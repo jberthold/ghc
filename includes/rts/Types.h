@@ -33,4 +33,25 @@ typedef struct StgClosure_   StgClosure;
 typedef struct StgInfoTable_ StgInfoTable;
 typedef struct StgTSO_       StgTSO;
 
+/* 
+   Types specific to the parallel runtime system.
+*/
+
+/* 
+   Types specific to the PARALLEL_RTS runtime system.
+   but types are defined in the sequential base system as well
+*/
+
+// aliases
+typedef int           OpCode;
+
+// a port type, stands for an inport (pe, proc,inport->id), an outport
+// (pe,proc,tso->id) and processes (pe, proc, NULL)
+typedef struct Port_ {
+  nat machine;
+  StgWord process;
+  StgWord id;
+} Port;
+typedef Port Proc;
+
 #endif /* RTS_TYPES_H */

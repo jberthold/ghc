@@ -720,3 +720,70 @@ stg_block_stmwait
 {
     BLOCK_BUT_FIRST(stg_block_stmwait_finally);
 }
+
+/* ----------------------------------------------------------------
+   PARALLEL_RTS: blocking on pack operation
+   ---------------------------------------------------------------- */
+
+/* this code is executed when resuming the thread.
+ * R1<-unused1=mode(int), R2<-unused2=graphroot(ptr)
+ */
+INFO_TABLE_RET( stg_block_pack, RET_SMALL, W_ unused1, P_ unused2 )
+{
+    R2 = Sp(2);
+    R1 = Sp(1);
+    Sp_adj(3);
+    jump stg_sendDatazh;
+}
+
+/* this code blocks the thread, saving function parameters on stack */
+stg_block_pack
+{
+    Sp_adj(-3);
+    Sp(2) = R2;
+    Sp(1) = R1;
+    Sp(0) = stg_block_pack_info;
+    BLOCK_GENERIC;
+}
+
+// analogon for blocking a serialize# call (packing into a Haskell array)
+/* this code is executed when resuming the thread.
+ * R1<-unused1=graphroot(ptr)
+ */
+INFO_TABLE_RET( stg_block_serializze, RET_SMALL, P_ unused1 )
+{
+    R1 = Sp(1);
+    Sp_adj(2);
+    jump stg_serializzezh;
+}
+
+/* this code blocks the thread, saving function parameters on stack */
+stg_block_serializze
+{
+    Sp_adj(-2);
+    Sp(1) = R1;
+    Sp(0) = stg_block_serializze_info;
+    BLOCK_GENERIC;
+}
+
+// yield when sending a message fails (give scheduler a chance to receive)
+/* this code is executed when resuming the thread.
+ * R1<-unused1=mode(int), R2<-unused2=graphroot(ptr)
+ */
+INFO_TABLE_RET( stg_yield_send, RET_SMALL, W_ unused1, P_ unused2 )
+{
+    R2 = Sp(2);
+    R1 = Sp(1);
+    Sp_adj(3);
+    jump stg_sendDatazh;
+}
+
+/* this code makes the thread yield, saving function parameters on stack */
+stg_yield_send
+{
+    Sp_adj(-3);
+    Sp(2) = R2;
+    Sp(1) = R1;
+    Sp(0) = stg_yield_send_info;
+    YIELD_GENERIC;
+}

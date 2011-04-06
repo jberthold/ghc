@@ -39,6 +39,11 @@ import ghczmprim_GHCziTypes_False_closure;
 import sm_mutex;
 #endif
 
+#ifdef PARALLEL_RTS
+import nPEs;
+import thisPE;
+#endif
+
 /*-----------------------------------------------------------------------------
   Array Primitives
 
@@ -558,6 +563,12 @@ stg_forkzh
 
   foreign "C" scheduleThread(MyCapability() "ptr", threadid "ptr") [];
 
+#if defined(PARALLEL_RTS)
+  // add the new thread to the process of the running (forking) one 
+  W_ proc;
+  (proc) = foreign "C" MyProcess(CurrentTSO "ptr") [];
+  foreign "C" addTSO(proc, threadid "ptr") []; 
+#endif
   // context switch soon, but not immediately: we don't want every
   // forkIO to force a context-switch.
   Capability_context_switch(MyCapability()) = 1 :: CInt;
@@ -586,6 +597,12 @@ stg_forkOnzh
      TO_W_(StgTSO_flags(threadid)) | 
      TO_W_(StgTSO_flags(CurrentTSO)) & (TSO_BLOCKEX | TSO_INTERRUPTIBLE));
 
+#if defined(PARALLEL_RTS)
+  // add the new thread to the process of the running (forking) one 
+  W_ proc;
+  (proc) = foreign "C" MyProcess(CurrentTSO "ptr") [];
+  foreign "C" addTSO(proc, threadid "ptr") []; 
+#endif
   foreign "C" scheduleThreadOn(MyCapability() "ptr", cpu, threadid "ptr") [];
 
   // context switch soon, but not immediately: we don't want every
@@ -1962,6 +1979,217 @@ stg_noDuplicatezh
         jump %ENTRY_CODE(Sp(0));
     }
 }
+
+
+/* -----------------------------------------------------------------------------
+   Parallel Haskell Primops
+   -------------------------------------------------------------------------- */
+
+/* for testing: duplicate a heap graph by packing/unpacking it */
+stg_duplicatezh
+{
+  // args: R1 closure (graph root to duplicate)
+  W_ original;
+  W_ copy;
+
+  original = R1;
+
+#if defined(PARALLEL_RTS)
+  ("ptr" copy) = foreign "C" 
+    DuplicateNearbyGraph(original "ptr", CurrentTSO "ptr", 
+			 MyCapability() "ptr") [];
+#else
+  copy = original;
+#endif
+  RET_P(copy);
+}
+
+// experimental feature: serialisation into a Haskell Byte Array
+stg_serializzezh
+{
+  // args: R1: closure (graph root to serialize)
+  W_ original;
+  W_ buff;
+
+  MAYBE_GC(R1_PTR,stg_serializzezh);
+  original = R1;
+
+#ifdef PARALLEL_RTS
+  // call packing function
+  ("ptr" buff) = foreign "C"
+    PackToMemory(original "ptr", CurrentTSO "ptr",
+		 MyCapability() "ptr") [];
+  // if we get NULL back, the packing tso is blocked on a black hole
+  if (buff == NULL) {
+    // Packing code has written block_reason and -closure, and
+    // created/modified a blocking queue by a new message, see packing code.
+    // So just adjust the TSO stack for blocked state and return to the
+    // scheduler.
+
+    // We do not use stg_block_blackhole, since R1 is *not* the
+    // closure TSO is blocked on! Must save R1 (graph
+    // root) for reentering after getting unblocked.
+    
+    // defined in HeapStackCheck.cmm, declared in
+    // StgMiscClosures.h. Saves R1 (as restored before)
+    R1 = original;
+
+    jump stg_block_serializze;
+  }
+
+#else
+  // serialisation in the non-parallel system not supported (for now)
+  // complain and crash the thread
+  foreign "C" debugBelch("Thread %ld: serialize# not supported.",
+			 StgTSO_id(CurrentTSO))[R1];
+  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
+				    CurrentTSO "ptr", NULL)[R1];
+#endif
+
+  RET_P(buff);
+}
+
+/* for testing: duplicate a heap graph by packing/unpacking it */
+stg_deserializzezh
+{
+  // args: R1 ByteArray# containing a serialized subgraph
+  W_ new;
+  W_ buff;
+
+  MAYBE_GC(R1_PTR,stg_deserializzezh);
+  buff = R1;
+
+#ifdef PARALLEL_RTS
+  // call packing function
+  ("ptr" new) = foreign "C"
+    UnpackGraphWrapper(buff "ptr", MyCapability() "ptr") [R1];
+#else
+  // system does not support packing, complain and crash the thread
+  foreign "C" debugBelch("Thread %ld: deserialize# not supported.",
+			 StgTSO_id(CurrentTSO))[R1];
+  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
+				    CurrentTSO "ptr", NULL)[R1];
+#endif
+
+  RET_P(new);
+}
+
+
+
+// PARALLEL_RTS: create a new placeholder and connected inport. Could
+// do the same in the sequential system, but returns garbage there.
+stg_expectDatazh
+{
+  /* args: None */
+  W_ retBH;
+  W_ id, proc;
+#if defined(PARALLEL_RTS)
+  ("ptr" retBH) = foreign "C" createBH(MyCapability() "ptr") [];
+  (proc) = foreign "C" MyProcess(CurrentTSO "ptr") [];
+  (id)   = foreign "C" addInport(proc, retBH "ptr") [];
+#else
+  id = 0;
+  proc = 0;
+  retBH = NULL;
+#endif
+  RET_NNP(id, proc, retBH); 
+}
+
+stg_connectToPortzh
+{
+  // args: 3 Int#s for remote port (pe,proc,inport) 
+  // passed on directly
+#if defined(PARALLEL_RTS)
+  foreign "C" setReceiver(CurrentTSO "ptr", R1, R2, R3) [];
+#endif // otherwise a NOOP
+  jump %ENTRY_CODE(Sp(0)); /* no return.. TODO check */
+}
+
+stg_sendDatazh
+{
+  /* args: 
+     R1: send mode & target (Int#) 
+	 Modes will be hardcoded in HLComms.c::sendWrapper, 
+	 as explained in primops.txt.pp.
+     R2: graph root 
+
+     returns: unit
+
+  !! TSO gets blocked if the graph to send contains black holes.
+     Proper reaction to this case not coded in RTS, 
+     depends on the high-level language concepts.
+  */
+  W_ success;
+
+  /* use local var.s for parameters */
+  W_ mode;
+  W_ graphroot;
+
+  mode = R1;
+  graphroot = R2;
+  
+#if defined(PARALLEL_RTS)
+  (success) = foreign "C" sendWrapper(CurrentTSO "ptr", mode, graphroot "ptr") [];
+  // ( 0=blocked, -1=send failed, otherwise successfully packed/sent away )
+#else
+  // seq. system: no operation. Could instead fill a blackhole locally.
+    success = 2;
+#endif
+
+  if (success == 0) {
+    // Packing code has written block_reason and -closure, and
+    // created/modified a blocking queue by a new message, see packing code.
+    // So just adjust the TSO stack for blocked state and return to the
+    // scheduler.
+
+    // We do not use stg_block_blackhole, since R1 is *not* the
+    // closure TSO is blocked on! Must save R1 (mode) and R2 (graph
+    // root) for reentering after getting unblocked.
+    
+    // defined in HeapStackCheck.cmm, declared in
+    // StgMiscClosures.h. Saves R1 and R2 (as restored before)
+    R1 = mode;
+    R2 = graphroot;
+
+    jump stg_block_pack;
+  }
+
+  if (success == 1) {
+
+    //    foreign "C" debugBelch("send failed in PrimOps.cmm") [];
+
+    // send failed, after successfully packing. The packet has been thrown
+    // away (see sendWrapper), so save arguments and do it all again
+    R1 = mode;
+    R2 = graphroot;
+
+    jump stg_yield_send;
+  }
+
+    // normal unit return
+  jump %ENTRY_CODE(Sp(0));
+}
+
+stg_labelProcesszh
+{
+  /* args: ... */
+  foreign "C" debugBelch("labelProcesszh_fast") [];
+  /* later: call a tracing function to emit an event */
+  jump %ENTRY_CODE(Sp(0)); /* no return.. TODO check */
+}
+
+stg_myProcesszh
+{
+  /* args: none, returns processId */
+  W_ val;
+#if defined(PARALLEL_RTS)
+  (val) = foreign "C" MyProcess(CurrentTSO "ptr") [];
+#else
+  val = 1;
+#endif
+  RET_N(val); 
+}
+
 
 /* -----------------------------------------------------------------------------
    Misc. primitives

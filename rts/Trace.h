@@ -12,6 +12,11 @@
 #include "rts/EventLogFormat.h"
 #include "Capability.h"
 
+#if defined(PARALLEL_RTS)
+#include "Rts.h"
+#endif //PARALLEL_RTS
+
+
 #if defined(DTRACE)
 #include "RtsProbes.h"
 #endif /* defined(DTRACE) */
@@ -160,6 +165,105 @@ void traceUserMsg(Capability *cap, char *msg);
 
 void traceThreadStatus_ (StgTSO *tso);
 
+
+
+#define traceVersion(version)             \
+    if (RTS_UNLIKELY(TRACE_sched)) {      \
+      traceVersion_(version);             \
+    }
+void traceVersion_(char *version);
+
+
+
+#define traceProgramInvocation(commandline)    \
+    if (RTS_UNLIKELY(TRACE_sched)) {           \
+      traceProgramInvocation_(commandline);    \
+    }
+void traceProgramInvocation_(char *commandline);
+
+
+#if defined(PARALLEL_RTS)
+/* 
+ * Record a EdenEventStartReceive event
+ */
+//TODO introduce Message Flag!!!
+#define traceEdenEventStartReceive(cap)   \
+    if (RTS_UNLIKELY(TRACE_sched)) {      \
+        traceEdenEventStartReceive_(cap); \
+    }
+void traceEdenEventStartReceive_(Capability *cap);
+
+
+
+/* 
+ * Record EdenEventEndReceive event
+ */
+//TODO introduce Message Flag!!!
+#define traceEdenEventEndReceive(cap)     \
+    if (RTS_UNLIKELY(TRACE_sched)) {      \
+       traceEdenEventEndReceive_(cap); \
+    }
+void traceEdenEventEndReceive_(Capability *cap);
+
+
+
+/* 
+ * Record a CreateProcess event
+ */
+#define traceCreateProcess(pid)   \
+    if (RTS_UNLIKELY(TRACE_sched)) {   \
+        traceCreateProcess_(pid); \
+    }
+void traceCreateProcess_(StgWord pid);
+
+
+
+/* 
+ * Record a KillProcess event
+ */
+#define traceKillProcess(pid)     \
+    if (RTS_UNLIKELY(TRACE_sched)) {   \
+        traceKillProcess_( pid);   \
+    }
+void traceKillProcess_(StgWord pid);
+
+
+#define traceAssignThreadToProcessEvent(cap, tid, pid)  \
+    if (RTS_UNLIKELY(TRACE_sched)) {                    \
+      traceAssignThreadToProcessEvent_(cap, tid, pid);  \
+    }
+void traceAssignThreadToProcessEvent_(Capability *cap, nat tid, StgWord pid);
+
+
+#define traceCreateMachine(pe, time, ticks)       \
+    if (RTS_UNLIKELY(TRACE_sched)) {        \
+      traceCreateMachine_(pe, time, ticks);       \
+    }
+void traceCreateMachine_ (nat pe, StgWord64 time, StgWord64 ticks);
+
+
+#define traceKillMachine(pe)        \
+    if (RTS_UNLIKELY(TRACE_sched)) {   \
+      traceKillMachine_(pe);        \
+    }
+void traceKillMachine_(nat pe);
+
+
+#define traceSendMessageEvent(mstag, buf)      \
+    if (RTS_UNLIKELY(TRACE_sched)) {                \
+      traceSendMessageEvent_(mstag, buf);      \
+    }
+void traceSendMessageEvent_(OpCode msgtag, rtsPackBuffer *buf);
+
+
+#define traceReceiveMessageEvent(cap, mstag, buf)      \
+    if (RTS_UNLIKELY(TRACE_sched)) {                   \
+      traceReceiveMessageEvent_(cap, mstag, buf);      \
+    }
+void traceReceiveMessageEvent_(Capability *cap, OpCode msgtag, rtsPackBuffer *buf);
+
+#endif // PARALLEL_RTS
+
 #else /* !TRACING */
 
 #define traceSchedEvent(cap, tag, tso, other) /* nothing */
@@ -170,8 +274,22 @@ void traceThreadStatus_ (StgTSO *tso);
 #define debugTrace(class, str, ...) /* nothing */
 #define debugTraceCap(class, cap, str, ...) /* nothing */
 #define traceThreadStatus(class, tso) /* nothing */
+#define traceVersion(version) /* nothing */
+#define traceProgramInvocation(commandline) /* nothing */
 
+#if defined(PARALLEL_RTS)
+#define traceEdenEventStartReceive(cap) /* nothing */
+#define traceEdenEventEndReceive(cap) /* nothing */
+#define traceCreateProcess(pid) /* nothing */
+#define traceKillProcess(pid) /* nothing */
+#define traceAssignThreadToProcessEvent(cap, tid, pid) /* nothing */
+#define traceCreateMachine(pe, time, ticks) /* nothing */
+#define traceKillMachine(pe)  /* nothing */
+#define traceSendMessageEvent(mstag, buf) /* nothing */
+#define traceReceiveMessageEvent(cap, mstag, buf) /* nothing */
+#endif // PARALLEL_RTS
 #endif /* TRACING */
+
 
 // If DTRACE is enabled, but neither DEBUG nor TRACING, we need a C land
 // wrapper for the user-msg probe (as we can't expand that in PrimOps.cmm)

@@ -121,7 +121,37 @@
 #define EVENT_GC_WORK             21 /* () */
 #define EVENT_GC_DONE             22 /* () */
 
-#define NUM_EVENT_TAGS            23
+#define EVENT_VERSION                   23 /* (version_string) */
+#define EVENT_PROGRAM_INVOCATION        24 /* (commandline_string) */
+
+/* range 25 - 59 reserved for sequential trace events */
+
+/* start of parallel trace events */
+#define EVENT_EDEN_START_RECEIVE        60 /* () */
+#define EVENT_EDEN_END_RECEIVE          61 /* () */
+#define EVENT_CREATE_PROCESS            62 /* (process) */
+#define EVENT_KILL_PROCESS              63 /* (process) */
+#define EVENT_ASSIGN_THREAD_TO_PROCESS  64 /* (thread, process) */
+#define EVENT_CREATE_MACHINE            65 /* (machine, startupTime(in 10^-8 seconds after 19xx)) */
+#define EVENT_KILL_MACHINE              66 /* (machine) */
+#define EVENT_SEND_MESSAGE              67 /* (tag, sender_process, sender_thread, receiver_machine, receiver_process, receiver_inport) */
+#define EVENT_RECEIVE_MESSAGE           68 /* (tag, receiver_process, receiver_inport, sender_machine, sender_process, sender_outport, message_size) */
+
+/* following events defined here but not yet anywhere else realised (i.e. EventLog.c) */
+#define EVENT_GUM_THREAD_END         69 /* (thread, spark_name, start_time, heap_allocations, run_time, block_time, block_count, fetch_time, local_spark_count, global_spark_count) */
+#define EVENT_GUM_CREATE_THREAD_INFO 70 /* (thread, expression_location, spark_site) */
+#define EVENT_GUM_BLOCKED_ON         71 /* (thread, global_address) */
+#define EVENT_GUM_FETCH              72 /* (thread, global_address) */
+#define EVENT_GUM_RESUME             73 /* (thread, global_address) */
+#define EVENT_GUM_MIGRATE_THREAD     74 /* (thread, pe) */
+#define EVENT_GUM_THREAD_STOLEN      75 /* (new_thread_id, old_pe) */
+#define EVENT_GUM_CREATE_SPARK       76 /* (expression_location) */
+#define EVENT_GUM_PRUNE_SPARK        77 /* (expression_location) *) */
+#define EVENT_GUM_EXPORT_SPARK       78 /* (expression_location, target_pe) */
+#define EVENT_GUM_ACQUIRE_SPARK      79 /* (expression_location, source_pe) */
+#define EVENT_GUM_SYSTEM_CENSUS      80 /* (spark_count, runnable_thread_count, load) */
+
+#define NUM_EVENT_TAGS            69 /* NOTE: switch to 81 when realising the GUM events */
 
 #if 0  /* DEPRECATED EVENTS: */
 #define EVENT_CREATE_SPARK        13 /* (cap, thread) */
@@ -160,6 +190,10 @@ typedef StgWord32 EventThreadID;
 typedef StgWord16 EventCapNo;
 typedef StgWord16 EventPayloadSize; /* variable-size events */
 typedef StgWord16 EventThreadStatus; /* status for EVENT_STOP_THREAD */
+
+typedef StgWord32 EventProcessID;
+typedef StgWord16 EventMachineID;
+typedef EventThreadID EventPortID;
 
 #endif
 

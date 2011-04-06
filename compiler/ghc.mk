@@ -176,6 +176,12 @@ ifeq "$(UseLibFFIForAdjustors)" "YES"
 else
 	@echo 'cLibFFI               = False'                               >> $@
 endif
+	@echo "cMPI_Opts             :: String"               >> $@
+	@echo "cMPI_Opts             = \"$(MPIOpts)\""        >> $@
+	@echo "cPVM_Root             :: String"               >> $@
+	@echo "cPVM_Root             = \"$(PVM_ROOT)\""       >> $@
+	@echo "cPVM_Arch             :: String"               >> $@
+	@echo "cPVM_Arch             = \"$(PVM_ARCH)\""       >> $@
 	@echo done.
 
 # XXX 2010-08-19: This is a legacy clean. Remove later.
