@@ -332,7 +332,12 @@ checkClosure( StgClosure* p )
         // ASSERT(get_itbl(bq->bh)->type == BLACKHOLE);
         ASSERT(LOOKS_LIKE_CLOSURE_PTR(bq->bh));
 
+#ifdef PARALLEL_RTS
+        ASSERT(bq->owner == (StgTSO*) &stg_system_tso
+	       || get_itbl(bq->owner)->type == TSO);
+#else
         ASSERT(get_itbl(bq->owner)->type == TSO);
+#endif
         ASSERT(bq->queue == (MessageBlackHole*)END_TSO_QUEUE 
                || bq->queue->header.info == &stg_MSG_BLACKHOLE_info);
         ASSERT(bq->link == (StgBlockingQueue*)END_TSO_QUEUE || 
@@ -536,6 +541,9 @@ checkTSO(StgTSO *tso)
        */
       return;
     }
+
+    // make sure we do not run into a loop (checking direct loop only)
+    ASSERT(tso != tso->_link);
 
     ASSERT(tso->_link == END_TSO_QUEUE || 
            tso->_link->header.info == &stg_MVAR_TSO_QUEUE_info ||

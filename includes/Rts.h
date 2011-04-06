@@ -279,6 +279,13 @@ TICK_VAR(2)
 #define DEBUG_ONLY(s) doNothing()
 #endif
 
+#if defined(PARALLEL_RTS) && defined(DEBUG)
+#define IF_PAR_DEBUG(c,s)  if (RtsFlags.ParFlags.Debug.c) { s; }
+
+#else
+#define IF_PAR_DEBUG(c,s)  doNothing()
+#endif
+
 /* -----------------------------------------------------------------------------
    Useful macros and inline functions
    -------------------------------------------------------------------------- */

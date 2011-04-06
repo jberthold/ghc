@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [7.1], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Parallel Haskell Compilation System], [7.1], [eden@mathematik.uni-marburg.de], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=NO}
@@ -903,6 +903,147 @@ fi
 AC_SUBST(BUILD_DOCBOOK_PS)
 AC_SUBST(BUILD_DOCBOOK_PDF)
 
+############### Parallel haskell Support, Eden group Marburg ##########
+dnl option --enable-parallel, default=yes for us!
+AC_ARG_ENABLE(parallel,
+  [AC_HELP_STRING([--enable-parallel],
+     [Enable support for parallel Haskell (Eden,GpH).
+      Required framework: PVM, MPI, or "Copy". 
+      You must specify a suitable RTS way in mk/build.mk.])],
+  [if test x"$enableval" = "xyes"; then
+        ParallelRts=YES
+     else
+        ParallelRts=NO
+     fi
+  ],
+  [
+    # TODO: default YES for us, normally NO
+    ParallelRts=YES
+  ]
+)
+
+AC_SUBST(ParallelRts)
+if test "$ParallelRts" = "YES"; then
+
+dnl tests for PVM and MPI
+
+dnl 
+ac_parallel_save_LDFLAGS=$LDFLAGS
+ac_parallel_save_CPPFLAGS=$CPPFLAGS
+
+dnl check for PVM library, by "calling" pvm_mytid.  we assume
+dnl an env. variable "PVM_ROOT" pointing to the installation directory
+PVM=${PVM_ROOT=}
+ARCH=${PVM_ARCH=}
+LDFLAGS="$LDFLAGS -L$PVM/lib/$ARCH"
+CPPFLAGS="$CPPFLAGS -I$PVM/include"
+dnl Checking for PVM: library and header
+AC_CHECK_HEADER([pvm3.h], [HavePvmHeader=YES], [HavePvmHeader=NO])
+AC_CHECK_LIB(pvm3, pvm_mytid, HavePvmLib=YES, HavePvmLib=NO)
+AC_SUBST(HavePvmHeader)
+AC_SUBST(HavePvmLib)
+
+LDFLAGS=$ac_parallel_save_LDFLAGS
+CPPFLAGS=$ac_parallel_save_CPPFLAGS
+
+AS_IF([test x"$HavePvmLib" = x"YES" -a x"$HavePvmHeader" = x"YES"],
+      [HavePvm=YES],
+      [HavePvm=NO;
+       AC_WARN([No usable PVM detected, will build without PVM])])
+AC_SUBST(HavePvm)
+
+dnl checking MPI implementation
+dnl check for MPI compiler mpicc, libaries, and presence of MPI_Init
+dnl 
+dnl Different implementations might use different flags, but all agree
+dnl on having a compiler script "mpicc". Then, ask this utility for
+dnl the compiler and linker flags it uses, and try a compilation
+
+dnl test for mpicc
+
+AC_ARG_VAR(MPICC,[MPI C compiler command])
+AC_CHECK_PROG([MPICC], mpicc , mpicc)
+
+AS_IF([test x = x"$MPICC"],
+      [HaveMPI=NO; MPIOpts=""],
+      [
+  AC_MSG_CHECKING(MPI compilation options)
+dnl the strange sed script is needed because of older mpich which, 
+dnl unlike older openmpi and lam, splits compilation and linker flags
+dnl
+dnl We could try and distinguish compile and link options. Recent
+dnl openmpi versions support -showme:compile and -showme:link, where
+dnl older mpich uses -compile-info and -show for the same. 
+dnl Unfortunately, newer mpich do not distinguish -compile-info and -show.
+dnl
+dnl For now, throw compiler and linker options into one variable
+dnl after filling them into two variables at first. 
+  mpiopts=""
+  mpicompile=""
+  mpilink=""
+  echo "Running $MPICC with --showme:compile or -compile-info"
+                 >&AS_MESSAGE_LOG_FD 
+  $MPICC --showme:compile > conftestmpi 2>&AS_MESSAGE_LOG_FD || 
+     $MPICC -compile-info > conftestmpi 2>&AS_MESSAGE_LOG_FD
+  cat conftestmpi >&AS_MESSAGE_LOG_FD
+  mpicompile=`cat conftestmpi | sed 's/\(\s\|^\)\(\S*\/\)\?\S\?cc\(\s\|$\)//g'`
+  echo $mpicompile >&AS_MESSAGE_LOG_FD
+
+  echo "Running $MPICC with --showme:link or -show" >&AS_MESSAGE_LOG_FD
+  $MPICC --showme:link > conftestmpi 2>&AS_MESSAGE_LOG_FD ||
+    $MPICC -show > conftestmpi 2>&AS_MESSAGE_LOG_FD 
+  cat conftestmpi >&AS_MESSAGE_LOG_FD
+  mpilink=`cat conftestmpi | sed 's/\(\s\|^\)\(\S*\/\)\?\S\?cc\(\s\|$\)//g'`
+
+  echo $mpilink >&AS_MESSAGE_LOG_FD
+  rm -f conftestmpi
+
+dnl newer mpich and older openmpi outputs the same for both commands
+dnl (the union of both flag sets)
+dnl If both commands have failed, result will be the same (empty).
+dnl If only one has failed, we still try with the other's result.
+  AS_IF([ test "x$mpicompile" = "x$mpilink" ],
+   [echo "mpi flags already unified" >&AS_MESSAGE_LOG_FD; mpiopts="$mpicompile"],
+   [echo "unifying flags" >&AS_MESSAGE_LOG_FD; mpiopts="$mpicompile $mpilink"]
+  )
+
+  AS_IF([test x = x"$mpiopts"],
+   [AC_MSG_RESULT(not successful!); HaveMPI=NO],
+   [AC_MSG_RESULT(MPI compilation options look OK);
+    HaveMPI=YES;
+    MPIOpts=$mpiopts;
+
+    CPPFLAGS="$CPPFLAGS $MPIOpts";
+
+    AC_MSG_CHECKING(a compilation with MPI flags);
+    AC_CHECK_HEADER([mpi.h], [], 
+                  [HaveMPI=NO; MPIOpts=""])
+
+    CPPFLAGS=$ac_parallel_save_CPPFLAGS
+    LDFLAGS="$LDFLAGS $MPIOpts";
+
+dnl This does not work with mpich... program needs to come BEFORE the
+dnl linker options on the command line. :(
+
+    AC_CHECK_FUNC(MPI_Init,[],
+                  [ AS_IF($MPICC -compile-info,
+		          [AC_WARN(using mpich without compilation test)],
+			  [HaveMPI=NO; MPIOpts=""])
+      ])
+   ])
+])
+
+LDFLAGS=$ac_parallel_save_LDFLAGS
+CPPFLAGS=$ac_parallel_save_CPPFLAGS
+
+AC_SUBST(HaveMPI)
+AC_SUBST(MPIOpts)
+
+AC_MSG_RESULT([MPI: $HaveMPI, Options: $MPIOpts])
+
+fi;
+###########################################
+
 LIBRARY_VERSION(base)
 LIBRARY_VERSION(Cabal)
 LIBRARY_VERSION(ghc-prim)
@@ -987,6 +1128,17 @@ echo ["\
 
 echo ["----------------------------------------------------------------------
 "]
+
+if test "$ParallelRts" = "YES"; then
+echo ["\
+   Parallel build options:
+   PVM detected: $HavePvm
+   MPI detected: $HaveMPI
+   MPI Options: $MPIOpts"]
+
+echo ["----------------------------------------------------------------------
+"]
+fi
 
 echo "\
 For a standard build of GHC (fully optimised with profiling), type (g)make.

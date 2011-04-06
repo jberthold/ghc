@@ -419,6 +419,9 @@ createStrictIOThread(Capability *cap, nat stack_size,  StgClosure *closure)
 
 /* ----------------------------------------------------------------------------
    Evaluating Haskell expressions
+
+   PARALLEL_RTS: using these API methods implies that a new process is
+              created (will normally be the first, "main" process)
    ------------------------------------------------------------------------- */
 
 Capability *
@@ -427,6 +430,10 @@ rts_eval (Capability *cap, HaskellObj p, /*out*/HaskellObj *ret)
     StgTSO *tso;
     
     tso = createGenThread(cap, RtsFlags.GcFlags.initialStkSize, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     return scheduleWaitThread(tso,ret,cap);
 }
 
@@ -437,6 +444,10 @@ rts_eval_ (Capability *cap, HaskellObj p, unsigned int stack_size,
     StgTSO *tso;
 
     tso = createGenThread(cap, stack_size, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     return scheduleWaitThread(tso,ret,cap);
 }
 
@@ -450,6 +461,10 @@ rts_evalIO (Capability *cap, HaskellObj p, /*out*/HaskellObj *ret)
     StgTSO* tso; 
     
     tso = createStrictIOThread(cap, RtsFlags.GcFlags.initialStkSize, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     return scheduleWaitThread(tso,ret,cap);
 }
 
@@ -471,6 +486,10 @@ rts_evalStableIO (Capability *cap, HsStablePtr s, /*out*/HsStablePtr *ret)
     // async exceptions are always blocked by default in the created
     // thread.  See #1048.
     tso->flags |= TSO_BLOCKEX | TSO_INTERRUPTIBLE;
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     cap = scheduleWaitThread(tso,&r,cap);
     stat = rts_getSchedStatus(cap);
 
@@ -491,6 +510,10 @@ rts_evalLazyIO (Capability *cap, HaskellObj p, /*out*/HaskellObj *ret)
     StgTSO *tso;
 
     tso = createIOThread(cap, RtsFlags.GcFlags.initialStkSize, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     return scheduleWaitThread(tso,ret,cap);
 }
 
@@ -501,6 +524,10 @@ rts_evalLazyIO_ (Capability *cap, HaskellObj p, unsigned int stack_size,
     StgTSO *tso;
 
     tso = createIOThread(cap, stack_size, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     return scheduleWaitThread(tso,ret,cap);
 }
 

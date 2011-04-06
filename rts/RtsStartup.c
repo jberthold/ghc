@@ -119,6 +119,16 @@ hs_init(int *argc, char **argv[])
      */
     stat_startInit();
 
+#ifdef PARALLEL_RTS
+    /*
+     * The parallel system needs to be initialised and synchronised before
+     * the program is run.  
+     * 
+     */ 
+    startupParallelSystem(argc, argv);
+
+#endif
+
     /* Set the RTS flags to default values. */
 
     initRtsFlagsDefaults();
@@ -140,14 +150,27 @@ hs_init(int *argc, char **argv[])
     papi_init();
 #endif
 
+#if defined(PARALLEL_RTS)
+    /* NB: this really must be done after processing the RTS flags */
+    IF_PAR_DEBUG(verbose,
+                 debugBelch("==== Synchronising system (%d PEs)\n", nPEs));
+    synchroniseSystem();             // calls initParallelSystem etc
+#endif	/* PARALLEL_RTS */
+
+
     /* initTracing must be after setupRtsFlags() */
 #ifdef TRACING
     initTracing();
+#endif
+
+#if defined(PARALLEL_RTS)
+    emitStartupEvents();
 #endif
     /* Dtrace events are always enabled
      */
     dtraceEventStartup();
 
+    
     /* initialise scheduler data structures (needs to be done before
      * initStorage()).
      */
@@ -433,10 +456,6 @@ hs_exit_(rtsBool wait_foreign)
     if (prof_file != NULL) fclose(prof_file);
 #endif
 
-#ifdef TRACING
-    endTracing();
-    freeTracing();
-#endif
 
 #if defined(TICKY_TICKY)
     if (RtsFlags.TickyFlags.showTickyStats) PrintTickyInfo();
@@ -446,7 +465,19 @@ hs_exit_(rtsBool wait_foreign)
     shutdownAsyncIO(wait_foreign);
 #endif
 
-    /* free hash table storage */
+#if defined(PARALLEL_RTS)
+    IF_PAR_DEBUG(verbose, 
+				 debugBelch("==-- hs_exit on [%d]...", thisPE));
+    /* exit parallel system at the last possible place */
+    shutdownParallelSystem(0);
+#endif
+
+#ifdef TRACING
+    endTracing();
+    freeTracing();
+#endif
+
+/* free hash table storage */
     exitHashTable();
 
     // Finally, free all our storage.  However, we only free the heap

@@ -144,8 +144,36 @@ struct MISC_FLAGS {
                                   * for the linker, NULL ==> off */
 };
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS) || defined(PARALLEL_RTS)
+#ifdef PARALLEL_RTS
+struct PAR_DEBUG_FLAGS {  
+  /* flags to control debugging output in various subsystems */
+  rtsBool verbose    : 1; /* 2^0=1 */
+  rtsBool mpcomm     : 1; /* 2^1=2 */
+  rtsBool pack       : 1; /*     4 */
+  rtsBool packet     : 1; /*     8 */
+  rtsBool procs      : 1; /*    16 */
+  rtsBool ports      : 1; /*    32 */
+};
+
+/* starting at 0, number of flags defined above... */
+#define MAX_PAR_DEBUG_OPTION     5
+
+#define PAR_DEBUG_MASK(n)          ((nat) (1<<(n)))
+#define MAX_PAR_DEBUG_MASK         ((nat) ((1<<(MAX_PAR_DEBUG_OPTION+1))-1))
+
+#endif /* PARALLEL_RTS */
+
 struct PAR_FLAGS {
+#if defined(PARALLEL_RTS)
+  struct PAR_DEBUG_FLAGS Debug;         /* debugging options */
+  nat      sendBufferSize;
+  nat      packBufferSize;
+  nat      placement;            
+
+  long   wait;
+#endif /* PARALLEL_RTS */
+#ifdef THREADED_RTS
   nat            nNodes;         /* number of threads to run simultaneously */
   rtsBool        migrate;        /* migrate threads between capabilities */
   unsigned int   maxLocalSparks;
@@ -159,8 +187,9 @@ struct PAR_FLAGS {
                                  /* do load-balancing in this
                                   * generation and higher only */
   rtsBool        setAffinity;    /* force thread affinity with CPUs */
-};
 #endif /* THREADED_RTS */
+};
+#endif /* THREADED || PARALLEL */
 
 struct TICKY_FLAGS {
     rtsBool showTickyStats;
@@ -202,7 +231,7 @@ typedef struct _RTS_FLAGS {
     struct TRACE_FLAGS       TraceFlags;
     struct TICKY_FLAGS	     TickyFlags;
 
-#if defined(THREADED_RTS)
+#if defined(THREADED_RTS) || defined(PARALLEL_RTS)
     struct PAR_FLAGS	ParFlags;
 #endif
 #ifdef USE_PAPI

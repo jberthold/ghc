@@ -24,6 +24,10 @@
 #include "Storage.h"
 #include "Threads.h"
 
+#if defined(PARALLEL_RTS)
+#include "parallel/RTTables.h"
+#endif
+
 /* -----------------------------------------------------------------------------
    Weak Pointers
 

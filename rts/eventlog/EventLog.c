@@ -29,6 +29,10 @@
 // PID of the process that writes to event_log_filename (#4512)
 static pid_t event_log_pid = -1;
 
+#ifdef PARALLEL_RTS
+#include "rts/Parallel.h" //need thisPE for parallel trace file name
+#endif //PARALLEL_RTS
+
 static char *event_log_filename = NULL;
 
 // File for logging events
@@ -75,7 +79,18 @@ char *EventDesc[] = {
   [EVENT_GC_IDLE]             = "GC idle",
   [EVENT_GC_WORK]             = "GC working",
   [EVENT_GC_DONE]             = "GC done",
-  [EVENT_BLOCK_MARKER]        = "Block marker"
+  [EVENT_BLOCK_MARKER]        = "Block marker",
+  [EVENT_VERSION]             = "Version",
+  [EVENT_PROGRAM_INVOCATION]  = "Program invocation",
+  [EVENT_EDEN_START_RECEIVE]  = "Starting message receival",
+  [EVENT_EDEN_END_RECEIVE]    = "Finished message receival",
+  [EVENT_CREATE_PROCESS]      = "Creating Process",
+  [EVENT_KILL_PROCESS]        = "Killing Process",
+  [EVENT_ASSIGN_THREAD_TO_PROCESS] = "Assigning thread to process",
+  [EVENT_CREATE_MACHINE]      = "Creating machine",
+  [EVENT_KILL_MACHINE]        = "Killing machine",
+  [EVENT_SEND_MESSAGE]        = "Sending message",
+  [EVENT_RECEIVE_MESSAGE]     = "Receiving message"
 };
 
 // Event type. 
@@ -143,6 +158,15 @@ static inline void postTimestamp(EventsBuf *eb)
 static inline void postThreadID(EventsBuf *eb, EventThreadID id)
 { postWord32(eb,id); }
 
+static inline void postProcessID(EventsBuf *eb, EventProcessID id)
+{ postWord32(eb,id); }
+
+static inline void postMachineID(EventsBuf *eb, EventMachineID id)
+{ postWord16(eb,id); }
+
+static inline void postPortID(EventsBuf *eb, EventPortID id)
+{ postThreadID(eb,id); }
+
 static inline void postCapNo(EventsBuf *eb, EventCapNo no)
 { postWord16(eb,no); }
 
@@ -154,7 +178,11 @@ static inline void postEventHeader(EventsBuf *eb, EventTypeNum type)
     postEventTypeNum(eb, type);
     postTimestamp(eb);
 }    
-
+static inline void postEventHeaderTime(EventsBuf *eb, EventTypeNum type, StgWord64 time)
+{
+    postEventTypeNum(eb, type);
+    postWord64(eb, time);
+}  
 static inline void postInt8(EventsBuf *eb, StgInt8 i)
 { postWord8(eb, (StgWord8)i); }
 
@@ -173,16 +201,30 @@ initEventLogging(void)
 {
     StgWord8 t, c;
     nat n_caps;
+#ifdef PARALLEL_RTS   
+    int thisPESize, peTemp;
+    peTemp = thisPE;
+    thisPESize = 1;
+    while (peTemp > 9){
+      peTemp = peTemp / 10;
+      thisPESize ++;
+    }
+    event_log_filename = stgMallocBytes(strlen(prog_name) + 10 + 1 + thisPESize,
+                                        "initEventLogging");
 
+#else //PARALLEL_RTS
     event_log_filename = stgMallocBytes(strlen(prog_name)
                                         + 10 /* .%d */
                                         + 10 /* .eventlog */,
                                         "initEventLogging");
-
+#endif //else PARALLEL_RTS
     if (sizeof(EventDesc) / sizeof(char*) != NUM_EVENT_TAGS) {
         barf("EventDesc array has the wrong number of elements");
     }
 
+#ifdef PARALLEL_RTS 
+    sprintf(event_log_filename, "%s#%d.eventlog", prog_name, thisPE);
+#else //PARALLEL_RTS  
     if (event_log_pid == -1) { // #4512
         // Single process
         sprintf(event_log_filename, "%s.eventlog", prog_name);
@@ -193,6 +235,8 @@ initEventLogging(void)
         event_log_pid = getpid();
         sprintf(event_log_filename, "%s.%d.eventlog", prog_name, event_log_pid);
     }
+#endif //else PARALLE_RTS
+ 
 
     /* Open event log file for writing. */
     if ((event_log_file = fopen(event_log_filename, "wb")) == NULL) {
@@ -267,11 +311,15 @@ initEventLogging(void)
         case EVENT_GC_IDLE:
         case EVENT_GC_WORK:
         case EVENT_GC_DONE:
+        case EVENT_EDEN_START_RECEIVE:
+        case EVENT_EDEN_END_RECEIVE:
             eventTypes[t].size = 0;
             break;
 
-        case EVENT_LOG_MSG:          // (msg)
-        case EVENT_USER_MSG:         // (msg)
+        case EVENT_LOG_MSG:            // (msg)
+        case EVENT_USER_MSG:           // (msg)
+        case EVENT_VERSION:            // (version_string)
+        case EVENT_PROGRAM_INVOCATION: // (commandline)
             eventTypes[t].size = 0xffff;
             break;
 
@@ -279,6 +327,34 @@ initEventLogging(void)
             eventTypes[t].size = sizeof(StgWord32) + sizeof(EventTimestamp) + 
                 sizeof(EventCapNo);
             break;
+        
+        case EVENT_CREATE_PROCESS:  // (process)
+        case EVENT_KILL_PROCESS:    // (process)
+        	eventTypes[t].size = sizeof(EventProcessID);
+        	break;
+        	
+        case EVENT_ASSIGN_THREAD_TO_PROCESS: // (thread, process)
+        	eventTypes[t].size = sizeof(EventThreadID) + sizeof(EventProcessID);
+        	break;
+        
+        case EVENT_CREATE_MACHINE: // (machine)
+        	eventTypes[t].size = sizeof(EventMachineID) + sizeof(EventTimestamp);
+        	break;
+        case EVENT_KILL_MACHINE:   // (machine)
+        	eventTypes[t].size = sizeof(EventMachineID);
+        	break;
+        
+        case EVENT_SEND_MESSAGE: //(msgtag, sender_process, sender_thread, receiver_machine, receiver_process, receiver_inport)
+        	eventTypes[t].size = sizeof(StgWord8) + sizeof(EventThreadID) 
+        	                     + 2 * sizeof(EventProcessID) + sizeof(EventPortID)
+        	                     + sizeof(EventMachineID);
+        	break;
+        	
+        case EVENT_RECEIVE_MESSAGE: // (msgtag, receiver_process, receiver_inport, sender_machine, sender_process, sender_outport, message_size)
+        	eventTypes[t].size = sizeof(StgWord8) + 2 * sizeof(EventProcessID)
+        	                     + 2 * sizeof(EventPortID) + sizeof(EventMachineID)
+        	                     + sizeof(StgInt32);
+        	break;
 
         default:
             continue; /* ignore deprecated events */
@@ -337,7 +413,7 @@ endEventLogging(void)
 
     if (event_log_file != NULL) {
         fclose(event_log_file);
-    }
+    }       
 }
 
 void 
@@ -458,24 +534,31 @@ postEvent (Capability *cap, EventTypeNum tag)
     postEventHeader(eb, tag);
 }
 
+
+void postLogMsgF(EventsBuf *eb, EventTypeNum type, char *msg, ...)
+{
+    va_list ap;
+    va_start(ap,msg);
+    postLogMsg(eb, type, msg, ap);
+    va_end(ap);
+}
+
 #define BUF 512
 
 void postLogMsg(EventsBuf *eb, EventTypeNum type, char *msg, va_list ap)
 {
     char buf[BUF];
     nat size;
-
     size = vsnprintf(buf,BUF,msg,ap);
     if (size > BUF) {
         buf[BUF-1] = '\0';
         size = BUF;
     }
-
     if (!hasRoomForVariableEvent(eb, size)) {
         // Flush event buffer to make room for new event.
         printAndClearEventBuf(eb);
     }
-
+   
     postEventHeader(eb, type);
     postPayloadSize(eb, size);
     postBuf(eb,(StgWord8*)buf,size);
@@ -532,16 +615,138 @@ void postBlockMarker (EventsBuf *eb)
     postCapNo(eb, eb->capno);
 }
 
+void postVersion(char *version)
+{
+    ACQUIRE_LOCK(&eventBufMutex);
+    postLogMsgF(&eventBuf, EVENT_VERSION, version);
+    RELEASE_LOCK(&eventBufMutex);
+}
+
+void postProgramInvocation(char *commandline)
+{
+    ACQUIRE_LOCK(&eventBufMutex);
+    postLogMsgF(&eventBuf, EVENT_PROGRAM_INVOCATION, commandline);
+    RELEASE_LOCK(&eventBufMutex);
+}
+
+#ifdef PARALLEL_RTS
+void postProcessEvent(EventProcessID pid, EventTypeNum tag)
+{
+    ASSERT(tag == EVENT_CREATE_PROCESS || tag == EVENT_KILL_PROCESS);
+    
+    EventsBuf *eb;
+    eb = &eventBuf;
+
+    if (!hasRoomForEvent(eb, tag)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(eb);
+    }
+
+    postEventHeader(eb, tag);	
+    postProcessID(eb, pid);
+}
+
+void postAssignThreadToProcessEvent(Capability *cap, EventThreadID tid, EventProcessID pid)
+{
+	EventsBuf *eb;
+
+    eb = &capEventBuf[cap->no];
+
+    if (!hasRoomForEvent(eb, EVENT_ASSIGN_THREAD_TO_PROCESS)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(eb);
+    }
+
+    postEventHeader(eb, EVENT_ASSIGN_THREAD_TO_PROCESS);
+    postThreadID(eb, tid);
+    postProcessID(eb, pid);
+}
+
+void postCreateMachineEvent(EventMachineID pe, StgWord64 time,StgWord64 ticks, EventTypeNum tag)
+{
+    ASSERT(tag == EVENT_CREATE_MACHINE);
+    
+    EventsBuf *eb;
+
+    eb = &eventBuf;
+
+    if (!hasRoomForEvent(eb,EVENT_CREATE_MACHINE)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(eb);
+    }
+    postEventHeaderTime(eb, tag, ticks);	
+    postMachineID(eb, pe); 
+    postInt64(eb, time);
+}
+
+void postKillMachineEvent(EventMachineID pe, EventTypeNum tag)
+{
+    ASSERT(tag == EVENT_KILL_MACHINE);
+    
+    EventsBuf *eb;
+
+    eb = &eventBuf;
+
+    if (!hasRoomForEvent(eb,EVENT_KILL_MACHINE)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(eb);
+    }
+      postEventHeader(eb, tag);	
+    postMachineID(eb, pe);
+}
+
+void postSendMessageEvent(OpCode msgtag, rtsPackBuffer* buf)
+{
+	EventsBuf *eb;
+
+    eb = &eventBuf;
+
+    if (!hasRoomForEvent(eb, EVENT_SEND_MESSAGE)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(eb);
+    }
+
+    postEventHeader(eb, EVENT_SEND_MESSAGE);	
+    postWord8(eb, msgtag); 
+    postProcessID(eb, buf->sender.process);
+    postThreadID(eb, buf->sender.id);
+    postMachineID(eb, buf->receiver.machine);
+    postProcessID(eb, buf->receiver.process);
+    postPortID(eb, buf->receiver.id);
+}
+
+void postReceiveMessageEvent(Capability *cap, OpCode msgtag, rtsPackBuffer* buf)
+{
+	EventsBuf *eb;
+
+    eb = &capEventBuf[cap->no];
+
+    if (!hasRoomForEvent(eb, EVENT_RECEIVE_MESSAGE)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(eb);
+    }
+
+    postEventHeader(eb, EVENT_RECEIVE_MESSAGE);	
+    postWord8(eb, msgtag);
+    postProcessID(eb, buf->receiver.process);
+    postPortID(eb, buf->receiver.id);
+    postMachineID(eb, buf->sender.machine);
+    postProcessID(eb, buf->sender.process);
+    postThreadID(eb, buf->sender.id);
+    postInt32(eb, buf->size);
+}
+#endif //PARALLEL_RTS
+
 void printAndClearEventBuf (EventsBuf *ebuf)
 {
     StgWord64 numBytes = 0, written = 0;
 
     closeBlockMarker(ebuf);
-
+    
+    
     if (ebuf->begin != NULL && ebuf->pos != ebuf->begin)
     {
         numBytes = ebuf->pos - ebuf->begin;
-        
         written = fwrite(ebuf->begin, 1, numBytes, event_log_file);
         if (written != numBytes) {
             debugBelch(

@@ -245,6 +245,27 @@ BuildSharedLibs=$(strip $(if $(findstring dyn,$(GhcLibWays)),YES,NO))
 #
 GhcRTSWays=l
 
+# parallel Haskell support (Eden Group Marburg)
+#
+# do we build a parallel version (default=yes in this source bundle!!!)
+ParallelRts=@ParallelRts@
+HavePvm=@HavePvm@
+HaveMPI=@HaveMPI@
+# if user has given --enable-parallel, override the previous default.
+ifeq "$(ParallelRts)" "YES"
+# choose way based on existing middleware (checked by configure)
+  ifeq "$(HavePvm)" "YES"
+    GhcRTSWays+=pp debug_pp l_pp
+  endif
+  ifeq "$(HaveMPI)" "YES"
+    GhcRTSWays+=pm debug_pm l_pm
+    MPIOpts=@MPIOpts@
+  endif
+# should always work: multicore version based on copying between OS
+# processes
+  GhcRTSWays+=pc debug_pc l_pc
+endif
+
 # Usually want the debug version
 ifeq "$(BootingFromHc)" "NO"
 GhcRTSWays += debug 
@@ -316,7 +337,8 @@ SplitObjs=$(SupportsSplitObjs)
 EXTRA_PACKAGES =
 
 # Whether to install $(EXTRA_PACKAGES)
-InstallExtraPackages = NO
+# Parallel_RTS default: InstallExtraPackages = YES (install parallel libraries)
+InstallExtraPackages = YES
 
 # Run "ghc-pkg check" on each package
 CHECK_PACKAGES = NO
