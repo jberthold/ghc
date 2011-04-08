@@ -83,5 +83,4 @@ libraries/stm                   extra       packages/stm.git                    
 libraries/primitive             dph         packages/primitive.git              git   http://code.haskell.org/primitive
 libraries/vector                dph         packages/vector.git                 git   http://code.haskell.org/vector
 libraries/dph                   dph         packages/dph.git                    git   -
-
 libraries/edenmodules           extra       packages/edenmodules            darcs   -
