@@ -24,6 +24,13 @@
 # include "Printer.h"   /* for printing        */
 #endif
 
+#if defined(PARALLEL_RTS)
+#include "Schedule.h"
+#ifdef DEBUG
+#include <unistd.h> // gethostname, getpid, sleep with "wait" flag
+#endif
+#endif
+
 #ifdef HAVE_WINDOWS_H
 # include <windows.h>
 #endif
@@ -57,6 +64,57 @@ static void real_main(void)
        (IAmMainThread is set in startupHaskell) 
     */
 
+#if defined(PARALLEL_RTS)
+
+# if defined(DEBUG)
+    if (RtsFlags.ParFlags.wait != 0) {
+    /* a wait loop to allow attachment of gdb to UNIX threads */
+      char hostname[256];
+      gethostname(hostname, sizeof(hostname));
+      debugBelch("Process is ready for attaching debugger.\n"
+		 "%s %d (on host %s) and set RtsFlags.ParFlags.wait=rtsFalse\n"
+		 , progargv[0], getpid(), hostname);
+      while (RtsFlags.ParFlags.wait != 0)
+        sleep(1);
+    }
+# endif
+
+    if (IAmMainThread == rtsTrue) {
+
+    /* ToDo: want to start with a larger stack size */
+      Capability *cap;
+	IF_PAR_DEBUG(verbose,
+		     debugBelch("==== [%x] Main Thread Started ...\n", thisPE));
+
+	cap = rts_lock();
+	// copied from below...
+	cap = rts_evalLazyIO(cap,progmain_closure, NULL);
+	status = rts_getSchedStatus(cap);
+	taskTimeStamp(myTask());
+	rts_unlock(cap);
+
+	IF_PAR_DEBUG(verbose,
+		     debugBelch("== [%x] Main PE stopping ...\n",
+				thisPE));
+    } else {
+      Capability *cap = rts_lock();
+
+      /* Just to show we're alive */
+      IF_PAR_DEBUG(verbose,
+		   debugBelch("== [%x] Non-Main PE enters scheduler via taskStart() without work ...\n",
+			   thisPE));
+      /* all non-main threads enter the scheduler without work */
+      startEmptyScheduler(cap);
+
+      rts_unlock(cap);
+      IF_PAR_DEBUG(verbose,
+		   debugBelch("== [%x] Non-Main PE stopping ...\n",
+			   thisPE));
+      status = Success;  // declare victory (see shutdownParallelSystem)
+    }
+
+#  else /* !PARALLEL_RTS */
+
     /* ToDo: want to start with a larger stack size */
     { 
 	Capability *cap = rts_lock();
@@ -65,6 +123,8 @@ static void real_main(void)
 	taskTimeStamp(myTask());
 	rts_unlock(cap);
     }
+
+#endif /* PARALLEL_RTS */
 
     /* check the status of the entire Haskell computation */
     switch (status) {

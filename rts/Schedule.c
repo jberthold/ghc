@@ -26,6 +26,14 @@
 #include "Proftimer.h"
 #include "ProfHeap.h"
 #include "Weak.h"
+
+/* PARALLEL_HASKELL includes go here */
+#if defined(PARALLEL_RTS)
+#include "PEOpCodes.h"
+#include "MPSystem.h"
+#include "parallel/RTTables.h"
+#endif
+
 #include "sm/GC.h" // waitForGcThreads, releaseGCThreads, N
 #include "Sparks.h"
 #include "Capability.h"
@@ -137,6 +145,10 @@ static void scheduleDetectDeadlock (Capability *cap, Task *task);
 static void schedulePushWork(Capability *cap, Task *task);
 #if defined(THREADED_RTS)
 static void scheduleActivateSpark(Capability *cap);
+#endif
+#if defined(PARALLEL_RTS)
+static void processMessages(Capability *cap);
+static void startNewProcess(Capability *cap, StgClosure *graph);
 #endif
 static void schedulePostRunThread(Capability *cap, StgTSO *t);
 static rtsBool scheduleHandleHeapOverflow( Capability *cap, StgTSO *t );
@@ -327,6 +339,10 @@ schedule (Capability *initialCapability, Task *task)
 
     scheduleYield(&cap,task);
 
+    if (emptyRunQueue(cap)) continue; // look for work again
+#endif
+
+#if defined(PARALLEL_RTS)
     if (emptyRunQueue(cap)) continue; // look for work again
 #endif
 
@@ -547,6 +563,11 @@ run_thread:
       cap = scheduleDoGC(cap,task,rtsFalse);
     }
   } /* end of while() */
+
+#if defined(PARALLEL_RTS)
+  /* the parallel system might end up here (non-main PEs) */
+  return cap;
+#endif
 }
 
 /* -----------------------------------------------------------------------------
@@ -601,7 +622,243 @@ scheduleFindWork (Capability *cap)
 #if defined(THREADED_RTS)
     if (emptyRunQueue(cap)) { scheduleActivateSpark(cap); }
 #endif
+
+    // in GUM: if emptyRunQ(cap) 
+    //        try to activate a local spark (as above)
+    //        otherwise send out a fish message here
+
+#if defined(PARALLEL_RTS)
+    if (emptyRunQueue(cap) || MP_probe() ) {
+      // nothing to do or messages available for us
+
+      // perform a blocking receive
+      processMessages(cap);
+      // this call will set sched_state for termination as well
+
+    }
+#endif
+
 }
+
+#if defined(PARALLEL_RTS)
+/* -------------------------------------------------------------------------
+ * processMessages()
+ *
+ *  receive messages from other machines, process them.
+ * -------------------------------------------------------------------------
+ * processMessages 
+ *   called from scheduleFindWork when there *are* messages
+ *   or when there is nothing to do (the call is BLOCKING)
+ *
+ * For message codes, see PEOpCodes.h
+ * At this level, there are basically 3 message types:
+ *   System messages:  PP_FINISH, (PP_READY, PP_PETIDS not here)
+ *   Control messages: PP_RFORK, PP_TERMINATE
+ *   Data messages:    PP_DATA, PP_HEAD, PP_CONSTR, PP_CONNECT
+ * processMessages receives them and executes the required action.  
+ * 
+ * This function used to live inside HLComms.c, but has now moved to
+ * the scheduler to bring Capabilities and such into scope.
+ * The former HLComms.c is now DataComm.c and contains processing 
+ * and sending methods for data messages.
+ */
+
+// static data... 
+static rtsPackBuffer *recvBuffer = NULL;
+static void initRecvBuffer(void);
+// done on demand in processMessages
+static void initRecvBuffer(void) {
+  if (recvBuffer == NULL) {
+    recvBuffer = (rtsPackBuffer*) 
+      stgMallocBytes(sizeof(StgWord)*DATASPACEWORDS,
+		     "recvBuffer");
+  }
+}
+
+// called at shutdown, declared in Parallel.h
+void freeRecvBuffer(void) {
+  if (recvBuffer != NULL) { stgFree(recvBuffer); }
+}
+
+static void processMessages(Capability *cap) {
+  OpCode opcode;
+  nat pe;
+  Port sender, receiver;
+  StgTSO* tso; // for terminate messages
+  rtsBool eventEmitted = rtsFalse;
+
+  initRecvBuffer();
+
+  IF_PAR_DEBUG(verbose,
+	       debugBelch("processing messages from other PEs\n"));
+  do {
+    // using raw MP interface... And we unpack at most the maximum
+    // size (MPSystem will determine and unpack the real size).
+    MP_recv(sizeof(StgWord)*DATASPACEWORDS,
+	    (long*) recvBuffer, &opcode, &pe);
+	
+    ASSERT(pe <= nPEs && pe > 0);
+    ASSERT(ISOPCODE(opcode));
+
+    if (!eventEmitted)  {
+    //          edentrace: start communication event
+      eventEmitted = rtsTrue;
+      traceEdenEventStartReceive(cap);
+    }   
+
+    IF_PAR_DEBUG(verbose,
+		 debugBelch("Received %s (Code %0d) from %d\n",
+			    getOpName(opcode),opcode,pe));
+    switch (opcode) {
+      /* system messages (one valid) */
+    case PP_FINISH:
+	IF_PAR_DEBUG(verbose,
+		     debugBelch("== received FINISH from [%d]\n", pe));
+	if (IAmMainThread) {
+	  /* One of the child PEs has stopped (internal error). We could
+	   *  inform the other children and go on, but the system is
+	   *  unstable in case of global memory. We abort execution.
+	   */
+	} else { // not IAmMainThread
+	  ASSERT(pe == 1); // only the main PE (with logical No.1) may
+	                   // send a FINISH to children.
+	}
+	// this will stop the main scheduling loop, makes all threads
+	// join and shut down the entire instance.
+	sched_state = SCHED_INTERRUPTING;
+	break;  
+    case PP_NEWPE:
+    case PP_READY:
+    case PP_PETIDS:
+      barf("MP-System message %x found on scheduler level",
+	   opcode);
+      /* When a new PE joins then potentially FISH & REVAL message may
+	 reach PES before they are notified of the new PEs existence. The
+	 only solution is to bounce/fail these messages back to the sender.
+
+	 But we will worry about it once we start seeing these race
+	 conditions! Currently, we assume a closed system. TODO: do
+	 something about supporting an open system!
+      */
+      break;
+
+      /* control messages */
+    case PP_RFORK:
+      { 
+	StgClosure *graph;
+
+	ASSERT(isRtsPort(recvBuffer->receiver) && 
+	       recvBuffer->receiver.machine == thisPE);
+	// edentrace: emit an event receiveMessage(cap, recvBuffer)
+        traceReceiveMessageEvent(cap, opcode, recvBuffer);
+	graph = UnpackGraph(recvBuffer, recvBuffer->receiver, cap);
+	startNewProcess(cap, graph);
+
+	break;
+      }
+    case PP_TERMINATE:
+      // remote request to terminate a local thread
+      // ports: sender = a remote inport, receiver = a local thread
+      // receiver should be (thisPE, a process, a ThreadID)
+      
+      receiver = recvBuffer->receiver;
+      sender = recvBuffer->sender;
+
+      // checks if 1. this thread exists 
+      //           2. belongs to the process
+      // TODO: this is currently unimplemented.  what we want is to
+      // kill the thread with thread->id == receiver.id
+      tso = findTSOByP(receiver);
+      if (tso == NULL) {
+	// nothing to do
+	break;
+      }
+      // checks if 3. (still) has receiver set to this sender
+      if (equalPorts(*(MyReceiver(tso)), sender)) {
+
+	// edentrace: emit event receiveMessage(cap, recvBuffer TERMINATE)
+        traceReceiveMessageEvent(cap, opcode, recvBuffer);
+	// terminate this thread (it may not catch ThreadKilled!)
+	deleteThread(cap, tso);
+      }	else {
+	// otherwise: nothing to do, ignore message
+	IF_PAR_DEBUG(ports,
+		     debugBelch("WARN: Request from port (%d,%d,%d) "
+				"to terminate thread %d (not connected).\n",
+				(int) sender.machine, (int) sender.process,
+				(int) sender.id, (int) tso->id));
+      }
+      break;
+
+      /* data messages: */
+    case PP_DATA:
+    case PP_HEAD:
+    case PP_CONSTR:
+      // unpack ports, check 1:1 connection, 
+      // unpack data in the heap, update Blackhole. 
+      // All done inside DataComms.c
+      processDataMsg(cap, opcode, recvBuffer);
+      // this will also unblock threads
+      break;
+
+    case PP_CONNECT:
+      // connect receiver port to sender (checking 1:1, one connection allowed)
+      connectInportByP(recvBuffer->receiver, recvBuffer->sender);
+      break;
+
+    default:
+	/* Anything we're not prepared to deal with. */
+	barf("PE %d: Unexpected opcode %x from %x",
+	     thisPE, opcode, pe);
+      } /* switch */
+    
+  } while (sched_state < SCHED_INTERRUPTING && // stop shortcut
+	   MP_probe());       // While there are messages: process them
+
+  // edentrace: EdenEventEndReceive
+     if ( eventEmitted ) {
+        traceEdenEventEndReceive(cap);
+     }
+  return;
+}				/* processMessages */
+
+/* startNewProcess
+ *   start a new process to evaluate data we usually received via
+ *   processMessages (called from there).
+ *
+ * As opposed to "forking" a thread from haskell, a new processID is
+ * assigned and the new process not supposed to share heap data with
+ * other existing threads.
+ */
+
+void startNewProcess(Capability *cap, StgClosure* graph) {
+  StgTSO *tso;
+
+  IF_PAR_DEBUG(verbose,
+	       debugBelch("Starting a new process for graph @ %p.\n", 
+			  graph));
+
+  // create a thread, push graph, set to a new process, schedule the thread
+
+  // besides registering a new process, this is an imitation of what
+  // happens in forkzh
+  tso = createIOThread(cap, RtsFlags.GcFlags.initialStkSize, graph);
+  // create a new process table entry, set this TSO as first thread
+  newProcess(tso);
+
+  IF_DEBUG(sanity,
+	   checkTSO(tso));
+  IF_PAR_DEBUG(procs,
+	       printTSO(tso));
+
+  // schedule the thread (will go to the end of the run queue)
+  scheduleThread(cap, tso);
+
+  return;
+}
+
+#endif // PARALLEL_RTS
+
 
 #if defined(THREADED_RTS)
 STATIC_INLINE rtsBool
@@ -849,6 +1106,11 @@ scheduleCheckBlockedThreads(Capability *cap USED_IF_NOT_THREADS)
 static void
 scheduleDetectDeadlock (Capability *cap, Task *task)
 {
+
+#if defined(PARALLEL_RTS)
+    return;
+#endif
+
     /* 
      * Detect deadlock: when we have no threads to run, there are no
      * threads blocked, waiting for I/O, or sleeping, and all the
@@ -1218,6 +1480,12 @@ scheduleHandleThreadFinished (Capability *cap STG_UNUSED, Task *task, StgTSO *t)
     // blocked mode (see #2910).
     awakenBlockedExceptionQueue (cap, t);
 
+#if defined(PARALLEL_RTS)
+    //       Remove thread from its process: completed or killed
+    //         threads are left on the run_queue in order for the
+    //         garbage collection to find and evacuate them.
+    removeTSO(t->id);
+#endif
       //
       // Check whether the thread that just completed was a bound
       // thread, and if so return with the result.  
@@ -1426,6 +1694,7 @@ delete_threads_and_gc:
     heap_census = scheduleNeedHeapProfile(rtsTrue);
 
     traceEventGcStart(cap);
+    traceEventGcStart(cap);    
 #if defined(THREADED_RTS)
     // reset waiting_for_gc *before* GC, so that when the GC threads
     // emerge they don't immediately re-enter the GC.
@@ -1930,6 +2199,21 @@ scheduleWaitThread (StgTSO* tso, /*[out]*/HaskellObj* ret, Capability *cap)
  * Starting Tasks
  * ------------------------------------------------------------------------- */
 
+#if defined(PARALLEL_RTS)
+// Entry point into the scheduling loop for the parallel runtime
+// system. Every PE (running instance of the runtime system) except
+// the main PE (the one which was first started) will call this
+// function to run an (initially empty) scheduler. Mostly similar to
+// "workerStart" for the threaded runtime system - just below, but the
+// executing thread operates on the main capability.
+
+void startEmptyScheduler(Capability *cap)
+{
+    // schedule() runs without a lock.
+    cap = schedule(cap, cap->running_task);
+}
+
+#endif
 #if defined(THREADED_RTS)
 void scheduleWorker (Capability *cap, Task *task)
 {

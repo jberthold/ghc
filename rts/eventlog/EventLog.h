@@ -12,6 +12,10 @@
 #include "rts/EventLogFormat.h"
 #include "Capability.h"
 
+#ifdef PARALLEL_RTS
+#include "Rts.h"
+#endif //PARALLEL_RTS
+
 #include "BeginPrivate.h"
 
 #ifdef TRACING
@@ -69,6 +73,25 @@ void postCapsetVecEvent (EventTypeNum tag,
                          int argc,
                          char *msg[]);
 
+void postVersion(char *version);
+
+void postProgramInvocation(char *commandline);
+
+#ifdef PARALLEL_RTS
+void postProcessEvent(EventProcessID pid, EventTypeNum tag);
+
+void postAssignThreadToProcessEvent(Capability *cap, EventThreadID tid, EventProcessID pid);
+
+void postCreateMachineEvent(EventMachineID pe, StgWord64 time, StgWord64 ticks, EventTypeNum tag);
+
+void postKillMachineEvent(EventMachineID pe, EventTypeNum tag);
+
+void postSendMessageEvent(OpCode msgtag, rtsPackBuffer* buf);
+                          
+void postReceiveMessageEvent(Capability *cap, OpCode msgtag, rtsPackBuffer* buf);
+
+#endif //PARALLEL_RTS
+
 #else /* !TRACING */
 
 INLINE_HEADER void postSchedEvent (Capability *cap  STG_UNUSED,
@@ -90,6 +113,45 @@ INLINE_HEADER void postCapMsg (Capability *cap STG_UNUSED,
                                char *msg STG_UNUSED, 
                                va_list ap STG_UNUSED)
 { /* nothing */ }
+
+INLINE_HEADER void postVersion(char *version STG_UNUSED)
+{ /* nothing */ }
+
+INLINE_HEADER void postProgramInvocation(char *commandline STG_UNUSED)
+{ /* nothing */ }
+
+#if defined(PARALLEL_RTS)
+INLINE_HEADER void postProcessEvent(EventProcessID pid  STG_UNUSED,
+                                    EventTypeNum tag    STG_UNUSED)
+{ /* nothing */ }
+
+INLINE_HEADER void postAssignThreadToProcessEvent(Capability *cap    STG_UNUSED,
+                                                  EventThreadID tid  STG_UNUSED, 
+                                                  EventProcessID pid STG_UNUSED)
+{ /* nothing */ }
+
+INLINE_HEADER void postCreateMachineEvent(EventProcessID pid STG_UNUSED,
+                                    StgWord64 time    STG_UNUSED,
+                                    StgWord64 ticks    STG_UNUSED,
+                                    EventTypeNum tag    STG_UNUSED)
+{ /* nothing */ }
+
+INLINE_HEADER void postKillMachineEvent(EventProcessID pid STG_UNUSED,
+                                    EventTypeNum tag    STG_UNUSED)
+{ /* nothing */ }
+
+INLINE_HEADER void postSendMessageEvent(OpCode msgtag              STG_UNUSED, 
+                                        rtsPackBuffer *buf         STG_UNUSED)
+{ /* nothing */ }
+                          
+INLINE_HEADER void postReceiveMessageEvent(Capability *cap            STG_UNUSED, 
+                                           OpCode msgtag              STG_UNUSED, 
+                                           rtsPackBuffer *buf         STG_UNUSED)
+
+{ /* nothing */ }
+
+//INLINE_HEADER inline StgWord64 time_ns(void STG_UNUSED){return 0; /* nothing */ }
+#endif // PARALLEL_RTS
 
 #endif
 

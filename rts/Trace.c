@@ -389,6 +389,14 @@ static void trace_stderr(char *msg, va_list ap)
 
     RELEASE_LOCK(&trace_utx);
 }
+
+static void trace_stderr_(char *msg, ...)
+{
+    va_list ap;
+    va_start(ap,msg);
+    trace_stderr(msg, ap);
+    va_end(ap);
+}
 #endif
 
 void trace_(char *msg, ...)
@@ -468,6 +476,154 @@ void traceEnd (void)
     RELEASE_LOCK(&trace_utx);
 }
 #endif /* DEBUG */
+
+
+void traceVersion_(char *version)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("version: %s \n", version);
+    } else
+#endif
+    {
+      postVersion(version);
+    }
+}
+
+
+void traceProgramInvocation_(char *commandline)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("program call commandline: %s \n", commandline);
+    } else
+#endif
+      {
+        postProgramInvocation(commandline);
+      }
+}
+
+
+#if defined(PARALLEL_RTS)
+
+void traceEdenEventStartReceive_(Capability *cap)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("cap %d: starting to work on inbox \n", cap->no);
+    } else
+#endif
+      {
+        postEvent(cap,EVENT_EDEN_START_RECEIVE);
+      }
+}
+
+
+void traceEdenEventEndReceive_(Capability *cap)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("cap %d: stopped working on inbox \n", cap->no);
+    } else
+#endif
+      {
+        postEvent(cap,EVENT_EDEN_END_RECEIVE);
+      }
+}
+
+
+void traceCreateProcess_(StgWord pid)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("creating process %u \n", (nat)pid );
+    } else
+#endif
+      {
+        postProcessEvent(pid, EVENT_CREATE_PROCESS);
+      }
+}
+
+
+void traceKillProcess_(StgWord pid)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("killing process %u \n", (nat)pid);
+    } else
+#endif
+      {
+        postProcessEvent((EventProcessID) pid, EVENT_KILL_PROCESS);
+      }
+}
+
+
+void traceAssignThreadToProcessEvent_(Capability *cap, nat tid, StgWord pid)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("cap %d: assigning thread %u to process %u \n",cap->no , tid, (nat)pid);
+    } else
+#endif
+      {
+        postAssignThreadToProcessEvent(cap, (EventThreadID)tid, (EventProcessID)pid);
+      }
+}
+
+
+void traceCreateMachine_ (nat pe, StgWord64 time,StgWord64 ticks)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+      trace_stderr_(" creating machine %u at time %lu ns \n",pe, (long)time, (long)ticks);
+    } else
+#endif
+      {
+        postCreateMachineEvent(pe, time, ticks, EVENT_CREATE_MACHINE);
+      }
+}
+
+
+void traceKillMachine_ (nat pe)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("killing machine %u",pe);
+    } else
+#endif
+      {
+        postKillMachineEvent(pe, EVENT_KILL_MACHINE);
+      }
+}
+
+
+void traceSendMessageEvent_ (OpCode msgtag, rtsPackBuffer *buf)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("sending message with Tag %d, \n \t sender: process %lu, thread %lu  \n \t receiver: machine %d, process %lu, portID %lu \n", 
+                 msgtag, (long)buf->sender.process, (long)buf->sender.id, buf->receiver.machine, (long)buf->receiver.process, (long)buf->receiver.id);
+    } else
+#endif
+      {
+        postSendMessageEvent (msgtag, buf);
+      }
+}
+
+
+void traceReceiveMessageEvent_ (Capability *cap, OpCode msgtag, rtsPackBuffer *buf)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("cap %d: receive message with Tag %d of size %u, \n \t receiver: process %lu, portID %lu  \n \t sender: machine %d, process %lu, thread %lu \n", 
+                 cap->no, msgtag, (nat)buf->size, (long)buf->receiver.process, (long)buf->receiver.id, buf->sender.machine, (long)buf->sender.process, (long)buf->sender.id);
+    } else
+#endif
+      {
+        postReceiveMessageEvent (cap, msgtag, buf);
+      }
+}
+#endif /* PARALLEL_RTS */
 
 #endif /* TRACING */
 

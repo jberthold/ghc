@@ -749,6 +749,9 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_block_1)                        \
       SymI_HasProto(stg_block_takemvar)                 \
       SymI_HasProto(stg_block_putmvar)                  \
+      SymI_HasProto(stg_block_pack)                     \
+      SymI_HasProto(stg_block_serializze)               \
+      SymI_HasProto(stg_yield_send)                     \
       MAIN_CAP_SYM                                      \
       SymI_HasProto(MallocFailHook)                     \
       SymI_HasProto(OnExitHook)                         \
@@ -1000,6 +1003,16 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stopTimer)                          \
       SymI_HasProto(n_capabilities)                     \
       SymI_HasProto(stg_traceCcszh)                     \
+      SymI_HasProto(nPEs)                               \
+      SymI_HasProto(thisPE)                             \
+      SymI_HasProto(stg_duplicatezh)                    \
+      SymI_HasProto(stg_serializzezh)                   \
+      SymI_HasProto(stg_deserializzezh)                 \
+      SymI_HasProto(stg_expectDatazh)                   \
+      SymI_HasProto(stg_connectToPortzh)                \
+      SymI_HasProto(stg_sendDatazh)                     \
+      SymI_HasProto(stg_labelProcesszh)                 \
+      SymI_HasProto(stg_myProcesszh)                    \
       SymI_HasProto(stg_traceEventzh)                   \
       RTS_USER_SIGNALS_SYMBOLS                          \
       RTS_INTCHAR_SYMBOLS

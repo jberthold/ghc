@@ -1639,7 +1639,92 @@ primop  ReallyUnsafePtrEqualityOp "reallyUnsafePtrEquality#" GenPrimOp
    a -> a -> Int#
 
 ------------------------------------------------------------------------
-section "Parallelism"
+section "Distributed heap parallelism"
+   {Running GHC in several instances in a network. 
+   
+    These primitive operations implement the coordination language
+    {\tt Eden}, see http://www.mathematik.uni-marburg.de/~eden
+   }
+
+------------------------------------------------------------------------
+
+primop DuplicateOp "duplicate#" GenPrimOp
+   a -> State# RealWorld -> (# State# RealWorld, a #)
+  {for tests only: Packs and unpacks a subgraph in the local heap.}
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop SerializeOp "serialize#" GenPrimOp
+   a -> State# s -> (# State# s, ByteArray# #)
+  { serialize a subgraph in the heap, into a primitive array }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop DeserializeOp "deserialize#" GenPrimOp
+   ByteArray# -> State# s -> (# State# s, a #)
+  { deserialize a subgraph serialized before, into the heap }
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop ExpectDataOp "expectData#" GenPrimOp
+   State# RealWorld -> (# State# RealWorld, Int# , Int# , a #)
+   {creates a blackhole (a) and an inport (Ints are Proc.Id and Port ID)}
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop ConnectToPortOp "connectToPort#" GenPrimOp
+   Int# -> Int# -> Int# -> State# RealWorld -> State# RealWorld
+   {stores an inport (given as 3 Ints) as receiver in the calling thread}
+   with
+   has_side_effects = True
+   out_of_line      = True
+
+primop SendDataOp "sendData#" GenPrimOp
+   Int# -> a -> State# RealWorld -> State# RealWorld
+   { sends data to an inport.
+
+    The first argument encodes a send mode (low bits) and 
+    possibly a target PE (high bits) for process placement.
+
+    Send modes:
+
+      * 1: connection message
+
+      * 2: stream data
+
+      * 3: single data, closing the inport
+
+      * 4: rFork (PE indicated by higher bits above 4) }
+   with
+   out_of_line      = True
+   has_side_effects = True
+
+primop LabelProcessOp "labelProcess#" GenPrimOp
+   Addr# -> State# RealWorld -> State# RealWorld
+   {sets a label for the process of the caller, 
+    relevant only for tracing (writes an event)}
+   with 
+   out_of_line = True
+   has_side_effects = True
+
+primop MyProcessOp "myProcess#" GenPrimOp
+   State# RealWorld -> (# State# RealWorld, Int# #)
+   {returns process ID where the calling thread belongs.
+
+    Code for experiments with Eden Debugger/Haskell scheduler}
+   with 
+   out_of_line = True
+
+------------------------------------------------------------------------
+section "Shared heap parallelism"
+   {Glasgow-parallel Haskell, supported by the threaded runtime system.
+
+    This is mostly old code, untouched by the Eden group.
+   }
 ------------------------------------------------------------------------
 
 primop  ParOp "par#" GenPrimOp
