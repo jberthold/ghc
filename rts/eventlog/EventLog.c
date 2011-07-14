@@ -89,7 +89,8 @@ char *EventDesc[] = {
   [EVENT_PROGRAM_ENV]         = "Program environment variables",
   [EVENT_OSPROCESS_PID]       = "Process ID",
   [EVENT_OSPROCESS_PPID]      = "Parent process ID"
-  [EVENT_VERSION]             = "Version",
+
+  , [EVENT_VERSION]             = "Version",
   [EVENT_PROGRAM_INVOCATION]  = "Program invocation",
   [EVENT_EDEN_START_RECEIVE]  = "Starting message receival",
   [EVENT_EDEN_END_RECEIVE]    = "Finished message receival",
