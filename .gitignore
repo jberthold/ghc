@@ -83,6 +83,9 @@ _darcs/
 /utils/haddock/
 /utils/hsc2hs/
 
+#
+/libraries/edenmodules
+
 # -----------------------------------------------------------------------------
 # specific generated files
 
