@@ -19,6 +19,7 @@ module HscTypes (
 
 	ModSummary(..), ms_imps, ms_mod_name, showModMsg, isBootSummary,
 	msHsFilePath, msHiFilePath, msObjFilePath,
+        SourceModified(..),
 
         -- * Information about the module being compiled
 	HscSource(..), isHsBoot, hscSourceString,	-- Re-exported from DriverPhases
@@ -130,8 +131,7 @@ import TyCon
 import DataCon		( DataCon, dataConImplicitIds, dataConWrapId )
 import PrelNames	( gHC_PRIM )
 import Packages hiding ( Version(..) )
-import DynFlags		( DynFlags(..), isOneShot, HscTarget (..), dopt,
-                          DynFlag(..), SafeHaskellMode(..), dynFlagDependencies )
+import DynFlags
 import DriverPhases	( HscSource(..), isHsBoot, hscSourceString, Phase )
 import BasicTypes	( IPName, defaultFixity, WarningTxt(..) )
 import OptimizationFuel	( OptFuelState )
@@ -235,7 +235,7 @@ printOrThrowWarnings dflags warns
 
 handleFlagWarnings :: DynFlags -> [Located String] -> IO ()
 handleFlagWarnings dflags warns
- = when (dopt Opt_WarnDeprecatedFlags dflags) $ do
+ = when (wopt Opt_WarnDeprecatedFlags dflags) $ do
         -- It would be nicer if warns :: [Located Message], but that
         -- has circular import problems.
       let bag = listToBag [ mkPlainWarnMsg loc (text warn) 
@@ -616,6 +616,8 @@ data ModIface
         
         mi_exp_hash :: !Fingerprint,	-- ^ Hash of export list
 
+        mi_used_th :: !Bool,  -- ^ Module required TH splices when it was compiled.  This disables recompilation avoidance (see #481).
+
         mi_fixities :: [(OccName,Fixity)],
                 -- ^ Fixities
         
@@ -735,7 +737,8 @@ data ModGuts
 					 -- generate initialisation code
 	mg_used_names:: !NameSet,	 -- ^ What the module needed (used in 'MkIface.mkIface')
 
-        mg_rdr_env   :: !GlobalRdrEnv,	 -- ^ Top-level lexical environment
+        mg_used_th   :: !Bool,           -- ^ Did we run a TH splice?
+        mg_rdr_env   :: !GlobalRdrEnv,   -- ^ Top-level lexical environment
 
 	-- These fields all describe the things **declared in this module**
 	mg_fix_env   :: !FixityEnv,	 -- ^ Fixities declared in this module
@@ -847,7 +850,8 @@ emptyModIface mod
 	       mi_usages   = [],
 	       mi_exports  = [],
 	       mi_exp_hash = fingerprint0,
-	       mi_fixities = [],
+               mi_used_th  = False,
+               mi_fixities = [],
 	       mi_warns    = NoWarnings,
 	       mi_anns     = [],
 	       mi_insts     = [],
@@ -1723,6 +1727,30 @@ showModMsg target recomp mod_summary
     mod_str = showSDoc (ppr mod) ++ hscSourceString (ms_hsc_src mod_summary)
 \end{code}
 
+%************************************************************************
+%*									*
+\subsection{Recmpilation}
+%*									*
+%************************************************************************
+
+\begin{code}
+-- | Indicates whether a given module's source has been modified since it
+-- was last compiled.
+data SourceModified
+  = SourceModified
+       -- ^ the source has been modified
+  | SourceUnmodified
+       -- ^ the source has not been modified.  Compilation may or may
+       -- not be necessary, depending on whether any dependencies have
+       -- changed since we last compiled.
+  | SourceUnmodifiedAndStable
+       -- ^ the source has not been modified, and furthermore all of
+       -- its (transitive) dependencies are up to date; it definitely
+       -- does not need to be recompiled.  This is important for two
+       -- reasons: (a) we can omit the version check in checkOldIface,
+       -- and (b) if the module used TH splices we don't need to force
+       -- recompilation.
+\end{code}
 
 %************************************************************************
 %*									*

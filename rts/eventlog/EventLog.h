@@ -73,6 +73,18 @@ void postCapsetVecEvent (EventTypeNum tag,
                          int argc,
                          char *msg[]);
 
+/* 
+ * Post a `par` spark event
+ */
+void postSparkEvent(Capability *cap, EventTypeNum tag, StgWord info1);
+
+/*
+ * Post an event with several counters relating to `par` sparks.
+ */
+void postSparkCountersEvent (Capability *cap, 
+                             SparkCounters counters,
+                             StgWord remaining);
+
 void postVersion(char *version);
 
 void postProgramInvocation(char *commandline);

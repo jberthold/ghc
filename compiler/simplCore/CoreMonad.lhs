@@ -11,10 +11,8 @@ module CoreMonad (
     CoreToDo(..), runWhen, runMaybe,
     SimplifierMode(..),
     FloatOutSwitches(..),
-    dumpSimplPhase,
+    dumpSimplPhase, pprPassDetails, 
 
-    defaultGentleSimplToDo,
-    
     -- * Plugins
     PluginPass, Plugin(..), CommandLineOption, 
     defaultPlugin, bindsOnlyPass,
@@ -37,11 +35,14 @@ module CoreMonad (
     liftIO, liftIOWithCount,
     liftIO1, liftIO2, liftIO3, liftIO4,
     
+    -- ** Global initialization
+    reinitializeGlobals,
+    
     -- ** Dealing with annotations
     getAnnotations, getFirstAnnotations,
     
     -- ** Debug output
-    showPass, endPass, endIteration, dumpIfSet,
+    showPass, endPass, dumpPassResult, lintPassResult, dumpIfSet,
 
     -- ** Screen output
     putMsg, putMsgS, errorMsg, errorMsgS, 
@@ -98,8 +99,16 @@ import Control.Monad
 import Prelude hiding   ( read )
 
 #ifdef GHCI
+import Control.Concurrent.MVar (MVar)
+import Linker ( PersistentLinkerState, saveLinkerGlobals, restoreLinkerGlobals )
 import {-# SOURCE #-} TcSplice ( lookupThName_maybe )
 import qualified Language.Haskell.TH as TH
+#else
+saveLinkerGlobals :: IO ()
+saveLinkerGlobals = return ()
+
+restoreLinkerGlobals :: () -> IO ()
+restoreLinkerGlobals () = return ()
 #endif
 \end{code}
 
@@ -118,48 +127,52 @@ showPass :: DynFlags -> CoreToDo -> IO ()
 showPass dflags pass = Err.showPass dflags (showSDoc (ppr pass))
 
 endPass :: DynFlags -> CoreToDo -> [CoreBind] -> [CoreRule] -> IO ()
-endPass dflags pass = dumpAndLint dflags True pass empty (coreDumpFlag pass)
-
--- Same as endPass but doesn't dump Core even with -dverbose-core2core
-endIteration :: DynFlags -> CoreToDo -> Int -> [CoreBind] -> [CoreRule] -> IO ()
-endIteration dflags pass n
-  = dumpAndLint dflags False pass (ptext (sLit "iteration=") <> int n)
-                (Just Opt_D_dump_simpl_iterations)
+endPass dflags pass binds rules
+  = do { dumpPassResult dflags mb_flag (ppr pass) empty binds rules
+       ; lintPassResult dflags pass binds }      
+  where
+    mb_flag = case coreDumpFlag pass of
+                Just dflag | dopt dflag dflags                   -> Just dflag
+                           | dopt Opt_D_verbose_core2core dflags -> Just dflag
+                _ -> Nothing
 
 dumpIfSet :: Bool -> CoreToDo -> SDoc -> SDoc -> IO ()
 dumpIfSet dump_me pass extra_info doc
   = Err.dumpIfSet dump_me (showSDoc (ppr pass <+> extra_info)) doc
 
-dumpAndLint :: DynFlags -> Bool -> CoreToDo -> SDoc -> Maybe DynFlag
-            -> [CoreBind] -> [CoreRule] -> IO ()
--- The "show_all" parameter says to print dump if -dverbose-core2core is on
-dumpAndLint dflags show_all pass extra_info mb_dump_flag binds rules
-  = do {  -- Report result size if required
+dumpPassResult :: DynFlags 
+               -> Maybe DynFlag		-- Just df => show details in a file whose
+	       	  			--            name is specified by df
+               -> SDoc 			-- Header
+               -> SDoc 			-- Extra info to appear after header
+               -> [CoreBind] -> [CoreRule] 
+               -> IO ()
+dumpPassResult dflags mb_flag hdr extra_info binds rules
+  | Just dflag <- mb_flag
+  = Err.dumpSDoc dflags dflag (showSDoc hdr) dump_doc
+
+  | otherwise
+  = Err.debugTraceMsg dflags 2 $
+    (text "Result size of" <+> hdr <+> equals <+> int (coreBindsSize binds))
+          -- Report result size 
 	  -- This has the side effect of forcing the intermediate to be evaluated
-       ; Err.debugTraceMsg dflags 2 $
-		(text "    Result size =" <+> int (coreBindsSize binds))
 
-	-- Report verbosely, if required
-       ; let pass_name = showSDoc (ppr pass <+> extra_info)
-             dump_doc  = pprCoreBindings binds 
-                         $$ ppUnless (null rules) pp_rules
-
-       ; case mb_dump_flag of
-            Nothing        -> return ()
-            Just dump_flag -> Err.dumpIfSet_dyn_or dflags dump_flags pass_name dump_doc
-               where
-                 dump_flags | show_all  = [dump_flag, Opt_D_verbose_core2core]
-		 	    | otherwise = [dump_flag] 
-
-	-- Type check
-       ; when (dopt Opt_DoCoreLinting dflags) $
-         do { let (warns, errs) = lintCoreBindings binds
-            ; Err.showPass dflags ("Core Linted result of " ++ pass_name)
-            ; displayLintResults dflags pass warns errs binds  } }
   where
+    dump_doc  = vcat [ text "Result size =" <+> int (coreBindsSize binds)
+                     , extra_info
+		     , blankLine
+                     , pprCoreBindings binds 
+                     , ppUnless (null rules) pp_rules ]
     pp_rules = vcat [ blankLine
                     , ptext (sLit "------ Local rules for imported ids --------")
                     , pprRules rules ]
+
+lintPassResult :: DynFlags -> CoreToDo -> [CoreBind] -> IO ()
+lintPassResult dflags pass binds
+  = when (dopt Opt_DoCoreLinting dflags) $
+    do { let (warns, errs) = lintCoreBindings binds
+       ; Err.showPass dflags ("Core Linted result of " ++ showSDoc (ppr pass))
+       ; displayLintResults dflags pass warns errs binds  }
 
 displayLintResults :: DynFlags -> CoreToDo
                    -> Bag Err.Message -> Bag Err.Message -> [CoreBind]
@@ -222,7 +235,6 @@ data CoreToDo           -- These are diff core-to-core passes,
   | CoreDoWorkerWrapper
   | CoreDoSpecialising
   | CoreDoSpecConstr
-  | CoreDoGlomBinds
   | CoreCSE
   | CoreDoRuleCheck CompilerPhase String   -- Check for non-application of rules
                                            -- matching this string
@@ -259,13 +271,10 @@ coreDumpFlag CorePrep                 = Just Opt_D_dump_prep
 coreDumpFlag CoreDoPrintCore         = Nothing
 coreDumpFlag (CoreDoRuleCheck {})    = Nothing
 coreDumpFlag CoreDoNothing           = Nothing
-coreDumpFlag CoreDoGlomBinds         = Nothing
 coreDumpFlag (CoreDoPasses {})       = Nothing
 
 instance Outputable CoreToDo where
-  ppr (CoreDoSimplify n md)  = ptext (sLit "Simplifier")
-                               <+> ppr md
-                                 <+> ptext (sLit "max-iterations=") <> int n
+  ppr (CoreDoSimplify _ _)     = ptext (sLit "Simplifier")
   ppr (CoreDoPluginPass s _)   = ptext (sLit "Core plugin: ") <+> text s
   ppr CoreDoFloatInwards       = ptext (sLit "Float inwards")
   ppr (CoreDoFloatOutwards f)  = ptext (sLit "Float out") <> parens (ppr f)
@@ -282,9 +291,12 @@ instance Outputable CoreToDo where
   ppr CorePrep 		       = ptext (sLit "CorePrep")
   ppr CoreDoPrintCore          = ptext (sLit "Print core")
   ppr (CoreDoRuleCheck {})     = ptext (sLit "Rule check")
-  ppr CoreDoGlomBinds          = ptext (sLit "Glom binds")
   ppr CoreDoNothing            = ptext (sLit "CoreDoNothing")
   ppr (CoreDoPasses {})        = ptext (sLit "CoreDoPasses")
+
+pprPassDetails :: CoreToDo -> SDoc
+pprPassDetails (CoreDoSimplify n md) = ppr md <+> ptext (sLit "max-iterations=") <> int n
+pprPassDetails _ = empty
 \end{code}
 
 \begin{code}
@@ -339,17 +351,6 @@ pprFloatOutSwitches sw
      [ ptext (sLit "Lam =")    <+> ppr (floatOutLambdas sw)
      , ptext (sLit "Consts =") <+> ppr (floatOutConstants sw)
      , ptext (sLit "PAPs =")   <+> ppr (floatOutPartialApplications sw) ])
-
--- | A reasonably gentle simplification pass for doing "obvious" simplifications
-defaultGentleSimplToDo :: CoreToDo
-defaultGentleSimplToDo = CoreDoSimplify 4 -- 4 is the default maxSimpleIterations
-                       (SimplMode { sm_phase = InitialPhase
-                                  , sm_names = ["Gentle"]
-                                  , sm_rules = True     -- Note [RULEs enabled in SimplGently]
-                                  , sm_inline = False
-                                  , sm_eta_expand = False
-                                  , sm_case_case = False 
-                                  })
 
 -- The core-to-core pass ordering is derived from the DynFlags:
 runWhen :: Bool -> CoreToDo -> CoreToDo
@@ -698,7 +699,13 @@ newtype CoreState = CoreState {
 data CoreReader = CoreReader {
         cr_hsc_env :: HscEnv,
         cr_rule_base :: RuleBase,
-        cr_module :: Module
+        cr_module :: Module,
+        cr_globals :: ((Bool, [String], [Way]),
+#ifdef GHCI
+                       (MVar PersistentLinkerState, Bool))
+#else
+                       ())
+#endif
 }
 
 data CoreWriter = CoreWriter {
@@ -756,13 +763,15 @@ runCoreM :: HscEnv
          -> Module
          -> CoreM a
          -> IO (a, SimplCount)
-runCoreM hsc_env rule_base us mod m =
-        liftM extract $ runIOEnv reader $ unCoreM m state
+runCoreM hsc_env rule_base us mod m = do
+        glbls <- liftM2 (,) saveStaticFlagGlobals saveLinkerGlobals
+        liftM extract $ runIOEnv (reader glbls) $ unCoreM m state
   where
-    reader = CoreReader {
+    reader glbls = CoreReader {
             cr_hsc_env = hsc_env,
             cr_rule_base = rule_base,
-            cr_module = mod
+            cr_module = mod,
+            cr_globals = glbls
         }
     state = CoreState { 
             cs_uniq_supply = us
@@ -851,6 +860,49 @@ getOrigNameCache = do
     liftIO $ fmap nsNames $ readIORef nameCacheRef
 \end{code}
 
+%************************************************************************
+%*									*
+             Initializing globals
+%*									*
+%************************************************************************
+
+This is a rather annoying function. When a plugin is loaded, it currently
+gets linked against a *newly loaded* copy of the GHC package. This would
+not be a problem, except that the new copy has its own mutable state
+that is not shared with that state that has already been initialized by
+the original GHC package.
+
+This leads to loaded plugins calling GHC code which pokes the static flags,
+and then dying with a panic because the static flags *it* sees are uninitialized.
+
+There are two possible solutions:
+  1. Export the symbols from the GHC executable from the GHC library and link
+     against this existing copy rather than a new copy of the GHC library
+  2. Carefully ensure that the global state in the two copies of the GHC
+     library matches
+
+I tried 1. and it *almost* works (and speeds up plugin load times!) except
+on Windows. On Windows the GHC library tends to export more than 65536 symbols
+(see #5292) which overflows the limit of what we can export from the EXE and
+causes breakage.
+
+(Note that if the GHC exeecutable was dynamically linked this wouldn't be a problem,
+because we could share the GHC library it links to.)
+
+We are going to try 2. instead. Unfortunately, this means that every plugin
+will have to say `reinitializeGlobals` before it does anything, but never mind.
+
+I've threaded the cr_globals through CoreM rather than giving them as an
+argument to the plugin function so that we can turn this function into
+(return ()) without breaking any plugins when we eventually get 1. working.
+
+\begin{code}
+reinitializeGlobals :: CoreM ()
+reinitializeGlobals = do
+    (sf_globals, linker_globals) <- read cr_globals
+    liftIO $ restoreStaticFlagGlobals sf_globals
+    liftIO $ restoreLinkerGlobals linker_globals
+\end{code}
 
 %************************************************************************
 %*									*

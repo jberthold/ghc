@@ -67,6 +67,9 @@ extern int DEBUG_sparks;
 
 // events
 extern int TRACE_sched;
+extern int TRACE_gc;
+extern int TRACE_spark_sampled;
+extern int TRACE_spark_full;
 
 // -----------------------------------------------------------------------------
 // Posting events
@@ -101,16 +104,30 @@ void traceEnd (void);
 void traceSchedEvent_ (Capability *cap, EventTypeNum tag, 
                        StgTSO *tso, StgWord info1, StgWord info2);
 
-
-/*
- * Record a nullary event
+/* 
+ * Record a GC event
  */
-#define traceEvent(cap, tag)                    \
-    if (RTS_UNLIKELY(TRACE_sched)) {            \
-        traceEvent_(cap, tag);                  \
+#define traceGcEvent(cap, tag)    \
+    if (RTS_UNLIKELY(TRACE_gc)) { \
+        traceGcEvent_(cap, tag);  \
     }
 
-void traceEvent_ (Capability *cap, EventTypeNum tag);
+void traceGcEvent_ (Capability *cap, EventTypeNum tag);
+
+/* 
+ * Record a spark event
+ */
+#define traceSparkEvent(cap, tag)         \
+    if (RTS_UNLIKELY(TRACE_spark_full)) { \
+        traceSparkEvent_(cap, tag, 0);    \
+    }
+
+#define traceSparkEvent2(cap, tag, other)  \
+    if (RTS_UNLIKELY(TRACE_spark_full)) {  \
+        traceSparkEvent_(cap, tag, other); \
+    }
+
+void traceSparkEvent_ (Capability *cap, EventTypeNum tag, StgWord info1);
 
 // variadic macros are C99, and supported by gcc.  However, the
 // ##__VA_ARGS syntax is a gcc extension, which allows the variable
@@ -189,6 +206,9 @@ void traceCapsetModify_ (EventTypeNum tag,
 
 void traceOSProcessInfo_ (void);
 
+void traceSparkCounters_ (Capability *cap,
+                          SparkCounters counters,
+                          StgWord remaining);
 
 #define traceVersion(version)             \
     if (RTS_UNLIKELY(TRACE_sched)) {      \
@@ -291,7 +311,9 @@ void traceReceiveMessageEvent_(Capability *cap, OpCode msgtag, rtsPackBuffer *bu
 
 #define traceSchedEvent(cap, tag, tso, other) /* nothing */
 #define traceSchedEvent2(cap, tag, tso, other, info) /* nothing */
-#define traceEvent(cap, tag) /* nothing */
+#define traceGcEvent(cap, tag) /* nothing */
+#define traceSparkEvent(cap, tag) /* nothing */
+#define traceSparkEvent2(cap, tag, other) /* nothing */
 #define traceCap(class, cap, msg, ...) /* nothing */
 #define trace(class, msg, ...) /* nothing */
 #define debugTrace(class, str, ...) /* nothing */
@@ -300,6 +322,7 @@ void traceReceiveMessageEvent_(Capability *cap, OpCode msgtag, rtsPackBuffer *bu
 INLINE_HEADER void traceEventStartup_ (int n_caps STG_UNUSED) {};
 #define traceCapsetModify_(tag, capset, other) /* nothing */
 #define traceOSProcessInfo_() /* nothing */
+#define traceSparkCounters_(cap, counters, remaining) /* nothing */
 
 #define traceVersion(version) /* nothing */
 #define traceProgramInvocation(commandline) /* nothing */
@@ -342,10 +365,6 @@ void dtraceUserMsgWrapper(Capability *cap, char *msg);
     HASKELLEVENT_THREAD_RUNNABLE(cap, tid)
 #define dtraceMigrateThread(cap, tid, new_cap)          \
     HASKELLEVENT_MIGRATE_THREAD(cap, tid, new_cap)
-#define dtraceRunSpark(cap, tid)                        \
-    HASKELLEVENT_RUN_SPARK(cap, tid)
-#define dtraceStealSpark(cap, tid, victim_cap)          \
-    HASKELLEVENT_STEAL_SPARK(cap, tid, victim_cap)
 #define dtraceShutdown(cap)                             \
     HASKELLEVENT_SHUTDOWN(cap)
 #define dtraceThreadWakeup(cap, tid, other_cap)         \
@@ -379,6 +398,22 @@ INLINE_HEADER void dtraceStartup (int num_caps) {
     HASKELLEVENT_CAPSET_ASSIGN_CAP(capset, capno)
 #define dtraceCapsetRemoveCap(capset, capno)            \
     HASKELLEVENT_CAPSET_REMOVE_CAP(capset, capno)
+#define dtraceSparkCounters(cap, a, b, c, d, e, f, g) \
+    HASKELLEVENT_SPARK_COUNTERS(cap, a, b, c, d, e, f, g)
+#define dtraceSparkCreate(cap)                         \
+    HASKELLEVENT_SPARK_CREATE(cap)
+#define dtraceSparkDud(cap)                             \
+    HASKELLEVENT_SPARK_DUD(cap)
+#define dtraceSparkOverflow(cap)                        \
+    HASKELLEVENT_SPARK_OVERFLOW(cap)
+#define dtraceSparkRun(cap)                             \
+    HASKELLEVENT_SPARK_RUN(cap)
+#define dtraceSparkSteal(cap, victim_cap)               \
+    HASKELLEVENT_SPARK_STEAL(cap, victim_cap)
+#define dtraceSparkFizzle(cap)                          \
+    HASKELLEVENT_SPARK_FIZZLE(cap)
+#define dtraceSparkGc(cap)                              \
+    HASKELLEVENT_SPARK_GC(cap)
 
 #else /* !defined(DTRACE) */
 
@@ -387,8 +422,6 @@ INLINE_HEADER void dtraceStartup (int num_caps) {
 #define dtraceStopThread(cap, tid, status, info)        /* nothing */
 #define dtraceThreadRunnable(cap, tid)                  /* nothing */
 #define dtraceMigrateThread(cap, tid, new_cap)          /* nothing */
-#define dtraceRunSpark(cap, tid)                        /* nothing */
-#define dtraceStealSpark(cap, tid, victim_cap)          /* nothing */
 #define dtraceShutdown(cap)                             /* nothing */
 #define dtraceThreadWakeup(cap, tid, other_cap)         /* nothing */
 #define dtraceGcStart(cap)                              /* nothing */
@@ -405,6 +438,14 @@ INLINE_HEADER void dtraceStartup (int num_caps STG_UNUSED) {};
 #define dtraceCapsetDelete(capset)                      /* nothing */
 #define dtraceCapsetAssignCap(capset, capno)            /* nothing */
 #define dtraceCapsetRemoveCap(capset, capno)            /* nothing */
+#define dtraceSparkCounters(cap, a, b, c, d, e, f, g)   /* nothing */
+#define dtraceSparkCreate(cap)                          /* nothing */
+#define dtraceSparkDud(cap)                             /* nothing */
+#define dtraceSparkOverflow(cap)                        /* nothing */
+#define dtraceSparkRun(cap)                             /* nothing */
+#define dtraceSparkSteal(cap, victim_cap)               /* nothing */
+#define dtraceSparkFizzle(cap)                          /* nothing */
+#define dtraceSparkGc(cap)                              /* nothing */
 
 #endif
 
@@ -469,22 +510,6 @@ INLINE_HEADER void traceEventMigrateThread(Capability *cap     STG_UNUSED,
                         (EventCapNo)new_cap);
 }
 
-INLINE_HEADER void traceEventRunSpark(Capability *cap STG_UNUSED, 
-                                      StgTSO     *tso STG_UNUSED)
-{
-    traceSchedEvent(cap, EVENT_RUN_SPARK, tso, 0);
-    dtraceRunSpark((EventCapNo)cap->no, (EventThreadID)tso->id);
-}
-
-INLINE_HEADER void traceEventStealSpark(Capability *cap        STG_UNUSED, 
-                                        StgTSO     *tso        STG_UNUSED,
-                                        nat         victim_cap STG_UNUSED)
-{
-    traceSchedEvent(cap, EVENT_STEAL_SPARK, tso, victim_cap);
-    dtraceStealSpark((EventCapNo)cap->no, (EventThreadID)tso->id,
-                     (EventCapNo)victim_cap);
-}
-
 INLINE_HEADER void traceEventShutdown(Capability *cap STG_UNUSED)
 {
     traceSchedEvent(cap, EVENT_SHUTDOWN, 0, 0);
@@ -502,33 +527,44 @@ INLINE_HEADER void traceEventThreadWakeup(Capability *cap       STG_UNUSED,
 
 INLINE_HEADER void traceEventGcStart(Capability *cap STG_UNUSED)
 {
-    traceSchedEvent(cap, EVENT_GC_START, 0, 0);
+    traceGcEvent(cap, EVENT_GC_START);
     dtraceGcStart((EventCapNo)cap->no);
 }
 
 INLINE_HEADER void traceEventGcEnd(Capability *cap STG_UNUSED)
 {
-    traceSchedEvent(cap, EVENT_GC_END, 0, 0);
+    traceGcEvent(cap, EVENT_GC_END);
     dtraceGcEnd((EventCapNo)cap->no);
 }
 
 INLINE_HEADER void traceEventRequestSeqGc(Capability *cap STG_UNUSED)
 {
-    traceSchedEvent(cap, EVENT_REQUEST_SEQ_GC, 0, 0);
+    traceGcEvent(cap, EVENT_REQUEST_SEQ_GC);
     dtraceRequestSeqGc((EventCapNo)cap->no);
 }
 
 INLINE_HEADER void traceEventRequestParGc(Capability *cap STG_UNUSED)
 {
-    traceSchedEvent(cap, EVENT_REQUEST_PAR_GC, 0, 0);
+    traceGcEvent(cap, EVENT_REQUEST_PAR_GC);
     dtraceRequestParGc((EventCapNo)cap->no);
 }
 
-INLINE_HEADER void traceEventCreateSparkThread(Capability  *cap      STG_UNUSED, 
-                                               StgThreadID spark_tid STG_UNUSED)
+INLINE_HEADER void traceEventGcIdle(Capability *cap STG_UNUSED)
 {
-    traceSchedEvent(cap, EVENT_CREATE_SPARK_THREAD, 0, spark_tid);
-    dtraceCreateSparkThread((EventCapNo)cap->no, (EventThreadID)spark_tid);
+    traceGcEvent(cap, EVENT_GC_IDLE);
+    dtraceGcIdle((EventCapNo)cap->no);
+}
+
+INLINE_HEADER void traceEventGcWork(Capability *cap STG_UNUSED)
+{
+    traceGcEvent(cap, EVENT_GC_WORK);
+    dtraceGcWork((EventCapNo)cap->no);
+}
+
+INLINE_HEADER void traceEventGcDone(Capability *cap STG_UNUSED)
+{
+    traceGcEvent(cap, EVENT_GC_DONE);
+    dtraceGcDone((EventCapNo)cap->no);
 }
 
 INLINE_HEADER void traceEventStartup(void)
@@ -543,24 +579,6 @@ INLINE_HEADER void traceEventStartup(void)
 
     traceEventStartup_(n_caps);
     dtraceStartup(n_caps);
-}
-
-INLINE_HEADER void traceEventGcIdle(Capability *cap STG_UNUSED)
-{
-    traceEvent(cap, EVENT_GC_IDLE);
-    dtraceGcIdle((EventCapNo)cap->no);
-}
-
-INLINE_HEADER void traceEventGcWork(Capability *cap STG_UNUSED)
-{
-    traceEvent(cap, EVENT_GC_WORK);
-    dtraceGcWork((EventCapNo)cap->no);
-}
-
-INLINE_HEADER void traceEventGcDone(Capability *cap STG_UNUSED)
-{
-    traceEvent(cap, EVENT_GC_DONE);
-    dtraceGcDone((EventCapNo)cap->no);
 }
 
 INLINE_HEADER void traceCapsetCreate(CapsetID   capset      STG_UNUSED,
@@ -595,6 +613,73 @@ INLINE_HEADER void traceOSProcessInfo(void)
     traceOSProcessInfo_();
     /* Note: no DTrace equivalent because all this OS process info
      * is available to DTrace directly */
+}
+
+INLINE_HEADER void traceEventCreateSparkThread(Capability  *cap      STG_UNUSED, 
+                                               StgThreadID spark_tid STG_UNUSED)
+{
+    traceSparkEvent2(cap, EVENT_CREATE_SPARK_THREAD, spark_tid);
+    dtraceCreateSparkThread((EventCapNo)cap->no, (EventThreadID)spark_tid);
+}
+
+INLINE_HEADER void traceSparkCounters(Capability *cap STG_UNUSED)
+{
+#ifdef THREADED_RTS
+    if (RTS_UNLIKELY(TRACE_spark_sampled)) {
+        traceSparkCounters_(cap, cap->spark_stats, sparkPoolSize(cap->sparks));
+    }
+    dtraceSparkCounters((EventCapNo)cap->no,
+                        cap->spark_stats.created,
+                        cap->spark_stats.dud,
+                        cap->spark_stats.overflowed,
+                        cap->spark_stats.converted,
+                        cap->spark_stats.gcd,
+                        cap->spark_stats.fizzled,
+                        sparkPoolSize(cap->sparks));
+#endif
+}
+
+INLINE_HEADER void traceEventSparkCreate(Capability *cap STG_UNUSED)
+{
+    traceSparkEvent(cap, EVENT_SPARK_CREATE);
+    dtraceSparkCreate((EventCapNo)cap->no);
+}
+
+INLINE_HEADER void traceEventSparkDud(Capability *cap STG_UNUSED)
+{
+    traceSparkEvent(cap, EVENT_SPARK_DUD);
+    dtraceSparkDud((EventCapNo)cap->no);
+}
+
+INLINE_HEADER void traceEventSparkOverflow(Capability *cap STG_UNUSED)
+{
+    traceSparkEvent(cap, EVENT_SPARK_OVERFLOW);
+    dtraceSparkOverflow((EventCapNo)cap->no);
+}
+
+INLINE_HEADER void traceEventSparkRun(Capability *cap STG_UNUSED)
+{
+    traceSparkEvent(cap, EVENT_SPARK_RUN);
+    dtraceSparkRun((EventCapNo)cap->no);
+}
+
+INLINE_HEADER void traceEventSparkSteal(Capability *cap STG_UNUSED,
+                                        nat         victim_cap STG_UNUSED)
+{
+    traceSparkEvent2(cap, EVENT_SPARK_STEAL, victim_cap);
+    dtraceSparkSteal((EventCapNo)cap->no, (EventCapNo)victim_cap);
+}
+
+INLINE_HEADER void traceEventSparkFizzle(Capability *cap STG_UNUSED)
+{
+    traceSparkEvent(cap, EVENT_SPARK_FIZZLE);
+    dtraceSparkFizzle((EventCapNo)cap->no);
+}
+
+INLINE_HEADER void traceEventSparkGC(Capability *cap STG_UNUSED)
+{
+    traceSparkEvent(cap, EVENT_SPARK_GC);
+    dtraceSparkGc((EventCapNo)cap->no);
 }
 
 #include "EndPrivate.h"

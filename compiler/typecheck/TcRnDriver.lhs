@@ -121,15 +121,18 @@ tcRnModule hsc_env hsc_src save_rn_syntax
  = do { showPass (hsc_dflags hsc_env) "Renamer/typechecker" ;
 
    let { this_pkg = thisPackage (hsc_dflags hsc_env) ;
-	 this_mod = case maybe_mod of
-			Nothing  -> mAIN	-- 'module M where' is omitted
-			Just (L _ mod) -> mkModule this_pkg mod } ;
-						-- The normal case
+	 (this_mod, prel_imp_loc) 
+            = case maybe_mod of
+		Nothing -- 'module M where' is omitted  
+                    ->  (mAIN, srcLocSpan (srcSpanStart loc))	
+			    	   
+		Just (L mod_loc mod)  -- The normal case
+                    -> (mkModule this_pkg mod, mod_loc) } ;
 		
    initTc hsc_env hsc_src save_rn_syntax this_mod $ 
    setSrcSpan loc $
    do {		-- Deal with imports;
-	tcg_env <- tcRnImports hsc_env this_mod import_decls ;
+	tcg_env <- tcRnImports hsc_env this_mod prel_imp_loc import_decls ;
 	setGblEnv tcg_env		$ do {
 
 		-- Load the hi-boot interface for this module, if any
@@ -199,9 +202,11 @@ tcRnModule hsc_env hsc_src save_rn_syntax
 %************************************************************************
 
 \begin{code}
-tcRnImports :: HscEnv -> Module -> [LImportDecl RdrName] -> TcM TcGblEnv
-tcRnImports hsc_env this_mod import_decls
-  = do	{ (rn_imports, rdr_env, imports,hpc_info) <- rnImports import_decls ;
+tcRnImports :: HscEnv -> Module 
+            -> SrcSpan 	 -- Location for the implicit prelude import
+            -> [LImportDecl RdrName] -> TcM TcGblEnv
+tcRnImports hsc_env this_mod prel_imp_loc import_decls
+  = do	{ (rn_imports, rdr_env, imports,hpc_info) <- rnImports prel_imp_loc import_decls ;
 
 	; let { dep_mods :: ModuleNameEnv (ModuleName, IsBootInterface)
 	        -- Make sure we record the dependencies from the DynFlags in the EPS or we
@@ -323,10 +328,11 @@ tcRnExtCore hsc_env (HsExtCore this_mod decls src_binds)
 	final_type_env = 
              extendTypeEnvWithIds (tcg_type_env tcg_env) bndrs ;
 
-	mod_guts = ModGuts {	mg_module    = this_mod,
+        mod_guts = ModGuts {    mg_module    = this_mod,
 				mg_boot	     = False,
 				mg_used_names = emptyNameSet, -- ToDo: compute usage
-				mg_dir_imps  = emptyModuleEnv, -- ??
+                                mg_used_th   = False,
+                                mg_dir_imps  = emptyModuleEnv, -- ??
 				mg_deps      = noDependencies,	-- ??
 				mg_exports   = my_exports,
 				mg_types     = final_type_env,
