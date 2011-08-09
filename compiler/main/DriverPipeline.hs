@@ -1008,7 +1008,7 @@ runPhase Cmm input_fn dflags
 -- way too many hacks, and I can't say I've ever used it anyway.
 
 runPhase cc_phase input_fn dflags
-   | cc_phase `eqPhase` Cc || cc_phase `eqPhase` Ccpp || cc_phase `eqPhase` HCc || cc_phase `eqPhase` Cobjc
+   | any (cc_phase `eqPhase`) [Cc, Ccpp, HCc, Cobjc, Cobjcpp]
    = do
         let cc_opts = getOpts dflags opt_c
             hcc = cc_phase `eqPhase` HCc
@@ -1076,6 +1076,7 @@ runPhase cc_phase input_fn dflags
 
         let gcc_lang_opt | cc_phase `eqPhase` Ccpp  = "c++"
                          | cc_phase `eqPhase` Cobjc = "objective-c"
+                         | cc_phase `eqPhase` Cobjcpp = "objective-c++"
                          | otherwise                = "c"
         io $ SysTools.runCc dflags (
                 -- force the C compiler to interpret this file as C when
@@ -1730,15 +1731,13 @@ linkBinary dflags o_files dep_packages = do
                           then ["-Wl,--enable-auto-import"]
                           else [])
 
-                      -- '-no_pie' - On OS X, the linker otherwise complains that it cannot build 
-                      --             position independent code due to some offensive code in GMP.
                       -- '-no_compact_unwind'
                       --           - C++/Objective-C exceptions cannot use optimised stack
                       --             unwinding code (the optimised form is the default in Xcode 4 on
                       --             x86_64).
-                      ++ (if platformOS   (targetPlatform dflags) == OSDarwin   && 
+                      ++ (if platformOS   (targetPlatform dflags) == OSDarwin   &&
                              platformArch (targetPlatform dflags) == ArchX86_64
-                          then ["-Wl,-no_pie", "-Wl,-no_compact_unwind"]
+                          then ["-Wl,-no_compact_unwind"]
                           else [])
 
                       ++ o_files
