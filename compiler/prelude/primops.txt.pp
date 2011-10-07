@@ -302,6 +302,17 @@ primop   WordNeOp   "neWord#"   Compare   Word# -> Word# -> Bool
 primop   WordLtOp   "ltWord#"   Compare   Word# -> Word# -> Bool
 primop   WordLeOp   "leWord#"   Compare   Word# -> Word# -> Bool
 
+primop   PopCnt8Op   "popCnt8#"   Monadic   Word# -> Word#
+    {Count the number of set bits in the lower 8 bits of a word.}
+primop   PopCnt16Op   "popCnt16#"   Monadic   Word# -> Word#
+    {Count the number of set bits in the lower 16 bits of a word.}
+primop   PopCnt32Op   "popCnt32#"   Monadic   Word# -> Word#
+    {Count the number of set bits in the lower 32 bits of a word.}
+primop   PopCnt64Op   "popCnt64#"   GenPrimOp   WORD64 -> Word#
+    {Count the number of set bits in a 64-bit word.}
+primop   PopCntOp   "popCnt#"   Monadic   Word# -> Word#
+    {Count the number of set bits in a word.}
+
 ------------------------------------------------------------------------
 section "Narrowings" 
 	{Explicit narrowing of native-sized ints or words.}
@@ -1835,14 +1846,14 @@ section "Bytecode operations"
 primtype BCO#
    {Primitive bytecode type.}
 
-primop   AddrToHValueOp "addrToHValue#" GenPrimOp
-   Addr# -> (# a #)
-   {Convert an {\tt Addr\#} to a followable type.}
+primop   AddrToAnyOp "addrToAny#" GenPrimOp
+   Addr# -> (# Any #)
+   {Convert an {\tt Addr\#} to a followable Any type.}
    with
    code_size = 0
 
 primop   MkApUpd0_Op "mkApUpd0#" GenPrimOp
-   BCO# -> (# a #)
+   BCO# -> (# Any #)
    with
    out_of_line = True
 
@@ -1923,7 +1934,7 @@ pseudoop   "lazy"
 
 	Like {\tt seq}, the argument of {\tt lazy} can have an unboxed type. }
 
-primtype Any a
+primtype Any
 	{ The type constructor {\tt Any} is type to which you can unsafely coerce any
 	lifted type, and back. 
 
@@ -2011,6 +2022,3 @@ primop  TraceEventOp "traceEvent#" GenPrimOp
 ------------------------------------------------------------------------
 
 thats_all_folks
-
-
-

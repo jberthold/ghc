@@ -1333,7 +1333,8 @@ runPhase LlvmLlc input_fn dflags
                     SysTools.Option $ "-relocation-model=" ++ rmodel,
                     SysTools.FileOption "" input_fn,
                     SysTools.Option "-o", SysTools.FileOption "" output_fn]
-                ++ map SysTools.Option lc_opts)
+                ++ map SysTools.Option lc_opts
+                ++ map SysTools.Option fpOpts)
 
     return (LlvmMangle, output_fn)
   where
@@ -1341,6 +1342,17 @@ runPhase LlvmLlc input_fn dflags
         llvmOpts = if platformOS (targetPlatform dflags) == OSDarwin
                    then ["-O1", "-O2", "-O2"]
                    else ["-O1", "-O2", "-O3"]
+        -- On ARMv7 using LLVM, LLVM fails to allocate floating point registers
+        -- while compiling GHC source code. It's probably due to fact
+        -- that it does not enable VFP by default. Let's do this manually
+        -- here
+        fpOpts = case platformArch (targetPlatform dflags) of 
+                   ArchARM ARMv7 ext -> if (elem VFPv3 ext)
+                                      then ["-mattr=+v7,+vfp3"]
+                                      else if (elem VFPv3D16 ext)
+                                           then ["-mattr=+v7,+vfp3,+d16"]
+                                           else []
+                   _               -> []
 
 -----------------------------------------------------------------------------
 -- LlvmMangle phase
@@ -1479,8 +1491,8 @@ mkExtraObjToLinkIntoBinary dflags dep_packages = do
 
             elfSectionNote :: String
             elfSectionNote = case platformArch (targetPlatform dflags) of
-                               ArchARM    -> "%note"
-                               _          -> "@note"
+                               ArchARM _ _ -> "%note"
+                               _           -> "@note"
 
 -- The "link info" is a string representing the parameters of the
 -- link.  We save this information in the binary, and the next time we
@@ -1732,12 +1744,27 @@ linkBinary dflags o_files dep_packages = do
                           else [])
 
                       -- '-no_compact_unwind'
-                      --           - C++/Objective-C exceptions cannot use optimised stack
-                      --             unwinding code (the optimised form is the default in Xcode 4 on
-                      --             x86_64).
+                      -- C++/Objective-C exceptions cannot use optimised
+                      -- stack unwinding code. The optimised form is the
+                      -- default in Xcode 4 on at least x86_64, and
+                      -- without this flag we're also seeing warnings
+                      -- like
+                      --     ld: warning: could not create compact unwind for .LFB3: non-standard register 5 being saved in prolog
+                      -- on x86.
                       ++ (if platformOS   (targetPlatform dflags) == OSDarwin   &&
-                             platformArch (targetPlatform dflags) == ArchX86_64
+                             platformArch (targetPlatform dflags) `elem` [ArchX86, ArchX86_64]
                           then ["-Wl,-no_compact_unwind"]
+                          else [])
+
+                      -- '-Wl,-read_only_relocs,suppress'
+                      -- ld gives loads of warnings like:
+                      --     ld: warning: text reloc in _base_GHCziArr_unsafeArray_info to _base_GHCziArr_unsafeArray_closure
+                      -- when linking any program. We're not sure
+                      -- whether this is something we ought to fix, but
+                      -- for now this flags silences them.
+                      ++ (if platformOS   (targetPlatform dflags) == OSDarwin   &&
+                             platformArch (targetPlatform dflags) == ArchX86
+                          then ["-Wl,-read_only_relocs,suppress"]
                           else [])
 
                       ++ o_files
