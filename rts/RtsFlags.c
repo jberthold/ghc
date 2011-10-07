@@ -211,7 +211,7 @@ void initRtsFlagsDefaults(void)
 
 #ifdef PARALLEL_RTS
     // common parallelism options:
-    RtsFlags.ParFlags.packBufferSize	= 10485760; // 10MB, we set it...;
+    RtsFlags.ParFlags.packBufferSize	= 1048576; // 1MB, we set it...;
     RtsFlags.ParFlags.sendBufferSize	= 20; // MD this default should be tested;
     RtsFlags.ParFlags.placement         = 0; /* default: RR placement,
 						including local PE*/
@@ -404,7 +404,7 @@ usage_text[] = {
 "  --install-signal-handlers=<yes|no>",
 "            Install signal handlers (default: yes)",
 #if defined(PARALLEL_RTS)
-"  -qQ<size> Set pack-buffer size (default: 10MB)",
+"  -qQ<size> Set pack-buffer size (default: 1MB)",
 "  -qq<n>    Set MPI-send-buffer size to <n> * pack-buffer (default: 20)",
 "  -qremote  Avoid placing child processes on the same PE",
 "  -qrnd     Enable random process placement (i.e. not round-robin)",
