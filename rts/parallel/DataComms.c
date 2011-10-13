@@ -133,6 +133,10 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
 }
 
 
+// fwd declaration 
+int fakeDataMsg(StgClosure *graph, Port sender, Port receiver, 
+		Capability * cap, OpCode tag);
+
 int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data);
 /* sendWrapper
  * 
@@ -234,6 +238,18 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
      */
 
   packData:
+    // shortcut if sender and receiver share the same heap
+    if ( (sender.machine == receiver->machine) 
+	 //   conceptually OK if same process, in practice, same machine is enough
+#ifdef PEDANTIC
+	 && (sender.process == receiver->process)
+#endif
+	 //   we do this only for DATA and HEAD messages, tags 2 and 3
+	 && (m & 2)) {
+      // do processDataMsg() directly w/o unpacking, defined at the bottom
+      return fakeDataMsg(data, sender, *receiver, sendingtso->cap, sendTag);
+    }
+
     // pack the graph, needed in modes 2-4
     // TODO: later, we need to save/restore the sendingtso's receiver.
     // PackNearbyGraph will send parts to sendingtso's receiver and
@@ -263,7 +279,7 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     } else {
       success = 2;
     }
-    IF_PAR_DEBUG(mpcomm,debugBelch("Sending of message from thread %d returned code %d\n", sendingtso->id, success));
+    IF_PAR_DEBUG(mpcomm,debugBelch("Sending of message from thread %d returned code %d\n", (int) sendingtso->id, success));
   }
   if (success == 0 || success == 1) {
     // in rFork case, packing might have failed, so RR-placement must
@@ -370,6 +386,94 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
   // use system tso as owner when waking up blocked threads
   updateThunk(cap, (StgTSO*) &stg_system_tso, placeholder, graph);
 
+}
+
+/* fake a Heap Data Message (Data, Head). Called when sender was on the same
+ *   machine (and same process? see sendWrapper), avoids pack/unpack
+ *   duplication. Returns sendWrapper return codes (see sendWrapper).
+ */
+int
+fakeDataMsg(StgClosure *graph, 
+	    Port sender, Port receiver, 
+	    Capability * cap, OpCode tag) {
+  Inport* inport;
+  StgClosure *placeholder;
+
+  IF_PAR_DEBUG(pack,
+	       debugBelch("shortcut for data message (%s, tag %#0x), data %p\n",
+			  getOpName(tag), tag, graph));
+
+  // should only be called when sender and receiver share heap
+  ASSERT(sender.machine == receiver.machine
+#ifdef PEDANTIC
+	 && sender.process == receiver.process
+#endif
+	 );
+
+  inport = findInportByP(receiver);
+
+  if (inport == NULL) {
+    IF_PAR_DEBUG(ports,
+		 errorBelch("fakeDataMsg: unknown inport: Port (%d,%ld,%ld)\n",
+			    receiver.machine, 
+			    receiver.process, 
+			    receiver.id));
+    // should not happen... but just give up
+    return 2;
+  }
+
+  if (!(equalPorts(inport->sender,sender))) {
+    IF_PAR_DEBUG(ports,
+		 debugBelch("fakeDataMsg: Sender (%d,%ld,%ld)" 
+			    " not connected yet\n",
+			    sender.machine, 
+			    sender.process, 
+			    sender.id));
+    if (tag != PP_DATA)
+      connectInportByP(receiver, sender);
+  }
+
+  // select placeholder closure (assumed: blackhole!)
+  placeholder = inport->closure;
+  ASSERT(IsBlackhole(placeholder));
+
+  // replace placeholder by received data, possibly leaving port open
+  switch(tag) {
+  case PP_HEAD:
+    { StgClosure *temp, *list;
+      temp            = createBH(cap); // new tail node
+      inport->closure = temp;
+      // graph becomes head, BH becomes tail:
+      list = createListNode(cap, graph, temp); 
+      IF_PAR_DEBUG(pack,
+		   debugBelch("fakeDataMsg: HEAD message:" 
+			      " created list node %p/new BH %p\n",
+			      list, temp));
+      graph = list;
+      break;
+    }
+  case PP_DATA:
+    IF_PAR_DEBUG(pack,
+		 debugBelch("fakeDataMsg: DATA message, removing inport %d\n",
+			    (int) receiver.id));
+    removeInportByP(receiver);
+    break;
+
+  default:
+    barf("fakeDataMsg: unexpected tag %#0x \n", tag);
+  }
+  // edentrace: emit event sendMessage(tag,dataBuffer)
+  // traceSendReceiveLocalMessageEvent(tag,sender.process,sender.id,receiver.process,receiver.id);
+  
+  // and update the old blackhole
+  IF_PAR_DEBUG(pack,
+	       debugBelch("fakeDataMsg: Replacing Blackhole @ %p by node %p\n",
+			  placeholder, graph));
+
+  // use system tso as owner when waking up blocked threads
+  updateThunk(cap, (StgTSO*) &stg_system_tso, placeholder, graph);
+
+  return 2;
 }
 
 #endif /* PARALLEL_HASKELL -- whole file */
