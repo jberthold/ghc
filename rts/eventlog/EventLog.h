@@ -102,6 +102,8 @@ void postSendMessageEvent(OpCode msgtag, rtsPackBuffer* buf);
                           
 void postReceiveMessageEvent(Capability *cap, OpCode msgtag, rtsPackBuffer* buf);
 
+void postSendReceiveLocalMessageEvent(OpCode msgtag, EventProcessID spid, EventThreadID stid, EventProcessID rpid, EventPortID rpoid);
+
 #endif //PARALLEL_RTS
 
 #else /* !TRACING */
@@ -159,6 +161,14 @@ INLINE_HEADER void postSendMessageEvent(OpCode msgtag              STG_UNUSED,
 INLINE_HEADER void postReceiveMessageEvent(Capability *cap            STG_UNUSED, 
                                            OpCode msgtag              STG_UNUSED, 
                                            rtsPackBuffer *buf         STG_UNUSED)
+
+{ /* nothing */ }
+
+INLINE_HEADER void postSendReceiveLocalMessageEvent(OpCode msgtag              STG_UNUSED, 
+                                                    EventProcessID spid        STG_UNUSED, 
+                                                    EventThreadID stid         STG_UNUSED, 
+                                                    EventProcessID rpid        STG_UNUSED,
+                                                    EventPortID rpoid          STG_UNUSED)
 
 { /* nothing */ }
 

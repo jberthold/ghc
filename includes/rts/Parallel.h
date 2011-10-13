@@ -43,6 +43,9 @@ void          startupParallelSystem(int* argc, char** argv[]);
 void          synchroniseSystem(void);
 void          shutdownParallelSystem(StgInt errorcode);
 
+// defined in ParInit.c, called in RtsStartup.c
+void          emitStartupEvents(void);
+
  
 // packing and sending:
 // Pack Buffer for constructing messages between PEs

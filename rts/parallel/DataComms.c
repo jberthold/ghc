@@ -463,7 +463,7 @@ fakeDataMsg(StgClosure *graph,
     barf("fakeDataMsg: unexpected tag %#0x \n", tag);
   }
   // edentrace: emit event sendMessage(tag,dataBuffer)
-  // traceSendReceiveLocalMessageEvent(tag,sender.process,sender.id,receiver.process,receiver.id);
+  traceSendReceiveLocalMessageEvent(tag,sender.process,sender.id,receiver.process,receiver.id);
   
   // and update the old blackhole
   IF_PAR_DEBUG(pack,

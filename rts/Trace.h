@@ -305,6 +305,12 @@ void traceSendMessageEvent_(OpCode msgtag, rtsPackBuffer *buf);
     }
 void traceReceiveMessageEvent_(Capability *cap, OpCode msgtag, rtsPackBuffer *buf);
 
+#define traceSendReceiveLocalMessageEvent(mstag, spid, stid, rpid, rpoid) \
+    if (RTS_UNLIKELY(TRACE_sched)) {                \
+      traceSendReceiveLocalMessageEvent_(mstag, spid, stid, rpid, rpoid);      \
+    }
+void traceSendReceiveLocalMessageEvent_(OpCode msgtag,  StgWord spid, StgWord stid, StgWord rpid, StgWord rpoid);
+
 #endif // PARALLEL_RTS
 
 #else /* !TRACING */
@@ -336,6 +342,7 @@ INLINE_HEADER void traceEventStartup_ (int n_caps STG_UNUSED) {};
 #define traceKillMachine(pe)  /* nothing */
 #define traceSendMessageEvent(mstag, buf) /* nothing */
 #define traceReceiveMessageEvent(cap, mstag, buf) /* nothing */
+#define traceSendReceiveLocalMessageEvent(mstag, spid, stid, rpid, rpoid) /* nothing */
 #endif // PARALLEL_RTS
 #endif /* TRACING */
 

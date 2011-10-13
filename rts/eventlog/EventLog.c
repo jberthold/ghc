@@ -105,7 +105,8 @@ char *EventDesc[] = {
   [EVENT_CREATE_MACHINE]      = "Creating machine",
   [EVENT_KILL_MACHINE]        = "Killing machine",
   [EVENT_SEND_MESSAGE]        = "Sending message",
-  [EVENT_RECEIVE_MESSAGE]     = "Receiving message"
+  [EVENT_RECEIVE_MESSAGE]     = "Receiving message",
+  [EVENT_SEND_RECEIVE_LOCAL_MESSAGE] = "Sending/Receiving local message"
 };
 
 // Event type. 
@@ -415,6 +416,10 @@ initEventLogging(void)
         	eventTypes[t].size = sizeof(StgWord8) + 2 * sizeof(EventProcessID)
         	                     + 2 * sizeof(EventPortID) + sizeof(EventMachineID)
         	                     + sizeof(StgInt32);
+        	break;
+        case EVENT_SEND_RECEIVE_LOCAL_MESSAGE: //(msgtag, sender_process, sender_thread, receiver_process, receiver_inport)
+        	eventTypes[t].size = sizeof(StgWord8) + sizeof(EventThreadID) 
+        	                     + 2 * sizeof(EventProcessID) + sizeof(EventPortID);
         	break;
 
         default:
@@ -978,6 +983,25 @@ void postReceiveMessageEvent(Capability *cap, OpCode msgtag, rtsPackBuffer* buf)
     postProcessID(eb, buf->sender.process);
     postThreadID(eb, buf->sender.id);
     postInt32(eb, buf->size);
+}
+
+void postSendReceiveLocalMessageEvent(OpCode msgtag, EventProcessID spid, EventThreadID stid, EventProcessID rpid, EventPortID rpoid)
+{
+	EventsBuf *eb;
+
+    eb = &eventBuf;
+
+    if (!hasRoomForEvent(eb, EVENT_SEND_RECEIVE_LOCAL_MESSAGE)) {
+        // Flush event buffer to make room for new event.
+        printAndClearEventBuf(eb);
+    }
+
+    postEventHeader(eb, EVENT_SEND_RECEIVE_LOCAL_MESSAGE);	
+    postWord8(eb, msgtag); 
+    postProcessID(eb, spid);
+    postThreadID(eb, stid);
+    postProcessID(eb, rpid);
+    postPortID(eb, rpoid);
 }
 #endif //PARALLEL_RTS
 

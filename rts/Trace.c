@@ -725,6 +725,21 @@ void traceReceiveMessageEvent_ (Capability *cap, OpCode msgtag, rtsPackBuffer *b
         postReceiveMessageEvent (cap, msgtag, buf);
       }
 }
+
+
+void traceSendReceiveLocalMessageEvent_ (OpCode msgtag, StgWord spid, StgWord stid, StgWord rpid, StgWord rpoid)
+{
+#ifdef DEBUG
+    if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
+        trace_stderr_("sending/receiving LOCAL message with Tag %d, \n \t sender: process %lu, thread %lu  \n \t receiver: process %lu, portID %lu \n", 
+                 msgtag, (long)spid, (long)stid, (long)rpid, (long)rpoid);
+    } else
+#endif
+      {
+        postSendReceiveLocalMessageEvent (msgtag,(EventProcessID) spid, (EventThreadID) stid, (EventProcessID) rpid, (EventPortID) rpoid);
+      }
+}
+
 #endif /* PARALLEL_RTS */
 
 #endif /* TRACING */
