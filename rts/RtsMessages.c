@@ -305,8 +305,7 @@ rtsDebugMsgFn(const char *s, va_list ap)
  * "rts..."  functions. Unnecessary code for non-supported platforms.
  */
 
-// not __noreturn__, since we try a clean shutdown for the main thread
-void
+void GNU_ATTRIBUTE(__noreturn__)
 edenFatalInternalErrorFn(const char *s, va_list ap)
 {
   /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
@@ -325,12 +324,12 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
   
   fflush(stderr);
   
-  // The sequential system uses abort(); but
-  // we would like to shut down the system cleanly here..
+  // The sequential system uses abort(); but we would like to shut down the
+  // entire system cleanly. shutdownHaskellAndExit does not return, though.
   if (IAmMainThread) {
     shutdownHaskellAndExit(EXIT_INTERNAL_ERROR);
   } else {
-    // non-main PEs just crash, making the main PE shut down
+    // non-main PEs just crash, making the main PE shut down the rest
     stg_exit(EXIT_INTERNAL_ERROR);
   }
 }

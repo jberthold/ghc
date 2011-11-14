@@ -459,8 +459,9 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length) {
   ASSERT(ISOPCODE(tag));
 
   IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MP_send for PVM: sending buffer@%p (length %d) to %d with tag %x\n",
-			  data, length, node, tag));
+	       debugBelch("MP_send for PVM: sending buffer@%p "
+                          "(length %d) to %d with tag %x (%s)\n",
+			  data, length, node, tag, getOpName(tag)));
   pvm_initsend(PvmDataRaw);
   
   if (length > 0) {
@@ -514,8 +515,10 @@ int MP_recv(int maxlength, long *destination,
   }
   
   IF_PAR_DEBUG(mpcomm, 
-	       debugBelch("Packet No. (pvm-%d) (code %x, size %d bytes) from PE %x.\n",
-			  buffer, *retcode, bytes, sendPE));
+	       debugBelch("Packet No. (pvm-%d) (code %x (%s), "
+                          "size %d bytes) from PE %x.\n",
+			  buffer, *retcode, getOpName(*retcode), 
+                          bytes, sendPE));
 
   // could happen that we pick up an MPCODE message here :-(
   if (ISMPCODE(*retcode)) {

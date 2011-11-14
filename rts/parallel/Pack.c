@@ -220,7 +220,7 @@ static nat     pack_locn,           /* ptr to first free loc in pack buffer */
 static nat     unpacked_size;
 static rtsBool packing_aborted; // global variable reporting whether
 				// packing was aborted
-static StgClosure *thunks[MAX_THUNKS_PER_PACKET]; 
+//static StgClosure *thunks[MAX_THUNKS_PER_PACKET]; 
                         // for reverting thunks (only when *moving*)
 static int thunks_packed; // used as index of thunks_packed
 

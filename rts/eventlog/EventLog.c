@@ -127,6 +127,7 @@ static void printAndClearEventBuf (EventsBuf *eventsBuf);
 
 static void postEventType(EventsBuf *eb, EventType *et);
 
+static void postLogMsgF(EventsBuf *eb, EventTypeNum type, char *msg, ...);
 static void postLogMsg(EventsBuf *eb, EventTypeNum type, char *msg, va_list ap);
 
 static void postBlockMarker(EventsBuf *eb);

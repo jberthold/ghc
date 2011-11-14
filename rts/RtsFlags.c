@@ -59,7 +59,7 @@ wchar_t **win32_prog_argv = NULL;
 
 #if defined(PARALLEL_RTS)
 
-static void process_par_option(int arg, int *rts_argc, char *rts_argv[], rtsBool *error);
+static void process_par_option(int arg, rtsBool *error);
 
 #if defined(DEBUG)
 static char *par_debug_opts_strs[] = {
@@ -1250,7 +1250,8 @@ error = rtsTrue;
 		      // historically, "-q<option>" were for parallel Haskell.
 		      // taken for threaded RTS: a,b,g,m,w below.
 		      // When parallel: branch into separate option processing
-                        process_par_option(arg, rts_argc, rts_argv, &error);
+                        process_par_option(arg, &error);
+                      // uses global rts_argc and rts_argv
                         break;
 #endif
 		THREADED_BUILD_ONLY(
@@ -1507,12 +1508,12 @@ static void errorUsage (void)
 #ifdef PARALLEL_RTS
 
 static void
-process_par_option(int arg, int *rts_argc, char *rts_argv[], rtsBool *error)
+process_par_option(int arg, rtsBool *error)
 {
 
   // the -q prefix is shared with THREADED_RTS.
   // Currently taken by THREADED_RTS: a,b,g,m,w.
-  // Currently accepted here: D,Q,r,W
+  // Currently accepted here: q,Q,r(emote/nd),W,D
 
   /* Communication and task creation cost parameters */
   switch(rts_argv[arg][2]) {
@@ -1656,7 +1657,7 @@ process_par_option(int arg, int *rts_argc, char *rts_argv[], rtsBool *error)
 # endif
   default:
     errorBelch("Unknown option -q%c (%d opts in total)", 
-	  rts_argv[arg][2], *rts_argc);
+	  rts_argv[arg][2], rts_argc);
     *error = rtsTrue;
     break;
   } /* switch */

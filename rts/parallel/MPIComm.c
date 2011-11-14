@@ -255,8 +255,8 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
   
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("MPI sending message to PE %d "
-			  "(tag %d, datasize %d)\n",
-			  node, tag,length));
+			  "(tag %d (%s), datasize %d)\n",
+			  node, tag, getOpName(tag), length));
   // adjust node no.
   node--;
   //case each slot in buffer has been used
@@ -275,18 +275,19 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
   // send the message
   if (!hasFreeSpace){
     IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MPI CANCELED sending message to PE %d (tag %d, datasize %d)\n",
-			  node, tag,length));   
+	       debugBelch("MPI CANCELED sending message to PE %d "
+                          "(tag %d (%s), datasize %d)\n",
+			  node, tag, getOpName(tag), length));   
     return rtsFalse;
   }
-  IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MPI sending message to PE %d (tag %d, datasize %d)\n",
-			  node, tag,length));
   //calculate offset in mpiMsgBuffer
   // using ptr. arithmetics and void* size (see includes/stg/Types.h)
   sendPos = ((StgPtr)mpiMsgBuffer) + sendIndex * DATASPACEWORDS;
   memcpy((void*)sendPos, data, length * sizeof(StgWord));
-  MPI_Isend(sendPos, length, MPI_LONG, node, tag, MPI_COMM_WORLD, &(requests[sendIndex]));
+  MPI_Isend(sendPos, length, MPI_LONG, node, tag, 
+            MPI_COMM_WORLD, &(requests[sendIndex]));
+  IF_PAR_DEBUG(mpcomm,
+	       debugBelch("Done sending message to PE %d\n", node));
   return rtsTrue;
 }
 
