@@ -2,7 +2,27 @@
 % (c) The University of Glasgow 2006
 % (c) The GRASP Project, Glasgow University, 1992-2002
 %
+
+Various types used during typechecking, please see TcRnMonad as well for
+operations on these types. You probably want to import it, instead of this
+module.
+
+All the monads exported here are built on top of the same IOEnv monad. The
+monad functions like a Reader monad in the way it passes the environment
+around. This is done to allow the environment to be manipulated in a stack
+like fashion when entering expressions... ect.
+
+For state that is global and should be returned at the end (e.g not part
+of the stack mechanism), you should use an TcRef (= IORef) to store them.
+
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcRnTypes(
 	TcRnIf, TcRn, TcM, RnM,	IfM, IfL, IfG, -- The monad is opaque outside this module
 	TcRef,
@@ -135,29 +155,34 @@ instance Outputable TcTyVarBind where
 
 
 %************************************************************************
-%*									*
-		The main environment types
-%*									*
+%*                                                                      *
+                The main environment types
+%*                                                                      *
 %************************************************************************
 
 \begin{code}
-data Env gbl lcl	-- Changes as we move into an expression
+-- We 'stack' these envs through the Reader like monad infastructure
+-- as we move into an expression (although the change is focused in
+-- the lcl type).
+data Env gbl lcl
   = Env {
-	env_top	 :: HscEnv,	-- Top-level stuff that never changes
-				-- Includes all info about imported things
+        env_top  :: HscEnv,  -- Top-level stuff that never changes
+                             -- Includes all info about imported things
 
-	env_us   :: {-# UNPACK #-} !(IORef UniqSupply),	
-				-- Unique supply for local varibles
+        env_us   :: {-# UNPACK #-} !(IORef UniqSupply),
+                             -- Unique supply for local varibles
 
-	env_gbl  :: gbl,	-- Info about things defined at the top level
-				-- of the module being compiled
+        env_gbl  :: gbl,     -- Info about things defined at the top level
+                             -- of the module being compiled
 
-	env_lcl  :: lcl	 	-- Nested stuff; changes as we go into 
+        env_lcl  :: lcl      -- Nested stuff; changes as we go into 
     }
 
 -- TcGblEnv describes the top-level of the module at the 
 -- point at which the typechecker is finished work.
 -- It is this structure that is handed on to the desugarer
+-- For state that needs to be updated during the typechecking
+-- phase and returned at end, use a TcRef (= IORef).
 
 data TcGblEnv
   = TcGblEnv {
@@ -198,7 +223,8 @@ data TcGblEnv
 	tcg_exports :: [AvailInfo],	-- ^ What is exported
 	tcg_imports :: ImportAvails,
           -- ^ Information about what was imported from where, including
-	  -- things bound in this module.
+	  -- things bound in this module. Also store Safe Haskell info
+          -- here about transative trusted packaage requirements.
 
 	tcg_dus :: DefUses,
           -- ^ What is defined in this module and what is used.
@@ -262,14 +288,15 @@ data TcGblEnv
           -- ^ Renamed decls, maybe.  @Nothing@ <=> Don't retain renamed
           -- decls.
 
+    tcg_dependent_files :: TcRef [FilePath], -- ^ dependencies from addDependentFile
+
         tcg_ev_binds  :: Bag EvBind,	    -- Top-level evidence bindings
 	tcg_binds     :: LHsBinds Id,	    -- Value bindings in this module
         tcg_sigs      :: NameSet, 	    -- ...Top-level names that *lack* a signature
         tcg_imp_specs :: [LTcSpecPrag],     -- ...SPECIALISE prags for imported Ids
 	tcg_warns     :: Warnings,	    -- ...Warnings and deprecations
 	tcg_anns      :: [Annotation],      -- ...Annotations
-        tcg_tcs       :: [TyCon],           -- ...TyCons
-        tcg_clss      :: [Class],           -- ...Classes
+        tcg_tcs       :: [TyCon],           -- ...TyCons and Classes
 	tcg_insts     :: [Instance],	    -- ...Instances
         tcg_fam_insts :: [FamInst],         -- ...Family instances
         tcg_rules     :: [LRuleDecl Id],    -- ...Rules
@@ -280,9 +307,11 @@ data TcGblEnv
         tcg_hpc       :: AnyHpcUsage,        -- ^ @True@ if any part of the
                                              --  prog uses hpc instrumentation.
 
-        tcg_main      :: Maybe Name          -- ^ The Name of the main
+        tcg_main      :: Maybe Name,         -- ^ The Name of the main
                                              -- function, if this module is
                                              -- the main module.
+        tcg_safeInfer :: TcRef Bool          -- Has the typechecker infered this
+                                             -- module as -XSafe (Safe Haskell)
     }
 
 data RecFieldEnv 
@@ -529,8 +558,32 @@ data TcTyThing
 				-- for error-message purposes; it is the corresponding
 				-- Name in the domain of the envt
 
-  | AThing  TcKind 		-- Used temporarily, during kind checking, for the
-				--	tycons and clases in this recursive group
+  | AThing  TcKind   -- Used temporarily, during kind checking, for the
+		     --	tycons and clases in this recursive group
+                     -- Can be a mono-kind or a poly-kind; in TcTyClsDcls see
+                     -- Note [Type checking recursive type and class declarations]
+
+  | ANothing                    -- see Note [ANothing]
+
+{-
+Note [ANothing]
+~~~~~~~~~~~~~~~
+
+We don't want to allow promotion in a strongly connected component
+when kind checking.
+
+Consider:
+  data T f = K (f (K Any))
+
+When kind checking the `data T' declaration the local env contains the
+mappings:
+  T -> AThing <some initial kind>
+  K -> ANothing
+
+ANothing is only used for DataCons, and only used during type checking
+in tcTyClGroup.
+-}
+
 
 instance Outputable TcTyThing where	-- Debugging only
    ppr (AGlobal g)      = pprTyThing g
@@ -541,12 +594,14 @@ instance Outputable TcTyThing where	-- Debugging only
 				 <+> ppr (tct_level elt))
    ppr (ATyVar tv _)    = text "Type variable" <+> quotes (ppr tv)
    ppr (AThing k)       = text "AThing" <+> ppr k
+   ppr ANothing         = text "ANothing"
 
 pprTcTyThingCategory :: TcTyThing -> SDoc
 pprTcTyThingCategory (AGlobal thing) = pprTyThingCategory thing
 pprTcTyThingCategory (ATyVar {})     = ptext (sLit "Type variable")
 pprTcTyThingCategory (ATcId {})      = ptext (sLit "Local identifier")
 pprTcTyThingCategory (AThing {})     = ptext (sLit "Kinded thing")
+pprTcTyThingCategory ANothing        = ptext (sLit "Opaque thing")
 \end{code}
 
 Note [Bindings with closed types]
@@ -557,7 +612,7 @@ Consider
         in ...
 
 Can we generalise 'g' under the OutsideIn algorithm?  Yes, 
-becuase all g's free variables are top-level; that is they themselves
+because all g's free variables are top-level; that is they themselves
 have no free type variables, and it is the type variables in the
 environment that makes things tricky for OutsideIn generalisation.
 

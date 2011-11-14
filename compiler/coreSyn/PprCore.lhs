@@ -6,6 +6,13 @@
 Printing of Core syntax
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module PprCore (
 	pprCoreExpr, pprParendExpr,
 	pprCoreBinding, pprCoreBindings, pprCoreAlt,
@@ -13,7 +20,7 @@ module PprCore (
     ) where
 
 import CoreSyn
-import CostCentre
+import Literal( pprLiteral )
 import Var
 import Id
 import IdInfo
@@ -21,6 +28,7 @@ import Demand
 import DataCon
 import TyCon
 import Type
+import Kind
 import Coercion
 import StaticFlags
 import BasicTypes
@@ -94,8 +102,8 @@ ppr_binding (val_bdr, expr)
 \end{code}
 
 \begin{code}
-pprParendExpr   expr = ppr_expr parens expr
-pprCoreExpr expr = ppr_expr noParens expr
+pprParendExpr expr = ppr_expr parens expr
+pprCoreExpr   expr = ppr_expr noParens expr
 
 noParens :: SDoc -> SDoc
 noParens pp = pp
@@ -106,12 +114,10 @@ ppr_expr :: OutputableBndr b => (SDoc -> SDoc) -> Expr b -> SDoc
 	-- The function adds parens in context that need
 	-- an atomic value (e.g. function args)
 
-ppr_expr add_par (Type ty) = add_par (ptext (sLit "TYPE") <+> ppr ty)	-- Wierd
-
+ppr_expr _       (Var name)    = ppr name
+ppr_expr add_par (Type ty)     = add_par (ptext (sLit "TYPE") <+> ppr ty)	-- Wierd
 ppr_expr add_par (Coercion co) = add_par (ptext (sLit "CO") <+> ppr co)
-	           
-ppr_expr _       (Var name) = ppr name
-ppr_expr _       (Lit lit)  = ppr lit
+ppr_expr add_par (Lit lit)     = pprLiteral add_par lit
 
 ppr_expr add_par (Cast expr co) 
   = add_par $
@@ -226,13 +232,8 @@ ppr_expr add_par (Let bind expr)
 		Rec _      -> (sLit "letrec {")
 		NonRec _ _ -> (sLit "let {")
 
-ppr_expr add_par (Note (SCC cc) expr)
-  = add_par (sep [pprCostCentreCore cc, pprCoreExpr expr])
-
-ppr_expr add_par (Note (CoreNote s) expr)
-  = add_par $ 
-    sep [sep [ptext (sLit "__core_note"), pprHsString (mkFastString s)],
-         pprParendExpr expr]
+ppr_expr add_par (Tick tickish expr)
+  = add_par (sep [ppr tickish, pprCoreExpr expr])
 
 pprCoreAlt :: OutputableBndr a => (AltCon, [a] , Expr a) -> SDoc
 pprCoreAlt (con, args, rhs) 
@@ -468,16 +469,47 @@ pprRule (Rule { ru_name = name, ru_act = act, ru_fn = fn,
 \end{code}
 
 -----------------------------------------------------
+--      Tickish
+-----------------------------------------------------
+
+\begin{code}
+instance Outputable id => Outputable (Tickish id) where
+  ppr (HpcTick modl ix) =
+      hcat [ptext (sLit "tick<"),
+            ppr modl, comma,
+            ppr ix,
+            ptext (sLit ">")]
+  ppr (Breakpoint ix vars) =
+      hcat [ptext (sLit "break<"),
+            ppr ix,
+            ptext (sLit ">"),
+            parens (hcat (punctuate comma (map ppr vars)))]
+  ppr (ProfNote { profNoteCC = cc,
+                  profNoteCount = tick,
+                  profNoteScope = scope }) =
+      case (tick,scope) of
+         (True,True)  -> hcat [ptext (sLit "scctick<"), ppr cc, char '>']
+         (True,False) -> hcat [ptext (sLit "tick<"),    ppr cc, char '>']
+         _            -> hcat [ptext (sLit "scc<"),     ppr cc, char '>']
+\end{code}
+
+-----------------------------------------------------
 --      Vectorisation declarations
 -----------------------------------------------------
 
 \begin{code}
 instance Outputable CoreVect where
-  ppr (Vect     var Nothing)   = ptext (sLit "VECTORISE SCALAR") <+> ppr var
-  ppr (Vect     var (Just e))  = hang (ptext (sLit "VECTORISE") <+> ppr var <+> char '=')
-                                   4 (pprCoreExpr e)
-  ppr (NoVect   var)           = ptext (sLit "NOVECTORISE") <+> ppr var
-  ppr (VectType var Nothing)   = ptext (sLit "VECTORISE SCALAR type") <+> ppr var
-  ppr (VectType var (Just ty)) = hang (ptext (sLit "VECTORISE type") <+> ppr var <+> char '=')
-                                   4 (ppr ty)
+  ppr (Vect     var Nothing)         = ptext (sLit "VECTORISE SCALAR") <+> ppr var
+  ppr (Vect     var (Just e))        = hang (ptext (sLit "VECTORISE") <+> ppr var <+> char '=')
+                                         4 (pprCoreExpr e)
+  ppr (NoVect   var)                 = ptext (sLit "NOVECTORISE") <+> ppr var
+  ppr (VectType False var Nothing)   = ptext (sLit "VECTORISE type") <+> ppr var
+  ppr (VectType True  var Nothing)   = ptext (sLit "VECTORISE SCALAR type") <+> ppr var
+  ppr (VectType False var (Just tc)) = ptext (sLit "VECTORISE type") <+> ppr var <+> char '=' <+>
+                                       ppr tc
+  ppr (VectType True var (Just tc))  = ptext (sLit "VECTORISE SCALAR type") <+> ppr var <+>
+                                       char '=' <+> ppr tc
+  ppr (VectClass tc)                 = ptext (sLit "VECTORISE class") <+> ppr tc
+  ppr (VectInst False var)           = ptext (sLit "VECTORISE instance") <+> ppr var
+  ppr (VectInst True var)            = ptext (sLit "VECTORISE SCALAR instance") <+> ppr var
 \end{code}

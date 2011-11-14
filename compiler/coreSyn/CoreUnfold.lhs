@@ -15,6 +15,13 @@ literal'').  In the corner of a @CoreUnfolding@ unfolding, you will
 find, unsurprisingly, a Core expression.
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CoreUnfold (
 	Unfolding, UnfoldingGuidance,	-- Abstract types
 
@@ -33,7 +40,7 @@ module CoreUnfold (
 
         -- Reexport from CoreSubst (it only live there so it can be used
         -- by the Very Simple Optimiser)
-        exprIsConApp_maybe
+        exprIsConApp_maybe, exprIsLiteral_maybe
     ) where
 
 #include "HsVersions.h"
@@ -204,7 +211,7 @@ inlineBoringOk e
     go credit (App f (Type {}))            = go credit f
     go credit (App f a) | credit > 0  
                         , exprIsTrivial a  = go (credit-1) f
-    go credit (Note _ e) 		   = go credit e     
+    go credit (Tick _ e)                 = go credit e -- dubious
     go credit (Cast e _) 		   = go credit e
     go _      (Var {})         		   = boringCxtOk
     go _      _                		   = boringCxtNotOk
@@ -348,7 +355,7 @@ sizeExpr bOMB_OUT_SIZE top_args expr
   = size_up expr
   where
     size_up (Cast e _) = size_up e
-    size_up (Note _ e) = size_up e
+    size_up (Tick _ e) = size_up e
     size_up (Type _)   = sizeZero           -- Types cost nothing
     size_up (Coercion _) = sizeZero
     size_up (Lit lit)  = sizeN (litSize lit)
@@ -491,7 +498,8 @@ sizeExpr bOMB_OUT_SIZE top_args expr
 -- | Finds a nominal size of a string literal.
 litSize :: Literal -> Int
 -- Used by CoreUnfold.sizeExpr
-litSize (MachStr str) = 10 + 10 * ((lengthFS str + 3) `div` 4)
+litSize (LitInteger {}) = 100	-- Note [Size of literal integers]
+litSize (MachStr str)   = 10 + 10 * ((lengthFS str + 3) `div` 4)
 	-- If size could be 0 then @f "x"@ might be too small
 	-- [Sept03: make literal strings a bit bigger to avoid fruitless 
 	--  duplication of little strings]
@@ -555,6 +563,17 @@ conSize dc n_val_args
      -- REALLY like unfolding constructors that get scrutinised.
      -- [SDM, 25/5/11]
 \end{code}
+
+Note [Literal integer size]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Literal integers *can* be big (mkInteger [...coefficients...]), but
+need not be (S# n).  We just use an aribitrary big-ish constant here
+so that, in particular, we don't inline top-level defns like
+   n = S# 5
+There's no point in doing so -- any optimsations will see the S#
+through n's unfolding.  Nor will a big size inhibit unfoldings functions
+that mention a literal Integer, because the float-out pass will float
+all those constants to top level.
 
 Note [Constructor size]
 ~~~~~~~~~~~~~~~~~~~~~~~
@@ -1175,7 +1194,7 @@ interestingArg e = go e 0
     go (App fn (Type _)) n = go fn n
     go (App fn (Coercion _)) n = go fn n
     go (App fn _)        n = go fn (n+1)
-    go (Note _ a) 	 n = go a n
+    go (Tick _ a)      n = go a n
     go (Cast e _) 	 n = go e n
     go (Lam v e)  	 n 
        | isTyVar v	   = go e n

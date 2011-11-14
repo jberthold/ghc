@@ -6,6 +6,13 @@
 TcPat: Typechecking patterns
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module TcPat ( tcLetPat, TcSigFun, TcSigInfo(..), TcPragFun 
              , LetBndrSpec(..), addInlinePrags, warnPrags
              , tcPat, tcPats, newNoSigLetBndr, newSigLetBndr
@@ -666,6 +673,8 @@ tcConPat penv (L con_span con_name) pat_ty arg_pats thing_inside
 
 	; checkExistentials ex_tvs penv 
         ; ex_tvs' <- tcInstSuperSkolTyVars ex_tvs
+-- JPM: call the X version, with initial subt (univ_tvs -> ctxt_res_tys)
+-- return tenv
                      -- Get location from monad, not from ex_tvs
 
         ; let pat_ty' = mkTyConApp tycon ctxt_res_tys

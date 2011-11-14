@@ -1,4 +1,11 @@
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 -- Type definitions for the constraint solver
 module TcSMonad ( 
 
@@ -57,7 +64,7 @@ module TcSMonad (
     instDFunConstraints,          
     newFlexiTcSTy, instFlexiTcS,
 
-    compatKind,
+    compatKind, compatKindTcS, isSubKindTcS, unifyKindTcS,
 
     TcsUntouchables,
     isTouchableMetaTyVar,
@@ -89,6 +96,7 @@ import qualified TcRnMonad as TcM
 import qualified TcMType as TcM
 import qualified TcEnv as TcM 
        ( checkWellStaged, topIdLvl, tcGetDefaultTys )
+import {-# SOURCE #-} qualified TcUnify as TcM ( unifyKindEq, mkKindErrorCtxt )
 import Kind
 import TcType
 import DynFlags
@@ -107,18 +115,16 @@ import MonadUtils
 import VarSet
 import Pair
 import FastString
+import StaticFlags
+import Util
 
 import HsBinds               -- for TcEvBinds stuff 
 import Id 
 import TcRnTypes
+
+import Control.Monad
 import Data.IORef
-
 import qualified Data.Map as Map
-
-#ifdef DEBUG
-import StaticFlags( opt_PprStyle_Debug )
-import Control.Monad( when )
-#endif
 \end{code}
 
 
@@ -197,6 +203,23 @@ mkFrozenError fl ev = CFrozenErr { cc_id = ev, cc_flavor = fl }
 
 compatKind :: Kind -> Kind -> Bool
 compatKind k1 k2 = k1 `isSubKind` k2 || k2 `isSubKind` k1 
+
+compatKindTcS :: Kind -> Kind -> TcS Bool
+-- Because kind unification happens during constraint solving, we have
+-- to make sure that two kinds are zonked before we compare them.
+compatKindTcS k1 k2 = wrapTcS (TcM.compatKindTcM k1 k2)
+
+isSubKindTcS :: Kind -> Kind -> TcS Bool
+isSubKindTcS k1 k2 = wrapTcS (TcM.isSubKindTcM k1 k2)
+
+unifyKindTcS :: Type -> Type     -- Context
+             -> Kind -> Kind     -- Corresponding kinds
+             -> TcS Bool
+unifyKindTcS ty1 ty2 ki1 ki2
+  = wrapTcS $ TcM.addErrCtxtM ctxt $ do
+      (_errs, mb_r) <- TcM.tryTc (TcM.unifyKindEq ki1 ki2)
+      return (maybe False (const True) mb_r)
+  where ctxt = TcM.mkKindErrorCtxt ty1 ki1 ty2 ki2
 
 deCanonicalise :: CanonicalCt -> FlavoredEvVar
 deCanonicalise ct = mkEvVarX (cc_id ct) (cc_flavor ct)
@@ -585,12 +608,12 @@ runTcS context untouch tcs
        ; ty_binds <- TcM.readTcRef ty_binds_var
        ; mapM_ do_unification (varEnvElts ty_binds)
 
-#ifdef DEBUG
-       ; count <- TcM.readTcRef step_count
-       ; when (opt_PprStyle_Debug && count > 0) $
-         TcM.debugDumpTcRn (ptext (sLit "Constraint solver steps =") 
-                            <+> int count <+> ppr context)
-#endif
+       ; when debugIsOn $ do {
+             count <- TcM.readTcRef step_count
+           ; when (opt_PprStyle_Debug && count > 0) $
+             TcM.debugDumpTcRn (ptext (sLit "Constraint solver steps =") 
+                                <+> int count <+> ppr context)
+         }
              -- And return
        ; ev_binds      <- TcM.readTcRef evb_ref
        ; return (res, evBindMapBinds ev_binds) }
@@ -727,12 +750,11 @@ setWantedTyBind tv ty
   = do { ref <- getTcSTyBinds
        ; wrapTcS $ 
          do { ty_binds <- TcM.readTcRef ref
-#ifdef DEBUG
-            ; TcM.checkErr (not (tv `elemVarEnv` ty_binds)) $
-              vcat [ text "TERRIBLE ERROR: double set of meta type variable"
-                   , ppr tv <+> text ":=" <+> ppr ty
-                   , text "Old value =" <+> ppr (lookupVarEnv_NF ty_binds tv)]
-#endif
+            ; when debugIsOn $
+                  TcM.checkErr (not (tv `elemVarEnv` ty_binds)) $
+                  vcat [ text "TERRIBLE ERROR: double set of meta type variable"
+                       , ppr tv <+> text ":=" <+> ppr ty
+                       , text "Old value =" <+> ppr (lookupVarEnv_NF ty_binds tv)]
             ; TcM.writeTcRef ref (extendVarEnv ty_binds tv (tv,ty)) } }
 
 setIPBind :: EvVar -> EvTerm -> TcS () 

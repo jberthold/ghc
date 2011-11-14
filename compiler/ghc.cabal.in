@@ -81,7 +81,7 @@ Library
     if flag(ghci)
         Build-Depends: template-haskell
         CPP-Options: -DGHCI
-        Include-Dirs: ../libffi/build/include
+        Include-Dirs: ../rts/dist/build
 
     Build-Depends: bin-package-db
     Build-Depends: hoopl
@@ -94,7 +94,7 @@ Library
                 ForeignFunctionInterface, EmptyDataDecls,
                 TypeSynonymInstances, MultiParamTypeClasses,
                 FlexibleInstances, Rank2Types, ScopedTypeVariables,
-                DeriveDataTypeable
+                DeriveDataTypeable, BangPatterns
     if impl(ghc >= 7.1)
         Extensions: NondecreasingIndentation
 
@@ -301,6 +301,7 @@ Library
         LoadIface
         MkIface
         TcIface
+        FlagChecker
         Annotations
         BreakArray
         CmdLineParser
@@ -459,7 +460,6 @@ Library
         Util
         Vectorise.Builtins.Base
         Vectorise.Builtins.Initialise
-        Vectorise.Builtins.Modules
         Vectorise.Builtins
         Vectorise.Monad.Base
         Vectorise.Monad.Naming

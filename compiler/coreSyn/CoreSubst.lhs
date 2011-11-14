@@ -6,6 +6,13 @@
 Utility functions on @Core@ syntax
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 module CoreSubst (
 	-- * Main data types
 	Subst(..), -- Implementation exported for supercompiler's Renaming.hs only
@@ -16,6 +23,7 @@ module CoreSubst (
 	substTy, substCo, substExpr, substExprSC, substBind, substBindSC,
         substUnfolding, substUnfoldingSC,
 	substUnfoldingSource, lookupIdSubst, lookupTvSubst, lookupCvSubst, substIdOcc,
+        substTickish,
 
         -- ** Operations on substitutions
 	emptySubst, mkEmptySubst, mkSubst, mkOpenSubst, substInScope, isEmptySubst, 
@@ -32,7 +40,7 @@ module CoreSubst (
 
 	-- ** Simple expression optimiser
         simpleOptPgm, simpleOptExpr, simpleOptExprWith,
-        exprIsConApp_maybe
+        exprIsConApp_maybe, exprIsLiteral_maybe
     ) where
 
 #include "HsVersions.h"
@@ -40,6 +48,7 @@ module CoreSubst (
 import CoreSyn
 import CoreFVs
 import CoreUtils
+import Literal  ( Literal )
 import OccurAnal( occurAnalyseExpr, occurAnalysePgm )
 
 import qualified Type
@@ -370,7 +379,7 @@ subst_expr subst expr
     go (Coercion co)   = Coercion (substCo subst co)
     go (Lit lit)       = Lit lit
     go (App fun arg)   = App (go fun) (go arg)
-    go (Note note e)   = Note (go_note note) (go e)
+    go (Tick tickish e) = Tick (substTickish subst tickish) (go e)
     go (Cast e co)     = Cast (go e) (substCo subst co)
        -- Do not optimise even identity coercions
        -- Reason: substitution applies to the LHS of RULES, and
@@ -393,8 +402,6 @@ subst_expr subst expr
     go_alt subst (con, bndrs, rhs) = (con, bndrs', subst_expr subst' rhs)
 				 where
 				   (subst', bndrs') = substBndrs subst bndrs
-
-    go_note note	     = note
 
 -- | Apply a substititon to an entire 'CoreBind', additionally returning an updated 'Subst'
 -- that should be used by subsequent substitutons.
@@ -742,10 +749,12 @@ substVects subst = map (substVect subst)
 
 ------------------
 substVect :: Subst -> CoreVect -> CoreVect
-substVect _subst (Vect   v Nothing)    = Vect   v Nothing
-substVect subst  (Vect   v (Just rhs)) = Vect   v (Just (simpleOptExprWith subst rhs))
+substVect _subst (Vect   v Nothing)    = Vect v Nothing
+substVect subst  (Vect   v (Just rhs)) = Vect v (Just (simpleOptExprWith subst rhs))
 substVect _subst vd@(NoVect _)         = vd
-substVect _subst vd@(VectType _ _)     = vd
+substVect _subst vd@(VectType _ _ _)   = vd
+substVect _subst vd@(VectClass _)      = vd
+substVect _subst vd@(VectInst _ _)     = vd
 
 ------------------
 substVarSet :: Subst -> VarSet -> VarSet
@@ -755,6 +764,28 @@ substVarSet subst fvs
     subst_fv subst fv 
         | isId fv   = exprFreeVars (lookupIdSubst (text "substVarSet") subst fv)
         | otherwise = Type.tyVarsOfType (lookupTvSubst subst fv)
+
+------------------
+substTickish :: Subst -> Tickish Id -> Tickish Id
+substTickish subst (Breakpoint n ids) = Breakpoint n (map do_one ids)
+ where do_one = getIdFromTrivialExpr . lookupIdSubst (text "subst_tickish") subst
+substTickish _subst other = other
+
+{- Note [substTickish]
+
+A Breakpoint contains a list of Ids.  What happens if we ever want to
+substitute an expression for one of these Ids?
+
+First, we ensure that we only ever substitute trivial expressions for
+these Ids, by marking them as NoOccInfo in the occurrence analyser.
+Then, when substituting for the Id, we unwrap any type applications
+and abstractions to get back to an Id, with getIdFromTrivialExpr.
+
+Second, we have to ensure that we never try to substitute a literal
+for an Id in a breakpoint.  We ensure this by never storing an Id with
+an unlifted type in a Breakpoint - see Coverage.mkTickish.
+Breakpoints can't handle free variables with unlifted types anyway.
+-}
 \end{code}
 
 Note [Worker inlining]
@@ -899,7 +930,7 @@ simple_opt_expr' subst expr
     go (Type ty)        = Type     (substTy subst ty)
     go (Coercion co)    = Coercion (optCoercion (getCvSubst subst) co)
     go (Lit lit)        = Lit lit
-    go (Note note e)    = Note note (go e)
+    go (Tick tickish e) = Tick (substTickish subst tickish) (go e)
     go (Cast e co)      | isReflCo co' = go e
        	                | otherwise    = Cast (go e) co' 
                         where
@@ -1133,8 +1164,8 @@ exprIsConApp_maybe id_unf expr
     go :: Either InScopeSet Subst 
        -> CoreExpr -> ConCont 
        -> Maybe (DataCon, [Type], [CoreExpr])
-    go subst (Note note expr) cont 
-       | notSccNote note = go subst expr cont
+    go subst (Tick t expr) cont
+       | not (tickishIsCode t) = go subst expr cont
     go subst (Cast expr co1) (CC [] co2)
        = go subst expr (CC [] (subst_co subst co1 `mkTransCo` co2))
     go subst (App fun arg) (CC args co)
@@ -1227,16 +1258,14 @@ dealWithCoercion co stuff@(dc, _dc_univ_args, dc_args)
           -- Cast the value arguments (which include dictionaries)
         new_val_args = zipWith cast_arg arg_tys val_args
         cast_arg arg_ty arg = mkCoerce (theta_subst arg_ty) arg
-    in
-#ifdef DEBUG
-    let dump_doc = vcat [ppr dc,      ppr dc_univ_tyvars, ppr dc_ex_tyvars,
+
+        dump_doc = vcat [ppr dc,      ppr dc_univ_tyvars, ppr dc_ex_tyvars,
                          ppr arg_tys, ppr dc_args,        ppr _dc_univ_args,
                          ppr ex_args, ppr val_args]
     in
     ASSERT2( eqType _from_ty (mkTyConApp to_tc _dc_univ_args), dump_doc )
     ASSERT2( all isTypeArg ex_args, dump_doc )
     ASSERT2( equalLength val_args arg_tys, dump_doc )
-#endif
     Just (dc, to_tc_arg_tys, ex_args ++ new_val_args)
 
   | otherwise
@@ -1265,3 +1294,18 @@ Note [DFun arity check]
 Here we check that the total number of supplied arguments (inclding 
 type args) matches what the dfun is expecting.  This may be *less*
 than the ordinary arity of the dfun: see Note [DFun unfoldings] in CoreSyn
+
+\begin{code}
+exprIsLiteral_maybe :: IdUnfoldingFun -> CoreExpr -> Maybe Literal
+-- Same deal as exprIsConApp_maybe, but much simpler
+-- Nevertheless we do need to look through unfoldings for
+-- Integer literals, which are vigorously hoisted to top level
+-- and not subsequently inlined
+exprIsLiteral_maybe id_unf e
+  = case e of
+      Lit l     -> Just l
+      Tick _ e' -> exprIsLiteral_maybe id_unf e' -- dubious?
+      Var v     | Just rhs <- expandUnfolding_maybe (id_unf v)
+                -> exprIsLiteral_maybe id_unf rhs
+      _         -> Nothing
+\end{code}       

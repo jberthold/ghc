@@ -4,6 +4,13 @@
 %
 
 \begin{code}
+{-# OPTIONS -fno-warn-tabs #-}
+-- The above warning supression flag is a temporary kludge.
+-- While working on this module you are encouraged to remove it and
+-- detab the module (please do the detabbing in a separate patch). See
+--     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
+-- for details
+
 -- | This module defines classes and functions for pretty-printing. It also
 -- exports a number of helpful debugging and other utilities such as 'trace' and 'panic'.
 --
@@ -23,7 +30,7 @@ module Outputable (
 	char,
 	text, ftext, ptext,
 	int, integer, float, double, rational,
-	parens, cparen, brackets, braces, quotes, doubleQuotes, angleBrackets,
+	parens, cparen, brackets, braces, quotes, quote, doubleQuotes, angleBrackets,
 	semi, comma, colon, dcolon, space, equals, dot, arrow, darrow,
 	lparen, rparen, lbrack, rbrack, lbrace, rbrace, underscore,
 	blankLine,
@@ -84,6 +91,8 @@ import Panic
 import Data.Char
 import qualified Data.Map as M
 import qualified Data.IntMap as IM
+import Data.Set (Set)
+import qualified Data.Set as Set
 import Data.Word
 import System.IO	( Handle, stderr, stdout, hFlush )
 import System.FilePath
@@ -440,11 +449,12 @@ float n     = docToSDoc $ Pretty.float n
 double n    = docToSDoc $ Pretty.double n
 rational n  = docToSDoc $ Pretty.rational n
 
-parens, braces, brackets, quotes, doubleQuotes, angleBrackets :: SDoc -> SDoc
+parens, braces, brackets, quotes, quote, doubleQuotes, angleBrackets :: SDoc -> SDoc
 
 parens d       = SDoc $ Pretty.parens . runSDoc d
 braces d       = SDoc $ Pretty.braces . runSDoc d
 brackets d     = SDoc $ Pretty.brackets . runSDoc d
+quote d        = SDoc $ Pretty.quote . runSDoc d
 doubleQuotes d = SDoc $ Pretty.doubleQuotes . runSDoc d
 angleBrackets d = char '<' <> d <> char '>'
 
@@ -643,6 +653,9 @@ instance (Outputable a) => Outputable [a] where
     ppr xs = brackets (fsep (punctuate comma (map ppr xs)))
 instance (PlatformOutputable a) => PlatformOutputable [a] where
     pprPlatform platform xs = brackets (fsep (punctuate comma (map (pprPlatform platform) xs)))
+
+instance (Outputable a) => Outputable (Set a) where
+    ppr s = braces (fsep (punctuate comma (map ppr (Set.toList s))))
 
 instance (Outputable a, Outputable b) => Outputable (a, b) where
     ppr (x,y) = parens (sep [ppr x <> comma, ppr y])
