@@ -220,6 +220,15 @@ rtsBool MP_start(int* argc, char* argv[]) {
     }
     IF_PAR_DEBUG(mpcomm, 
 		 debugBelch("Nodes requested: %d\n", nPEs));
+
+    // refuse to create more PEs than the system can contain
+    // see MPSystem.h for MAX_PES
+    if (nPEs > MAX_PES) {
+      errorBelch("Unable to create more than %d processes, "
+                 "using available maximum.", MAX_PES);
+      nPEs = MAX_PES;
+    }
+
     if (nPEs > 1) {
       /*   if needed, we spawn the program name set in ENV("PE"), 
 	   assuming it is in scope in $PVM_ROOT/bin/$PVM_ARCH.
