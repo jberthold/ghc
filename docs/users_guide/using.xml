@@ -731,11 +731,9 @@ ghc -c Foo.hs</screen>
       <filename>Foo.hs</filename> to an object file
       <filename>Foo.o</filename>.</para>
 
-      <para>Note: What the Haskell compiler proper produces depends on
-      whether a native-code generator<indexterm><primary>native-code
-      generator</primary></indexterm> is used (producing assembly
-      language) or not (producing C).  See <xref
-      linkend="options-codegen"/> for more details.</para>
+      <para>Note: What the Haskell compiler proper produces depends on what
+      backend code generator is used. See <xref linkend="code-generators"/>
+      for more details.</para>
 
       <para>Note: C pre-processing is optional, the
       <option>-cpp</option><indexterm><primary><option>-cpp</option></primary></indexterm>
@@ -1856,6 +1854,20 @@ f "2"    = 2
 
 	<varlistentry>
 	  <term>
+            <option>-fpedantic-bottoms</option>
+            <indexterm><primary><option>-fpedantic-bottoms</option></primary></indexterm>
+          </term>
+	  <listitem>
+	    <para>Make GHC be more precise about its treatment of bottom (but see also
+                     <option>-fno-state-hack</option>). In particular, stop GHC 
+                     eta-expanding through a case expression, which is good for
+		     performance, but bad if you are using <literal>seq</literal> on
+                     partial applications.</para>
+	  </listitem>
+	</varlistentry>
+
+	<varlistentry>
+	  <term>
             <option>-fomit-interface-pragmas</option>
 	    <indexterm><primary><option>-fomit-interface-pragmas</option></primary></indexterm>
           </term>
@@ -1989,6 +2001,8 @@ f "2"    = 2
 
   </sect1>
 
+  &code-gens;
+
   &phases;
 
   &shared_libs;
@@ -2098,8 +2112,10 @@ f "2"    = 2
     <sect2 id="parallel-options">
       <title>RTS options for SMP parallelism</title>
 
-      <para>To run a program on multiple CPUs, use the
-	RTS <option>-N</option> option:</para>
+      <para>There are two ways to run a program on multiple
+        processors:
+        call <literal>GHC.Conc.setNumCapabilities</literal> from your
+        program, or use the RTS <option>-N</option> option.</para>
 
       <variablelist>
 	<varlistentry>
@@ -2134,7 +2150,13 @@ f "2"    = 2
 
             <para>The current value of the <option>-N</option> option
               is available to the Haskell program
-              via <literal>GHC.Conc.numCapabilities</literal>.</para>
+              via <literal>GHC.Conc.getNumCapabilities</literal>, and
+              it may be changed while the program is running by
+              calling <literal>GHC.Conc.setNumCapabilities</literal>.
+              Note: in the current implementation,
+              the <option>-N</option> value may only
+              be <emphasis>increased</emphasis>, not decreased, by
+              calling <literal>GHC.Conc.setNumCapabilities</literal>.</para>
 	  </listitem>
 	</varlistentry>
       </variablelist>
@@ -2218,16 +2240,35 @@ f "2"    = 2
 	<term><option>-msse2</option>:</term>
 	<listitem>
           <para>
-            (x86 only, added in GHC 7.0.1) Use the SSE2 registers and
-            instruction set to implement floating point operations
-            when using the native code generator.  This gives a
-            substantial performance improvement for floating point,
-            but the resulting compiled code will only run on
-            processors that support SSE2 (Intel Pentium 4 and later,
-            or AMD Athlon 64 and later).
+				(x86 only, added in GHC 7.0.1) Use the SSE2 registers and
+				instruction set to implement floating point operations when using
+				the <link linkend="native-code-gen">native code generator</link>.
+				This gives a substantial performance improvement for floating
+				point, but the resulting compiled code
+				will only run on processors that support SSE2 (Intel Pentium 4 and
+				later, or AMD Athlon 64 and later). The
+				<link linkend="llvm-code-gen">LLVM backend</link> will also use SSE2
+				if your processor supports it but detects this automatically so no
+				flag is required.
           </para>
           <para>
             SSE2 is unconditionally used on x86-64 platforms.
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+	<term><option>-msse4.2</option>:</term>
+	<listitem>
+          <para>
+				(x86 only, added in GHC 7.2.1) Use the SSE4.2 instruction set to
+				implement some floating point and bit operations when using the
+				<link linkend="native-code-gen">native code generator</link>. The
+				resulting compiled code will only run on processors that
+				support SSE4.2 (Intel Core i7 and later). The
+				<link linkend="llvm-code-gen">LLVM backend</link> will also use
+				SSE4.2 if your processor supports it but detects this automatically
+				so no flag is required.
           </para>
         </listitem>
       </varlistentry>

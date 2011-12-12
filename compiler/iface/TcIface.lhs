@@ -273,7 +273,7 @@ typecheckIface iface
         ; anns      <- tcIfaceAnnotations (mi_anns iface)
 
                 -- Vectorisation information
-        ; vect_info <- tcIfaceVectInfo (mi_module iface) (mi_vect_info iface)
+        ; vect_info <- tcIfaceVectInfo (mi_module iface) type_env (mi_vect_info iface)
 
                 -- Exports
         ; exports <- ifaceExportNames (mi_exports iface)
@@ -712,19 +712,27 @@ tcIfaceAnnTarget (ModuleTarget mod) = do
 %************************************************************************
 
 \begin{code}
-tcIfaceVectInfo :: Module -> IfaceVectInfo -> IfL VectInfo
-tcIfaceVectInfo mod (IfaceVectInfo 
-                     { ifaceVectInfoVar          = vars
-                     , ifaceVectInfoTyCon        = tycons
-                     , ifaceVectInfoTyConReuse   = tyconsReuse
-                     , ifaceVectInfoScalarVars   = scalarVars
-                     , ifaceVectInfoScalarTyCons = scalarTyCons
-                     })
+-- We need access to the type environment as we need to look up information about type constructors
+-- (i.e., their data constructors and whether they are class type constructors).  If a vectorised
+-- type constructor or class is defined in the same module as where it is vectorised, we cannot
+-- look that information up from the type constructor that we obtained via a 'forkM'ed
+-- 'tcIfaceTyCon' without recursively loading the interface that we are already type checking again
+-- and again and again...
+--
+tcIfaceVectInfo :: Module -> TypeEnv -> IfaceVectInfo -> IfL VectInfo
+tcIfaceVectInfo mod typeEnv (IfaceVectInfo 
+                             { ifaceVectInfoVar          = vars
+                             , ifaceVectInfoTyCon        = tycons
+                             , ifaceVectInfoTyConReuse   = tyconsReuse
+                             , ifaceVectInfoScalarVars   = scalarVars
+                             , ifaceVectInfoScalarTyCons = scalarTyCons
+                             })
   = do { let scalarTyConsSet = mkNameSet scalarTyCons
-       ; vVars       <- mapM vectVarMapping                          vars
-       ; tyConRes1   <- mapM vectTyConMapping                        tycons
-       ; tyConRes2   <- mapM (vectTyConReuseMapping scalarTyConsSet) tyconsReuse
-       ; vScalarVars <- mapM vectVar                                 scalarVars
+       ; vVars       <- mapM vectVarMapping                  vars
+       ; let varsSet = mkVarSet (map fst vVars)
+       ; tyConRes1   <- mapM (vectTyConVectMapping varsSet)  tycons
+       ; tyConRes2   <- mapM (vectTyConReuseMapping varsSet) tyconsReuse
+       ; vScalarVars <- mapM vectVar                         scalarVars
        ; let (vTyCons, vDataCons) = unzip (tyConRes1 ++ tyConRes2)
        ; return $ VectInfo 
                   { vectInfoVar          = mkVarEnv  vVars
@@ -750,57 +758,51 @@ tcIfaceVectInfo mod (IfaceVectInfo
       = forkM (ptext (sLit "vect scalar var")  <+> ppr name)  $
           tcIfaceExtId name
 
-    vectTyConMapping name 
+    vectTyConVectMapping vars name
       = do { vName  <- lookupOrig mod (mkLocalisedOccName mod mkVectTyConOcc name)
-           ; tycon  <- forkM (text ("vect tycon") <+> ppr name) $
-                         tcIfaceTyCon (IfaceTc name)
-           ; vTycon <- forkM (text ("vect vTycon") <+> ppr vName) $
-                         tcIfaceTyCon (IfaceTc vName)
+           ; vectTyConMapping vars name vName
+           }
 
-               -- we need to handle class type constructors differently due to the manner in which
-               -- the name for the dictionary data constructor is computed
-           ; vDataCons <- if isClassTyCon tycon
-                          then vectClassDataConMapping vName (tyConSingleDataCon_maybe tycon)
-                          else mapM vectDataConMapping (tyConDataCons tycon)
+    vectTyConReuseMapping vars name
+      = vectTyConMapping vars name name
+
+    vectTyConMapping vars name vName
+      = do { tycon  <- lookupLocalOrExternal name
+           ; vTycon <- lookupLocalOrExternal vName
+
+               -- map the data constructors of the original type constructor to those of the
+               -- vectorised type constructor /unless/ the type constructor was vectorised
+               -- abstractly; if it was vectorised abstractly, the workers of its data constructors
+               -- do not appear in the set of vectorised variables
+           ; let isAbstract | isClassTyCon tycon = False
+                            | datacon:_ <- tyConDataCons tycon 
+                                                 = not $ dataConWrapId datacon `elemVarSet` vars
+                            | otherwise          = True
+                 vDataCons  | isAbstract = []
+                            | otherwise  = [ (dataConName datacon, (datacon, vDatacon))
+                                           | (datacon, vDatacon) <- zip (tyConDataCons tycon)
+                                                                        (tyConDataCons vTycon)
+                                           ]
+
            ; return ( (name, (tycon, vTycon))          -- (T, T_v)
                     , vDataCons                        -- list of (Ci, Ci_v)
                     )
            }
+      where
+          -- we need a fully defined version of the type constructor to be able to extract
+          -- its data constructors etc.
+        lookupLocalOrExternal name
+          = do { let mb_tycon = lookupTypeEnv typeEnv name
+               ; case mb_tycon of
+                     -- tycon is local
+                   Just (ATyCon tycon) -> return tycon
+                     -- name is not a tycon => internal inconsistency
+                   Just _              -> notATyConErr
+                     -- tycon is external
+                   Nothing             -> tcIfaceTyCon (IfaceTc name)
+               }
 
-    vectTyConReuseMapping scalarNames name 
-      = do { tycon <- forkM (text ("vect reuse tycon") <+> ppr name) $
-                        tcIfaceTyCon (IfaceTc name) -- somewhat naughty for wired in tycons, but ok
-           ; if name `elemNameSet` scalarNames
-             then do
-           { return ( (name, (tycon, tycon))      -- scalar type constructors expose no data..
-                    , []                          -- ..constructors see..
-                    )                             -- .."Note [Pragmas to vectorise tycons]"..
-                                                  -- ..in 'Vectorise.Type.Env'
-           } else do 
-           { let { vDataCons  = [ (dataConName dc, (dc, dc)) 
-                                | dc <- tyConDataCons tycon]
-                 }
-           ; return ( (name, (tycon, tycon))          -- (T, T)
-                    , vDataCons                       -- list of (Ci, Ci)
-                    )
-           }}
-
-    vectClassDataConMapping _vTyconName Nothing = panic "tcIfaceVectInfo: vectClassDataConMapping"
-    vectClassDataConMapping vTyconName  (Just datacon)
-      = do { let name = dataConName datacon
-           ; vName <- lookupOrig mod (mkClassDataConOcc . nameOccName $ vTyconName)
-           ; vDataCon <- forkM (text ("vect class datacon") <+> ppr name) $
-                           tcIfaceDataCon vName
-           ; return [(name, (datacon, vDataCon))]
-           }
-
-    vectDataConMapping datacon
-      = do { let name = dataConName datacon
-           ; vName <- lookupOrig mod (mkLocalisedOccName mod mkVectDataConOcc name)
-           ; vDataCon <- forkM (text ("vect datacon") <+> ppr name) $
-                           tcIfaceDataCon vName
-           ; return (name, (datacon, vDataCon))
-           }
+        notATyConErr = pprPanic "TcIface.tcIfaceVectInfo: not a tycon" (ppr name)
 \end{code}
 
 %************************************************************************

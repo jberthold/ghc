@@ -39,7 +39,8 @@ import RdrName
 import TcHsSyn
 import TcExpr
 import TcRnMonad
-import Coercion
+import TcEvidence
+import Coercion( pprCoAxiom )
 import FamInst
 import InstEnv
 import FamInstEnv
@@ -89,7 +90,6 @@ import Data.IORef ( readIORef )
 
 #ifdef GHCI
 import TcType   ( isUnitTy, isTauTy )
-import CoreUtils( mkPiTypes )
 import TcHsType
 import TcMatches
 import RnTypes
@@ -122,13 +122,18 @@ import Control.Monad
 tcRnModule :: HscEnv 
 	   -> HscSource
 	   -> Bool 		-- True <=> save renamed syntax
-	   -> Located (HsModule RdrName)
+           -> HsParsedModule
 	   -> IO (Messages, Maybe TcGblEnv)
 
 tcRnModule hsc_env hsc_src save_rn_syntax
-	 (L loc (HsModule maybe_mod export_ies 
+   HsParsedModule {
+      hpm_module =
+         (L loc (HsModule maybe_mod export_ies
 			  import_decls local_decls mod_deprec
-			  maybe_doc_hdr))
+                          maybe_doc_hdr)),
+      hpm_src_files =
+         src_files
+   }
  = do { showPass (hsc_dflags hsc_env) "Renamer/typechecker" ;
 
    let { this_pkg = thisPackage (hsc_dflags hsc_env) ;
@@ -150,7 +155,8 @@ tcRnModule hsc_env hsc_src save_rn_syntax
         ifWOptM Opt_WarnImplicitPrelude $
              when (notNull prel_imports) $ addWarn (implicitPreludeWarn) ;
 
-	tcg_env <- tcRnImports hsc_env this_mod (prel_imports ++ import_decls) ;
+	tcg_env <- {-# SCC "tcRnImports" #-}
+                   tcRnImports hsc_env this_mod (prel_imports ++ import_decls) ;
 	setGblEnv tcg_env		$ do {
 
 		-- Load the hi-boot interface for this module, if any
@@ -168,7 +174,8 @@ tcRnModule hsc_env hsc_src save_rn_syntax
 	tcg_env <- if isHsBoot hsc_src then
 			tcRnHsBootDecls local_decls
 		   else	
-			tcRnSrcDecls boot_iface local_decls ;
+			{-# SCC "tcRnSrcDecls" #-}
+                        tcRnSrcDecls boot_iface local_decls ;
 	setGblEnv tcg_env		$ do {
 
 		-- Report the use of any deprecated things
@@ -206,7 +213,10 @@ tcRnModule hsc_env hsc_src save_rn_syntax
 		-- Report unused names
  	reportUnusedNames export_ies tcg_env ;
 
-		-- Dump output and return
+                -- add extra source files to tcg_dependent_files
+        addDependentFiles src_files ;
+
+                -- Dump output and return
 	tcDump tcg_env ;
 	return tcg_env
     }}}}
@@ -324,7 +334,9 @@ tcRnExtCore hsc_env (HsExtCore this_mod decls src_binds)
                                               (mkFakeGroup ldecls) ;
    setEnvs tc_envs $ do {
 
-   (rn_decls, _fvs) <- checkNoErrs $ rnTyClDecls [ldecls] ;
+   (rn_decls, _fvs) <- checkNoErrs $ rnTyClDecls [] [ldecls] ;
+   -- The empty list is for extra dependencies coming from .hs-boot files
+   -- See Note [Extra dependencies from .hs-boot files] in RnSource
 
 	-- Dump trace of renaming part
    rnDump (ppr rn_decls) ;
@@ -333,7 +345,7 @@ tcRnExtCore hsc_env (HsExtCore this_mod decls src_binds)
 	-- any mutually recursive types are done right
 	-- Just discard the auxiliary bindings; they are generated 
 	-- only for Haskell source code, and should already be in Core
-   tcg_env <- tcTyAndClassDecls emptyModDetails rn_decls ;
+   tcg_env   <- tcTyAndClassDecls emptyModDetails rn_decls ;
    dep_files <- liftIO $ readIORef (tcg_dependent_files tcg_env) ;
 
    setGblEnv tcg_env $ do {
@@ -420,7 +432,8 @@ tcRnSrcDecls boot_iface decls
 	     --	 * the global env exposes the instances to simplifyTop
 	     --  * the local env exposes the local Ids to simplifyTop, 
 	     --    so that we get better error messages (monomorphism restriction)
-	new_ev_binds <- simplifyTop lie ;
+	new_ev_binds <- {-# SCC "simplifyTop" #-}
+                        simplifyTop lie ;
         traceTc "Tc9" empty ;
 
 	failIfErrsM ;	-- Don't zonk if there have been errors
@@ -441,7 +454,8 @@ tcRnSrcDecls boot_iface decls
             ; all_ev_binds = cur_ev_binds `unionBags` new_ev_binds } ;
 
         (bind_ids, ev_binds', binds', fords', imp_specs', rules', vects') 
-            <- zonkTopDecls all_ev_binds binds sig_ns rules vects imp_specs fords ;
+            <- {-# SCC "zonkTopDecls" #-}
+               zonkTopDecls all_ev_binds binds sig_ns rules vects imp_specs fords ;
         
         let { final_type_env = extendTypeEnvWithIds type_env bind_ids
             ; tcg_env' = tcg_env { tcg_binds    = binds',
@@ -460,11 +474,15 @@ tc_rn_src_decls :: ModDetails
 -- Loops around dealing with each top level inter-splice group 
 -- in turn, until it's dealt with the entire module
 tc_rn_src_decls boot_details ds
- = do { (first_group, group_tail) <- findSplice ds  ;
+ = {-# SCC "tc_rn_src_decls" #-}
+   do { (first_group, group_tail) <- findSplice ds  ;
 		-- If ds is [] we get ([], Nothing)
         
+        -- The extra_deps are needed while renaming type and class declarations 
+        -- See Note [Extra dependencies from .hs-boot files] in RnSource
+	let { extra_deps = map tyConName (typeEnvTyCons (md_types boot_details)) } ;
 	-- Deal with decls up to, but not including, the first splice
-	(tcg_env, rn_decls) <- rnTopSrcDecls first_group ;
+	(tcg_env, rn_decls) <- rnTopSrcDecls extra_deps first_group ;
 		-- rnTopSrcDecls fails if there are any errors
         
 	(tcg_env, tcl_env) <- setGblEnv tcg_env $ 
@@ -522,7 +540,9 @@ tcRnHsBootDecls decls
 		   hs_ruleds = rule_decls, 
 		   hs_vects  = vect_decls, 
 		   hs_annds  = _,
-		   hs_valds  = val_binds }) <- rnTopSrcDecls first_group
+		   hs_valds  = val_binds }) <- rnTopSrcDecls [] first_group
+        -- The empty list is for extra dependencies coming from .hs-boot files
+        -- See Note [Extra dependencies from .hs-boot files] in RnSource
 	; (gbl_env, lie) <- captureConstraints $ setGblEnv tcg_env $ do {
 
 
@@ -538,7 +558,6 @@ tcRnHsBootDecls decls
 		-- Typecheck type/class decls
 	; traceTc "Tc2" empty
 	; tcg_env <- tcTyAndClassDecls emptyModDetails tycl_decls
-        ; let aux_binds = mkRecSelBinds [tc | ATyCon tc <- nameEnvElts (tcg_type_env tcg_env)]
 	; setGblEnv tcg_env    $ do {
 
 		-- Typecheck instance decls
@@ -561,18 +580,13 @@ tcRnHsBootDecls decls
 		-- Make the final type-env
 		-- Include the dfun_ids so that their type sigs
 		-- are written into the interface file. 
-		-- And similarly the aux_ids from aux_binds
 	; let { type_env0 = tcg_type_env gbl_env
 	      ; type_env1 = extendTypeEnvWithIds type_env0 val_ids
 	      ; type_env2 = extendTypeEnvWithIds type_env1 dfun_ids 
-	      ; type_env3 = extendTypeEnvWithIds type_env2 aux_ids 
 	      ; dfun_ids = map iDFunId inst_infos
-	      ; aux_ids  = case aux_binds of
-	      		     ValBindsOut _ sigs -> [id | L _ (IdSig id) <- sigs]
-			     _		   	-> panic "tcRnHsBoodDecls"
 	      }
 
-	; setGlobalTypeEnv gbl_env type_env3
+	; setGlobalTypeEnv gbl_env type_env2
    }}}
    ; traceTc "boot" (ppr lie); return gbl_env }
 
@@ -850,12 +864,12 @@ monad; it augments it and returns the new TcGblEnv.
 
 \begin{code}
 ------------------------------------------------
-rnTopSrcDecls :: HsGroup RdrName -> TcM (TcGblEnv, HsGroup Name)
+rnTopSrcDecls :: [Name] -> HsGroup RdrName -> TcM (TcGblEnv, HsGroup Name)
 -- Fails if there are any errors
-rnTopSrcDecls group
+rnTopSrcDecls extra_deps group
  = do { -- Rename the source decls
         traceTc "rn12" empty ;
-	(tcg_env, rn_decls) <- checkNoErrs $ rnSrcDecls group ;
+	(tcg_env, rn_decls) <- checkNoErrs $ rnSrcDecls extra_deps group ;
         traceTc "rn13" empty ;
 
         -- save the renamed syntax, if we want it
@@ -888,10 +902,7 @@ tcTopSrcDecls boot_details
         traceTc "Tc2" empty ;
 
 	tcg_env <- tcTyAndClassDecls boot_details tycl_decls ;
-	let { aux_binds = mkRecSelBinds [tc | tc <- tcg_tcs tcg_env] } ;
-		-- If there are any errors, tcTyAndClassDecls fails here
-
-	setGblEnv tcg_env	$ do {
+	setGblEnv tcg_env       $ do {
 
 		-- Source-language instances, including derivings,
 		-- and import the supporting declarations
@@ -913,16 +924,13 @@ tcTopSrcDecls boot_details
 		-- Now GHC-generated derived bindings, generics, and selectors
 		-- Do not generate warnings from compiler-generated code;
 		-- hence the use of discardWarnings
-	(tc_aux_binds,   specs1, tcl_env) <- discardWarnings (tcTopBinds aux_binds) ;
-	(tc_deriv_binds, specs2, tcl_env) <- setLclTypeEnv tcl_env $ 
-			 	             discardWarnings (tcTopBinds deriv_binds) ;
+	tc_envs <- discardWarnings (tcTopBinds deriv_binds) ;
+        setEnvs tc_envs $ do {
 
 		-- Value declarations next
         traceTc "Tc5" empty ;
-	(tc_val_binds, specs3, tcl_env) <- setLclTypeEnv tcl_env $
-			 	           tcTopBinds val_binds;
-
-        setLclTypeEnv tcl_env $ do {	-- Environment doesn't change now
+	tc_envs@(tcg_env, tcl_env) <- tcTopBinds val_binds;
+        setEnvs tc_envs $ do {	-- Environment doesn't change now
 
                 -- Second pass over class and instance declarations, 
                 -- now using the kind-checked decls
@@ -944,11 +952,7 @@ tcTopSrcDecls boot_details
 
                 -- Wrap up
         traceTc "Tc7a" empty ;
-	tcg_env <- getGblEnv ;
-	let { all_binds = tc_val_binds	 `unionBags`
-			  tc_deriv_binds `unionBags`
-			  tc_aux_binds   `unionBags`
-			  inst_binds	 `unionBags`
+	let { all_binds = inst_binds	 `unionBags`
 			  foe_binds
 
             ; sig_names = mkNameSet (collectHsValBinders val_binds) 
@@ -957,8 +961,6 @@ tcTopSrcDecls boot_details
                 -- Extend the GblEnv with the (as yet un-zonked) 
                 -- bindings, rules, foreign decls
             ; tcg_env' = tcg_env { tcg_binds = tcg_binds tcg_env `unionBags` all_binds
-                                 , tcg_imp_specs = tcg_imp_specs tcg_env ++ specs1 ++ specs2 ++
-                                                   specs3
                                  , tcg_sigs  = tcg_sigs tcg_env `unionNameSets` sig_names
                                  , tcg_rules = tcg_rules tcg_env ++ rules
                                  , tcg_vects = tcg_vects tcg_env ++ vects
@@ -966,7 +968,7 @@ tcTopSrcDecls boot_details
                                  , tcg_fords = tcg_fords tcg_env ++ foe_decls ++ fi_decls } } ;
 
         return (tcg_env', tcl_env)
-    }}}}}}
+    }}}}}}}
 \end{code}
 
 
@@ -1416,6 +1418,7 @@ tcRnExpr hsc_env ictxt rdr_expr
     let { fresh_it  = itName uniq (getLoc rdr_expr) } ;
     ((_tc_expr, res_ty), lie)	<- captureConstraints (tcInferRho rn_expr) ;
     ((qtvs, dicts, _, _), lie_top) <- captureConstraints $ 
+                                      {-# SCC "simplifyInfer" #-}
                                       simplifyInfer True {- Free vars are closed -}
                                                     False {- No MR for now -}
                                                     [(fresh_it, res_ty)]

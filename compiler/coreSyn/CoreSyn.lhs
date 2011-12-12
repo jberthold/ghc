@@ -38,7 +38,7 @@ module CoreSyn (
 	-- ** Simple 'Expr' access functions and predicates
 	bindersOf, bindersOfBinds, rhssOfBind, rhssOfAlts, 
 	collectBinders, collectTyBinders, collectValBinders, collectTyAndValBinders,
-	collectArgs, coreExprCc, flattenBinds, 
+        collectArgs, flattenBinds,
 
         isValArg, isTypeArg, isTyCoArg, valArgCount, valBndrCount,
         isRuntimeArg, isRuntimeVar,
@@ -278,17 +278,37 @@ type Arg b = Expr b
 type Alt b = (AltCon, [b], Expr b)
 
 -- | A case alternative constructor (i.e. pattern match)
-data AltCon = DataAlt DataCon	-- ^ A plain data constructor: @case e of { Foo x -> ... }@.
-                                -- Invariant: the 'DataCon' is always from a @data@ type, and never from a @newtype@
-	    | LitAlt  Literal   -- ^ A literal: @case e of { 1 -> ... }@
-	    | DEFAULT           -- ^ Trivial alternative: @case e of { _ -> ... }@
-	 deriving (Eq, Ord, Data, Typeable)
+data AltCon 
+  = DataAlt DataCon   --  ^ A plain data constructor: @case e of { Foo x -> ... }@.
+                      -- Invariant: the 'DataCon' is always from a @data@ type, and never from a @newtype@
+
+  | LitAlt  Literal   -- ^ A literal: @case e of { 1 -> ... }@
+                      -- Invariant: always an *unlifted* literal
+		      -- See Note [Literal alternatives]
+	      	      
+  | DEFAULT           -- ^ Trivial alternative: @case e of { _ -> ... }@
+   deriving (Eq, Ord, Data, Typeable)
 
 -- | Binding, used for top level bindings in a module and local bindings in a @let@.
 data Bind b = NonRec b (Expr b)
 	    | Rec [(b, (Expr b))]
   deriving (Data, Typeable)
 \end{code}
+
+Note [Literal alternatives]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Literal alternatives (LitAlt lit) are always for *un-lifted* literals.
+We have one literal, a literal Integer, that is lifted, and we don't
+allow in a LitAlt, because LitAlt cases don't do any evaluation. Also
+(see Trac #5603) if you say
+    case 3 of
+      S# x -> ...
+      J# _ _ -> ...
+(where S#, J# are the constructors for Integer) we don't want the
+simplifier calling findAlt with argument (LitAlt 3).  No no.  Integer
+literals are an opaque encoding of an algebraic data type, not of
+an unlifted literal, like all the others.
+
 
 -------------------------- CoreSyn INVARIANTS ---------------------------
 
@@ -518,7 +538,7 @@ data CoreVect = Vect      Id   (Maybe CoreExpr)
               | NoVect    Id
               | VectType  Bool TyCon (Maybe TyCon)
               | VectClass TyCon                     -- class tycon
-              | VectInst  Bool Id                   -- (1) whether SCALAR & (2) instance dfun
+              | VectInst  Id                        -- instance dfun (always SCALAR)
 \end{code}
 
 
@@ -983,7 +1003,7 @@ instance Outputable b => OutputableBndr (TaggedBndr b) where
 
 \begin{code}
 -- | Apply a list of argument expressions to a function expression in a nested fashion. Prefer to
--- use 'CoreUtils.mkCoreApps' if possible
+-- use 'MkCore.mkCoreApps' if possible
 mkApps    :: Expr b -> [Arg b]  -> Expr b
 -- | Apply a list of type argument expressions to a function expression in a nested fashion
 mkTyApps  :: Expr b -> [Type]   -> Expr b
@@ -1053,10 +1073,10 @@ mkDoubleLit       d = Lit (mkMachDouble d)
 mkDoubleLitDouble d = Lit (mkMachDouble (toRational d))
 
 -- | Bind all supplied binding groups over an expression in a nested let expression. Prefer to
--- use 'CoreUtils.mkCoreLets' if possible
+-- use 'MkCore.mkCoreLets' if possible
 mkLets	      :: [Bind b] -> Expr b -> Expr b
 -- | Bind all supplied binders over an expression in a nested lambda expression. Prefer to
--- use 'CoreUtils.mkCoreLams' if possible
+-- use 'MkCore.mkCoreLams' if possible
 mkLams	      :: [b] -> Expr b -> Expr b
 
 mkLams binders body = foldr Lam body binders
@@ -1162,14 +1182,6 @@ collectArgs expr
   where
     go (App f a) as = go f (a:as)
     go e 	 as = (e, as)
-\end{code}
-
-\begin{code}
--- | Gets the cost centre enclosing an expression, if any.
--- It looks inside lambdas because @(scc \"foo\" \\x.e) = \\x. scc \"foo\" e@
-coreExprCc :: Expr b -> CostCentre
-coreExprCc (Tick (ProfNote { profNoteCC = cc}) _)   = cc
-coreExprCc _ = noCostCentre
 \end{code}
 
 %************************************************************************

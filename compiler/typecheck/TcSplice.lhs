@@ -55,6 +55,7 @@ import Class
 import Inst
 import TyCon
 import DataCon
+import TcEvidence( TcEvBinds(..) )
 import Id
 import IdInfo
 import DsMeta
@@ -1356,8 +1357,8 @@ reify_tc_app tc tys
          | otherwise                = TH.ConT (reifyName tc)
 
 reifyPred :: TypeRep.PredType -> TcM TH.Pred
-reifyPred ty = case predTypePredTree ty of
-  ClassPred cls tys -> do { tys' <- reifyTypes tys
+reifyPred ty = case classifyPredType ty of
+  ClassPred cls tys -> do { tys' <- reifyTypes tys 
                           ; return $ TH.ClassP (reifyName cls) tys' }
   IPPred _ _        -> noTH (sLit "implicit parameters") (ppr ty)
   EqPred ty1 ty2    -> do { ty1' <- reifyType ty1

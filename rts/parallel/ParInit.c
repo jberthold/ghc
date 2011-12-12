@@ -138,7 +138,7 @@ startupParallelSystem(int* argc, char **argv[]) {
   // trace file here => startup time is in reality sync time.
 //MD/TH 03/2010: workaround: store timestamp here and use it in synchroniseSystem
 #ifdef TRACING
-  startupTicks = stat_getElapsedTime() * (1000000000LL/TICKS_PER_SECOND);
+  startupTicks = stat_getElapsedTime(); // see Stats.c, elapsed time from init
   gettimeofday(&startupTime,&startupTimeZone);
   //MD: copy argument list to string for traceProgramInvocation
   int len = 0;

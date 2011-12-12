@@ -32,6 +32,7 @@ import RdrHsSyn
 import HscTypes         ( IsBootInterface, WarningTxt(..) )
 import Lexer
 import RdrName
+import TcEvidence       ( emptyTcEvBinds )
 import TysPrim          ( liftedTypeKindTyConName, eqPrimTyCon )
 import TysWiredIn       ( unitTyCon, unitDataCon, tupleTyCon, tupleCon, nilDataCon,
                           unboxedSingletonTyCon, unboxedSingletonDataCon,
@@ -244,6 +245,7 @@ incorrect.
  'family'       { L _ ITfamily }
  'stdcall'      { L _ ITstdcallconv }
  'ccall'        { L _ ITccallconv }
+ 'capi'         { L _ ITcapiconv }
  'prim'         { L _ ITprimcallconv }
  'proc'         { L _ ITproc }          -- for arrow notation extension
  'rec'          { L _ ITrec }           -- for arrow notation extension
@@ -589,11 +591,12 @@ topdecl :: { OrdList (LHsDecl RdrName) }
         | '{-# VECTORISE' 'type' gtycon '=' gtycon '#-}'     
                                                 { unitOL $ LL $ 
                                                     VectD (HsVectTypeIn False $3 (Just $5)) }
+        | '{-# VECTORISE_SCALAR' 'type' gtycon '=' gtycon '#-}'     
+                                                { unitOL $ LL $ 
+                                                    VectD (HsVectTypeIn True $3 (Just $5)) }
         | '{-# VECTORISE' 'class' gtycon '#-}'  { unitOL $ LL $ VectD (HsVectClassIn $3) }
-        | '{-# VECTORISE' 'instance' type '#-}'     
-                                                { unitOL $ LL $ VectD (HsVectInstIn False $3) }
         | '{-# VECTORISE_SCALAR' 'instance' type '#-}'     
-                                                { unitOL $ LL $ VectD (HsVectInstIn True $3) }
+                                                { unitOL $ LL $ VectD (HsVectInstIn $3) }
         | annotation { unitOL $1 }
         | decl                                  { unLoc $1 }
 
@@ -921,6 +924,7 @@ fdecl : 'import' callconv safety fspec
 callconv :: { CCallConv }
           : 'stdcall'                   { StdCallConv }
           | 'ccall'                     { CCallConv   }
+          | 'capi'                      { CApiConv    }
           | 'prim'                      { PrimCallConv}
 
 safety :: { Safety }
@@ -1047,7 +1051,7 @@ atype :: { LHsType RdrName }
         | tyvar                         { L1 (HsTyVar (unLoc $1)) }
         | strict_mark atype             { LL (HsBangTy (unLoc $1) $2) }  -- Constructor sigs only
         | '{' fielddecls '}'            {% checkRecordSyntax (LL $ HsRecTy $2) } -- Constructor sigs only
-        | '(' ctype ',' comma_types1 ')'  { LL $ HsTupleTy (HsBoxyTuple placeHolderKind)  ($2:$4) }
+        | '(' ctype ',' comma_types1 ')'  { LL $ HsTupleTy HsBoxedOrConstraintTuple  ($2:$4) }
         | '(#' comma_types1 '#)'        { LL $ HsTupleTy HsUnboxedTuple $2     }
         | '[' ctype ']'                 { LL $ HsListTy  $2 }
         | '[:' ctype ':]'               { LL $ HsPArrTy  $2 }
@@ -1126,7 +1130,7 @@ akind :: { LHsKind RdrName }
 pkind :: { LHsKind RdrName }  -- promoted type, see Note [Promotion]
         : qtycon                          { L1 $ HsTyVar $ unLoc $1 }
         | '(' ')'                         { LL $ HsTyVar $ getRdrName unitTyCon }
-        | '(' kind ',' comma_kinds1 ')'   { LL $ HsTupleTy (HsBoxyTuple placeHolderKind) ($2 : $4) }
+        | '(' kind ',' comma_kinds1 ')'   { LL $ HsTupleTy HsBoxedTuple ($2 : $4) }
         | '[' kind ']'                    { LL $ HsListTy $2 }
 
 comma_kinds1 :: { [LHsKind RdrName] }
@@ -1320,14 +1324,15 @@ sigdecl :: { Located (OrdList (LHsDecl RdrName)) }
                                 { LL $ toOL [ LL $ SigD (TypeSig ($1 : unLoc $3) $5) ] }
         | infix prec ops        { LL $ toOL [ LL $ SigD (FixSig (FixitySig n (Fixity $2 (unLoc $1))))
                                              | n <- unLoc $3 ] }
-        | '{-# INLINE'   activation qvar '#-}'        
+        | '{-# INLINE' activation qvar '#-}'        
                 { LL $ unitOL (LL $ SigD (InlineSig $3 (mkInlinePragma (getINLINE $1) $2))) }
-        | '{-# SPECIALISE' qvar '::' sigtypes1 '#-}'
-                { LL $ toOL [ LL $ SigD (SpecSig $2 t defaultInlinePragma) 
-                                            | t <- $4] }
+        | '{-# SPECIALISE' activation qvar '::' sigtypes1 '#-}'
+                { let inl_prag = mkInlinePragma (EmptyInlineSpec, FunLike) $2
+                  in LL $ toOL [ LL $ SigD (SpecSig $3 t inl_prag) 
+                               | t <- $5] }
         | '{-# SPECIALISE_INLINE' activation qvar '::' sigtypes1 '#-}'
                 { LL $ toOL [ LL $ SigD (SpecSig $3 t (mkInlinePragma (getSPEC_INLINE $1) $2))
-                                            | t <- $5] }
+                            | t <- $5] }
         | '{-# SPECIALISE' 'instance' inst_type '#-}'
                 { LL $ unitOL (LL $ SigD (SpecInstSig $3)) }
 
@@ -1392,6 +1397,7 @@ scc_annot :: { Located FastString }
         : '_scc_' STRING                        {% (addWarning Opt_WarnWarningsDeprecations (getLoc $1) (text "_scc_ is deprecated; use an SCC pragma instead")) >>= \_ ->
                                    ( do scc <- getSCC $2; return $ LL scc ) }
         | '{-# SCC' STRING '#-}'                {% do scc <- getSCC $2; return $ LL scc }
+        | '{-# SCC' VARID  '#-}'                { LL (getVARID $2) }
 
 hpc_annot :: { Located (FastString,(Int,Int),(Int,Int)) }
         : '{-# GENERATED' STRING INTEGER ':' INTEGER '-' INTEGER ':' INTEGER '#-}'
@@ -1584,21 +1590,15 @@ squals :: { Located [LStmt RdrName] }   -- In reverse order, because the last
 
 transformqual :: { Located ([LStmt RdrName] -> Stmt RdrName) }
                         -- Function is applied to a list of stmts *in order*
-    : 'then' exp                { LL $ \leftStmts -> (mkTransformStmt leftStmts $2) }
-    -- >>>
-    | 'then' exp 'by' exp       { LL $ \leftStmts -> (mkTransformByStmt leftStmts $2 $4) }
-    | 'then' 'group' 'by' exp   { LL $ \leftStmts -> (mkGroupByStmt leftStmts $4) }
-    -- <<<
-    -- These two productions deliberately have a shift-reduce conflict. I have made 'group' into a special_id,
-    -- which means you can enable TransformListComp while still using Data.List.group. However, this makes the two
-    -- productions ambiguous. I've set things up so that Happy chooses to resolve the conflict in that case by
-    -- choosing the "group by" variant, which is what we want.
-    --
-    -- This is rather dubious: the user might be confused as to how to parse this statement. However, it is a good
-    -- practical choice. NB: Data.List.group :: [a] -> [[a]], so using the first production would not even type check
-    -- if /that/ is the group function we conflict with.
-    | 'then' 'group' 'using' exp           { LL $ \leftStmts -> (mkGroupUsingStmt leftStmts $4) }
+    : 'then' exp                           { LL $ \leftStmts -> (mkTransformStmt    leftStmts $2)    }
+    | 'then' exp 'by' exp                  { LL $ \leftStmts -> (mkTransformByStmt  leftStmts $2 $4) }
+    | 'then' 'group' 'using' exp           { LL $ \leftStmts -> (mkGroupUsingStmt   leftStmts $4)    }
     | 'then' 'group' 'by' exp 'using' exp  { LL $ \leftStmts -> (mkGroupByUsingStmt leftStmts $4 $6) }
+
+-- Note that 'group' is a special_id, which means that you can enable
+-- TransformListComp while still using Data.List.group. However, this
+-- introduces a shift/reduce conflict. Happy chooses to resolve the conflict
+-- in by choosing the "group by" variant, which is what we want.
 
 -----------------------------------------------------------------------------
 -- Parallel array expressions
@@ -1948,6 +1948,7 @@ special_id
         | 'dynamic'             { L1 (fsLit "dynamic") }
         | 'stdcall'             { L1 (fsLit "stdcall") }
         | 'ccall'               { L1 (fsLit "ccall") }
+        | 'capi'                { L1 (fsLit "capi") }
         | 'prim'                { L1 (fsLit "prim") }
         | 'group'               { L1 (fsLit "group") }
 

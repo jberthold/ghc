@@ -42,12 +42,15 @@ module TcMType (
   -- Instantiation
   tcInstTyVars, tcInstSigTyVars,
   tcInstType, 
-  tcInstSkolTyVars, tcInstSuperSkolTyVars, tcInstSkolTyVar, tcInstSkolType,
+  tcInstSkolTyVars, tcInstSuperSkolTyVars,
+  tcInstSkolTyVarsX, tcInstSuperSkolTyVarsX,
+  tcInstSkolTyVar, tcInstSkolType,
   tcSkolDFunType, tcSuperSkolTyVars,
 
   --------------------------------
   -- Checking type validity
   Rank, UserTypeCtxt(..), checkValidType, checkValidMonoType,
+  expectedKindInCtxt, 
   checkValidTheta, 
   checkValidInstHead, checkValidInstance, validDerivPred,
   checkInstTermination, checkValidFamInst, checkTyFamFreeness, 
@@ -61,8 +64,10 @@ module TcMType (
   zonkTcTyVar, zonkTcTyVars, zonkTcTyVarsAndFV, zonkSigTyVar,
   zonkQuantifiedTyVar, zonkQuantifiedTyVars,
   zonkTcType, zonkTcTypes, zonkTcThetaType,
-  zonkTcKind, defaultKindVarToStar,
-  zonkImplication, zonkEvVar, zonkWantedEvVar, zonkFlavoredEvVar,
+
+  zonkTcKind, defaultKindVarToStar, zonkCt, zonkCts,
+  zonkImplication, zonkEvVar, zonkWantedEvVar,
+
   zonkWC, zonkWantedEvVars,
   zonkTcTypeAndSubst,
   tcGetGlobalTyVars, 
@@ -102,7 +107,7 @@ import Unique( Unique )
 import Bag
 
 import Control.Monad
-import Data.List        ( (\\), partition )
+import Data.List        ( (\\), partition, mapAccumL )
 \end{code}
 
 
@@ -162,7 +167,7 @@ newDict cls tys
        ; return (mkLocalId name (mkClassPred cls tys)) }
 
 predTypeOccName :: PredType -> OccName
-predTypeOccName ty = case predTypePredTree ty of
+predTypeOccName ty = case classifyPredType ty of
     ClassPred cls _ -> mkDictOcc (getOccName cls)
     IPPred ip _     -> mkVarOccFS (ipFastString ip)
     EqPred _ _      -> mkVarOccFS (fsLit "cobox")
@@ -210,51 +215,47 @@ tcSuperSkolTyVars :: [TyVar] -> [TcTyVar]
 -- Make skolem constants, but do *not* give them new names, as above
 -- Moreover, make them "super skolems"; see comments with superSkolemTv
 -- see Note [Kind substitution when instantiating]
-tcSuperSkolTyVars tyvars  -- IA0_NOTE: should be ordered (kind vars first)
-  = kvs' ++ tvs'
-  where
-    (kvs, tvs) = splitKiTyVars tyvars
-    kvs' = [ mkTcTyVar (tyVarName kv) (tyVarKind kv) superSkolemTv
-           | kv <- kvs ]
-    tvs' = [ mkTcTyVar (tyVarName tv) (substTy subst (tyVarKind tv)) superSkolemTv
-           | tv <- tvs ]
-    subst = zipTopTvSubst kvs (map mkTyVarTy kvs')
+-- Precondition: tyvars should be ordered (kind vars first)
+tcSuperSkolTyVars = snd . mapAccumL tcSuperSkolTyVar (mkTopTvSubst [])
 
-tcInstSkolTyVar :: Bool -> TvSubst -> TyVar -> TcM TcTyVar
+tcSuperSkolTyVar :: TvSubst -> TyVar -> (TvSubst, TcTyVar)
+tcSuperSkolTyVar subst tv
+  = (extendTvSubst subst tv (mkTyVarTy new_tv), new_tv)
+  where
+    kind   = substTy subst (tyVarKind tv)
+    new_tv = mkTcTyVar (tyVarName tv) kind superSkolemTv
+
+tcInstSkolTyVar :: Bool -> TvSubst -> TyVar -> TcM (TvSubst, TcTyVar)
 -- Instantiate the tyvar, using 
---	* the occ-name and kind of the supplied tyvar, 
---	* the unique from the monad,
---	* the location either from the tyvar (skol_info = SigSkol)
+--      * the occ-name and kind of the supplied tyvar, 
+--      * the unique from the monad,
+--      * the location either from the tyvar (skol_info = SigSkol)
 --                     or from the monad (otherwise)
 tcInstSkolTyVar overlappable subst tyvar
-  = do	{ uniq <- newUnique
-        ; loc <-  getSrcSpanM
-	; let new_name = mkInternalName uniq occ loc
-        ; return (mkTcTyVar new_name kind (SkolemTv overlappable)) }
+  = do  { uniq <- newUnique
+        ; loc  <- getSrcSpanM
+        ; let new_name = mkInternalName uniq occ loc
+              new_tv   = mkTcTyVar new_name kind (SkolemTv overlappable)
+        ; return (extendTvSubst subst tyvar (mkTyVarTy new_tv), new_tv) }
   where
     old_name = tyVarName tyvar
     occ      = nameOccName old_name
     kind     = substTy subst (tyVarKind tyvar)
 
-tcInstSkolTyVars :: [TyVar] -> TcM [TcTyVar]
+tcInstSkolTyVars' :: Bool -> TvSubst -> [TyVar] -> TcM (TvSubst, [TcTyVar])
 -- Precondition: tyvars should be ordered (kind vars first)
 -- see Note [Kind substitution when instantiating]
-tcInstSkolTyVars tyvars
-  = do { kvs' <- mapM (tcInstSkolTyVar False (mkTopTvSubst [])) kvs
-       ; tvs' <- mapM (tcInstSkolTyVar False (zipTopTvSubst kvs (map mkTyVarTy kvs'))) tvs
-       ; return (kvs' ++ tvs') }
-  where (kvs, tvs) = splitKiTyVars tyvars
+tcInstSkolTyVars' isSuperSkol = mapAccumLM (tcInstSkolTyVar isSuperSkol)
 
-tcInstSuperSkolTyVars :: [TyVar] -> TcM [TcTyVar]
--- Precondition: tyvars should be ordered (kind vars first)
--- see Note [Kind substitution when instantiating]
+-- Wrappers
+tcInstSkolTyVars, tcInstSuperSkolTyVars :: [TyVar] -> TcM [TcTyVar]
+tcInstSkolTyVars      = fmap snd . tcInstSkolTyVars' False (mkTopTvSubst [])
+tcInstSuperSkolTyVars = fmap snd . tcInstSkolTyVars' True  (mkTopTvSubst [])
 
--- JPM: do this with mapAccumLM
-tcInstSuperSkolTyVars tyvars
-  = do { kvs' <- mapM (tcInstSkolTyVar True (mkTopTvSubst [])) kvs
-       ; tvs' <- mapM (tcInstSkolTyVar True (zipTopTvSubst kvs (map mkTyVarTy kvs'))) tvs
-       ; return (kvs' ++ tvs') }
-  where (kvs, tvs) = splitKiTyVars tyvars
+tcInstSkolTyVarsX, tcInstSuperSkolTyVarsX
+  :: TvSubst -> [TyVar] -> TcM (TvSubst, [TcTyVar])
+tcInstSkolTyVarsX      subst = tcInstSkolTyVars' False subst
+tcInstSuperSkolTyVarsX subst = tcInstSkolTyVars' True  subst
 
 tcInstSkolType :: TcType -> TcM ([TcTyVar], TcThetaType, TcType)
 -- Instantiate a type with fresh skolem constants
@@ -266,21 +267,18 @@ tcInstSigTyVars :: [TyVar] -> TcM [TcTyVar]
 -- We use SigTvs for them, so that they can't unify with arbitrary types
 -- Precondition: tyvars should be ordered (kind vars first)
 -- see Note [Kind substitution when instantiating]
-tcInstSigTyVars tyvars
-  = do { kvs' <- mapM (tcInstSigTyVar (mkTopTvSubst [])) kvs
-       ; tvs' <- mapM (tcInstSigTyVar (zipTopTvSubst kvs (map mkTyVarTy kvs'))) tvs
-       ; return (kvs' ++ tvs') }
-  where (kvs, tvs) = splitKiTyVars tyvars
+tcInstSigTyVars = fmap snd . mapAccumLM tcInstSigTyVar (mkTopTvSubst [])
 
-tcInstSigTyVar :: TvSubst -> TyVar -> TcM TcTyVar
-tcInstSigTyVar subst tyvar
+tcInstSigTyVar :: TvSubst -> TyVar -> TcM (TvSubst, TcTyVar)
+tcInstSigTyVar subst tv
   = do { uniq <- newMetaUnique
        ; ref <- newMutVar Flexi
-       ; let name = setNameUnique (tyVarName tyvar) uniq
-                    -- Use the same OccName so that the tidy-er
-                    -- doesn't rename 'a' to 'a0' etc
-             kind = substTy subst (tyVarKind tyvar)
-       ; return (mkTcTyVar name kind (MetaTv SigTv ref)) }
+       ; let name   = setNameUnique (tyVarName tv) uniq
+                      -- Use the same OccName so that the tidy-er
+                      -- doesn't rename 'a' to 'a0' etc
+             kind   = substTy subst (tyVarKind tv)
+             new_tv = mkTcTyVar name kind (MetaTv SigTv ref)
+       ; return (extendTvSubst subst tv (mkTyVarTy new_tv), new_tv) }
 \end{code}
 
 Note [Kind substitution when instantiating]
@@ -578,11 +576,12 @@ zonkTcPredType = zonkTcType
 		     are used at the end of type checking
 
 \begin{code}
-defaultKindVarToStar :: TcTyVar -> TcM ()
+defaultKindVarToStar :: TcTyVar -> TcM Kind
 -- We have a meta-kind: unify it with '*'
 defaultKindVarToStar kv 
-  = ASSERT ( isKiVar kv && isMetaTyVar kv )
-    writeMetaTyVar kv liftedTypeKind
+  = do { ASSERT ( isKiVar kv && isMetaTyVar kv )
+         writeMetaTyVar kv liftedTypeKind
+       ; return liftedTypeKind }
 
 zonkQuantifiedTyVars :: TcTyVarSet -> TcM [TcTyVar]
 -- Precondition: a kind variable occurs before a type
@@ -675,18 +674,25 @@ zonkEvVar :: EvVar -> TcM EvVar
 zonkEvVar var = do { ty' <- zonkTcType (varType var)
                    ; return (setVarType var ty') }
 
-zonkFlavoredEvVar :: FlavoredEvVar -> TcM FlavoredEvVar
-zonkFlavoredEvVar (EvVarX ev fl)
-  = do { ev' <- zonkEvVar ev
-       ; fl' <- zonkFlavor fl
-       ; return (EvVarX ev' fl') }
 
 zonkWC :: WantedConstraints -> TcM WantedConstraints
 zonkWC (WC { wc_flat = flat, wc_impl = implic, wc_insol = insol })
-  = do { flat'   <- zonkWantedEvVars flat
+  = do { flat'   <- mapBagM zonkCt flat 
        ; implic' <- mapBagM zonkImplication implic
-       ; insol'  <- mapBagM zonkFlavoredEvVar insol
+       ; insol'  <- mapBagM zonkCt insol
        ; return (WC { wc_flat = flat', wc_impl = implic', wc_insol = insol' }) }
+
+zonkCt :: Ct -> TcM Ct 
+-- Zonking a Ct conservatively gives back a CNonCanonical
+zonkCt ct 
+  = do { v'  <- zonkEvVar (cc_id ct)
+       ; fl' <- zonkFlavor (cc_flavor ct)
+       ; return $ 
+         CNonCanonical { cc_id = v'
+                       , cc_flavor = fl'
+                       , cc_depth = cc_depth ct } }
+zonkCts :: Cts -> TcM Cts
+zonkCts = mapBagM zonkCt
 
 zonkWantedEvVars :: Bag WantedEvVar -> TcM (Bag WantedEvVar)
 zonkWantedEvVars = mapBagM zonkWantedEvVar
@@ -888,14 +894,26 @@ This might not necessarily show up in kind checking.
 
 	
 \begin{code}
+-- Depending on the context, we might accept any kind (for instance, in a TH
+-- splice), or only certain kinds (like in type signatures).
+expectedKindInCtxt :: UserTypeCtxt -> Maybe Kind
+expectedKindInCtxt (TySynCtxt _)  = Nothing -- Any kind will do
+expectedKindInCtxt ThBrackCtxt    = Nothing
+expectedKindInCtxt GhciCtxt       = Nothing
+expectedKindInCtxt ResSigCtxt     = Just openTypeKind
+expectedKindInCtxt ExprSigCtxt    = Just openTypeKind
+expectedKindInCtxt (ForSigCtxt _) = Just liftedTypeKind
+expectedKindInCtxt _              = Just argTypeKind
+
 checkValidType :: UserTypeCtxt -> Type -> TcM ()
 -- Checks that the type is valid for the given context
 checkValidType ctxt ty = do
-    traceTc "checkValidType" (ppr ty)
-    unboxed  <- xoptM Opt_UnboxedTuples
-    rank2    <- xoptM Opt_Rank2Types
-    rankn    <- xoptM Opt_RankNTypes
-    polycomp <- xoptM Opt_PolymorphicComponents
+    traceTc "checkValidType" (ppr ty <+> text "::" <+> ppr (typeKind ty))
+    unboxed         <- xoptM Opt_UnboxedTuples
+    rank2           <- xoptM Opt_Rank2Types
+    rankn           <- xoptM Opt_RankNTypes
+    polycomp        <- xoptM Opt_PolymorphicComponents
+    constraintKinds <- xoptM Opt_ConstraintKinds
     let 
 	gen_rank n | rankn     = ArbitraryRank
 	           | rank2     = Rank 2
@@ -925,14 +943,9 @@ checkValidType ctxt ty = do
 
 	actual_kind = typeKind ty
 
-	kind_ok = case ctxt of
-			TySynCtxt _  -> True -- Any kind will do
-			ThBrackCtxt  -> True -- ditto
-                        GhciCtxt     -> True -- ditto
-			ResSigCtxt   -> tcIsSubOpenTypeKind actual_kind
-			ExprSigCtxt  -> tcIsSubOpenTypeKind actual_kind
-			ForSigCtxt _ -> isLiftedTypeKind actual_kind
-			_            -> tcIsSubArgTypeKind actual_kind
+        kind_ok = case expectedKindInCtxt ctxt of
+                    Nothing -> True
+                    Just k  -> tcIsSubKind actual_kind k
 	
 	ubx_tup 
          | not unboxed = UT_NotOk
@@ -949,10 +962,12 @@ checkValidType ctxt ty = do
 	-- Check that the thing has kind Type, and is lifted if necessary
 	-- Do this second, because we can't usefully take the kind of an 
 	-- ill-formed type such as (a~Int)
-    traceTc "checkValidType kind_ok ctxt" (ppr kind_ok $$ pprUserTypeCtxt ctxt)
     checkTc kind_ok (kindErr actual_kind)
 
-    traceTc "checkValidType done" (ppr ty)
+        -- Check that the thing does not have kind Constraint,
+        -- if -XConstraintKinds isn't enabled
+    unless constraintKinds
+      $ checkTc (not (isConstraintKind actual_kind)) (predTupleErr ty)
 
 checkValidMonoType :: Type -> TcM ()
 checkValidMonoType ty = check_mono_type MustBeMonoType ty
@@ -1222,7 +1237,7 @@ check_pred_ty' _ _ctxt (IPPred _ ty) = checkValidMonoType ty
 check_pred_ty' dflags ctxt t@(TuplePred ts)
   = do { checkTc (xopt Opt_ConstraintKinds dflags)
                  (predTupleErr (predTreePredType t))
-       ; mapM_ (check_pred_ty' dflags ctxt) ts }
+       ; mapM_ (check_pred_ty dflags ctxt) ts }
     -- This case will not normally be executed because without -XConstraintKinds
     -- tuple types are only kind-checked as *
 
@@ -1391,7 +1406,7 @@ growPredTyVars :: TcPredType
                -> TyVarSet	-- The set to extend
 	       -> TyVarSet	-- TyVars of the predicate if it intersects
 	       	  		-- the set, or is implicit parameter
-growPredTyVars pred tvs = go (predTypePredTree pred)
+growPredTyVars pred tvs = go (classifyPredType pred)
   where
     grow pred_tvs | pred_tvs `intersectsVarSet` tvs = pred_tvs
                   | otherwise                       = emptyVarSet
@@ -1399,7 +1414,7 @@ growPredTyVars pred tvs = go (predTypePredTree pred)
     go (IPPred _ ty)     = tyVarsOfType ty -- See Note [Implicit parameters and ambiguity]
     go (ClassPred _ tys) = grow (tyVarsOfTypes tys)
     go (EqPred ty1 ty2)  = grow (tyVarsOfType ty1 `unionVarSet` tyVarsOfType ty2)
-    go (TuplePred ts)    = unionVarSets (map go ts)
+    go (TuplePred ts)    = unionVarSets (map (go . classifyPredType) ts)
     go (IrredPred ty)    = grow (tyVarsOfType ty)
 \end{code}
     
@@ -1732,7 +1747,6 @@ fvType (ForAllTy tyvar ty) = filter (/= tyvar) (fvType ty)
 fvTypes :: [Type] -> [TyVar]
 fvTypes tys                = concat (map fvType tys)
 
--------------------
 sizeType :: Type -> Int
 -- Size of a type: the number of variables and constructors
 sizeType ty | Just exp_ty <- tcView ty = sizeType exp_ty
@@ -1754,12 +1768,12 @@ sizeTypes xs = sum (map sizeType tys)
 -- can't get back to a class constraint, so it's safe
 -- to say "size 0".  See Trac #4200.
 sizePred :: PredType -> Int
-sizePred ty = go (predTypePredTree ty)
+sizePred ty = go (classifyPredType ty)
   where
     go (ClassPred _ tys') = sizeTypes tys'
     go (IPPred {})        = 0
     go (EqPred {})        = 0
-    go (TuplePred ts)     = sum (map go ts)
+    go (TuplePred ts)     = sum (map (go . classifyPredType) ts)
     go (IrredPred ty)     = sizeType ty
 \end{code}
 

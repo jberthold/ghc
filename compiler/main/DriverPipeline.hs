@@ -148,7 +148,7 @@ compile' (nothingCompiler, interactiveCompiler, batchCompiler)
    -- Figure out what lang we're generating
    let hsc_lang = hscTarget dflags
    -- ... and what the next phase should be
-   let next_phase = hscNextPhase dflags src_flavour hsc_lang
+   let next_phase = hscPostBackendPhase dflags src_flavour hsc_lang
    -- ... and what file to generate the output into
    output_fn <- getOutputFilename next_phase
                         Temporary basename dflags next_phase (Just location)
@@ -172,8 +172,7 @@ compile' (nothingCompiler, interactiveCompiler, batchCompiler)
        handleBatch (HscRecomp hasStub _)
            | isHsBoot src_flavour
                = do when (isObjectTarget hsc_lang) $ -- interpreted reaches here too
-                       liftIO $ SysTools.touch dflags' "Touching object file"
-                                   object_filename
+                       liftIO $ touchObjectFile dflags' object_filename
                     return maybe_old_linkable
 
            | otherwise
@@ -330,8 +329,8 @@ link' dflags batch_attempt_linking hpt
                    return Succeeded
            else do
 
-        debugTraceMsg dflags 1 (ptext (sLit "Linking") <+> text exe_file
-                                 <+> text "...")
+        compilationProgressMsg dflags $ showSDoc $
+            (ptext (sLit "Linking") <+> text exe_file <+> text "...")
 
         -- Don't showPass in Batch mode; doLink will do that for us.
         let link = case ghcLink dflags of
@@ -746,9 +745,7 @@ runPhase (Unlit sf) input_fn dflags
                    [ -- The -h option passes the file name for unlit to
                      -- put in a #line directive
                      SysTools.Option     "-h"
-                     -- cpp interprets \b etc as escape sequences,
-                     -- so we use / for filenames in pragmas
-                   , SysTools.Option $ reslash Forwards $ normalise input_fn
+                   , SysTools.Option $ escape $ normalise input_fn
                    , SysTools.FileOption "" input_fn
                    , SysTools.FileOption "" output_fn
                    ]
@@ -756,6 +753,19 @@ runPhase (Unlit sf) input_fn dflags
        io $ SysTools.runUnlit dflags flags
 
        return (Cpp sf, output_fn)
+  where
+       -- escape the characters \, ", and ', but don't try to escape
+       -- Unicode or anything else (so we don't use Util.charToC
+       -- here).  If we get this wrong, then in
+       -- Coverage.addTicksToBinds where we check that the filename in
+       -- a SrcLoc is the same as the source filenaame, the two will
+       -- look bogusly different. See test:
+       -- libraries/hpc/tests/function/subdir/tough2.lhs
+       escape ('\\':cs) = '\\':'\\': escape cs
+       escape ('\"':cs) = '\\':'\"': escape cs
+       escape ('\'':cs) = '\\':'\'': escape cs
+       escape (c:cs)    = c : escape cs
+       escape []        = []
 
 -------------------------------------------------------------------------------
 -- Cpp phase : (a) gets OPTIONS out of file
@@ -922,7 +932,7 @@ runPhase (Hsc src_flavour) input_fn dflags0
                                   else return SourceModified
 
   -- get the DynFlags
-        let next_phase = hscNextPhase dflags src_flavour hsc_lang
+        let next_phase = hscPostBackendPhase dflags src_flavour hsc_lang
         output_fn  <- phaseOutputFilename next_phase
 
         let dflags' = dflags { hscTarget = hsc_lang,
@@ -956,7 +966,7 @@ runPhase (Hsc src_flavour) input_fn dflags0
 
         case result of
           HscNoRecomp
-              -> do io $ SysTools.touch dflags' "Touching object file" o_file
+              -> do io $ touchObjectFile dflags' o_file
                     -- The .o file must have a later modification date
                     -- than the source file (else we wouldn't be in HscNoRecomp)
                     -- but we touch it anyway, to keep 'make' happy (we think).
@@ -970,7 +980,7 @@ runPhase (Hsc src_flavour) input_fn dflags0
                     -- In the case of hs-boot files, generate a dummy .o-boot
                     -- stamp file for the benefit of Make
                     when (isHsBoot src_flavour) $
-                      io $ SysTools.touch dflags' "Touching object file" o_file
+                      io $ touchObjectFile dflags' o_file
                     return (next_phase, output_fn)
 
 -----------------------------------------------------------------------------
@@ -988,7 +998,7 @@ runPhase Cmm input_fn dflags
         PipeEnv{src_basename} <- getPipeEnv
         let hsc_lang = hscTarget dflags
 
-        let next_phase = hscNextPhase dflags HsSrcFile hsc_lang
+        let next_phase = hscPostBackendPhase dflags HsSrcFile hsc_lang
 
         output_fn <- phaseOutputFilename next_phase
 
@@ -1000,11 +1010,6 @@ runPhase Cmm input_fn dflags
         PipeState{hsc_env} <- getPipeState
 
         io $ hscCompileCmmFile hsc_env input_fn
-
-        -- XXX: catch errors above and convert them into ghcError?  Original
-        -- code was:
-        --
-        --when (not ok) $ ghcError (PhaseFailed "cmm" (ExitFailure 1))
 
         return (next_phase, output_fn)
 
@@ -1064,7 +1069,6 @@ runPhase cc_phase input_fn dflags
                    | otherwise            = "-O"
 
         -- Decide next phase
-
         let next_phase = As
         output_fn <- phaseOutputFilename next_phase
 
@@ -1137,12 +1141,10 @@ runPhase cc_phase input_fn dflags
 
         return (next_phase, output_fn)
 
-        -- ToDo: postprocess the output from gcc
-
 -----------------------------------------------------------------------------
 -- Splitting phase
 
-runPhase SplitMangle input_fn dflags
+runPhase Splitter input_fn dflags
   = do  -- tmp_pfx is the prefix used for the split .s files
 
         split_s_prefix <- io $ SysTools.newTempName dflags "split"
@@ -1165,15 +1167,30 @@ runPhase SplitMangle input_fn dflags
         io $ addFilesToClean dflags' [ split_s_prefix ++ "__" ++ show n ++ ".s"
                                      | n <- [1..n_files]]
 
-        return (SplitAs, "**splitmangle**")
-          -- we don't use the filename
+        return (SplitAs,
+                "**splitter**") -- we don't use the filename in SplitAs
 
 -----------------------------------------------------------------------------
--- As phase
+-- As, SpitAs phase : Assembler
 
+-- This is for calling the assembler on a regular assembly file (not split).
 runPhase As input_fn dflags
   = do
-        let as_opts =  getOpts dflags opt_a
+        -- LLVM from version 3.0 onwards doesn't support the OS X system
+        -- assembler, so we use clang as the assembler instead. (#5636)
+        let whichAsProg | hscTarget dflags == HscLlvm &&
+                          platformOS (targetPlatform dflags) == OSDarwin
+                        = do
+                            llvmVer <- io $ figureLlvmVersion dflags
+                            return $ case llvmVer of
+                                Just n | n >= 30 -> SysTools.runClang
+                                _                -> SysTools.runAs
+
+                        | otherwise
+                        = return SysTools.runAs
+
+        as_prog <- whichAsProg
+        let as_opts = getOpts dflags opt_a
         let cmdline_include_paths = includePaths dflags
 
         next_phase <- maybeMergeStub
@@ -1183,7 +1200,7 @@ runPhase As input_fn dflags
         -- might be a hierarchical module.
         io $ createDirectoryHierarchy (takeDirectory output_fn)
 
-        io $ SysTools.runAs dflags
+        io $ as_prog dflags
                        (map SysTools.Option as_opts
                        ++ [ SysTools.Option ("-I" ++ p) | p <- cmdline_include_paths ]
 
@@ -1207,6 +1224,8 @@ runPhase As input_fn dflags
         return (next_phase, output_fn)
 
 
+-- This is for calling the assembler on a split assembly file (so a collection
+-- of assembly files)
 runPhase SplitAs _input_fn dflags
   = do
         -- we'll handle the stub_o file in this phase, so don't MergeStub,
@@ -1330,7 +1349,13 @@ runPhase LlvmLlc input_fn dflags
                | not opt_Static = "dynamic-no-pic"
                | otherwise      = "static"
 
-    output_fn <- phaseOutputFilename LlvmMangle
+    -- hidden debugging flag '-dno-llvm-mangler' to skip mangling
+    let next_phase = case dopt Opt_NoLlvmMangler dflags of
+                         False                            -> LlvmMangle
+                         True | dopt Opt_SplitObjs dflags -> Splitter
+                         True                             -> As
+                        
+    output_fn <- phaseOutputFilename next_phase
 
     io $ SysTools.runLlvmLlc dflags
                 ([ SysTools.Option (llvmOpts !! opt_lvl),
@@ -1340,16 +1365,15 @@ runPhase LlvmLlc input_fn dflags
                 ++ map SysTools.Option lc_opts
                 ++ map SysTools.Option fpOpts)
 
-    return (LlvmMangle, output_fn)
+    return (next_phase, output_fn)
   where
         -- Bug in LLVM at O3 on OSX.
         llvmOpts = if platformOS (targetPlatform dflags) == OSDarwin
                    then ["-O1", "-O2", "-O2"]
                    else ["-O1", "-O2", "-O3"]
         -- On ARMv7 using LLVM, LLVM fails to allocate floating point registers
-        -- while compiling GHC source code. It's probably due to fact
-        -- that it does not enable VFP by default. Let's do this manually
-        -- here
+        -- while compiling GHC source code. It's probably due to fact that it
+        -- does not enable VFP by default. Let's do this manually here
         fpOpts = case platformArch (targetPlatform dflags) of 
                    ArchARM ARMv7 ext -> if (elem VFPv3 ext)
                                       then ["-mattr=+v7,+vfp3"]
@@ -1361,11 +1385,12 @@ runPhase LlvmLlc input_fn dflags
 -----------------------------------------------------------------------------
 -- LlvmMangle phase
 
-runPhase LlvmMangle input_fn _dflags
+runPhase LlvmMangle input_fn dflags
   = do
-      output_fn <- phaseOutputFilename As
-      io $ llvmFixupAsm input_fn output_fn
-      return (As, output_fn)
+      let next_phase = if dopt Opt_SplitObjs dflags then Splitter else As
+      output_fn <- phaseOutputFilename next_phase
+      io $ llvmFixupAsm dflags input_fn output_fn
+      return (next_phase, output_fn)
 
 -----------------------------------------------------------------------------
 -- merge in stub objects
@@ -1451,25 +1476,48 @@ mkExtraCObj dflags xs
                       ++ map (FileOption "-I") (includeDirs rtsDetails))
       return oFile
 
+-- When linking a binary, we need to create a C main() function that
+-- starts everything off.  This used to be compiled statically as part
+-- of the RTS, but that made it hard to change the -rtsopts setting,
+-- so now we generate and compile a main() stub as part of every
+-- binary and pass the -rtsopts setting directly to the RTS (#5373)
+--
 mkExtraObjToLinkIntoBinary :: DynFlags -> [PackageId] -> IO FilePath
 mkExtraObjToLinkIntoBinary dflags dep_packages = do
    link_info <- getLinkInfo dflags dep_packages
-   mkExtraCObj dflags (showSDoc (vcat [rts_opts_enabled,
-                                       extra_rts_opts,
+
+   let have_rts_opts_flags =
+         isJust (rtsOpts dflags) || case rtsOptsEnabled dflags of
+                                        RtsOptsSafeOnly -> False
+                                        _ -> True
+
+   when (dopt Opt_NoHsMain dflags && have_rts_opts_flags) $ do
+      hPutStrLn stderr $ "Warning: -rtsopts and -with-rtsopts have no effect with -no-hs-main.\n" ++
+                         "    Call hs_init_ghc() from your main() function to set these options."
+
+   mkExtraCObj dflags (showSDoc (vcat [main,
                                        link_opts link_info]
                                    <> char '\n')) -- final newline, to
                                                   -- keep gcc happy
 
   where
-    rts_opts_enabled
-         = vcat [text "#include \"Rts.h\"",
-                 text "#include \"RtsOpts.h\"",
-                 text "const RtsOptsEnabledEnum rtsOptsEnabled = " <>
-                       text (show (rtsOptsEnabled dflags)) <> semi ]
-
-    extra_rts_opts = case rtsOpts dflags of
-          Nothing   -> empty
-          Just opts -> text "char *ghc_rts_opts = " <> text (show opts) <> semi
+    main
+      | dopt Opt_NoHsMain dflags = empty
+      | otherwise = vcat [
+             ptext (sLit "#include \"Rts.h\""),
+             ptext (sLit "extern StgClosure ZCMain_main_closure;"),
+             ptext (sLit "int main(int argc, char *argv[])"),
+             char '{',
+             ptext (sLit "    RtsConfig __conf = defaultRtsConfig;"),
+             ptext (sLit "    __conf.rts_opts_enabled = ")
+                 <> text (show (rtsOptsEnabled dflags)) <> semi,
+             case rtsOpts dflags of
+                Nothing   -> empty
+                Just opts -> ptext (sLit "    __conf.rts_opts= ") <>
+                               text (show opts) <> semi,
+             ptext (sLit "    return hs_main(argc, argv, &ZCMain_main_closure,__conf);"),
+             char '}'
+           ]
 
     link_opts info
      | not (platformSupportsSavingLinkOpts (platformOS (targetPlatform dflags)))
@@ -1660,13 +1708,6 @@ linkBinary dflags o_files dep_packages = do
     let lib_paths = libraryPaths dflags
     let lib_path_opts = map ("-L"++) lib_paths
 
-    -- The C "main" function is not in the rts but in a separate static
-    -- library libHSrtsmain.a that sits next to the rts lib files. Assuming
-    -- we're using a Haskell main function then we need to link it in.
-    let no_hs_main = dopt Opt_NoHsMain dflags
-    let main_lib | no_hs_main = []
-                 | otherwise  = [ "-lHSrtsmain" ]
-
     extraLinkObj <- mkExtraObjToLinkIntoBinary dflags dep_packages
 
     pkg_link_opts <- getPackageLinkOpts dflags dep_packages
@@ -1726,7 +1767,7 @@ linkBinary dflags o_files dep_packages = do
 
     let
         thread_opts | WayThreaded `elem` ways = [
-#if !defined(mingw32_TARGET_OS) && !defined(freebsd_TARGET_OS) && !defined(openbsd_TARGET_OS) && !defined(haiku_TARGET_OS)
+#if !defined(mingw32_TARGET_OS) && !defined(freebsd_TARGET_OS) && !defined(openbsd_TARGET_OS) && !defined(netbsd_TARGET_OS) && !defined(haiku_TARGET_OS)
                         "-lpthread"
 #endif
 #if defined(osf3_TARGET_OS)
@@ -1795,7 +1836,6 @@ linkBinary dflags o_files dep_packages = do
                       ++ framework_path_opts
                       ++ framework_opts
                       ++ pkg_lib_path_opts
-                      ++ main_lib
                       ++ [extraLinkObj]
                       ++ pkg_link_opts
                       ++ pkg_framework_path_opts
@@ -1928,8 +1968,6 @@ linkDynLib dflags o_files dep_packages = do
 
     let extra_ld_opts = getOpts dflags opt_l
 
-    extraLinkObj <- mkExtraObjToLinkIntoBinary dflags dep_packages
-
 #if defined(mingw32_HOST_OS)
     -----------------------------------------------------------------------------
     -- Making a DLL
@@ -1956,7 +1994,6 @@ linkDynLib dflags o_files dep_packages = do
          ++ lib_path_opts
          ++ extra_ld_opts
          ++ pkg_lib_path_opts
-         ++ [extraLinkObj]
          ++ pkg_link_opts
         ))
 #elif defined(darwin_TARGET_OS)
@@ -2012,7 +2049,6 @@ linkDynLib dflags o_files dep_packages = do
          ++ lib_path_opts
          ++ extra_ld_opts
          ++ pkg_lib_path_opts
-         ++ [extraLinkObj]
          ++ pkg_link_opts
         ))
 #else
@@ -2046,7 +2082,6 @@ linkDynLib dflags o_files dep_packages = do
          ++ lib_path_opts
          ++ extra_ld_opts
          ++ pkg_lib_path_opts
-         ++ [extraLinkObj]
          ++ pkg_link_opts
         ))
 #endif
@@ -2123,13 +2158,18 @@ joinObjectFiles dflags o_files output_fn = do
                                 else [])
                          ++ [
                             SysTools.Option ld_build_id,
-                            SysTools.Option ld_x_flag,
+                            -- SysTools.Option ld_x_flag,
                             SysTools.Option "-o",
                             SysTools.FileOption "" output_fn ]
                          ++ args)
 
-      ld_x_flag | null cLD_X = ""
-                | otherwise  = "-Wl,-x"
+      -- Do *not* add the -x flag to ld, because we want to keep those
+      -- local symbols around for the benefit of external tools. e.g.
+      -- the 'perf report' output is much less useful if all the local
+      -- symbols have been stripped out.
+      --
+      -- ld_x_flag | null cLD_X = ""
+      --           | otherwise  = "-Wl,-x"
 
       -- suppress the generation of the .note.gnu.build-id section,
       -- which we don't need and sometimes causes ld to emit a
@@ -2148,14 +2188,20 @@ joinObjectFiles dflags o_files output_fn = do
 -- -----------------------------------------------------------------------------
 -- Misc.
 
-hscNextPhase :: DynFlags -> HscSource -> HscTarget -> Phase
-hscNextPhase _ HsBootFile _        =  StopLn
-hscNextPhase dflags _ hsc_lang =
+-- | What phase to run after one of the backend code generators has run
+hscPostBackendPhase :: DynFlags -> HscSource -> HscTarget -> Phase
+hscPostBackendPhase _ HsBootFile _    =  StopLn
+hscPostBackendPhase dflags _ hsc_lang =
   case hsc_lang of
         HscC -> HCc
-        HscAsm | dopt Opt_SplitObjs dflags -> SplitMangle
-               | otherwise -> As
+        HscAsm | dopt Opt_SplitObjs dflags -> Splitter
+               | otherwise                 -> As
         HscLlvm        -> LlvmOpt
         HscNothing     -> StopLn
         HscInterpreted -> StopLn
+
+touchObjectFile :: DynFlags -> FilePath -> IO ()
+touchObjectFile dflags path = do
+  createDirectoryHierarchy $ takeDirectory path
+  SysTools.touch dflags "Touching object file" path
 

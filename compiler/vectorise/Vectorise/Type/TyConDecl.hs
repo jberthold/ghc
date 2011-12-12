@@ -1,9 +1,3 @@
-{-# OPTIONS -fno-warn-tabs #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and
--- detab the module (please do the detabbing in a separate patch). See
---     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
--- for details
 
 module Vectorise.Type.TyConDecl (
   vectTyConDecls
@@ -48,8 +42,12 @@ vectTyConDecl tycon
            -- vectorise superclass constraint (types)
        ; theta' <- mapM vectType (classSCTheta cls)
 
-           -- vectorise method selectors and add them to the vectorisation map
-       ; methods' <- sequence [ vectMethod id meth | (id, meth) <- classOpItems cls]
+           -- vectorise method selectors
+       ; let opItems      = classOpItems cls
+             Just datacon = tyConSingleDataCon_maybe tycon
+             argTys       = dataConRepArgTys datacon                      -- all selector types
+             opTys        = drop (length argTys - length opItems) argTys  -- only method types
+       ; methods' <- sequence [ vectMethod id meth ty | ((id, meth), ty) <- zip opItems opTys]
 
            -- keep the original recursiveness flag
        ; let rec_flag = boolToRecFlag (isRecursiveTyCon tycon)
@@ -74,6 +72,11 @@ vectTyConDecl tycon
              Just datacon  = tyConSingleDataCon_maybe tycon
              Just datacon' = tyConSingleDataCon_maybe tycon'
        ; defDataCon datacon datacon'
+
+           -- the original superclass and methods selectors must map to the vectorised ones
+       ; let selIds  = classAllSelIds cls
+             selIds' = classAllSelIds cls'
+       ; zipWithM_ defGlobalVar selIds selIds'
 
            -- return the type constructor of the vectorised class
        ; return tycon'
@@ -110,25 +113,17 @@ vectTyConDecl tycon
   | otherwise
   = cantVectorise "Can't vectorise exotic type constructor" (ppr tycon)
 
--- |Vectorise a class method.
+-- |Vectorise a class method.  (Don't enter it into the vectorisation map yet.)
 --
-vectMethod :: Id -> DefMeth -> VM (Name, DefMethSpec, Type)
-vectMethod id defMeth
+vectMethod :: Id -> DefMeth -> Type -> VM (Name, DefMethSpec, Type)
+vectMethod id defMeth ty
  = do {   -- Vectorise the method type.
-      ; typ' <- vectType (varType id)
+      ; ty' <- vectType ty
 
           -- Create a name for the vectorised method.
-      ; id' <- mkVectId id typ'
-      ; defGlobalVar id id'
+      ; id' <- mkVectId id ty'
 
-          -- When we call buildClass in vectTyConDecl, it adds foralls and dictionaries
-          -- to the types of each method. However, the types we get back from vectType
-          -- above already already have these, so we need to chop them off here otherwise
-          -- we'll get two copies in the final version.
-      ; let (_tyvars, tyBody) = splitForAllTys typ'
-      ; let (_dict,   tyRest) = splitFunTy tyBody
-
-      ; return  (Var.varName id', defMethSpecOfDefMeth defMeth, tyRest)
+      ; return  (Var.varName id', defMethSpecOfDefMeth defMeth, ty')
       }
 
 -- |Vectorise the RHS of an algebraic type.

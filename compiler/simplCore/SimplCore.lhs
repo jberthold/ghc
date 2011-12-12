@@ -191,8 +191,12 @@ getCoreToDo dflags
 
     core_todo =
      if opt_level == 0 then
-       [vectorisation,
-        simpl_phase 0 ["final"] max_iter]
+       [ vectorisation
+       , CoreDoSimplify max_iter
+             (base_mode { sm_phase = Phase 0
+                        , sm_names = ["Non-opt simplification"] }) 
+       ]
+
      else {- opt_level >= 1 -} [
 
     -- We want to do the static argument transform before full laziness as it
@@ -295,7 +299,6 @@ getCoreToDo dflags
         simpl_phase 0 ["final"] max_iter
      ]
 \end{code}
-
 
 Loading plugins
 
@@ -882,6 +885,7 @@ hasShortableIdInfo :: Id -> Bool
 hasShortableIdInfo id
   =  isEmptySpecInfo (specInfo info)
   && isDefaultInlinePragma (inlinePragInfo info)
+  && not (isStableUnfolding (unfoldingInfo info))
   where
      info = idInfo id
 

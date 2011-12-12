@@ -42,6 +42,7 @@ import Constants
 import Module
 import FastString
 import Outputable
+import StaticFlags
 
 ------------------------------------------------------------------------
 --	Primitive operations and foreign calls
@@ -222,11 +223,21 @@ emitPrimOp [res] SparkOp [arg]
         -- refer to arg twice (once to pass to newSpark(), and once to
         -- assign to res), so put it in a temporary.
         tmp <- assignTemp arg
+        tmp2 <- newTemp bWord
         emitCCall
-            []
+            [(tmp2,NoHint)]
             (CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageId (fsLit "newSpark"))))
             [(CmmReg (CmmGlobal BaseReg), AddrHint), ((CmmReg (CmmLocal tmp)), AddrHint)]
         emit (mkAssign (CmmLocal res) (CmmReg (CmmLocal tmp)))
+
+emitPrimOp [res] GetCCSOfOp [arg]
+  = emit (mkAssign (CmmLocal res) val)
+  where
+    val | opt_SccProfilingOn = costCentreFrom (cmmUntag arg)
+        | otherwise          = CmmLit zeroCLit
+
+emitPrimOp [res] GetCurrentCCSOp [_dummy_arg]
+   = emit (mkAssign (CmmLocal res) curCCS)
 
 emitPrimOp [res] ReadMutVarOp [mutv]
    = emit (mkAssign (CmmLocal res) (cmmLoadIndexW mutv fixedHdrSize gcWord))
@@ -296,8 +307,12 @@ emitPrimOp [res] DataToTagOp [arg]
 --	}
 emitPrimOp [res] UnsafeFreezeArrayOp [arg]
    = emit $ catAGraphs
-	 [ setInfo arg (CmmLit (CmmLabel mkMAP_FROZEN_infoLabel)),
-	   mkAssign (CmmLocal res) arg ]
+   [ setInfo arg (CmmLit (CmmLabel mkMAP_FROZEN_infoLabel)),
+     mkAssign (CmmLocal res) arg ]
+emitPrimOp [res] UnsafeFreezeArrayArrayOp [arg]
+   = emit $ catAGraphs
+   [ setInfo arg (CmmLit (CmmLabel mkMAP_FROZEN_infoLabel)),
+     mkAssign (CmmLocal res) arg ]
 
 --  #define unsafeFreezzeByteArrayzh(r,a)	r=(a)
 emitPrimOp [res] UnsafeFreezeByteArrayOp [arg]
@@ -615,6 +630,7 @@ translateOp SameMutVarOp           = Just mo_wordEq
 translateOp SameMVarOp             = Just mo_wordEq
 translateOp SameMutableArrayOp     = Just mo_wordEq
 translateOp SameMutableByteArrayOp = Just mo_wordEq
+translateOp SameMutableArrayArrayOp= Just mo_wordEq
 translateOp SameTVarOp             = Just mo_wordEq
 translateOp EqStablePtrOp          = Just mo_wordEq
 
@@ -877,7 +893,7 @@ emitCloneArray info_p res_r src0 src_off0 n0 = do
         (CmmLit $ mkIntCLit 0)
 
     let arr = CmmReg (CmmLocal arr_r)
-    emitSetDynHdr arr (CmmLit (CmmLabel info_p)) curCCSAddr
+    emitSetDynHdr arr (CmmLit (CmmLabel info_p)) curCCS
     emit $ mkStore (cmmOffsetB arr (fixedHdrSize * wORD_SIZE +
                                     oFFSET_StgMutArrPtrs_ptrs)) n
     emit $ mkStore (cmmOffsetB arr (fixedHdrSize * wORD_SIZE +

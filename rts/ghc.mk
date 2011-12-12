@@ -20,8 +20,7 @@ rts_dist_HC = $(GHC_STAGE1)
 rts_WAYS = $(GhcLibWays) $(filter-out $(GhcLibWays),$(GhcRTSWays))
 rts_dist_WAYS = $(rts_WAYS)
 
-ALL_RTS_LIBS = rts/dist/build/libHSrtsmain.a \
-             $(foreach way,$(rts_WAYS),rts/dist/build/libHSrts$($(way)_libsuf))
+ALL_RTS_LIBS = $(foreach way,$(rts_WAYS),rts/dist/build/libHSrts$($(way)_libsuf))
 all_rts : $(ALL_RTS_LIBS)
 
 # -----------------------------------------------------------------------------
@@ -36,7 +35,6 @@ ALL_DIRS += posix
 endif
 
 EXCLUDED_SRCS :=
-EXCLUDED_SRCS += rts/Main.c
 EXCLUDED_SRCS += rts/parallel/SysMan.c
 EXCLUDED_SRCS += $(wildcard rts/Vis*.c)
 
@@ -109,9 +107,9 @@ endif
 ifneq "$(BINDIST)" "YES"
 rts_ffi_objs_stamp = rts/dist/ffi/stamp
 rts_ffi_objs       = rts/dist/ffi/*.o
-$(rts_ffi_objs_stamp): $(libffi_STATIC_LIB) | $$(dir $$@)/.
+$(rts_ffi_objs_stamp): $(libffi_STATIC_LIB) $(TOUCH_DEP) | $$(dir $$@)/.
 	cd rts/dist/ffi && $(AR) x ../../../$(libffi_STATIC_LIB)
-	touch $@
+	"$(TOUCH_CMD)" $@
 
 # This is a little hacky. We don't know the SO version, so we only
 # depend on libffi.so, but copy libffi.so*
@@ -478,7 +476,7 @@ endif
 
 $(eval $(call dependencies,rts,dist,1))
 
-$(rts_dist_depfile_c_asm) : $(ffi_HEADER) $(DTRACEPROBES_H)
+$(rts_dist_depfile_c_asm) : $(libffi_HEADERS) $(DTRACEPROBES_H)
 
 # -----------------------------------------------------------------------------
 # compile dtrace probes if dtrace is supported
@@ -506,15 +504,6 @@ $(DTRACEPROBES_H): $(DTRACEPROBES_SRC) includes/ghcplatform.h | $$(dir $$@)/.
 endif
 
 # -----------------------------------------------------------------------------
-# build the static lib containing the C main symbol
-
-ifneq "$(BINDIST)" "YES"
-rts/dist/build/libHSrtsmain.a : rts/dist/build/Main.o
-	"$(RM)" $(RM_OPTS) $@
-	"$(AR_STAGE1)" $(AR_OPTS_STAGE1) $(EXTRA_AR_ARGS_STAGE1) $@ $<
-endif
-
-# -----------------------------------------------------------------------------
 # The RTS package config
 
 # If -DDEBUG is in effect, adjust package conf accordingly..
@@ -538,6 +527,13 @@ endif
 INSTALL_LIBS += $(ALL_RTS_LIBS)
 INSTALL_LIBS += $(wildcard rts/dist/build/libffi$(soext)*)
 INSTALL_LIBS += $(wildcard rts/dist/build/libffi-5.dll)
+
+install: install_libffi_headers
+
+.PHONY: install_libffi_headers
+install_libffi_headers :
+	$(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)")
+	$(call INSTALL_HEADER,$(INSTALL_OPTS),$(libffi_HEADERS),"$(DESTDIR)$(ghcheaderdir)/")
 
 # -----------------------------------------------------------------------------
 # cleaning

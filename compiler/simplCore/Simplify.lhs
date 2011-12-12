@@ -21,6 +21,7 @@ import Type hiding      ( substTy, extendTvSubst, substTyVar )
 import SimplEnv
 import SimplUtils
 import FamInstEnv	( FamInstEnv )
+import Literal		( litIsLifted )
 import Id
 import MkId		( seqId, realWorldPrimId )
 import MkCore		( mkImpossibleExpr )
@@ -982,26 +983,12 @@ simplCoercionF :: SimplEnv -> InCoercion -> SimplCont
 --  =  Coercion (syn (nth 0 g) ; co ; nth 1 g) 
 simplCoercionF env co cont 
   = do { co' <- simplCoercion env co
-       ; simpl_co co' cont }
-  where
-    simpl_co co (CoerceIt g cont)
-       = simpl_co new_co cont
-     where
-       -- g :: (s1 ~# s2) ~# (t1 ~#  t2)
-       -- g1 :: s1 ~# t1
-       -- g2 :: s2 ~# t2
-       new_co = mkSymCo g1 `mkTransCo` co `mkTransCo` g2
-       [_reflk, g1, g2] = decomposeCo 3 g
-            -- Remember, (~#) :: forall k. k -> k -> *
-            -- so it takes *three* arguments, not two
-
-    simpl_co co cont
-       = seqCo co `seq` rebuild env (Coercion co) cont
+       ; rebuild env (Coercion co') cont }
 
 simplCoercion :: SimplEnv -> InCoercion -> SimplM OutCoercion
 simplCoercion env co
   = let opt_co = optCoercion (getCvSubst env) co
-    in opt_co `seq` return opt_co
+    in seqCo opt_co `seq` return opt_co
 
 -----------------------------------
 -- | Push a TickIt context outwards past applications and cases, as
@@ -1039,55 +1026,77 @@ simplTick env tickish expr cont
        ; return (env', mkTick tickish expr')
        }
 
-  -- the last case handles scoped/counting ticks, where all we
-  -- can do is simplify the inner expression and then rebuild.
-  --
-  -- NB. float handling here is tricky.  We have some floats already
-  -- in the env, and there may be floats arising from the inner
-  -- expression.  We must be careful to wrap any floats arising from
-  -- the inner expression with a non-counting tick, but not those from
-  -- the env passed in.
-  --
-
   -- For breakpoints, we cannot do any floating of bindings around the
   -- tick, because breakpoints cannot be split into tick/scope pairs.
-  | Breakpoint{} <- tickish
-  = do { let (inc,outc) = splitCont cont
-       ; (env', expr') <- simplExprF (zapFloats env) expr inc
-       ; let tickish' = simplTickish env tickish
-       ; (env'', expr'') <- rebuild (zapFloats env') (wrapFloats env' expr') (TickIt tickish' outc)
-       ; return (env'', wrapFloats env expr'')
-       }
+  | not (tickishCanSplit tickish)
+  = no_floating_past_tick
 
-  | Just expr' <- want_to_push_tick_inside
+  | interesting_cont, Just expr' <- push_tick_inside tickish expr
     -- see Note [case-of-scc-of-case]
   = simplExprF env expr' cont
 
   | otherwise
-  = do { let (inc,outc) = splitCont cont
-       ; (env', expr') <- simplExprF (zapFloats env) expr inc
-       ; let tickish' = simplTickish env tickish
-       ; let wrap_float (b,rhs) = (zapIdStrictness (setIdArity b 0),
-                                   mkTick (mkNoTick tickish') rhs)
-              -- when wrapping a float with mkTick, we better zap the Id's
-              -- strictness info and arity, because it might be wrong now.
-       ; let env'' = addFloats env (mapFloats env' wrap_float)
-       ; rebuild env'' expr' (TickIt tickish' outc)
-       }
+  = no_floating_past_tick -- was: wrap_floats, see below
+
  where
-  want_to_push_tick_inside
-     | not interesting_cont = Nothing
+  interesting_cont = case cont of
+                        Select _ _ _ _ _ -> True
+                        _ -> False
+
+  push_tick_inside t expr0
+     | not (tickishCanSplit t) = Nothing
      | otherwise
-       = case expr of
+       = case expr0 of
+           Tick t' expr
+              -- scc t (tick t' E)
+              --   Pull the tick to the outside
+              -- This one is important for #5363
+              | not (tickishScoped t')
+                 -> Just (Tick t' (Tick t expr))
+
+              -- scc t (scc t' E)
+              --   Try to push t' into E first, and if that works,
+              --   try to push t in again
+              | Just expr' <- push_tick_inside t' expr
+                 -> push_tick_inside t expr'
+
+              | otherwise -> Nothing
+
            Case scrut bndr ty alts
-              -> Just (Case (mkTick tickish scrut) bndr ty alts')
-             where t_scope = mkNoTick tickish -- drop the tick on the dup'd ones
+              -> Just (Case (mkTick t scrut) bndr ty alts')
+             where t_scope = mkNoTick t -- drop the tick on the dup'd ones
                    alts'   = [ (c,bs, mkTick t_scope e) | (c,bs,e) <- alts]
            _other -> Nothing
+    where
 
-  interesting_cont = case cont of
-                          Select _ _ _ _ _ -> True
-                          _ -> False
+  no_floating_past_tick =
+    do { let (inc,outc) = splitCont cont
+       ; (env', expr') <- simplExprF (zapFloats env) expr inc
+       ; let tickish' = simplTickish env tickish
+       ; (env'', expr'') <- rebuild (zapFloats env')
+                                    (wrapFloats env' expr')
+                                    (TickIt tickish' outc)
+       ; return (addFloats env env'', expr'')
+       }
+
+-- Alternative version that wraps outgoing floats with the tick.  This
+-- results in ticks being duplicated, as we don't make any attempt to
+-- eliminate the tick if we re-inline the binding (because the tick
+-- semantics allows unrestricted inlining of HNFs), so I'm not doing
+-- this any more.  FloatOut will catch any real opportunities for
+-- floating.
+--
+--  wrap_floats =
+--    do { let (inc,outc) = splitCont cont
+--       ; (env', expr') <- simplExprF (zapFloats env) expr inc
+--       ; let tickish' = simplTickish env tickish
+--       ; let wrap_float (b,rhs) = (zapIdStrictness (setIdArity b 0),
+--                                   mkTick (mkNoTick tickish') rhs)
+--              -- when wrapping a float with mkTick, we better zap the Id's
+--              -- strictness info and arity, because it might be wrong now.
+--       ; let env'' = addFloats env (mapFloats env' wrap_float)
+--       ; rebuild env'' expr' (TickIt tickish' outc)
+--       }
 
 
   simplTickish env tickish
@@ -1154,7 +1163,8 @@ rebuild :: SimplEnv -> OutExpr -> SimplCont -> SimplM (SimplEnv, OutExpr)
 rebuild env expr cont
   = case cont of
       Stop {}                      -> return (env, expr)
-      CoerceIt co cont             -> rebuild env (Cast expr co) cont
+      CoerceIt co cont             -> rebuild env (mkCast expr co) cont 
+                                         -- NB: mkCast implements the (Coercion co |> g) optimisation
       Select _ bndr alts se cont   -> rebuildCase (se `setFloats` env) expr bndr alts cont
       StrictArg info _ cont        -> rebuildCall env (info `addArgTo` expr) cont
       StrictBind b bs body se cont -> do { env' <- simplNonRecX (se `setFloats` env) b expr
@@ -1234,7 +1244,7 @@ simplCast env body co0 cont0
            -- t2 ~ s2 with left and right on the curried form:
            --    (->) t1 t2 ~ (->) s1 s2
            [co1, co2] = decomposeCo 2 co
-           new_arg    = mkCoerce (mkSymCo co1) arg'
+           new_arg    = mkCast arg' (mkSymCo co1)
            arg'       = substExpr (text "move-cast") arg_se' arg
            arg_se'    = arg_se `setInScope` env
 
@@ -1439,7 +1449,7 @@ rebuildCall env (ArgInfo { ai_fun = fun, ai_args = rev_args, ai_strs = [] }) con
     cont_ty = contResultType env res_ty cont
     co      = mkUnsafeCo res_ty cont_ty
     mk_coerce expr | cont_ty `eqType` res_ty = expr
-                   | otherwise = mkCoerce co expr
+                   | otherwise = mkCast expr co
 
 rebuildCall env info (ApplyTo dup_flag (Type arg_ty) se cont)
   = do { arg_ty' <- if isSimplified dup_flag then return arg_ty
@@ -1635,7 +1645,7 @@ to just
 This particular example shows up in default methods for
 comparision operations (e.g. in (>=) for Int.Int32)
 
-Note [CaseElimination: lifted case]
+Note [Case elimination: lifted case]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We also make sure that we deal with this very common case,
 where x has a lifted type:
@@ -1722,6 +1732,7 @@ rebuildCase, reallyRebuildCase
 rebuildCase env scrut case_bndr alts cont
   | Lit lit <- scrut    -- No need for same treatment as constructors
                         -- because literals are inlined more vigorously
+  , not (litIsLifted lit)
   = do  { tick (KnownBranch case_bndr)
         ; case findAlt (LitAlt lit) alts of
 	    Nothing           -> missingAlt env case_bndr alts cont
@@ -1757,7 +1768,11 @@ rebuildCase env scrut case_bndr [(_, bndrs, rhs)] cont
  , if isUnLiftedType (idType case_bndr)
    then ok_for_spec         -- Satisfy the let-binding invariant
    else elim_lifted
-  = do  { tick (CaseElim case_bndr)
+  = do  { -- pprTrace "case elim" (vcat [ppr case_bndr, ppr (exprIsHNF scrut),
+          --                            ppr strict_case_bndr, ppr (scrut_is_var scrut),
+          --                            ppr ok_for_spec,
+          --                            ppr scrut]) $
+          tick (CaseElim case_bndr)
         ; env' <- simplNonRecX env case_bndr scrut
           -- If case_bndr is deads, simplNonRecX will discard
         ; simplExprF env' rhs cont }

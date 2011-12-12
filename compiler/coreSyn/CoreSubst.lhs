@@ -754,7 +754,7 @@ substVect subst  (Vect   v (Just rhs)) = Vect v (Just (simpleOptExprWith subst r
 substVect _subst vd@(NoVect _)         = vd
 substVect _subst vd@(VectType _ _ _)   = vd
 substVect _subst vd@(VectClass _)      = vd
-substVect _subst vd@(VectInst _ _)     = vd
+substVect _subst vd@(VectInst _)       = vd
 
 ------------------
 substVarSet :: Subst -> VarSet -> VarSet
@@ -949,7 +949,8 @@ simple_opt_expr' subst expr
       = case altcon of
           DEFAULT -> go rhs
           _       -> mkLets (catMaybes mb_binds) $ simple_opt_expr subst' rhs
-            where (subst', mb_binds) = mapAccumL simple_opt_out_bind subst (zipEqual "simpleOptExpr" bs es)
+            where (subst', mb_binds) = mapAccumL simple_opt_out_bind subst 
+                                                 (zipEqual "simpleOptExpr" bs es)
 
       | otherwise
       = Case e' b' (substTy subst ty)
@@ -1016,9 +1017,11 @@ simple_opt_bind' subst (NonRec b r)
 
 ----------------------
 simple_opt_out_bind :: Subst -> (InVar, OutExpr) -> (Subst, Maybe CoreBind)
-simple_opt_out_bind subst (b, r') = case maybe_substitute subst b r' of
-      Just ext_subst -> (ext_subst, Nothing)
-      Nothing        -> (subst', Just (NonRec b2 r'))
+simple_opt_out_bind subst (b, r') 
+  | Just ext_subst <- maybe_substitute subst b r'
+  = (ext_subst, Nothing)
+  | otherwise
+  = (subst', Just (NonRec b2 r'))
   where
     (subst', b') = subst_opt_bndr subst b
     b2 = add_info subst' b b'
@@ -1038,6 +1041,8 @@ maybe_substitute subst b r
     Just (extendCvSubst subst b co)
 
   | isId b              -- let x = e in <body>
+  , not (isCoVar b)	-- See Note [Do not inline CoVars unconditionally]
+    		 	-- in SimplUtils
   , safe_to_inline (idOccInfo b) 
   , isAlwaysActive (idInlineActivation b)	-- Note [Inline prag in simplOpt]
   , not (isStableUnfolding (idUnfolding b))
@@ -1192,16 +1197,15 @@ exprIsConApp_maybe id_unf expr
               mk_arg e = mkApps e args
         = dealWithCoercion co (con, substTys subst dfun_res_tys, map mk_arg ops)
 
-        -- Look through unfoldings, but only cheap ones, because
-        -- we are effectively duplicating the unfolding
+        -- Look through unfoldings, but only arity-zero one; 
+	-- if arity > 0 we are effectively inlining a function call,
+	-- and that is the business of callSiteInline.
+	-- In practice, without this test, most of the "hits" were
+	-- CPR'd workers getting inlined back into their wrappers,
         | Just rhs <- expandUnfolding_maybe unfolding
-        = -- pprTrace "expanding" (ppr fun $$ ppr rhs) $
-          let in_scope' = extendInScopeSetSet in_scope (exprFreeVars rhs)
-              res = go (Left in_scope') rhs cont
-          in WARN( unfoldingArity unfolding > 0 && isJust res,
-                   text "Interesting! exprIsConApp_maybe:" 
-                   <+> ppr fun <+> ppr expr)
-             res
+        , unfoldingArity unfolding == 0 
+        , let in_scope' = extendInScopeSetSet in_scope (exprFreeVars rhs)
+        = go (Left in_scope') rhs cont
         where
           unfolding = id_unf fun
 
@@ -1257,7 +1261,7 @@ dealWithCoercion co stuff@(dc, _dc_univ_args, dc_args)
 
           -- Cast the value arguments (which include dictionaries)
         new_val_args = zipWith cast_arg arg_tys val_args
-        cast_arg arg_ty arg = mkCoerce (theta_subst arg_ty) arg
+        cast_arg arg_ty arg = mkCast arg (theta_subst arg_ty)
 
         dump_doc = vcat [ppr dc,      ppr dc_univ_tyvars, ppr dc_ex_tyvars,
                          ppr arg_tys, ppr dc_args,        ppr _dc_univ_args,

@@ -129,6 +129,9 @@ import qualified Data.Set as Set
 import System.FilePath
 import System.IO        ( stderr, hPutChar )
 
+import Data.IntSet (IntSet)
+import qualified Data.IntSet as IntSet
+
 -- -----------------------------------------------------------------------------
 -- DynFlags
 
@@ -220,6 +223,7 @@ data DynFlag
    | Opt_DoStgLinting
    | Opt_DoCmmLinting
    | Opt_DoAsmLinting
+   | Opt_NoLlvmMangler
 
    | Opt_WarnIsError                    -- -Werror; makes warnings fatal
 
@@ -244,6 +248,7 @@ data DynFlag
    | Opt_Vectorise
    | Opt_RegsGraph                      -- do graph coloring register allocation
    | Opt_RegsIterative                  -- do iterative coalescing graph coloring register allocation
+   | Opt_PedanticBottoms                -- Be picky about how we treat bottom
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -264,7 +269,6 @@ data DynFlag
    | Opt_SplitObjs
    | Opt_StgStats
    | Opt_HideAllPackages
-   | Opt_DistrustAllPackages
    | Opt_PrintBindResult
    | Opt_Haddock
    | Opt_HaddockOptions
@@ -300,9 +304,10 @@ data DynFlag
    | Opt_KeepLlvmFiles
 
    -- safe haskell flags
+   | Opt_DistrustAllPackages
    | Opt_PackageTrust
 
-   deriving (Eq, Show)
+   deriving (Eq, Show, Enum)
 
 data WarningFlag =
      Opt_WarnDuplicateExports
@@ -337,7 +342,9 @@ data WarningFlag =
    | Opt_WarnUnusedDoBind
    | Opt_WarnWrongDoBind
    | Opt_WarnAlternativeLayoutRuleTransitional
-   deriving (Eq, Show)
+   | Opt_WarnUnsafe
+   | Opt_WarnSafe
+   deriving (Eq, Show, Enum)
 
 data Language = Haskell98 | Haskell2010
    deriving Enum
@@ -371,6 +378,7 @@ data ExtensionFlag
    | Opt_ForeignFunctionInterface
    | Opt_UnliftedFFITypes
    | Opt_InterruptibleFFI
+   | Opt_CApiFFI
    | Opt_GHCForeignImportPrim
    | Opt_ParallelArrays           -- Syntactic support for parallel arrays
    | Opt_Arrows                   -- Arrow-notation syntax
@@ -394,7 +402,7 @@ data ExtensionFlag
    | Opt_RebindableSyntax
    | Opt_ConstraintKinds
    | Opt_PolyKinds                -- Kind polymorphism
-   
+
    | Opt_StandaloneDeriving
    | Opt_DeriveDataTypeable
    | Opt_DeriveFunctor
@@ -445,6 +453,7 @@ data DynFlags = DynFlags {
   ghcMode               :: GhcMode,
   ghcLink               :: GhcLink,
   hscTarget             :: HscTarget,
+  settings              :: Settings,
   hscOutName            :: String,      -- ^ Name of the output file
   extCoreName           :: String,      -- ^ Name of the .hcr output file
   verbosity             :: Int,         -- ^ Verbosity level: see Note [Verbosity levels]
@@ -483,6 +492,7 @@ data DynFlags = DynFlags {
   dylibInstallName      :: Maybe String,
   hiDir                 :: Maybe String,
   stubDir               :: Maybe String,
+  dumpDir               :: Maybe String,
 
   objectSuf             :: String,
   hcSuf                 :: String,
@@ -513,8 +523,6 @@ data DynFlags = DynFlags {
   -- Plugins
   pluginModNames        :: [ModuleName],
   pluginModNameOpts     :: [(ModuleName,String)],
-
-  settings              :: Settings,
 
   --  For ghc -M
   depMakefile           :: FilePath,
@@ -548,8 +556,8 @@ data DynFlags = DynFlags {
   generatedDumps        :: IORef (Set FilePath),
 
   -- hsc dynamic flags
-  flags                 :: [DynFlag],
-  warningFlags          :: [WarningFlag],
+  flags                 :: IntSet,
+  warningFlags          :: IntSet,
   -- Don't change this without updating extensionFlags:
   language              :: Maybe Language,
   -- | Safe Haskell mode
@@ -559,11 +567,13 @@ data DynFlags = DynFlags {
   -- them off.
   thOnLoc               :: SrcSpan,
   newDerivOnLoc         :: SrcSpan,
+  warnSafeOnLoc         :: SrcSpan,
+  warnUnsafeOnLoc       :: SrcSpan,
   -- Don't change this without updating extensionFlags:
   extensions            :: [OnOff ExtensionFlag],
   -- extensionFlags should always be equal to
   --     flattenExtensionFlags language extensions
-  extensionFlags        :: [ExtensionFlag],
+  extensionFlags        :: IntSet,
 
   -- | Message output action: use "ErrUtils" instead of this if you can
   log_action            :: LogAction,
@@ -579,6 +589,8 @@ data ProfAuto
   | ProfAutoAll        -- ^ top-level and nested functions are annotated
   | ProfAutoTop        -- ^ top-level functions annotated only
   | ProfAutoExports    -- ^ exported functions annotated only
+  | ProfAutoCalls      -- ^ annotate call-sites
+  deriving (Enum)
 
 data Settings = Settings {
   sTargetPlatform        :: Platform,    -- Filled in by SysTools
@@ -846,6 +858,7 @@ defaultDynFlags mySettings =
         dylibInstallName        = Nothing,
         hiDir                   = Nothing,
         stubDir                 = Nothing,
+        dumpDir                 = Nothing,
 
         objectSuf               = phaseInputExt StopLn,
         hcSuf                   = phaseInputExt HCc,
@@ -887,12 +900,14 @@ defaultDynFlags mySettings =
         dirsToClean    = panic "defaultDynFlags: No dirsToClean",
         generatedDumps = panic "defaultDynFlags: No generatedDumps",
         haddockOptions = Nothing,
-        flags = defaultFlags,
-        warningFlags = standardWarnings,
+        flags = IntSet.fromList (map fromEnum defaultFlags),
+        warningFlags = IntSet.fromList (map fromEnum standardWarnings),
         language = Nothing,
         safeHaskell = Sf_SafeInfered,
         thOnLoc = noSrcSpan,
         newDerivOnLoc = noSrcSpan,
+        warnSafeOnLoc = noSrcSpan,
+        warnUnsafeOnLoc = noSrcSpan,
         extensions = [],
         extensionFlags = flattenExtensionFlags Nothing [],
         log_action = defaultLogAction,
@@ -929,12 +944,11 @@ data OnOff a = On a
 
 -- OnOffs accumulate in reverse order, so we use foldr in order to
 -- process them in the right order
-flattenExtensionFlags :: Maybe Language -> [OnOff ExtensionFlag]
-                      -> [ExtensionFlag]
+flattenExtensionFlags :: Maybe Language -> [OnOff ExtensionFlag] -> IntSet
 flattenExtensionFlags ml = foldr f defaultExtensionFlags
-    where f (On f)  flags = f : delete f flags
-          f (Off f) flags =     delete f flags
-          defaultExtensionFlags = languageExtensions ml
+    where f (On f)  flags = IntSet.insert (fromEnum f) flags
+          f (Off f) flags = IntSet.delete (fromEnum f) flags
+          defaultExtensionFlags = IntSet.fromList (map fromEnum (languageExtensions ml))
 
 languageExtensions :: Maybe Language -> [ExtensionFlag]
 
@@ -976,31 +990,31 @@ languageExtensions (Just Haskell2010)
 
 -- | Test whether a 'DynFlag' is set
 dopt :: DynFlag -> DynFlags -> Bool
-dopt f dflags  = f `elem` (flags dflags)
+dopt f dflags  = fromEnum f `IntSet.member` flags dflags
 
 -- | Set a 'DynFlag'
 dopt_set :: DynFlags -> DynFlag -> DynFlags
-dopt_set dfs f = dfs{ flags = f : flags dfs }
+dopt_set dfs f = dfs{ flags = IntSet.insert (fromEnum f) (flags dfs) }
 
 -- | Unset a 'DynFlag'
 dopt_unset :: DynFlags -> DynFlag -> DynFlags
-dopt_unset dfs f = dfs{ flags = filter (/= f) (flags dfs) }
+dopt_unset dfs f = dfs{ flags = IntSet.delete (fromEnum f) (flags dfs) }
 
 -- | Test whether a 'WarningFlag' is set
 wopt :: WarningFlag -> DynFlags -> Bool
-wopt f dflags  = f `elem` (warningFlags dflags)
+wopt f dflags  = fromEnum f `IntSet.member` warningFlags dflags
 
 -- | Set a 'WarningFlag'
 wopt_set :: DynFlags -> WarningFlag -> DynFlags
-wopt_set dfs f = dfs{ warningFlags = f : warningFlags dfs }
+wopt_set dfs f = dfs{ warningFlags = IntSet.insert (fromEnum f) (warningFlags dfs) }
 
 -- | Unset a 'WarningFlag'
 wopt_unset :: DynFlags -> WarningFlag -> DynFlags
-wopt_unset dfs f = dfs{ warningFlags = filter (/= f) (warningFlags dfs) }
+wopt_unset dfs f = dfs{ warningFlags = IntSet.delete (fromEnum f) (warningFlags dfs) }
 
 -- | Test whether a 'ExtensionFlag' is set
 xopt :: ExtensionFlag -> DynFlags -> Bool
-xopt f dflags = f `elem` extensionFlags dflags
+xopt f dflags = fromEnum f `IntSet.member` extensionFlags dflags
 
 -- | Set a 'ExtensionFlag'
 xopt_set :: DynFlags -> ExtensionFlag -> DynFlags
@@ -1075,10 +1089,12 @@ safeImplicitImpsReq d = safeLanguageOn d
 -- want to export this functionality from the module but do want to export the
 -- type constructors.
 combineSafeFlags :: SafeHaskellMode -> SafeHaskellMode -> DynP SafeHaskellMode
-combineSafeFlags a b | a `elem` [Sf_None, Sf_SafeInfered] = return b
-                     | b `elem` [Sf_None, Sf_SafeInfered] = return a
-                     | a == b                             = return a
-                     | otherwise = addErr errm >> return (panic errm)
+combineSafeFlags a b | a == Sf_SafeInfered = return b
+                     | b == Sf_SafeInfered = return a
+                     | a == Sf_None        = return b
+                     | b == Sf_None        = return a
+                     | a == b              = return a
+                     | otherwise           = addErr errm >> return (panic errm)
     where errm = "Incompatible Safe Haskell flags! ("
                     ++ showPpr a ++ ", " ++ showPpr b ++ ")"
 
@@ -1096,7 +1112,8 @@ getVerbFlags dflags
   | verbosity dflags >= 4 = ["-v"]
   | otherwise             = []
 
-setObjectDir, setHiDir, setStubDir, setOutputDir, setDylibInstallName,
+setObjectDir, setHiDir, setStubDir, setDumpDir, setOutputDir,
+         setDylibInstallName,
          setObjectSuf, setHiSuf, setHcSuf, parseDynLibLoaderMode,
          setPgmP, addOptl, addOptP,
          addCmdlineFramework, addHaddockOpts
@@ -1110,7 +1127,8 @@ setStubDir    f d = d{ stubDir    = Just f, includePaths = f : includePaths d }
   -- -stubdir D adds an implicit -I D, so that gcc can find the _stub.h file
   -- \#included from the .hc file when compiling via C (i.e. unregisterised
   -- builds).
-setOutputDir  f = setObjectDir f . setHiDir f . setStubDir f
+setDumpDir    f d = d{ dumpDir    = Just f}
+setOutputDir  f = setObjectDir f . setHiDir f . setStubDir f . setDumpDir f
 setDylibInstallName  f d = d{ dylibInstallName = Just f}
 
 setObjectSuf  f d = d{ objectSuf  = f}
@@ -1284,7 +1302,7 @@ parseDynamicFlags dflags0 args cmdline = do
 
   -- check for disabled flags in safe haskell
   let (dflags2, sh_warns) = safeFlagCheck dflags1
-  
+
   return (dflags2, leftover, sh_warns ++ warns)
 
 -- | Check (and potentially disable) any extensions that aren't allowed
@@ -1426,6 +1444,7 @@ dynamic_flags = [
   , Flag "hidir"             (hasArg setHiDir)
   , Flag "tmpdir"            (hasArg setTmpDir)
   , Flag "stubdir"           (hasArg setStubDir)
+  , Flag "dumpdir"           (hasArg setDumpDir)
   , Flag "outputdir"         (hasArg setOutputDir)
   , Flag "ddump-file-prefix" (hasArg (setDumpPrefixForce . Just))
 
@@ -1437,8 +1456,10 @@ dynamic_flags = [
   , Flag "keep-s-files"     (NoArg (setDynFlag Opt_KeepSFiles))
   , Flag "keep-raw-s-file"  (NoArg (addWarn "The -keep-raw-s-file flag does nothing; it will be removed in a future GHC release"))
   , Flag "keep-raw-s-files" (NoArg (addWarn "The -keep-raw-s-files flag does nothing; it will be removed in a future GHC release"))
-  , Flag "keep-llvm-file"   (NoArg (setDynFlag Opt_KeepLlvmFiles))
-  , Flag "keep-llvm-files"  (NoArg (setDynFlag Opt_KeepLlvmFiles))
+  , Flag "keep-llvm-file"   (NoArg (do setObjTarget HscLlvm
+                                       setDynFlag Opt_KeepLlvmFiles))
+  , Flag "keep-llvm-files"  (NoArg (do setObjTarget HscLlvm
+                                       setDynFlag Opt_KeepLlvmFiles))
      -- This only makes sense as plural
   , Flag "keep-tmp-files"   (NoArg (setDynFlag Opt_KeepTmpFiles))
 
@@ -1558,6 +1579,7 @@ dynamic_flags = [
   , Flag "dshow-passes"            (NoArg (do forceRecompile
                                               setVerbosity $ Just 2))
   , Flag "dfaststring-stats"       (NoArg (setDynFlag Opt_D_faststring_stats))
+  , Flag "dno-llvm-mangler"        (NoArg (setDynFlag Opt_NoLlvmMangler))
 
         ------ Machine dependant (-m<blah>) stuff ---------------------------
 
@@ -1572,9 +1594,9 @@ dynamic_flags = [
   , Flag "Werror" (NoArg (setDynFlag           Opt_WarnIsError))
   , Flag "Wwarn"  (NoArg (unSetDynFlag         Opt_WarnIsError))
   , Flag "Wall"   (NoArg (mapM_ setWarningFlag minusWallOpts))
-  , Flag "Wnot"   (NoArg (do upd (\dfs -> dfs {warningFlags = []})
+  , Flag "Wnot"   (NoArg (do upd (\dfs -> dfs {warningFlags = IntSet.empty})
                              deprecate "Use -w instead"))
-  , Flag "w"      (NoArg (upd (\dfs -> dfs {warningFlags = []})))
+  , Flag "w"      (NoArg (upd (\dfs -> dfs {warningFlags = IntSet.empty})))
 
         ------ Plugin flags ------------------------------------------------
   , Flag "fplugin-opt" (hasArg addPluginModuleNameOption)
@@ -1617,6 +1639,7 @@ dynamic_flags = [
   , Flag "fprof-auto"             (noArg (\d -> d { profAuto = ProfAutoAll } ))
   , Flag "fprof-auto-top"         (noArg (\d -> d { profAuto = ProfAutoTop } ))
   , Flag "fprof-auto-exported"    (noArg (\d -> d { profAuto = ProfAutoExports } ))
+  , Flag "fprof-auto-calls"       (noArg (\d -> d { profAuto = ProfAutoCalls } ))
   , Flag "fno-prof-auto"          (noArg (\d -> d { profAuto = NoProfAuto } ))
 
         ------ Compiler flags -----------------------------------------------
@@ -1637,6 +1660,7 @@ dynamic_flags = [
 
         ------ Safe Haskell flags -------------------------------------------
   , Flag "fpackage-trust"   (NoArg (setDynFlag Opt_PackageTrust))
+  , Flag "fno-safe-infer"   (NoArg (setSafeHaskell Sf_None))
  ]
  ++ map (mkFlag turnOn  "f"    setDynFlag  ) fFlags
  ++ map (mkFlag turnOff "fno-" unSetDynFlag) fFlags
@@ -1736,10 +1760,12 @@ fWarningFlags = [
   ( "warn-auto-orphans",                Opt_WarnAutoOrphans, nop ),
   ( "warn-tabs",                        Opt_WarnTabs, nop ),
   ( "warn-unrecognised-pragmas",        Opt_WarnUnrecognisedPragmas, nop ),
-  ( "warn-lazy-unlifted-bindings",      Opt_WarnLazyUnliftedBindings, nop),
+  ( "warn-lazy-unlifted-bindings",      Opt_WarnLazyUnliftedBindings, nop ),
   ( "warn-unused-do-bind",              Opt_WarnUnusedDoBind, nop ),
   ( "warn-wrong-do-bind",               Opt_WarnWrongDoBind, nop ),
-  ( "warn-alternative-layout-rule-transitional", Opt_WarnAlternativeLayoutRuleTransitional, nop )]
+  ( "warn-alternative-layout-rule-transitional", Opt_WarnAlternativeLayoutRuleTransitional, nop ),
+  ( "warn-unsafe",                      Opt_WarnUnsafe, setWarnUnsafe ),
+  ( "warn-safe",                        Opt_WarnSafe, setWarnSafe ) ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@
 fFlags :: [FlagSpec DynFlag]
@@ -1753,6 +1779,7 @@ fFlags = [
   ( "liberate-case",                    Opt_LiberateCase, nop ),
   ( "spec-constr",                      Opt_SpecConstr, nop ),
   ( "cse",                              Opt_CSE, nop ),
+  ( "pedantic-bottoms",                 Opt_PedanticBottoms, nop ),
   ( "ignore-interface-pragmas",         Opt_IgnoreInterfacePragmas, nop ),
   ( "omit-interface-pragmas",           Opt_OmitInterfacePragmas, nop ),
   ( "expose-all-unfoldings",            Opt_ExposeAllUnfoldings, nop ),
@@ -1875,6 +1902,7 @@ xFlags = [
   ( "ForeignFunctionInterface",         Opt_ForeignFunctionInterface, nop ),
   ( "UnliftedFFITypes",                 Opt_UnliftedFFITypes, nop ),
   ( "InterruptibleFFI",                 Opt_InterruptibleFFI, nop ),
+  ( "CApiFFI",                          Opt_CApiFFI, nop ),
   ( "GHCForeignImportPrim",             Opt_GHCForeignImportPrim, nop ),
   ( "LiberalTypeSynonyms",              Opt_LiberalTypeSynonyms, nop ),
   ( "Rank2Types",                       Opt_Rank2Types, nop ),
@@ -1906,7 +1934,7 @@ xFlags = [
   ( "RebindableSyntax",                 Opt_RebindableSyntax, nop ),
   ( "ConstraintKinds",                  Opt_ConstraintKinds, nop ),
   ( "PolyKinds",                        Opt_PolyKinds, nop ),
-  ( "MonoPatBinds",                     Opt_MonoPatBinds, 
+  ( "MonoPatBinds",                     Opt_MonoPatBinds,
     \ turn_on -> when turn_on $ deprecate "Experimental feature now removed; has no effect" ),
   ( "ExplicitForAll",                   Opt_ExplicitForAll, nop ),
   ( "AlternativeLayoutRule",            Opt_AlternativeLayoutRule, nop ),
@@ -2134,6 +2162,14 @@ foreign import ccall unsafe "rts_isProfiled" rtsIsProfiledIO :: IO CInt
 rtsIsProfiled :: Bool
 rtsIsProfiled = unsafePerformIO rtsIsProfiledIO /= 0
 #endif
+
+setWarnSafe :: Bool -> DynP ()
+setWarnSafe True  = getCurLoc >>= \l -> upd (\d -> d { warnSafeOnLoc = l })
+setWarnSafe False = return ()
+
+setWarnUnsafe :: Bool -> DynP ()
+setWarnUnsafe True  = getCurLoc >>= \l -> upd (\d -> d { warnUnsafeOnLoc = l })
+setWarnUnsafe False = return ()
 
 setGenDeriving :: Bool -> DynP ()
 setGenDeriving True  = getCurLoc >>= \l -> upd (\d -> d { newDerivOnLoc = l })
