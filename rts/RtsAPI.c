@@ -419,6 +419,9 @@ createStrictIOThread(Capability *cap, nat stack_size,  StgClosure *closure)
 
 /* ----------------------------------------------------------------------------
    Evaluating Haskell expressions
+
+   PARALLEL_RTS: using these API methods implies that a new process is
+              created (will normally be the first, "main" process)
    ------------------------------------------------------------------------- */
 
 void rts_eval (/* inout */ Capability **cap,
@@ -428,6 +431,10 @@ void rts_eval (/* inout */ Capability **cap,
     StgTSO *tso;
     
     tso = createGenThread(*cap, RtsFlags.GcFlags.initialStkSize, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     scheduleWaitThread(tso,ret,cap);
 }
 
@@ -439,6 +446,10 @@ void rts_eval_ (/* inout */ Capability **cap,
     StgTSO *tso;
 
     tso = createGenThread(*cap, stack_size, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     scheduleWaitThread(tso,ret,cap);
 }
 
@@ -453,6 +464,10 @@ void rts_evalIO (/* inout */ Capability **cap,
     StgTSO* tso; 
     
     tso = createStrictIOThread(*cap, RtsFlags.GcFlags.initialStkSize, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     scheduleWaitThread(tso,ret,cap);
 }
 
@@ -475,6 +490,10 @@ void rts_evalStableIO (/* inout */ Capability **cap,
     // async exceptions are always blocked by default in the created
     // thread.  See #1048.
     tso->flags |= TSO_BLOCKEX | TSO_INTERRUPTIBLE;
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     scheduleWaitThread(tso,&r,cap);
     stat = rts_getSchedStatus(*cap);
 
@@ -494,6 +513,10 @@ void rts_evalLazyIO (/* inout */ Capability **cap,
     StgTSO *tso;
 
     tso = createIOThread(*cap, RtsFlags.GcFlags.initialStkSize, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     scheduleWaitThread(tso,ret,cap);
 }
 
@@ -505,6 +528,10 @@ void rts_evalLazyIO_ (/* inout */ Capability **cap,
     StgTSO *tso;
 
     tso = createIOThread(*cap, stack_size, p);
+#if defined(PARALLEL_RTS)
+    // create a process, fill in this TSO as first member thread
+    newProcess(tso);
+#endif
     scheduleWaitThread(tso,ret,cap);
 }
 

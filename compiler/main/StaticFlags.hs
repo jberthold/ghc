@@ -421,6 +421,10 @@ data WayName
   | WayDebug
   | WayProf
   | WayEventLog
+-- Parallel Haskell support, Eden group Marburg
+  | WayParPvm
+  | WayParMPI
+  | WayParCp -- copy
   | WayPar
   | WayGran
   | WayNDP
@@ -448,6 +452,9 @@ allowed_combination way = and [ x `allowedWith` y
 	WayProf `allowedWith` WayNDP		= True
 	WayThreaded `allowedWith` WayProf	= True
 	WayThreaded `allowedWith` WayEventLog	= True
+	WayEventLog `allowedWith` WayParPvm	= True
+	WayEventLog `allowedWith` WayParMPI	= True
+	WayEventLog `allowedWith` WayParCp	= True
 	_ `allowedWith` _ 			= False
 
 
@@ -530,6 +537,37 @@ way_details =
     Way WayEventLog "l" True "RTS Event Logging"
 	[ "-DTRACING"
 	, "-optc-DTRACING" ],
+
+-- parallel Haskell support, Eden group Marburg
+
+-- Attention: way combinations are sensitive to order, for instance
+-- "debug_pp", not "pp_debug". Ordering derived from flag declaration above.
+
+    Way WayParPvm "pp" True "ParPVM" -- RTS-only way
+	[
+	  "-D__PARALLEL_HASKELL__"   -- for Haskell
+        , "-optc-DPARALLEL_RTS"      -- for RTS-compilation (gcc)
+	, "-optc-DUSE_PVM"
+   -- PVM-style communication, must sync with ghc/rts/ghc.mk and DriverPipeline
+   -- PVM-related includes and flags done in DriverPipeline
+	],
+    Way WayParMPI "pm" True "ParMPI" -- RTS-only way
+	[
+	  "-D__PARALLEL_HASKELL__" -- for Haskell
+        , "-optc-DPARALLEL_RTS"    -- for RTS-compilation (gcc)
+	, "-optc-DUSE_MPI"         -- MPI-style communication
+   -- MPI-related linker flags done in DriverPipeline, like we did for PVM.
+   -- compilation options for MPI inside ghc/rts/ghc.mk
+	],
+    Way WayParCp "pc" True "ParCP" -- RTS-only way
+	[
+	  "-D__PARALLEL_HASKELL__" -- for Haskell
+        , "-optc-DPARALLEL_RTS"    -- for RTS-compilation (gcc)
+	, "-optc-DUSE_COPY"        -- Handmade communication btw OS processes
+                                   -- (not implemented yet)
+	],
+-- end Marburg
+-- below: old PAR/GRAN, recycle it eventually
 
     Way WayPar "mp" False "Parallel"
 	[ "-fparallel"

@@ -321,6 +321,10 @@ RTS_FUN_DECL(stg_block_stmwait);
 RTS_FUN_DECL(stg_block_throwto);
 RTS_RET(stg_block_throwto);
 
+RTS_FUN_DECL(stg_block_pack);
+RTS_FUN_DECL(stg_block_serializze);
+RTS_FUN_DECL(stg_yield_send);
+
 /* Entry/exit points from StgStartup.cmm */
 
 RTS_RET(stg_stop_thread);
@@ -447,6 +451,16 @@ RTS_FUN_DECL(stg_unpackClosurezh);
 RTS_FUN_DECL(stg_getApStackValzh);
 RTS_FUN_DECL(stg_getSparkzh);
 RTS_FUN_DECL(stg_numSparkszh);
+
+/* parallel haskell primops */
+RTS_FUN_DECL(stg_duplicatezh);
+RTS_FUN_DECL(stg_serializzezh);
+RTS_FUN_DECL(stg_deserializzezh);
+RTS_FUN_DECL(stg_expectDatazh);
+RTS_FUN_DECL(stg_connectToPortzh);
+RTS_FUN_DECL(stg_sendDatazh);
+RTS_FUN_DECL(stg_labelProcesszh);
+RTS_FUN_DECL(stg_myProcesszh);
 
 RTS_FUN_DECL(stg_noDuplicatezh);
 

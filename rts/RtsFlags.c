@@ -56,6 +56,30 @@ wchar_t **win32_prog_argv = NULL;
 #define RTS 1
 #define PGM 0
 
+#if defined(PARALLEL_RTS)
+
+static void process_par_option(int arg, rtsBool *error);
+
+#if defined(DEBUG)
+static char *par_debug_opts_strs[] = {
+  "DEBUG (-qDv, -qD1): verbose; be generally verbose with parallel related stuff.\n",
+  "DEBUG (-qDc, -qD2): mpcomm; low level messages.\n",
+  "DEBUG (-qDp, -qD4): pack; packing code.\n",
+  "DEBUG (-qDq, -qD8): packet; verbose packing code.\n",
+  "DEBUG (-qDP, -qD16): processes; process management code.\n",
+  "DEBUG (-qDo, -qD32): ports; port management code (more verbose).\n"
+};
+/* one character codes for the available debug options */
+static char par_debug_opts_flags[] = {
+  'v', 'c', 'p', 'q', 'P', 'o'
+};
+
+static void set_par_debug_options(nat n);
+static void help_par_debug_options(nat n);
+
+#endif
+#endif
+
 /* -----------------------------------------------------------------------------
    Static function decls
    -------------------------------------------------------------------------- */
@@ -198,6 +222,14 @@ void initRtsFlagsDefaults(void)
     RtsFlags.ParFlags.setAffinity       = 0;
 #endif
 
+#ifdef PARALLEL_RTS
+    // common parallelism options:
+    RtsFlags.ParFlags.packBufferSize	= 1048576; // 1MB, we set it...;
+    RtsFlags.ParFlags.sendBufferSize	= 20; // MD this default should be tested;
+    RtsFlags.ParFlags.placement         = 0; /* default: RR placement,
+						including local PE*/
+#endif /* PARALLEL_RTS */
+
 #if defined(THREADED_RTS)
     RtsFlags.ParFlags.maxLocalSparks	= 4096;
 #endif /* THREADED_RTS */
@@ -325,6 +357,19 @@ usage_text[] = {
 "  -r<file>  Produce ticky-ticky statistics (with -rstderr for stderr)",
 "",
 #endif
+#ifdef PARALLEL_RTS
+"  -N<n>     Use <n> (virtual) processors in parallel "
+// -qp<n>  is still understood, but not encouraged.
+#if defined(USE_PVM)
+"(PVM default: all available nodes)",
+/* NB: the -N<n> is implemented by the driver script!! */
+#elif defined(USE_MPI)
+"(MPI default: 1)",
+/* NB: the -N<n> is implemented by the driver script!! */
+#else // normally, the default should be as in THREADED_RTS
+"(default: 1)",
+#endif
+#endif
 "  -C<secs>  Context-switch interval in seconds.",
 "            0 or no argument means switch as often as possible.",
 "            Default: 0.02 sec.",
@@ -356,6 +401,10 @@ usage_text[] = {
 "",
 "     NOTE: DEBUG events are sent to stderr by default; add -l to create a",
 "     binary event log file instead.",
+# if defined(PARALLEL_RTS)
+"",
+"  -qD  DEBUG(parallel):",
+# endif
 "",
 #endif /* DEBUG */
 #if defined(THREADED_RTS) && !defined(NOSMP)
@@ -370,6 +419,17 @@ usage_text[] = {
 #endif
 "  --install-signal-handlers=<yes|no>",
 "            Install signal handlers (default: yes)",
+#if defined(PARALLEL_RTS)
+"  -qQ<size> Set pack-buffer size (default: 1MB)",
+"  -qq<n>    Set MPI-send-buffer size to <n> * pack-buffer (default: 20)",
+"  -qremote  Avoid placing child processes on the same PE",
+"  -qrnd     Enable random process placement (i.e. not round-robin)",
+/*
+"  -qP       Activate parallel profiling (Eden)",
+"  -qPh      include GC statistics in trace file (implies -qP)",
+"  -qPm      include message traffic in trace file (implies -qP)",
+*/
+#endif
 #if defined(THREADED_RTS)
 "  -e<n>     Maximum number of outstanding local sparks (default: 4096)",
 #endif
@@ -629,6 +689,16 @@ error = rtsTrue;
 #else
 # define TRACING_BUILD_ONLY(x) \
 errorBelch("the flag %s requires the program to be built with -eventlog or -debug", rts_argv[arg]); \
+error = rtsTrue;
+#endif
+
+#ifdef PARALLEL_RTS
+# define PARALLEL_RTS_BUILD_ONLY(x)      x
+# define THREADED_OR_PARALLEL_BUILD_ONLY(x)    x
+#else
+# define THREADED_OR_PARALLEL_BUILD_ONLY(x) THREADED_BUILD_ONLY(x)
+# define PARALLEL_RTS_BUILD_ONLY(x) \
+errorBelch("the flag %s requires a parallel build", rts_argv[arg]); \
 error = rtsTrue;
 #endif
 
@@ -1128,6 +1198,8 @@ error = rtsTrue;
 	      case 'N':
 		OPTION_SAFE;
 		THREADED_BUILD_ONLY(
+		// could be THREADED_OR_PARALLEL_BUILD_ONLY()
+                // PARALLEL_RTS uses this flag in a different way (for now)
 		if (rts_argv[arg][2] == '\0') {
 #if defined(PROFILING)
 		    RtsFlags.ParFlags.nNodes = 1;
@@ -1168,6 +1240,14 @@ error = rtsTrue;
 
 	      case 'q':
 		OPTION_UNSAFE;
+#ifdef PARALLEL_RTS
+		      // historically, "-q<option>" were for parallel Haskell.
+		      // taken for threaded RTS: a,b,g,m,w below.
+		      // When parallel: branch into separate option processing
+                        process_par_option(arg, &error);
+                      // uses global rts_argc and rts_argv
+                        break;
+#endif
 		THREADED_BUILD_ONLY(
 		    switch (rts_argv[arg][2]) {
 		    case '\0':
@@ -1411,8 +1491,212 @@ static void errorUsage (void)
     fflush(stdout);
     for (p = usage_text; *p; p++)
         errorBelch("%s", *p);
+#if defined(PARALLEL_RTS) && defined(DEBUG)
+    errorBelch("Parallel debugging:");
+    help_par_debug_options(MAX_PAR_DEBUG_MASK);
+#endif
     stg_exit(EXIT_FAILURE);
 }
+
+
+#ifdef PARALLEL_RTS
+
+static void
+process_par_option(int arg, rtsBool *error)
+{
+
+  // the -q prefix is shared with THREADED_RTS.
+  // Currently taken by THREADED_RTS: a,b,g,m,w.
+  // Currently accepted here: q,Q,r(emote/nd),W,D
+
+  /* Communication and task creation cost parameters */
+  switch(rts_argv[arg][2]) {
+ 
+  // alphabetical order:
+  case 'q': /* -qq<n> ... set send buffer size to <n> * packbuffer */
+    if (rts_argv[arg][3] != '\0') {
+      RtsFlags.ParFlags.sendBufferSize 
+        = strtol(rts_argv[arg]+3, (char **) NULL, 10);
+    }
+    if (RtsFlags.ParFlags.sendBufferSize <= 0) {
+      errorBelch("bad value for -qq");
+      *error = rtsTrue;
+    }
+    break;
+  case 'Q': /* -qQ<n> ... set pack buffer size to <n> bytes*/
+    if (rts_argv[arg][3] != '\0') {
+      RtsFlags.ParFlags.packBufferSize = 
+	decodeSize(rts_argv[arg], 3, 1024, HS_INT_MAX);
+    } else {
+      errorBelch("missing size of PackBuffer (for -qQ)\n");
+      *error = rtsTrue;
+    }
+    IF_PAR_DEBUG(verbose,
+		 debugBelch("-qQ<n>: pack buffer size set to %d bytes\n", 
+		       RtsFlags.ParFlags.packBufferSize));
+    break;
+  case 'r':  // -Qr... : something about placement  
+    switch(rts_argv[arg][3]) {
+    case 'n': // will be "random placement"
+      if (!strncmp(rts_argv[arg],"-qrnd",5)) {
+	RtsFlags.ParFlags.placement 
+	  = (1 | RtsFlags.ParFlags.placement); // set first bit 
+	IF_PAR_DEBUG(verbose,
+	     debugBelch("-qrnd: random process placement\n"));
+      }
+      break;
+    case 'e': // will be -Qremote: create children only on remote PEs
+      if (!strncmp(rts_argv[arg],"-qremote",8)) {
+	RtsFlags.ParFlags.placement 
+	  = (2 | RtsFlags.ParFlags.placement); // set 2nd bit
+	IF_PAR_DEBUG(verbose,
+	     debugBelch("-qremote: only remote process creation.\n"));
+      }
+      break;
+    default: 
+      doNothing();
+    }
+    break; // finish "case 'r'"
+
+    /*
+  case 'B': // timeout for buffered messaging
+    RtsFlags.ParFlags.BufferTime
+      = strtol(rts_argv[arg]+3, (char **) NULL, 10);
+    IF_PAR_DEBUG(verbose,
+		 debugBelch("%s: Timeout for sending message buffers: %d\n",
+		       rts_argv[arg],RtsFlags.ParFlags.BufferTime));
+    break;
+  case 'P': // -qP for writing a log file 
+    //RtsFlags.ParFlags.ParStats.Full = rtsFalse;
+
+    // JB 11/2006: borrowed NewLogfile and Heap flags for Eden tracing
+    // (pablo sddf format). NewLogfile (for now) always on, Heap can
+    // be used as an optional extension (was commented out before).
+    RtsFlags.ParFlags.ParStats.NewLogfile = rtsTrue;
+
+    // JB 03/2007: option -qPm for "Full" => include messages
+
+    switch(rts_argv[arg][3]) {
+    case '\0': // JB 03/07... RtsFlags.ParFlags.ParStats.Full = rtsTrue;
+      // "Full" for Eden tracing: trace messages as well
+      break; // nothing special, just an ordinary profile
+    case 'm': RtsFlags.ParFlags.ParStats.Full = rtsTrue;
+      // "Full" for Eden tracing: trace messages as well
+      break;
+    case '0': RtsFlags.ParFlags.ParStats.Suppressed = rtsTrue;
+	RtsFlags.ParFlags.ParStats.Full = rtsFalse;
+      break;
+    case 'b': RtsFlags.ParFlags.ParStats.Binary = rtsTrue;
+      break;
+    case 's': RtsFlags.ParFlags.ParStats.Sparks = rtsTrue;
+      break;
+    case 'h': RtsFlags.ParFlags.ParStats.Heap = rtsTrue;
+      break;
+    case 'n': RtsFlags.ParFlags.ParStats.NewLogfile = rtsTrue;
+      break;
+    default: barf("Unknown option -qP%c", rts_argv[arg][2]);
+    }
+    IF_PAR_DEBUG(verbose,
+		 debugBelch("(-qP) writing to log-file (%s)",
+			    (RtsFlags.ParFlags.ParStats.NewLogfile ? 
+			     "SDDF" : 
+			     "not implemented")));
+    break;
+  
+    default:
+      errorBelch("setupRtsFlags: unknown parallelism option %s ",rts_argv[arg]);
+      *error = rtsTrue;
+    }
+    break;
+    */  
+# if defined(DEBUG)  
+  case 'W':
+    if (rts_argv[arg][3] != '\0') {
+      RtsFlags.ParFlags.wait
+	= strtol(rts_argv[arg]+3, (char **) NULL, 10);
+    } else {
+      RtsFlags.ParFlags.wait = 1000;
+    }
+    IF_PAR_DEBUG(verbose,
+		 debugBelch("-qW<n>: length of wait loop after "
+                            "synchr before reduction: %ld\n", 
+			    RtsFlags.ParFlags.wait));
+    break;
+
+  case 'D':  /* -qD ... all the debugging options */
+    /* if not specified further: switch on "verbosity" (bit 0,1) */
+    if (rts_argv[arg][3]== 0) {
+      set_par_debug_options(1);
+      break;
+    }
+    if (isdigit(rts_argv[arg][3])) {/* Set all debugging options in one */
+      /* hack warning: interpret the flags as a binary number */
+      nat n = (nat) strtol(rts_argv[arg]+3, (char **) NULL, 10);
+      set_par_debug_options(n);
+    } else {
+      nat i;
+      for (i=0; i<=MAX_PAR_DEBUG_OPTION; i++) 
+	if (rts_argv[arg][3] == par_debug_opts_flags[i])
+	  break;
+	
+      if (i > MAX_PAR_DEBUG_OPTION) {
+	errorBelch("Valid parallel debug options are:\n");
+	help_par_debug_options(MAX_PAR_DEBUG_MASK);
+	bad_option( rts_argv[arg] );
+      } else { // flag found; now set it
+	set_par_debug_options(PAR_DEBUG_MASK(i));  // 2^i
+      }
+    }
+    break;
+# endif
+  default:
+    errorBelch("Unknown option -q%c (%d opts in total)", 
+	  rts_argv[arg][2], rts_argc);
+    *error = rtsTrue;
+    break;
+  } /* switch */
+}
+
+#ifdef DEBUG
+/*
+  Interpret n as a binary number masking Par debug options and set the 
+  correxponding option. See par_debug_opts_strs for explanations of the flags.
+*/
+static void
+set_par_debug_options(nat n) {
+  nat i;
+
+  for (i=0; i<=MAX_PAR_DEBUG_OPTION; i++) 
+    if ((n>>i)&1) {
+      debugBelch("%s", par_debug_opts_strs[i]);
+      switch (i) {
+        case 0: RtsFlags.ParFlags.Debug.verbose       = rtsTrue;  break;
+        case 1: RtsFlags.ParFlags.Debug.mpcomm        = rtsTrue;  break;
+        case 2: RtsFlags.ParFlags.Debug.pack          = rtsTrue;  break;
+        case 3: RtsFlags.ParFlags.Debug.packet        = rtsTrue;  break;
+        case 4: RtsFlags.ParFlags.Debug.procs         = rtsTrue;  break;
+        case 5: RtsFlags.ParFlags.Debug.ports         = rtsTrue;  break;
+        default: barf("set_par_debug_options: only %d debug options expected",
+		      MAX_PAR_DEBUG_OPTION);
+      } /* switch */
+    } /* if */
+}
+
+/*
+  Print one line explanation for each of the GranSim debug options specified
+  in the bitmask n.
+*/
+static void
+help_par_debug_options(nat n) {
+  nat i;
+
+  for (i=0; i<=MAX_PAR_DEBUG_OPTION; i++) 
+    if ((n>>i)&1) 
+      debugBelch("%s", par_debug_opts_strs[i]);
+}
+
+#endif /* DEBUG */
+#endif /* PARALLEL_RTS */
 
 static void
 stats_fprintf(FILE *f, char *s, ...)

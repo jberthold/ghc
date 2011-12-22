@@ -205,6 +205,12 @@ loop:
 
     else if (info == &stg_TSO_info)
     {
+#ifdef PARALLEL_RTS
+      rtsBool is_system = p == (StgClosure*) &stg_system_tso;
+      // In case of a system-created blackhole, most code stays the same as
+      // below: create BQ with first message MSG, change BH pointer. But we
+      // need to enqueue the BQ differently.
+#endif
         owner = (StgTSO*)p;
 
 #ifdef THREADED_RTS
@@ -228,6 +234,13 @@ loop:
         
         msg->link = (MessageBlackHole*)END_TSO_QUEUE;
         
+#ifdef PARALLEL_RTS
+        if (is_system) {
+	  bq->link = (StgBlockingQueue*) stg_system_tso.indirectee;
+	  stg_system_tso.indirectee = (StgClosure*) bq;
+        } else {
+	  // following code will not work with owner==stg_system_tso
+#endif
         // All BLOCKING_QUEUES are linked in a list on owner->bq, so
         // that we can search through them in the event that there is
         // a collision to update a BLACKHOLE and a BLOCKING_QUEUE
@@ -249,15 +262,28 @@ loop:
             removeFromRunQueue(cap, owner);
             pushOnRunQueue(cap,owner);
         }
+#ifdef PARALLEL_RTS
+        } // end of "else" for "if (is_system)"
+#endif
 
         // point to the BLOCKING_QUEUE from the BLACKHOLE
         write_barrier(); // make the BQ visible
         ((StgInd*)bh)->indirectee = (StgClosure *)bq;
         recordClosureMutated(cap,bh); // bh was mutated
 
+#ifdef PARALLEL_RTS
+	// nearby, these are macros, so they need "{..}"
+	if (is_system) {
+	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH", 
+			(lnat)msg->tso->id);
+	} else {
+	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d", 
+			(lnat)msg->tso->id, (lnat)owner->id);
+	}
+#else
         debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d", 
                       (lnat)msg->tso->id, (lnat)owner->id);
-
+#endif
         return 1; // blocked
     }
     else if (info == &stg_BLOCKING_QUEUE_CLEAN_info || 
@@ -267,6 +293,12 @@ loop:
 
         ASSERT(bq->bh == bh);
 
+#ifdef PARALLEL_RTS
+	rtsBool is_system = bq->owner == (StgTSO*) &stg_system_tso;
+	// In case of a system-created blackhole, most code stays the same as
+	// below: create BQ with first message MSG, change BH pointer. But we
+	// need to enqueue the BQ differently.
+#endif
         owner = bq->owner;
 
         ASSERT(owner != END_TSO_QUEUE);
@@ -288,9 +320,24 @@ loop:
             recordClosureMutated(cap,(StgClosure*)bq);
         }
 
+#ifdef PARALLEL_RTS
+	// nearby, these are macros, so they need "{..}"
+	if (is_system) {
+	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH",
+			(lnat)msg->tso->id);
+	} else {
+	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
+			(lnat)msg->tso->id, (lnat)owner->id);
+	}
+#else
         debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d", 
                       (lnat)msg->tso->id, (lnat)owner->id);
+#endif
 
+#ifdef PARALLEL_RTS
+	if (!is_system)
+	  // then do the other if statement
+#endif
         // See above, #3838
         if (owner->why_blocked == NotBlocked && owner->id != msg->tso->id) {
             removeFromRunQueue(cap, owner);

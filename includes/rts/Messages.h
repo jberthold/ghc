@@ -94,4 +94,11 @@ extern RtsMsgFunction rtsDebugMsgFn;
 extern RtsMsgFunction rtsErrorMsgFn;
 extern RtsMsgFunction rtsSysErrorMsgFn;
 
-#endif /* RTS_MESSAGES_H */
+#if defined(PARALLEL_RTS)
+extern RtsMsgFunction edenFatalInternalErrorFn;
+extern RtsMsgFunction parDebugMsgFn;
+extern RtsMsgFunction parErrorMsgFn;
+extern RtsMsgFunction parSysErrorMsgFn;
+#endif
+
+#endif /* RTSMESSAGES_H */

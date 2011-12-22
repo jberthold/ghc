@@ -236,7 +236,7 @@ WARNING_OPTS += -Wredundant-decls
 # support for registerised builds on this arch. -- BL 2010/02/03
 # WARNING_OPTS += -Wcast-align
 
-STANDARD_OPTS += -Iincludes -Irts -Irts/dist/build
+STANDARD_OPTS += -Iincludes -Irts -Irts/parallel -Irts/dist/build
 # COMPILING_RTS is only used when building Win32 DLL support.
 STANDARD_OPTS += -DCOMPILING_RTS
 
@@ -292,6 +292,10 @@ rts/RtsMain_HC_OPTS += -optc-O0
 rts/RtsMessages_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
 rts/RtsUtils_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
 rts/Trace_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
+#Parallel_RTS edentrace
+#Define ProjectVersion (compiler version) of project.mk.in for 
+#rts/parallel/ParInit.c to trace the compiler version.
+rts/parallel/ParInit_CC_OPTS += -DProjectVersion=\"$(ProjectVersion)\"
 #
 rts/RtsUtils_CC_OPTS += -DHostPlatform=\"$(HOSTPLATFORM)\"
 rts/RtsUtils_CC_OPTS += -DHostArch=\"$(HostArch_CPP)\"
@@ -402,6 +406,23 @@ rts/dist/build/sm/Evac_thr_HC_OPTS += -optc-funroll-loops
 # but compiled with -DPARALLEL_GC.
 rts/dist/build/sm/Evac_thr_CC_OPTS += -DPARALLEL_GC -Irts/sm
 rts/dist/build/sm/Scav_thr_CC_OPTS += -DPARALLEL_GC -Irts/sm
+
+############### communication section ##############
+
+# parallel ways may require PVM or MPI, depending on actual config
+# this section has to be adapted to each way's requirements
+
+# any way with "pp" should include pvm3 (especially debug_<way>)
+# necessary only for one file:
+ifneq "$(findstring pp, $(rts_WAYS))" ""
+rts/parallel/PVMComm_HC_OPTS += -I$$PVM_ROOT/include
+endif
+
+# "mpicc --showme"(lam/openmpi) or "mpicc -compile-info;mpicc -show"(mpich) 
+# from the configure script, saved output (minus 1st word) into $MPIOpts
+ifneq "$(findstring pm, $(rts_WAYS))" ""
+rts/parallel/MPIComm_CC_OPTS += $(MPIOpts)
+endif
 
 #-----------------------------------------------------------------------------
 # Add PAPI library if needed

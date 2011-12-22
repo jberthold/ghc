@@ -28,11 +28,20 @@
    to the debug console, or pop up message boxes.
    -------------------------------------------------------------------------- */
 
+#if defined(PARALLEL_RTS)
+/* Special versions of message functions, prepending the PE number and
+   giving the Eden URL for bug reports. */
+RtsMsgFunction *fatalInternalErrorFn = edenFatalInternalErrorFn;
+RtsMsgFunction *debugMsgFn           = parDebugMsgFn;
+RtsMsgFunction *errorMsgFn           = parErrorMsgFn;
+RtsMsgFunction *sysErrorMsgFn        = parSysErrorMsgFn;
+#else
 // Default to the stdio implementation of these hooks.
 RtsMsgFunction *fatalInternalErrorFn = rtsFatalInternalErrorFn;
 RtsMsgFunction *debugMsgFn           = rtsDebugMsgFn;
 RtsMsgFunction *errorMsgFn           = rtsErrorMsgFn;
 RtsMsgFunction *sysErrorMsgFn        = rtsSysErrorMsgFn;
+#endif
 
 void
 barf(const char*s, ...)
@@ -283,3 +292,88 @@ rtsDebugMsgFn(const char *s, va_list ap)
      fflush(stderr);
   }
 }
+
+#if defined(PARALLEL_RTS)
+/* ***************************** 
+ * Parallel RTS versions: 
+ * 
+ * - in case of error exit: shut down the system
+ * - give the Eden website for bug reports
+ * - prepend the PE number to debug messages
+ * 
+ * Otherwise, these functions are mostly copies from the above
+ * "rts..."  functions. Unnecessary code for non-supported platforms.
+ */
+
+void GNU_ATTRIBUTE(__noreturn__)
+edenFatalInternalErrorFn(const char *s, va_list ap)
+{
+  /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
+  if (prog_argv != NULL && prog_name != NULL) {
+    fprintf(stderr, "%s: internal error: ", prog_name);
+  } else {
+    fprintf(stderr, "internal error: ");
+  }
+  vfprintf(stderr, s, ap);
+  fprintf(stderr, "\n");
+  
+  fprintf(stderr, "    (Eden compiler %s for %s)\n", 
+	  ProjectVersion, xstr(HostPlatform_TYPE));
+  fprintf(stderr, "    Please report this as a bug: "
+	  "http://www.mathematik.uni-marburg.de/~eden\n");
+  
+  fflush(stderr);
+  
+  // The sequential system uses abort(); but we would like to shut down the
+  // entire system cleanly. shutdownHaskellAndExit does not return, though.
+  if (IAmMainThread) {
+    shutdownHaskellAndExit(EXIT_INTERNAL_ERROR);
+  } else {
+    // non-main PEs just crash, making the main PE shut down the rest
+    stg_exit(EXIT_INTERNAL_ERROR);
+  }
+}
+
+void
+parErrorMsgFn(const char *s, va_list ap)
+{
+  /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
+  if (prog_name != NULL) {
+    fprintf(stderr, "%s [PE %d]: ", prog_name, thisPE);
+  } else {
+    fprintf(stderr, "[PE %d]: ", thisPE);
+  }
+  vfprintf(stderr, s, ap);
+  fprintf(stderr, "\n");
+}
+
+void
+parSysErrorMsgFn(const char *s, va_list ap)
+{
+    char *syserr;
+
+    syserr = strerror(errno);
+    // ToDo: use strerror_r() if available
+    
+    /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
+    if (prog_argv != NULL && prog_name != NULL) {
+      fprintf(stderr, "%s [PE %d]: ", prog_name, thisPE);
+    } else {
+      fprintf(stderr, "[PE %d]: ", thisPE);
+    }
+    vfprintf(stderr, s, ap);
+    if (syserr) {
+      fprintf(stderr, ": %s\n", syserr);
+    } else {
+      fprintf(stderr, "\n");
+    }
+}
+
+void
+parDebugMsgFn(const char *s, va_list ap)
+{
+  fprintf(stderr, "[PE %d]", thisPE);
+  vfprintf(stderr, s, ap);
+  fflush(stderr);
+}
+#endif

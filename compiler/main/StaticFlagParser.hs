@@ -120,6 +120,11 @@ static_flags = [
   , Flag "ticky"          (PassFlag (\f -> do addOpt f; addWay WayDebug))
     -- -ticky enables ticky-ticky code generation, and also implies -debug which
     -- is required to get the RTS ticky support.
+-- Parallel Haskell support, Eden group Marburg
+  , Flag "parpvm"         (NoArg (addWay WayParPvm) )
+  , Flag "parmpi"         (NoArg (addWay WayParMPI) )
+  , Flag "parcp"          (NoArg (addWay WayParCp) )
+-- end Marburg
 
         ------ Debugging ----------------------------------------------------
   , Flag "dppr-debug"                  (PassFlag addOpt)

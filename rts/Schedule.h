@@ -50,6 +50,16 @@ StgWord findRetryFrameHelper (Capability *cap, StgTSO *tso);
 /* Entry point for a new worker */
 void scheduleWorker (Capability *cap, Task *task);
 
+/* startEmptyScheduler()
+ *
+ * ...as the name suggests. Uses cap->running_task as task.
+ * Called from STG :  NO
+ * Locks assumed   : none
+ */
+#if defined(PARALLEL_RTS)
+void startEmptyScheduler(Capability *cap);
+#endif
+
 /* The state of the scheduler.  This is used to control the sequence
  * of events during shutdown, and when the runtime is interrupted
  * using ^C.

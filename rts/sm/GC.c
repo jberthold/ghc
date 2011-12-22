@@ -50,6 +50,10 @@
 #include "Sparks.h"
 #include "Sweep.h"
 
+#if defined(PARALLEL_RTS)
+#include "parallel/RTTables.h" // to update inports in process table
+#endif
+
 #include <string.h> // for memset()
 #include <unistd.h>
 
@@ -369,6 +373,21 @@ GarbageCollect (rtsBool force_major_gc,
   // Mark the stable pointer table.
   markStablePtrTable(mark_root, gct);
 
+#if defined(PARALLEL_RTS)
+  // mark the queue of threads which are "externally blocked" (on system
+  // Blackholes). This queue lives in an extern structure defined in Pack.c.
+  // Evacuate the BQs attached to it, if any. Effect is:
+  // a) evacuates all interesting blocked threads (they block here if
+  //    they depend on external data)
+  // b) evacuates all blackholes for external data where data is needed.
+  //    If an external blackhole is not evacuated, its port can be closed.
+
+  if (stg_system_tso.indirectee != (StgClosure*) END_TSO_QUEUE) {
+    mark_root(gct, &stg_system_tso.indirectee);
+  }
+  // We could make this an extra function, but only for aestethic reasons
+#endif
+
   /* -------------------------------------------------------------------------
    * Repeatedly scavenge all the areas we know about until there's no
    * more scavenging to be done.
@@ -394,6 +413,13 @@ GarbageCollect (rtsBool force_major_gc,
 
   // Now see which stable names are still alive.
   gcStablePtrTable();
+
+#ifdef PARALLEL_RTS
+  // we have to update the inport addresses in here, as long as
+  // IsAlive() works... Inports to garbage-collected blackholes will
+  // be closed, sending a message to the sender if known.
+  updateRTT();
+#endif
 
 #ifdef THREADED_RTS
   if (n_gc_threads == 1) {

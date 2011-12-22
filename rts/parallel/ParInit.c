@@ -1,5 +1,4 @@
 /* --------------------------------------------------------------------------
-   Time-stamp: <Wed Mar 21 2001 16:37:16 Stardate: [-30]6363.46 hwloidl>
 
    Initialising the parallel RTS
 
@@ -9,314 +8,165 @@
    P. Trinder, July 1997.
    H-W. Loidl, November 1999.
 
+   rewrite for Eden-6.x, Jost Berthold, 2006
+   adapted to Eden-6.11, August 2009
+
    ------------------------------------------------------------------------ */
 
-#ifdef PAR /* whole file */
-
-//@menu
-//* Includes::			
-//* Global variables::		
-//* Initialisation Routines::	
-//@end menu
-
-//@node Includes, Global variables
-//@subsection Includes
-
-/* Evidently not Posix */
-/* #include "PosixSource.h" */
-
-#include <setjmp.h>
 #include "Rts.h"
-#include "RtsFlags.h"
 #include "RtsUtils.h"
-#include "ParallelRts.h"
-#include "Sparks.h"
 #include "LLC.h"
 #include "HLC.h"
 
-//@node Global variables, Initialisation Routines, Includes
-//@subsection Global variables
+#include "MPSystem.h" /* wraps middleware usage */
 
-/* Global conditions defined here. */
-
-rtsBool	IAmMainThread = rtsFalse;	/* Set for the main thread	*/
-
-/* Task identifiers for various interesting global tasks. */
-
-GlobalTaskId IOTask = 0,                /* The IO Task Id		*/
-             SysManTask = 0,            /* The System Manager Task Id	*/
-             mytid = 0;                 /* This PE's Task Id		*/
-
-rtsTime 	main_start_time;	/* When the program started	*/
-rtsTime   	main_stop_time;	    	/* When the program finished    */
-jmp_buf		exit_parallel_system;	/* How to abort from the RTS	*/
+#include "Trace.h"
+#include <string.h>
+#include "Stats.h"
 
 
-//rtsBool fishing = rtsFalse;             /* We have no fish out in the stream */
-rtsTime last_fish_arrived_at = 0;       /* Time of arrival of most recent fish*/
-nat     outstandingFishes = 0;          /* Number of active fishes */ 
+#include <sys/time.h>
 
-//@cindex spark queue
-/* GranSim: a globally visible array of spark queues */
-rtsSpark *pending_sparks_hd[SPARK_POOLS],  /* ptr to start of a spark pool */ 
-         *pending_sparks_tl[SPARK_POOLS],  /* ptr to end of a spark pool */ 
-         *pending_sparks_lim[SPARK_POOLS],
-         *pending_sparks_base[SPARK_POOLS]; 
+#ifndef PARALLEL_RTS
+/* provide constants nPE and thisPe for foreign import */
+nat nPEs   = 1;
+nat thisPE = 1;
+#endif
 
-//@cindex spark_limit
-/* max number of sparks permitted on the PE; 
-   see RtsFlags.ParFlags.maxLocalSparks */
-nat spark_limit[SPARK_POOLS];
-
-//@cindex PendingFetches
-/* A list of fetch reply messages not yet processed; this list is filled
-   by awaken_blocked_queue and processed by processFetches */
-StgBlockedFetch *PendingFetches = END_BF_QUEUE;
-
-//@cindex allPEs
-GlobalTaskId *allPEs;
-
-//@cindex nPEs
-nat nPEs = 0;
-
-//@cindex sparksIgnored
-nat sparksIgnored = 0, sparksCreated = 0, 
-    threadsIgnored = 0, threadsCreated = 0;
-
-//@cindex advisory_thread_count
-nat advisory_thread_count = 0;
-
-globalAddr theGlobalFromGA;
-
+#ifdef PARALLEL_RTS /* whole rest of the file */
+#ifdef TRACING
+StgWord64 startupTicks;
+char *argvsave;
+struct timeval startupTime;
+struct timezone startupTimeZone;
+#endif //TRACING
 /* For flag handling see RtsFlags.h */
 
-//@node Prototypes
-//@subsection Prototypes
-
-/* Needed for FISH messages (initialisation of random number generator) */
-void srand48 (long);
-time_t time (time_t *);
-
-//@node Initialisation Routines,  , Global variables
-//@subsection Initialisation Routines
-
-/*
-  par_exit defines how to terminate the program.  If the exit code is
-  non-zero (i.e. an error has occurred), the PE should not halt until
-  outstanding error messages have been processed.  Otherwise, messages
-  might be sent to non-existent Task Ids.  The infinite loop will actually
-  terminate, since STG_Exception will call myexit\tr{(0)} when
-  it received a PP_FINISH from the system manager task.
-*/
-//@cindex shutdownParallelSystem
 void
 shutdownParallelSystem(StgInt n)
 {
-  /* use the file specified via -S */ 
-  FILE *sf = RtsFlags.GcFlags.statsFile;
-
   IF_PAR_DEBUG(verbose,
 	       if (n==0)
-  	         belch("==== entered shutdownParallelSystem ...");
+  	         debugBelch("==== entered shutdownParallelSystem ...\n");
                else
-  	         belch("==== entered shutdownParallelSystem (ERROR %d)...", n);
+  	         debugBelch("==== entered shutdownParallelSystem (ERROR %d)...\n", (int) n);
 	       );
-  
-  stopPEComms(n);
 
-#if 0
-  if (sf!=(FILE*)NULL) 
-    fprintf(sf, "PE %x: %u sparks created, %u sparks Ignored, %u threads created, %u threads Ignored", 
-	    (W_) mytid, sparksCreated, sparksIgnored,
-	    threadsCreated, threadsIgnored);
-#endif
+  // JB 11/2006: write stop event, close trace file. Done here to
+  // avoid a race condition if trace files merged by main node
+  // automatically.
+  //edentrace: traceKillMachine
+  traceKillMachine(thisPE);
 
-  ShutdownEachPEHook();
-}
+  MP_quit(n);
 
-//@cindex initParallelSystem
-void
-initParallelSystem(void)
-{
-  /* Don't buffer standard channels... */
-  setbuf(stdout,NULL);
-  setbuf(stderr,NULL);
-  
-  srand48(time(NULL) * getpid()); /* Initialise Random-number generator seed*/
-                                  /* used to select target of FISH message*/
-  if (!InitPackBuffer())
-    barf("InitPackBuffer");
+  // free allocated space (send/receive buffers)
+  freePackBuffer();
+  freeRecvBuffer();
+  /*
+  freeMoreBuffers();
+  */
 
-  if (!initMoreBuffers())
-    barf("initMoreBuffers");
+  // and runtime tables
+  freeRTT();
 
-  if (!initSparkPools())
-    barf("initSparkPools");
 }
 
 /* 
  * SynchroniseSystem synchronises the reduction task with the system
- * manager, and initialises the Global address tables (LAGA & GALA)
+ * manager, and initialises global structures: receive buffer for
+ * communication, process table, and in GUM the Global address tables
+ * (LAGA & GALA)
  */
 
 //@cindex synchroniseSystem
 void
 synchroniseSystem(void)
 {
-  /* Only in debug mode? */
-  fprintf(stderr, "==== Starting parallel execution on %d processors ...\n", nPEs);
+  MP_sync();
 
-  InitEachPEHook();                  /* HWL: hook to be execed on each PE */
+  // all kinds of initialisation we can do now...
+  // Don't buffer standard channels...
+  setbuf(stdout,NULL);
+  setbuf(stderr,NULL);
 
-  /* Initialize global address tables */
-  initGAtables();
+  // initialise runtime tables
+  initRTT();
 
-  initParallelSystem();
-  
-  startPEComms();
+  // care not to GC any CAFs. Incoming packets might refer to them
+  // This variable lives in Storage.c
+  keepCAFs = rtsTrue;
+
+  // initialise "system tso" which owns blackholes and stores blocking queues
+  SET_HDR(&stg_system_tso, &stg_TSO_info, CCS_SYSTEM);
+  stg_system_tso.indirectee = (StgClosure*) END_TSO_QUEUE;
+
 }
 
+
+void emitStartupEvents(void){
+  //edentrace: traceCreateMachine
+  //startupTicks was fetched earlier, CreateMachine has 
+  //to be the first Event writen to keep the order of the 
+  //timestamps in the buffers valid
+  traceCreateMachine(thisPE,((startupTime.tv_sec) * 100000000 + (startupTime.tv_usec) * 100),startupTicks); 
+
+  //edentrace:  traceVersion
+  traceVersion(ProjectVersion);
+  //edentrace:  traceProgramInvocation
+  traceProgramInvocation(argvsave);
+}
+
+
+
+
 /* 
-  Do the startup stuff (this is PVM specific!).
-  Determines global vars: mytid, IAmMainThread, SysManTask, nPEs
+  Do the startup stuff (middleware-dependencies wrapped in MPSystem.h
+  Global vars held in MPSystem:  IAmMainThread, thisPE, nPEs
   Called at the beginning of RtsStartup.startupHaskell
 */
-void 
-startupParallelSystem(char *argv[]) { 
- mytid = pvm_mytid();	        /* Connect to PVM */
-
- if (*argv[0] == '-') {         /* Look to see whether we're the Main Thread */
-  IAmMainThread = rtsTrue;
-  sscanf(argv[0],"-%0X",&SysManTask);  /* extract SysMan task ID*/	
-  argv++;	                       /* Strip off flag argument */
- } else {
-  SysManTask = pvm_parent();
- }
-
- IF_PAR_DEBUG(verbose,
-	       fprintf(stderr, "==== [%x] %s PE located SysMan at %x\n",
-		       mytid, IAmMainThread?"Main":"Remote", SysManTask));
-
- nPEs = atoi(argv[1]);
-}
-
-/* 
-   Exception handler during startup.
-*/
-void *
-processUnexpectedMessageDuringStartup(rtsPacket p) {
-  OpCode opCode;
-  GlobalTaskId sender_id;
-
-  getOpcodeAndSender(p, &opCode, &sender_id);
-
-  switch(opCode) { 
-      case PP_FISH:
-        bounceFish();
-	break;
-#if defined(DIST)
-      case PP_REVAL:
-	bounceReval();
-	break;
-#endif
-      case PP_FINISH:
-        stg_exit(EXIT_SUCCESS);	
-	break;
-      default:
-	fprintf(stderr,"== Task %x: Unexpected OpCode %x (%s) from %x in startPEComms\n",
-		mytid, opCode, getOpName(opCode), sender_id);
-    }
-}
 
 void 
-startPEComms(void){ 
+startupParallelSystem(int* argc, char **argv[]) { 
 
-  startUpPE(); 
-  allPEs = (GlobalTaskId *) stgMallocBytes(sizeof(GlobalTaskId) * MAX_PES,
-					   "(PEs)");
-  
-  /* Send our tid and IAmMainThread flag back to SysMan */
-  sendOp1(PP_READY, SysManTask, (StgWord)IAmMainThread);  
-  /* Wait until we get the PE-Id table from Sysman */    
-  waitForPEOp(PP_PETIDS, SysManTask, processUnexpectedMessageDuringStartup); 
+  //  getStartTime(); // init start time (in RtsUtils.*)
 
-  IF_PAR_DEBUG(verbose,
-               belch("==-- startPEComms: methinks we just received a PP_PETIDS message"));
+  // write Event for machine startup here, before
+  // communication is set up (might take a while)
 
-  /* Digest the PE table we received */
-  processPEtids();
-}
-
-void
-processPEtids(void) { 
-  long newPE;
-  nat i, sentPEs, currentPEs;
-
-  nPEs=0;
-	  
-  currentPEs = nPEs;
-
-  IF_PAR_DEBUG(verbose,
-		belch("==-- processPEtids: starting to iterate over a PVM buffer"));
-  /* ToDo: this has to go into LLComms !!! */
-  GetArgs(&sentPEs,1);
-
-  ASSERT(sentPEs > currentPEs);
-  ASSERT(sentPEs < MAX_PES); /* enforced by SysMan too*/  
-  
-  for (i = 0; i < sentPEs; i++) { 
-    GetArgs(&newPE,1);
-    if (i<currentPEs) { 
-      ASSERT(newPE == allPEs[i]);
-    } else { 
-#if defined(DIST)
-      // breaks with PAR && !DEBUG
-      IF_PAR_DEBUG(verbose,
-	fprintf(stderr, "[%x] registering %d'th %x\n", mytid, i, newPE)); 
-      if(!looks_like_tid(newPE))
-	  barf("unacceptable taskID %x\n",newPE);
-#endif
-      allPEs[i] = newPE;      
-      nPEs++;
-      registerTask(newPE); 
-    }
+  // JB 11/2006: thisPE is still 0 at this moment, we cannot name the
+  // trace file here => startup time is in reality sync time.
+//MD/TH 03/2010: workaround: store timestamp here and use it in synchroniseSystem
+#ifdef TRACING
+  startupTicks = stat_getElapsedTime(); // see Stats.c, elapsed time from init
+  gettimeofday(&startupTime,&startupTimeZone);
+  //MD: copy argument list to string for traceProgramInvocation
+  int len = 0;
+  int i=0;
+  while (i < *argc){
+    len+=strlen((*argv)[i])+1;
+    i++;
   }
-
-  IF_PAR_DEBUG(verbose,
-  	       /* debugging */
-  	       belch("++++ [%x] PE table as I see it:", mytid);
-  	       for (i = 0; i < sentPEs; i++) { 
-  		 belch("++++ allPEs[%d] = %x", i, allPEs[i]);
-               });
-}
-
-void 
-stopPEComms(StgInt n) { 
-  if (n != 0) { 
-    /* In case sysman doesn't know about us yet...
-    pvm_initsend(PvmDataDefault);
-    PutArgs(&IAmMainThread,1);
-    pvm_send(SysManTask, PP_READY);
-     */
-    sendOp(PP_READY, SysManTask);  
-  } 
+  argvsave = (char *)calloc(len + 1, sizeof(char));
+  i=0;
+  while (i < *argc){
+  strcat(argvsave,(*argv)[i]);
+  strcat(argvsave," ");
+    i++;
+  }
+#endif //TRACING
+  // possibly starts other PEs (first argv is number) 
+  // sets IAmMainThread, nPEs
+  MP_start(argc, *argv); 
   
-  sendOp2(PP_FINISH, SysManTask, n, n);  
-  waitForPEOp(PP_FINISH, SysManTask, NULL);
-  fflush(gr_file);
-  shutDownPE();
+  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
+  (*argv)++; (*argc)--;
+
+  /* Only in debug mode? */
+  fprintf(stderr, "==== Starting parallel execution on %d processors ...\n", 
+	  nPEs);
 }
 
-#endif /* PAR -- whole file */
 
-//@index
-//* PendingFetches::  @cindex\s-+PendingFetches
-//* SynchroniseSystem::  @cindex\s-+SynchroniseSystem
-//* allPEs::  @cindex\s-+allPEs
-//* initParallelSystem::  @cindex\s-+initParallelSystem
-//* nPEs::  @cindex\s-+nPEs
-//* par_exit::  @cindex\s-+par_exit
-//* spark queue::  @cindex\s-+spark queue
-//* sparksIgnored::  @cindex\s-+sparksIgnored
-//@end index
 
+#endif /* PARALLEL_RTS -- whole file */
