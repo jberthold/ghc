@@ -810,6 +810,7 @@ dnl tests for PVM and MPI
 dnl 
 ac_parallel_save_LDFLAGS=$LDFLAGS
 ac_parallel_save_CPPFLAGS=$CPPFLAGS
+ac_parallel_save_LIBS=$LIBS
 
 dnl check for PVM library, by "calling" pvm_mytid.  we assume
 dnl an env. variable "PVM_ROOT" pointing to the installation directory
@@ -904,6 +905,9 @@ dnl If only one has failed, we still try with the other's result.
 
 dnl This does not work with mpich... program needs to come BEFORE the
 dnl linker options on the command line. :(
+dnl Therefore, also use $LIBS instead of $LDFLAGS (although some of them 
+dnl are indeed flags, not libs)
+    LIBS="$MPIOpts"
 
     AC_CHECK_FUNC(MPI_Init,[],
                   [ AS_IF($MPICC -compile-info,
@@ -913,6 +917,7 @@ dnl linker options on the command line. :(
    ])
 ])
 
+LIBS=$ac_parallel_save_LIBS
 LDFLAGS=$ac_parallel_save_LDFLAGS
 CPPFLAGS=$ac_parallel_save_CPPFLAGS
 
