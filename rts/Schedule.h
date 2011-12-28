@@ -135,7 +135,6 @@ appendToRunQueue (Capability *cap, StgTSO *tso)
         setTSOPrev(cap, tso, cap->run_queue_tl);
     }
     cap->run_queue_tl = tso;
-    traceEventThreadRunnable (cap, tso);
 }
 
 /* Push a thread on the beginning of the run queue.

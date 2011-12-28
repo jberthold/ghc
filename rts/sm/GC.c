@@ -342,6 +342,13 @@ GarbageCollect (rtsBool force_major_gc,
       }
   } else {
       scavenge_capability_mut_lists(gct->cap);
+      for (n = 0; n < n_capabilities; n++) {
+          if (gc_threads[n]->idle) {
+              markCapability(mark_root, gct, &capabilities[n],
+                             rtsTrue/*don't mark sparks*/);
+              scavenge_capability_mut_lists(&capabilities[n]);
+          }
+      }
   }
 
   // follow roots from the CAF list (used by GHCi)
@@ -427,7 +434,11 @@ GarbageCollect (rtsBool force_major_gc,
           pruneSparkQueue(&capabilities[n]);
       }
   } else {
-      pruneSparkQueue(gct->cap);
+      for (n = 0; n < n_capabilities; n++) {
+          if (n == cap->no || gc_threads[n]->idle) {
+              pruneSparkQueue(&capabilities[n]);
+         }
+      }
   }
 #endif
 
@@ -666,7 +677,9 @@ GarbageCollect (rtsBool force_major_gc,
           zero_static_object_list(gct->scavenged_static_objects);
       } else {
           for (i = 0; i < n_gc_threads; i++) {
-              zero_static_object_list(gc_threads[i]->scavenged_static_objects);
+              if (!gc_threads[i]->idle) {
+                  zero_static_object_list(gc_threads[i]->scavenged_static_objects);
+              }
           }
       }
   }
@@ -834,6 +847,7 @@ new_gc_thread (nat n, gc_thread *t)
 #endif
 
     t->thread_index = n;
+    t->idle = rtsFalse;
     t->free_blocks = NULL;
     t->gc_count = 0;
 
@@ -1074,6 +1088,11 @@ gcWorkerThread (Capability *cap)
 
     // Wait until we're told to wake up
     RELEASE_SPIN_LOCK(&gct->mut_spin);
+    // yieldThread();
+    //    Strangely, adding a yieldThread() here makes the CPU time
+    //    measurements more accurate on Linux, perhaps because it syncs
+    //    the CPU time across the multiple cores.  Without this, CPU time
+    //    is heavily skewed towards GC rather than MUT.
     gct->wakeup = GC_THREAD_STANDING_BY;
     debugTrace(DEBUG_gc, "GC thread %d standing by...", gct->thread_index);
     ACQUIRE_SPIN_LOCK(&gct->gc_spin);
@@ -1140,7 +1159,7 @@ waitForGcThreads (Capability *cap USED_IF_THREADS)
 
     while(retry) {
         for (i=0; i < n_threads; i++) {
-            if (i == me) continue;
+            if (i == me || gc_threads[i]->idle) continue;
             if (gc_threads[i]->wakeup != GC_THREAD_STANDING_BY) {
                 prodCapability(&capabilities[i], cap->running_task);
             }
@@ -1148,9 +1167,9 @@ waitForGcThreads (Capability *cap USED_IF_THREADS)
         for (j=0; j < 10; j++) {
             retry = rtsFalse;
             for (i=0; i < n_threads; i++) {
-                if (i == me) continue;
+                if (i == me || gc_threads[i]->idle) continue;
                 write_barrier();
-                interruptAllCapabilities();
+                interruptCapability(&capabilities[i]);
                 if (gc_threads[i]->wakeup != GC_THREAD_STANDING_BY) {
                     retry = rtsTrue;
                 }
@@ -1180,8 +1199,8 @@ wakeup_gc_threads (nat me USED_IF_THREADS)
     if (n_gc_threads == 1) return;
 
     for (i=0; i < n_gc_threads; i++) {
-        if (i == me) continue;
-	inc_running();
+        if (i == me || gc_threads[i]->idle) continue;
+        inc_running();
         debugTrace(DEBUG_gc, "waking up gc thread %d", i);
         if (gc_threads[i]->wakeup != GC_THREAD_STANDING_BY) barf("wakeup_gc_threads");
 
@@ -1204,7 +1223,7 @@ shutdown_gc_threads (nat me USED_IF_THREADS)
     if (n_gc_threads == 1) return;
 
     for (i=0; i < n_gc_threads; i++) {
-        if (i == me) continue;
+        if (i == me || gc_threads[i]->idle) continue;
         while (gc_threads[i]->wakeup != GC_THREAD_WAITING_TO_CONTINUE) { write_barrier(); }
     }
 #endif
@@ -1218,8 +1237,8 @@ releaseGCThreads (Capability *cap USED_IF_THREADS)
     const nat me = cap->no;
     nat i;
     for (i=0; i < n_threads; i++) {
-        if (i == me) continue;
-        if (gc_threads[i]->wakeup != GC_THREAD_WAITING_TO_CONTINUE) 
+        if (i == me || gc_threads[i]->idle) continue;
+        if (gc_threads[i]->wakeup != GC_THREAD_WAITING_TO_CONTINUE)
             barf("releaseGCThreads");
         
         gc_threads[i]->wakeup = GC_THREAD_INACTIVE;
