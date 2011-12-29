@@ -661,11 +661,11 @@ scheduleFindWork (Capability **pcap)
     //        otherwise send out a fish message here
 
 #if defined(PARALLEL_RTS)
-    if (emptyRunQueue(cap) || MP_probe() ) {
+    if (emptyRunQueue(*pcap) || MP_probe() ) {
       // nothing to do or messages available for us
 
       // perform a blocking receive
-      processMessages(cap);
+      processMessages(*pcap);
       // this call will set sched_state for termination as well
 
     }
