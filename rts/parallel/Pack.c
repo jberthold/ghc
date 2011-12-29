@@ -169,10 +169,12 @@ typedef struct UnpackInfo_ {
   HashTable* offsets; // set of offsets, stored in a Hashtable
 } UnpackInfo;
 
+/* Future use: global unpack state to support fragmented subgraphs
 static StgClosure* restoreUnpackState(UnpackInfo* unpack,StgClosure** graphroot, 
 				      nat* pptr, nat* pptrs, nat* pvhs);
 static UnpackInfo* saveUnpackState(StgClosure* graphroot, StgClosure* parent, 
 				   nat pptr, nat pptrs, nat pvhs);
+*/
 
 // external interface, declared in Parallel.h:
 /*
@@ -1099,7 +1101,6 @@ static void PackClosure(StgClosure* closure) {
 }
 
 static void PackGeneric(StgClosure* closure) {
-  StgInfoTable *info;
   nat size, ptrs, nonptrs, vhs, i;
   StgWord tag=0;
 
@@ -1108,7 +1109,7 @@ static void PackGeneric(StgClosure* closure) {
   closure = UNTAG_CLOSURE(closure);
 
   /* get info about basic layout of the closure */
-  info = get_closure_info(closure, &size, &ptrs, &nonptrs, &vhs);
+  get_closure_info(closure, &size, &ptrs, &nonptrs, &vhs);
 
   ASSERT(!IsBlackhole(closure));
 
@@ -1494,14 +1495,20 @@ PackArray(StgClosure *closure) {
 */
 
 StgClosure *
-UnpackGraph(rtsPackBuffer *packBuffer, Port inPort, Capability* cap) {
+UnpackGraph(rtsPackBuffer *packBuffer, 
+	    STG_UNUSED Port inPort, Capability* cap) {
   StgWord *bufptr, *slotptr;
-  StgClosure *closure, *graphroot, *parent;
-  nat heapsize, bufsize, pptr = 0, pptrs = 0, pvhs = 0;
+  StgClosure *closure, *graphroot;
+  StgClosure *parent = NULL;
+  nat bufsize, pptr = 0, pptrs = 0, pvhs = 0;
   nat unpacked_closures = 0, unpacked_thunks = 0; // stats only
+#if defined(DEBUG)
+  nat heapsize;
+#endif
 
-  /* to save and restore the unpack state (future use...) */
+  /* to save and restore the unpack state (future use...)
   UnpackInfo *unpackState = NULL;
+  */
   nat currentOffset;
 
   /* Initialisation */
@@ -1515,8 +1522,8 @@ UnpackGraph(rtsPackBuffer *packBuffer, Port inPort, Capability* cap) {
 
   /* Unpack the header */
   bufsize = packBuffer->size;
-  heapsize = packBuffer->unpacked_size;
   IF_PAR_DEBUG(pack,
+    heapsize = packBuffer->unpacked_size;
     debugBelch("Packing: Header unpacked. (bufsize=%d, heapsize=%d)\n"
 	       "Unpacking closures now...\n", 
 	       bufsize, heapsize));
@@ -1531,7 +1538,6 @@ UnpackGraph(rtsPackBuffer *packBuffer, Port inPort, Capability* cap) {
      Inport* inport = findInportByP(inPort);
      unpackState = inport->unpackState;
      inport->unpackState = NULL; // invalidate, will be deallocated!
-   */
   if (unpackState!=NULL) {
     IF_PAR_DEBUG(pack,
 	   debugBelch("Unpack state found, partial message on inport %d.\n", 
@@ -1544,6 +1550,7 @@ UnpackGraph(rtsPackBuffer *packBuffer, Port inPort, Capability* cap) {
 		      (int)inPort.id));
     parent = (StgClosure *) NULL;
   }
+   */
 
   do {
     /* check that we aren't at the end of the buffer, yet */
@@ -1614,6 +1621,13 @@ UnpackGraph(rtsPackBuffer *packBuffer, Port inPort, Capability* cap) {
   } while ((parent != NULL) && (bufsize > (nat) (bufptr-(packBuffer->buffer))));
 
   if (parent != NULL) {  // prepare all for next part if graph not complete
+ 
+   barf("Graph fragmentation not supported, packet full\n" 
+	"(and THIS MESSAGE SHOULD NEVER BE SEEN BY A USER)\n"
+	"Try a bigger pack buffer with +RTS -qQ<size>");
+
+  /* future use: save unpack state to support fragmented subgraphs
+
     StgClosure* tempBH;
     StgPtr childP;
 
@@ -1646,8 +1660,9 @@ UnpackGraph(rtsPackBuffer *packBuffer, Port inPort, Capability* cap) {
       LocateNextParent(&parent, &pptr, &pptrs, &pvhs); 
       // until the queue is empty and the last parent filled
     } // while
-  } else { /* PARENT == NULL: whole graph has arrived, offset table
-	      can be dropped */
+  */
+  } else { 
+    // PARENT == NULL: whole graph has arrived, drop offset table
     freeHashTable(offsetTable, NULL);
     offsetTable = NULL;
   }
@@ -1715,7 +1730,6 @@ LocateNextParent(parentP, pptrP, pptrsP, pvhsP)
 StgClosure **parentP;
 nat *pptrP, *pptrsP, *pvhsP;
 {
-  StgInfoTable *ip; // debugging
   nat size, nonptrs;
 
   /* pptr as an index into the current parent; find the next pointer field
@@ -1735,7 +1749,7 @@ nat *pptrP, *pptrsP, *pvhsP;
     if (*parentP == NULL)
       break;
     else {
-      ip = get_closure_info(*parentP, &size, pptrsP, &nonptrs, pvhsP);
+      get_closure_info(*parentP, &size, pptrsP, &nonptrs, pvhsP);
       *pptrP = 0;
     }
   }
@@ -2136,7 +2150,7 @@ UnpackOffset(StgWord **bufptrP)
 /* functions to save and restore the unpacking state from a 
  * saved format (including queue and offset table).
  * Format is defined as type "UnpackInfo".
- */
+
 static
 StgClosure* restoreUnpackState(UnpackInfo* unpack,StgClosure** graphroot, 
 		nat* pptr, nat* pptrs, nat* pvhs) {
@@ -2231,6 +2245,7 @@ UnpackInfo* saveUnpackState(StgClosure* graphroot, StgClosure* parent,
 
   return save;
 }
+ */
 
 /* Experimental feature: serialisation into a Haskell Byte Array and
  * respective deserialisation. 

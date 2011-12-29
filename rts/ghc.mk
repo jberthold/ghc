@@ -407,6 +407,9 @@ rts/dist/build/sm/Evac_thr_HC_OPTS += -optc-funroll-loops
 rts/dist/build/sm/Evac_thr_CC_OPTS += -DPARALLEL_GC -Irts/sm
 rts/dist/build/sm/Scav_thr_CC_OPTS += -DPARALLEL_GC -Irts/sm
 
+# inlining warnings happen in Pack.c
+rts/parallel/Pack_CC_OPTS += -Wno-inline
+
 ############### communication section ##############
 
 # parallel ways may require PVM or MPI, depending on actual config

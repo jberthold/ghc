@@ -26,12 +26,14 @@
 #include <unistd.h>
 #endif
 
+#ifdef PARALLEL_RTS
+#include "rts/Parallel.h" //need thisPE for parallel trace file name
+
+#else
 // PID of the process that writes to event_log_filename (#4512)
 static pid_t event_log_pid = -1;
 
-#ifdef PARALLEL_RTS
-#include "rts/Parallel.h" //need thisPE for parallel trace file name
-#endif //PARALLEL_RTS
+#endif // PARALLEL_RTS
 
 static char *event_log_filename = NULL;
 
