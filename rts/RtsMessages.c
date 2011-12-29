@@ -330,6 +330,9 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
     shutdownHaskellAndExit(EXIT_INTERNAL_ERROR);
   } else {
     // non-main PEs just crash, making the main PE shut down the rest
+#ifdef TRACING
+    if (RtsFlags.TraceFlags.tracing == TRACE_EVENTLOG) endEventLogging();
+#endif
     stg_exit(EXIT_INTERNAL_ERROR);
   }
 }
