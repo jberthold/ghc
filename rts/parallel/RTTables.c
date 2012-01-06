@@ -64,6 +64,7 @@ void updateInports(ProcessData *p);
 void CommCheckFailed(void) {
 #if defined(DEBUG)
   errorBelch("1 to 1 connection check failed: inspect channel usage in program");
+  trace(RtsFlags.TraceFlags.user, "COMM CHECK FAILED\n");
 /*   errorBelch("1 to 1 check failed: check program (RTS bug?)"); */
 /*   barf("Aborting program, suspected RTS bug"); */
 /*   stg_exit(EXIT_FAILURE); // in case barf returns */
@@ -282,6 +283,8 @@ Inport* addInport_(ProcessData *p, StgClosure *blackhole) {
       debugBelch("inport %d(%d) for process %d, closure %p\n",
 		 (int) newIn->id, (int) inportmax, 
 		 (int) p->id, blackhole));
+  trace(RtsFlags.TraceFlags.user, "newInport (%d,%d), blackhole %p\n",
+        (int) p->id, (int) newIn->id, blackhole);
 
   newIn->closure = blackhole;
   newIn->sender = NoPort;
@@ -366,6 +369,9 @@ void setReceiver(StgTSO* tso, nat pe, StgWord proc, StgWord id) {
 		 (int) pe, (int) proc, (int) id ));
 
   ASSERT(pe != 0 && proc != 0 && id != 0);
+
+  trace(RtsFlags.TraceFlags.user,"connectTSO %d to inport (%d,%d,%d)\n",
+        (int) tso->id, (int) pe, (int) proc, (int) id );
 
   // reconnection allowed, remove old entry.
   oldPort = lookupHashTable(threadrecvtable, tso->id);
