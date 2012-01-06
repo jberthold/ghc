@@ -198,6 +198,13 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     sendTag = PP_CONNECT;
     ASSERT(!(isNoPort(*receiver)));
     sender.id = sendingtso->id;
+
+    // same machine, same runtime tables, so we connect directly
+    if ( sender.machine == receiver->machine ) {
+      connectInportByP(*receiver, sender);
+      return 2;
+    }
+
     // no data needed
     packedData = &dummyBuffer;
     packedData->size = 0;
