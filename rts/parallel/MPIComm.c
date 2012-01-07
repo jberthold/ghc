@@ -57,6 +57,8 @@ struct _status
 	.. more, implementation-dependent
 */
 
+// communicator for system messages
+MPI_Comm sysComm;
 
 /**************************************************************
  * Startup and Shutdown routines (used inside ParInit.c only) */
@@ -110,7 +112,11 @@ rtsBool MP_start(int* argc, char** argv) {
 			    mpiWorldSize));
   }
   nPEs = mpiWorldSize; //  (re-)set size from MPI (in any case)
-
+  
+  // System communicator sysComm is duplicated from COMM_WORLD
+  // but has its own context
+  MPI_Comm_dup(MPI_COMM_WORLD, &sysComm); 
+  
   return rtsTrue;
 }
 
@@ -145,6 +151,7 @@ rtsBool MP_sync(void) {
 	       debugBelch("Node %d synchronising.\n", thisPE));
 
   MPI_Barrier(MPI_COMM_WORLD); // unnecessary...
+                               // but currently used to synchronize system times
 
   return rtsTrue;
 }
@@ -284,8 +291,15 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
   // using ptr. arithmetics and void* size (see includes/stg/Types.h)
   sendPos = ((StgPtr)mpiMsgBuffer) + sendIndex * DATASPACEWORDS;
   memcpy((void*)sendPos, data, length * sizeof(StgWord));
-  MPI_Isend(sendPos, length, MPI_LONG, node, tag, 
+
+  if (ISSYSCODE(tag)){  //case system message
+      MPI_Isend(sendPos, length, MPI_LONG, node, tag, 
+            sysComm, &(requests[sendIndex]));
+  }
+  else {                //other message
+    MPI_Isend(sendPos, length, MPI_LONG, node, tag, 
             MPI_COMM_WORLD, &(requests[sendIndex]));
+  }
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("Done sending message to PE %d\n", node));
   return rtsTrue;
@@ -308,21 +322,18 @@ int MP_recv(int maxlength, long *destination,
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("MP_recv for MPI.\n"));
 
+  MPI_Comm useComm;
   // priority for system messages, probed before accepting anything
-  // todo: use different communicator!
-  while ( !haveSysMsg && code <=MAX_PEOPS ) {
-    code++;
-    if (ISSYSCODE(code)) 
-      // non-blocking probe, 
-      MPI_Iprobe(MPI_ANY_SOURCE, code, MPI_COMM_WORLD, &haveSysMsg, &status);
-  }
+  // non-blocking probe, 
+  MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, sysComm, &haveSysMsg, &status);
 
   // if SysMsg flag is set: we receive a system message
   if (haveSysMsg) {
-    // TODO: insert smart assertion
+    useComm = sysComm;
   } else {
     // blocking probe for any message, returns source and tag in status 
     MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+    useComm = MPI_COMM_WORLD;
   }
 
   if (status.MPI_ERROR != MPI_SUCCESS) {
@@ -339,7 +350,7 @@ int MP_recv(int maxlength, long *destination,
   // really receive (exactly!) the message probed above:
   source = status.MPI_SOURCE;
   code = status.MPI_TAG;
-  MPI_Recv(destination, size, MPI_LONG, source, code, MPI_COMM_WORLD, &status);
+  MPI_Recv(destination, size, MPI_LONG, source, code, useComm, &status);
 
   *retcode = status.MPI_TAG;
   *sender  = 1+status.MPI_SOURCE;
@@ -360,7 +371,9 @@ rtsBool MP_probe(void){
   // non-blocking probe: either flag is true and status filled, or no
   // message waiting to be received. Using ignore-status...
   MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, MPI_STATUS_IGNORE);
-
+  if (flag == 0){ // check for message on system communicator if there is no message on MPI_COMM_WORLD
+    MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, sysComm, &flag, MPI_STATUS_IGNORE);
+  }
   return (flag != 0);
 }
 
