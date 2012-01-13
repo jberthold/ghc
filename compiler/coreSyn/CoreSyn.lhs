@@ -26,6 +26,7 @@ module CoreSyn (
 	
 	mkIntLit, mkIntLitInt,
 	mkWordLit, mkWordLitWord,
+	mkWord64LitWord64, mkInt64LitInt64,
 	mkCharLit, mkStringLit,
 	mkFloatLit, mkFloatLitFloat,
 	mkDoubleLit, mkDoubleLitDouble,
@@ -104,6 +105,7 @@ import Outputable
 import Util
 
 import Data.Data hiding (TyCon)
+import Data.Int
 import Data.Word
 
 infixl 4 `mkApps`, `mkTyApps`, `mkVarApps`, `App`, `mkCoApps`
@@ -447,12 +449,12 @@ data CoreRule
 	ru_act  :: Activation,          -- ^ When the rule is active
 
 	-- Rough-matching stuff
-	-- see comments with InstEnv.Instance( is_cls, is_rough )
+	-- see comments with InstEnv.ClsInst( is_cls, is_rough )
 	ru_fn    :: Name,	        -- ^ Name of the 'Id.Id' at the head of this rule
 	ru_rough :: [Maybe Name],	-- ^ Name at the head of each argument to the left hand side
 	
 	-- Proper-matching stuff
-	-- see comments with InstEnv.Instance( is_tvs, is_tys )
+	-- see comments with InstEnv.ClsInst( is_tvs, is_tys )
 	ru_bndrs :: [CoreBndr],         -- ^ Variables quantified over
 	ru_args  :: [CoreExpr],         -- ^ Left hand side arguments
 	
@@ -1043,6 +1045,12 @@ mkWordLitWord :: Word -> Expr b
 
 mkWordLit     w = Lit (mkMachWord w)
 mkWordLitWord w = Lit (mkMachWord (toInteger w))
+
+mkWord64LitWord64 :: Word64 -> Expr b
+mkWord64LitWord64 w = Lit (mkMachWord64 (toInteger w))
+
+mkInt64LitInt64 :: Int64 -> Expr b
+mkInt64LitInt64 w = Lit (mkMachInt64 (toInteger w))
 
 -- | Create a machine character literal expression of type @Char#@.
 -- If you want an expression of type @Char@ use 'MkCore.mkCharExpr'
