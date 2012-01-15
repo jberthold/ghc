@@ -111,7 +111,6 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.IORef
 import System.FilePath
-import System.Directory (getModificationTime)
 \end{code}
 
 
@@ -844,7 +843,7 @@ oldMD5 dflags bh = do
 instOrphWarn :: PrintUnqualified -> ClsInst -> WarnMsg
 instOrphWarn unqual inst
   = mkWarnMsg (getSrcSpan inst) unqual $
-    hang (ptext (sLit "Warning: orphan instance:")) 2 (pprInstanceHdr inst)
+    hang (ptext (sLit "Orphan instance:")) 2 (pprInstanceHdr inst)
 
 ruleOrphWarn :: PrintUnqualified -> Module -> IfaceRule -> WarnMsg
 ruleOrphWarn unqual mod rule
@@ -886,7 +885,7 @@ mkOrphMap get_key decls
 mkUsageInfo :: HscEnv -> Module -> ImportedMods -> NameSet -> [FilePath] -> IO [Usage]
 mkUsageInfo hsc_env this_mod dir_imp_mods used_names dependent_files
   = do  { eps <- hscEPS hsc_env
-    ; mtimes <- mapM getModificationTime dependent_files
+    ; mtimes <- mapM getModificationUTCTime dependent_files
         ; let mod_usages = mk_mod_usage_info (eps_PIT eps) hsc_env this_mod
                                      dir_imp_mods used_names
         ; let usages = mod_usages ++ map to_file_usage (zip dependent_files mtimes)
@@ -1334,7 +1333,7 @@ checkModUsage _this_pkg UsageFile{ usg_file_path = file,
                                    usg_mtime = old_mtime } =
   liftIO $
     handleIO handle $ do
-      new_mtime <- getModificationTime file
+      new_mtime <- getModificationUTCTime file
       return $ old_mtime /= new_mtime
  where
    handle =

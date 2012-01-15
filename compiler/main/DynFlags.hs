@@ -113,7 +113,7 @@ import Outputable
 #ifdef GHCI
 import Foreign.C        ( CInt(..) )
 #endif
-import {-# SOURCE #-} ErrUtils ( Severity(..), Message, mkLocMessage )
+import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessage )
 
 #ifdef GHCI
 import System.IO.Unsafe ( unsafePerformIO )
@@ -250,6 +250,8 @@ data DynFlag
    | Opt_RegsGraph                      -- do graph coloring register allocation
    | Opt_RegsIterative                  -- do iterative coalescing graph coloring register allocation
    | Opt_PedanticBottoms                -- Be picky about how we treat bottom
+   | Opt_LlvmTBAA                       -- Use LLVM TBAA infastructure for improving AA
+   | Opt_RegLiveness                    -- Use the STG Reg liveness information
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -288,6 +290,7 @@ data DynFlag
    | Opt_GhciSandbox
    | Opt_GhciHistory
    | Opt_HelpfulErrors
+   | Opt_DeferTypeErrors
 
    -- temporary flags
    | Opt_RunCPS
@@ -578,7 +581,7 @@ data DynFlags = DynFlags {
   --     flattenExtensionFlags language extensions
   extensionFlags        :: IntSet,
 
-  -- | Message output action: use "ErrUtils" instead of this if you can
+  -- | MsgDoc output action: use "ErrUtils" instead of this if you can
   log_action            :: LogAction,
 
   haddockOptions        :: Maybe String,
@@ -921,7 +924,7 @@ defaultDynFlags mySettings =
         profAuto = NoProfAuto
       }
 
-type LogAction = Severity -> SrcSpan -> PprStyle -> Message -> IO ()
+type LogAction = Severity -> SrcSpan -> PprStyle -> MsgDoc -> IO ()
 
 defaultLogAction :: LogAction
 defaultLogAction severity srcSpan style msg
@@ -930,7 +933,7 @@ defaultLogAction severity srcSpan style msg
    SevInfo   -> printErrs msg style
    SevFatal  -> printErrs msg style
    _         -> do hPutChar stderr '\n'
-                   printErrs (mkLocMessage srcSpan msg) style
+                   printErrs (mkLocMessage severity srcSpan msg) style
                    -- careful (#2302): printErrs prints in UTF-8, whereas
                    -- converting to string first and using hPutStr would
                    -- just emit the low 8 bits of each unicode char.
@@ -1326,7 +1329,7 @@ safeFlagCheck cmdl dflags =
         False | not cmdl && safeInferOn dflags && packageTrustOn dflags
               -> (dopt_unset dflags' Opt_PackageTrust,
                   [L (pkgTrustOnLoc dflags') $
-                      "Warning: -fpackage-trust ignored;" ++
+                      "-fpackage-trust ignored;" ++
                       " must be specified with a Safe Haskell flag"]
                   )
 
@@ -1349,8 +1352,8 @@ safeFlagCheck cmdl dflags =
 
         apFix f = if safeInferOn dflags then id else f
 
-        safeFailure loc str = [L loc $ "Warning: " ++ str ++ " is not allowed in"
-                                      ++ " Safe Haskell; ignoring " ++ str]
+        safeFailure loc str 
+           = [L loc $ str ++ " is not allowed in Safe Haskell; ignoring " ++ str]
 
         bad_flags = [("-XGeneralizedNewtypeDeriving", newDerivOnLoc dflags,
                          xopt Opt_GeneralizedNewtypeDeriving,
@@ -1822,6 +1825,8 @@ fFlags = [
   ( "vectorise",                        Opt_Vectorise, nop ),
   ( "regs-graph",                       Opt_RegsGraph, nop ),
   ( "regs-iterative",                   Opt_RegsIterative, nop ),
+  ( "llvm-tbaa",                        Opt_LlvmTBAA, nop),
+  ( "reg-liveness",                     Opt_RegLiveness, nop),
   ( "gen-manifest",                     Opt_GenManifest, nop ),
   ( "embed-manifest",                   Opt_EmbedManifest, nop ),
   ( "ext-core",                         Opt_EmitExternalCore, nop ),
@@ -1829,6 +1834,7 @@ fFlags = [
   ( "ghci-sandbox",                     Opt_GhciSandbox, nop ),
   ( "ghci-history",                     Opt_GhciHistory, nop ),
   ( "helpful-errors",                   Opt_HelpfulErrors, nop ),
+  ( "defer-type-errors",                Opt_DeferTypeErrors, nop ),
   ( "building-cabal-package",           Opt_BuildingCabalPackage, nop ),
   ( "implicit-import-qualified",        Opt_ImplicitImportQualified, nop ),
   ( "prof-count-entries",               Opt_ProfCountEntries, nop ),
@@ -2069,6 +2075,8 @@ optLevelFlags
     , ([2],     Opt_LiberateCase)
     , ([2],     Opt_SpecConstr)
     , ([2],     Opt_RegsGraph)
+    , ([0,1,2], Opt_LlvmTBAA)
+    , ([0,1,2], Opt_RegLiveness)
 
 --     , ([2],     Opt_StaticArgumentTransformation)
 -- Max writes: I think it's probably best not to enable SAT with -O2 for the
