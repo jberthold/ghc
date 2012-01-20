@@ -1054,7 +1054,7 @@ mkLam :: SimplEnv -> [OutBndr] -> OutExpr -> SimplM OutExpr
 mkLam _b [] body 
   = return body
 mkLam _env bndrs body
-  = do	{ dflags <- getDOptsSmpl
+  = do	{ dflags <- getDynFlags
 	; mkLam' dflags bndrs body }
   where
     mkLam' :: DynFlags -> [OutBndr] -> OutExpr -> SimplM OutExpr
@@ -1125,7 +1125,7 @@ because the latter is not well-kinded.
 tryEtaExpand :: SimplEnv -> OutId -> OutExpr -> SimplM (Arity, OutExpr)
 -- See Note [Eta-expanding at let bindings]
 tryEtaExpand env bndr rhs
-  = do { dflags <- getDOptsSmpl
+  = do { dflags <- getDynFlags
        ; (new_arity, new_rhs) <- try_expand dflags
 
        ; WARN( new_arity < old_arity || new_arity < _dmd_arity, 
@@ -1161,10 +1161,10 @@ findArity dflags bndr rhs old_arity
        -- we stop right away (since arities should not decrease)
        -- Result: the common case is that there is just one iteration
   where
-    init_cheap_app :: FunAppAnalyser
+    init_cheap_app :: CheapAppFun
     init_cheap_app fn n_val_args
       | fn == bndr = True   -- On the first pass, this binder gets infinite arity
-      | otherwise  = isHNFApp fn n_val_args
+      | otherwise  = isCheapApp fn n_val_args
 
     go :: Arity -> Arity
     go cur_arity
@@ -1178,10 +1178,10 @@ findArity dflags bndr rhs old_arity
       where
         new_arity = exprEtaExpandArity dflags cheap_app rhs
 
-        cheap_app :: FunAppAnalyser
+        cheap_app :: CheapAppFun
         cheap_app fn n_val_args
           | fn == bndr = n_val_args < cur_arity
-          | otherwise  = isHNFApp fn n_val_args
+          | otherwise  = isCheapApp fn n_val_args
 \end{code}
 
 Note [Eta-expanding at let bindings]
@@ -1244,7 +1244,7 @@ argument
      type CheapFun = CoreExpr -> Maybe Type -> Bool
 used to decide if an expression is cheap enough to push inside a 
 lambda.  And exprIsCheap' in turn takes an argument
-     type FunAppAnalyser = Id -> Int -> Bool
+     type CheapAppFun = Id -> Int -> Bool
 which tells when an application is cheap. This makes it easy to
 write the analysis loop.
 
