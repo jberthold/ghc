@@ -45,7 +45,10 @@ int bufsize;
 void *mpiMsgBuffer;
 MPI_Request *requests;
 int msgCount; // to detach/attach buffer to avoid buffer overflow
-
+//request and buffer for Ping on sysComm
+MPI_Request sysRequest;
+int pingMessage=0;
+int pingMessage2=0;
 
 // status for receive and probe operations:
 MPI_Status status;
@@ -167,7 +170,7 @@ rtsBool MP_sync(void) {
  */
 rtsBool MP_quit(int isError) {
   long data[2];
-
+  MPI_Request sysRequest2;
   if (IAmMainThread) {
     int i;
 
@@ -178,9 +181,12 @@ rtsBool MP_quit(int isError) {
     data[0] = PP_FINISH;
     data[1] = isError;
 
-    for (i=2; i<=(int)nPEs; i++)
+    for (i=2; i<=(int)nPEs; i++){
       // synchronous send operation in order 2..nPEs ... might slow down. 
+      MPI_Isend(&pingMessage, 1, MPI_INT, i-1, PP_FINISH, sysComm, &sysRequest2);  
       MPI_Send(data,2,MPI_LONG,i-1, PP_FINISH, MPI_COMM_WORLD);
+      MPI_Wait(&sysRequest2, MPI_STATUS_IGNORE);
+    }
   }
   
   IF_PAR_DEBUG(mpcomm,
@@ -211,14 +217,22 @@ rtsBool MP_quit(int isError) {
     while (MP_probe()) {
       MPI_Recv(voidbuffer, DATASPACEWORDS, MPI_LONG, 
 	       MPI_ANY_SOURCE, MPI_ANY_TAG, 
-	       MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	       MPI_COMM_WORLD, &status);
+      if (ISSYSCODE(status.MPI_TAG)) 
+        MPI_Recv(voidbuffer, 1, MPI_INT, 
+                 MPI_ANY_SOURCE, MPI_ANY_TAG, 
+                 sysComm, MPI_STATUS_IGNORE);
     }
     MPI_Barrier(MPI_COMM_WORLD);
     // all in sync (noone sends further messages), receive rest
     while (MP_probe()) { 
       MPI_Recv(voidbuffer, DATASPACEWORDS, MPI_LONG, 
 	       MPI_ANY_SOURCE, MPI_ANY_TAG, 
-	       MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+	       MPI_COMM_WORLD, &status);
+      if (ISSYSCODE(status.MPI_TAG)) 
+        MPI_Recv(voidbuffer, 1, MPI_INT, 
+                 MPI_ANY_SOURCE, MPI_ANY_TAG, 
+                 sysComm, MPI_STATUS_IGNORE);
     }
     stgFree(voidbuffer);
   }
@@ -292,16 +306,14 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
   sendPos = ((StgPtr)mpiMsgBuffer) + sendIndex * DATASPACEWORDS;
   memcpy((void*)sendPos, data, length * sizeof(StgWord));
 
-  if (ISSYSCODE(tag)){  //case system message
-      MPI_Isend(sendPos, length, MPI_LONG, node, tag, 
-            sysComm, &(requests[sendIndex]));
+  if (ISSYSCODE(tag)){  //case system message (workaroud: send it on both communicators, because there is no receive on two comunicators.)
+      MPI_Isend(&pingMessage, 1, MPI_INT, node, tag, 
+            sysComm, &sysRequest);    
   }
-  else {                //other message
-    MPI_Isend(sendPos, length, MPI_LONG, node, tag, 
+  MPI_Isend(sendPos, length, MPI_LONG, node, tag, 
             MPI_COMM_WORLD, &(requests[sendIndex]));
-  }
   IF_PAR_DEBUG(mpcomm,
-	       debugBelch("Done sending message to PE %d\n", node));
+	       debugBelch("Done sending message to PE %d\n", node+1));
   return rtsTrue;
 }
 
@@ -323,19 +335,23 @@ int MP_recv(int maxlength, long *destination,
 	       debugBelch("MP_recv for MPI.\n"));
 
   MPI_Comm useComm;
-  // priority for system messages, probed before accepting anything
-  // non-blocking probe, 
+    // priority for system messages, probed before accepting anything
+    // non-blocking probe,
   MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, sysComm, &haveSysMsg, &status);
-
-  // if SysMsg flag is set: we receive a system message
-  if (haveSysMsg) {
-    useComm = sysComm;
-  } else {
-    // blocking probe for any message, returns source and tag in status 
-    MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
-    useComm = MPI_COMM_WORLD;
+    // blocking probe for other message, returns source and tag in status
+  if (!haveSysMsg){ 
+    // there is no system message: get meta data of the first message on MPI_COMM_WORLD
+   MPI_Probe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+    source = status.MPI_SOURCE;
+    code = status.MPI_TAG;
   }
-
+  else{
+    // there is a system message:
+    // still need to probe on MPI_COMM_WORLD for the system message to get status of the message and the messages size
+    source = status.MPI_SOURCE;
+    code = status.MPI_TAG;
+    MPI_Probe(source, code, MPI_COMM_WORLD, &status);
+  }
   if (status.MPI_ERROR != MPI_SUCCESS) {
     debugBelch("MPI: Error receiving message.\n"); 
     barf("PE %d aborting execution.\n", thisPE);
@@ -346,15 +362,17 @@ int MP_recv(int maxlength, long *destination,
   MPI_Get_count(&status, MPI_LONG, &size);
   if (maxlength < size) 
     barf("wrong MPI message length (%d, too big)!!!", size);
-
-  // really receive (exactly!) the message probed above:
-  source = status.MPI_SOURCE;
-  code = status.MPI_TAG;
-  MPI_Recv(destination, size, MPI_LONG, source, code, useComm, &status);
+  MPI_Recv(destination, size, MPI_LONG, source, code, MPI_COMM_WORLD, &status);
 
   *retcode = status.MPI_TAG;
   *sender  = 1+status.MPI_SOURCE;
 
+  // If we received a sys-message on COMM_WORLD, we need to receive it also on sysComm:
+  // if MPI_Iprobe on sysComm has failed, a sysMessage might have arived later - 
+  // don't use haveSysMsg for the decission, use ISSYSCODE(code) instead.
+  if (ISSYSCODE(code)){
+    MPI_Recv(&pingMessage2, 1, MPI_INT, source, code, sysComm, &status);
+  }
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("MPI Message from PE %d with code %d.\n",
 			  *sender, *retcode));
@@ -371,9 +389,12 @@ rtsBool MP_probe(void){
   // non-blocking probe: either flag is true and status filled, or no
   // message waiting to be received. Using ignore-status...
   MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &flag, MPI_STATUS_IGNORE);
-  if (flag == 0){ // check for message on system communicator if there is no message on MPI_COMM_WORLD
-    MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, sysComm, &flag, MPI_STATUS_IGNORE);
-  }
+  // We send and receive all sys-messages twice. Don't need to probe additionaly on the sysCom communictor.
+  // Use code beneth when we switch to a counting procedure.
+
+  //if (flag == 0){ // check for message on system communicator if there is no message on MPI_COMM_WORLD
+  //  MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, sysComm, &flag, MPI_STATUS_IGNORE);
+  //}
   return (flag != 0);
 }
 
