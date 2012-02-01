@@ -27,7 +27,7 @@
 ***********************************************************************/
 
 #define	MIN_PEOPS		0x50
-#define	MAX_PEOPS		0x5f
+#define	MAX_PEOPS		0x5c
 
 /* ************************** */
 /* Generic Parallel RTS */
