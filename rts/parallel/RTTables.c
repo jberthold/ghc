@@ -409,7 +409,7 @@ void removeInport(StgWord processId, StgWord inportId) {
 
   last = &(p->inports);
   remv = p->inports;
-  while (remv->id != inportId && remv!=NULL) {
+  while (remv != NULL && remv->id != inportId) {
       ASSERT(*last == remv); // INV: last points to remv (from
 			     // previous one or process entry)
       last = &(remv->next);
