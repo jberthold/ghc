@@ -15,6 +15,7 @@ import BlockId
 import CgUtils ( activeStgRegs, callerSaves )
 import CLabel
 import OldCmm
+import OldCmmUtils
 import qualified OldPprCmm as PprCmm
 
 import DynFlags
@@ -137,16 +138,15 @@ stmtToInstrs env stmt = case stmt of
         -> return (env, unitOL $ Return Nothing, [])
 
 
--- | Foreign Calls
-genCall :: LlvmEnv -> CmmCallTarget -> [HintedCmmFormal] -> [HintedCmmActual]
-              -> CmmReturnInfo -> UniqSM StmtData
+-- | Memory barrier instruction for LLVM >= 3.0
+barrier :: LlvmEnv -> UniqSM StmtData
+barrier env = do
+    let s = Fence False SyncSeqCst
+    return (env, unitOL s, [])
 
--- Write barrier needs to be handled specially as it is implemented as an LLVM
--- intrinsic function.
-genCall env (CmmPrim MO_WriteBarrier) _ _ _
- | platformArch (getLlvmPlatform env) `elem` [ArchX86, ArchX86_64, ArchSPARC]
-    = return (env, nilOL, [])
- | otherwise = do
+-- | Memory barrier instruction for LLVM < 3.0
+oldBarrier :: LlvmEnv -> UniqSM StmtData
+oldBarrier env = do
     let fname = fsLit "llvm.memory.barrier"
     let funSig = LlvmFunctionDecl fname ExternallyVisible CC_Ccc LMVoid
                     FixedArgs (tysToParams [i1, i1, i1, i1, i1]) llvmFunAlign
@@ -166,6 +166,18 @@ genCall env (CmmPrim MO_WriteBarrier) _ _ _
     where
         lmTrue :: LlvmVar
         lmTrue  = mkIntLit i1 (-1)
+
+-- | Foreign Calls
+genCall :: LlvmEnv -> CmmCallTarget -> [HintedCmmFormal] -> [HintedCmmActual]
+              -> CmmReturnInfo -> UniqSM StmtData
+
+-- Write barrier needs to be handled specially as it is implemented as an LLVM
+-- intrinsic function.
+genCall env (CmmPrim MO_WriteBarrier) _ _ _
+ | platformArch (getLlvmPlatform env) `elem` [ArchX86, ArchX86_64, ArchSPARC]
+    = return (env, nilOL, [])
+ | getLlvmVer env > 29 = barrier env
+ | otherwise           = oldBarrier env
 
 -- Handle popcnt function specifically since GHC only really has i32 and i64
 -- types and things like Word8 are backed by an i32 and just present a logical
@@ -210,6 +222,10 @@ genCall env t@(CmmPrim op) [] args CmmMayReturn | op == MO_Memcpy ||
         stmts = stmts1 `appOL` stmts2 `appOL` stmts3
                 `appOL` trashStmts `snocOL` call
     return (env2, stmts, top1 ++ top2)
+
+genCall env (CmmPrim op) results args _
+ | Just stmts <- expandCallishMachOp op results args
+    = stmtsToInstrs env stmts (nilOL, [])
 
 -- Handle all other foreign calls and prim ops.
 genCall env target res args ret = do
@@ -458,17 +474,17 @@ cmmPrimOpFunctions env mop
 
     (MO_PopCnt w) -> fsLit $ "llvm.ctpop."  ++ show (widthToLlvmInt w)
 
-    MO_WriteBarrier ->
-        panic $ "cmmPrimOpFunctions: MO_WriteBarrier not supported here"
-    MO_Touch ->
-        panic $ "cmmPrimOpFunctions: MO_Touch not supported here"
+    MO_S_QuotRem {} -> unsupported
+    MO_WriteBarrier -> unsupported
+    MO_Touch        -> unsupported
 
     where
         intrinTy1 = (if getLlvmVer env >= 28
                        then "p0i8.p0i8." else "") ++ show llvmWord
         intrinTy2 = (if getLlvmVer env >= 28
                        then "p0i8." else "") ++ show llvmWord
-    
+        unsupported = panic ("cmmPrimOpFunctions: " ++ show mop
+                          ++ " not supported here")
 
 -- | Tail function calls
 genJump :: LlvmEnv -> CmmExpr -> Maybe [GlobalReg] -> UniqSM StmtData
