@@ -1239,15 +1239,18 @@ error = rtsTrue;
                     ) break;
 
 	      case 'q':
-		OPTION_UNSAFE;
 #ifdef PARALLEL_RTS
+                //suppose that all options for the PARALLEL_RTS extension are safe
+		OPTION_SAFE;
 		      // historically, "-q<option>" were for parallel Haskell.
 		      // taken for threaded RTS: a,b,g,m,w below.
 		      // When parallel: branch into separate option processing
                         process_par_option(arg, &error);
                       // uses global rts_argc and rts_argv
                         break;
-#endif
+#endif //PARALLEL_RTS
+                //other q... options are unsafe
+		OPTION_UNSAFE;
 		THREADED_BUILD_ONLY(
 		    switch (rts_argv[arg][2]) {
 		    case '\0':
