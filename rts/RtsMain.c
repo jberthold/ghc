@@ -90,7 +90,6 @@ static void real_main(void)
 	// copied from below...
 	rts_evalLazyIO(&cap,progmain_closure, NULL);
 	status = rts_getSchedStatus(cap);
-	taskTimeStamp(myTask());
 	rts_unlock(cap);
 
 	IF_PAR_DEBUG(verbose,
