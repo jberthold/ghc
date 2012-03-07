@@ -46,7 +46,6 @@ import DataCon
 import Name
 import TyCon
 import Type
-import Kind( splitKiTyVars )
 import TcEvidence
 import Var
 import VarSet
@@ -648,25 +647,25 @@ tcExpr (RecordUpd record_expr rbinds _ _ _) res_ty
 	-- 
 	; let fixed_tvs = getFixedTyVars con1_tvs relevant_cons
 	      is_fixed_tv tv = tv `elemVarSet` fixed_tvs
-	      mk_inst_ty subst tv result_inst_ty 
-	        | is_fixed_tv tv = return result_inst_ty	    -- Same as result type
-	        | otherwise      = newFlexiTyVarTy (subst (tyVarKind tv))  -- Fresh type, of correct kind
 
-	; (_, result_inst_tys, result_inst_env) <- tcInstTyVars con1_tvs
+              mk_inst_ty :: TvSubst -> (TKVar, TcType) -> TcM (TvSubst, TcType)
+              -- Deals with instantiation of kind variables
+              --   c.f. TcMType.tcInstTyVarsX
+	      mk_inst_ty subst (tv, result_inst_ty)
+	        | is_fixed_tv tv   -- Same as result type
+                = return (extendTvSubst subst tv result_inst_ty, result_inst_ty)
+	        | otherwise        -- Fresh type, of correct kind
+                = do { new_ty <- newFlexiTyVarTy (TcType.substTy subst (tyVarKind tv))
+                     ; return (extendTvSubst subst tv new_ty, new_ty) }
 
-        ; let (con1_r_kvs, con1_r_tvs) = splitKiTyVars con1_tvs
-              n_kinds = length con1_r_kvs
-              (result_inst_r_kis, result_inst_r_tys) = splitAt n_kinds result_inst_tys
-	; scrut_inst_r_kis <- zipWithM (mk_inst_ty (TcType.substTy (zipTopTvSubst [] []))) con1_r_kvs result_inst_r_kis
-          -- IA0_NOTE: we have to build the kind substitution
-        ; let kind_subst = TcType.substTy (zipTopTvSubst con1_r_kvs scrut_inst_r_kis)
-	; scrut_inst_r_tys <- zipWithM (mk_inst_ty kind_subst) con1_r_tvs result_inst_r_tys
+	; (_, result_inst_tys, result_subst) <- tcInstTyVars con1_tvs
 
-	; let scrut_inst_tys = scrut_inst_r_kis ++ scrut_inst_r_tys
-              rec_res_ty    = TcType.substTy result_inst_env con1_res_ty
-	      con1_arg_tys' = map (TcType.substTy result_inst_env) con1_arg_tys
-              scrut_subst   = zipTopTvSubst con1_tvs scrut_inst_tys
-	      scrut_ty      = TcType.substTy scrut_subst con1_res_ty
+        ; (scrut_subst, scrut_inst_tys) <- mapAccumLM mk_inst_ty emptyTvSubst 
+                                                      (con1_tvs `zip` result_inst_tys) 
+
+	; let rec_res_ty    = TcType.substTy result_subst con1_res_ty
+	      scrut_ty      = TcType.substTy scrut_subst  con1_res_ty
+	      con1_arg_tys' = map (TcType.substTy result_subst) con1_arg_tys
 
         ; co_res <- unifyType rec_res_ty res_ty
 
@@ -832,6 +831,10 @@ tcApp (L loc (HsVar fun)) args res_ty
   | fun `hasKey` tagToEnumKey
   , [arg] <- args
   = tcTagToEnum loc fun arg res_ty
+
+  | fun `hasKey` seqIdKey
+  , [arg1,arg2] <- args
+  = tcSeq loc fun arg1 arg2 res_ty
 
 tcApp fun args res_ty
   = do	{   -- Type-check the function
@@ -1119,6 +1122,18 @@ constructors of F [Int] but here we have to do it explicitly.
 It's all grotesquely complicated.
 
 \begin{code}
+tcSeq :: SrcSpan -> Name -> LHsExpr Name -> LHsExpr Name 
+      -> TcRhoType -> TcM (HsExpr TcId)
+-- (seq e1 e2) :: res_ty
+-- We need a special typing rule because res_ty can be unboxed
+tcSeq loc fun_name arg1 arg2 res_ty
+  = do	{ fun <- tcLookupId fun_name
+        ; (arg1', arg1_ty) <- tcInfer (tcMonoExpr arg1)
+        ; arg2' <- tcMonoExpr arg2 res_ty
+        ; let fun'    = L loc (HsWrap ty_args (HsVar fun))
+              ty_args = WpTyApp res_ty <.> WpTyApp arg1_ty
+        ; return (HsApp (L loc (HsApp fun' arg1')) arg2') }
+
 tcTagToEnum :: SrcSpan -> Name -> LHsExpr Name -> TcRhoType -> TcM (HsExpr TcId)
 -- tagToEnum# :: forall a. Int# -> a
 -- See Note [tagToEnum#]   Urgh!

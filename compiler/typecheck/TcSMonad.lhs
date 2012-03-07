@@ -142,7 +142,7 @@ import TrieMap
 
 \begin{code}
 compatKind :: Kind -> Kind -> Bool
-compatKind k1 k2 = k1 `isSubKind` k2 || k2 `isSubKind` k1 
+compatKind k1 k2 = k1 `tcIsSubKind` k2 || k2 `tcIsSubKind` k1 
 
 mkKindErrorCtxtTcS :: Type -> Kind 
                    -> Type -> Kind 
@@ -1081,7 +1081,7 @@ warnTcS loc warn_if doc
 getDefaultInfo ::  TcS (SimplContext, [Type], (Bool, Bool))
 getDefaultInfo 
   = do { ctxt <- getTcSContext
-       ; (tys, flags) <- wrapTcS (TcM.tcGetDefaultTys (isInteractive ctxt))
+       ; (tys, flags) <- wrapTcS TcM.tcGetDefaultTys
        ; return (ctxt, tys, flags) }
 
 -- Just get some environments needed for instance looking up and matching
@@ -1112,7 +1112,7 @@ checkWellStagedDFun pred dfun_id loc
     bind_lvl = TcM.topIdLvl dfun_id
 
 pprEq :: TcType -> TcType -> SDoc
-pprEq ty1 ty2 = pprType $ mkEqPred (ty1,ty2)
+pprEq ty1 ty2 = pprType $ mkEqPred ty1 ty2
 
 isTouchableMetaTyVar :: TcTyVar -> TcS Bool
 isTouchableMetaTyVar tv 
@@ -1351,7 +1351,7 @@ newGivenEqVar fl ty1 ty2 co
 
 newEqVar :: CtFlavor -> TcType -> TcType -> TcS EvVarCreated
 newEqVar fl ty1 ty2 
-  = do { let pred = mkEqPred (ty1,ty2)
+  = do { let pred = mkTcEqPred ty1 ty2
        ; v <- newEvVar fl pred 
        ; traceTcS "newEqVar" (ppr v <+> dcolon <+> ppr pred)
        ; return v }

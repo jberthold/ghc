@@ -120,8 +120,7 @@ static void real_main(void)
 	Capability *cap = rts_lock();
         rts_evalLazyIO(&cap,progmain_closure, NULL);
 	status = rts_getSchedStatus(cap);
-	taskTimeStamp(myTask());
-	rts_unlock(cap);
+        rts_unlock(cap);
     }
 
 #endif /* PARALLEL_RTS */

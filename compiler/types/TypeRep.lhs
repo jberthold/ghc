@@ -4,6 +4,16 @@
 %
 \section[TypeRep]{Type - friends' interface}
 
+Note [The Type-related module hierarchy]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  Class
+  TyCon    imports Class
+  TypeRep 
+  TysPrim  imports TypeRep ( including mkTyConTy )
+  Kind     imports TysPrim ( mainly for primitive kinds )
+  Type     imports Kind
+  Coercion imports Type
+
 \begin{code}
 {-# OPTIONS -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
@@ -22,11 +32,11 @@ module TypeRep (
         PredType, ThetaType,      -- Synonyms
 
         -- Functions over types
-        mkTyConApp, mkTyConTy, mkTyVarTy, mkTyVarTys,
-        isLiftedTypeKind,
+        mkNakedTyConApp, mkTyConTy, mkTyVarTy, mkTyVarTys,
+        isLiftedTypeKind, isSuperKind, isTypeVar, isKindVar,
         
         -- Pretty-printing
-	pprType, pprParendType, pprTypeApp,
+	pprType, pprParendType, pprTypeApp, pprTvBndr, pprTvBndrs,
 	pprTyThing, pprTyThingCategory, 
 	pprEqPred, pprTheta, pprForAll, pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind,
@@ -59,6 +69,7 @@ import PrelNames
 import Outputable
 import FastString
 import Pair
+import StaticFlags( opt_PprStyle_Debug )
 
 -- libraries
 import qualified Data.Data        as Data hiding ( TyCon )
@@ -244,24 +255,36 @@ mkTyVarTy  = TyVarTy
 mkTyVarTys :: [TyVar] -> [Type]
 mkTyVarTys = map mkTyVarTy -- a common use of mkTyVarTy
 
--- | A key function: builds a 'TyConApp' or 'FunTy' as apppropriate to its arguments.
--- Applies its arguments to the constructor from left to right
-mkTyConApp :: TyCon -> [Type] -> Type
-mkTyConApp tycon tys
-  | isFunTyCon tycon, [ty1,ty2] <- tys
-  = FunTy ty1 ty2
-
-  | otherwise
-  = TyConApp tycon tys
+mkNakedTyConApp :: TyCon -> [Type] -> Type
+-- Builds a TyConApp 
+--   * without being strict in TyCon,
+--   * the TyCon should never be a saturated FunTyCon 
+-- Type.mkTyConApp is the usual one
+mkNakedTyConApp tc tys
+  = TyConApp (ASSERT( not (isFunTyCon tc && length tys == 2) ) tc) tys
 
 -- | Create the plain type constructor type which has been applied to no type arguments at all.
 mkTyConTy :: TyCon -> Type
-mkTyConTy tycon = mkTyConApp tycon []
+mkTyConTy tycon = TyConApp tycon []
+\end{code}
 
+Some basic functions, put here to break loops eg with the pretty printer
+
+\begin{code}
 isLiftedTypeKind :: Kind -> Bool
--- This function is here because it's used in the pretty printer
 isLiftedTypeKind (TyConApp tc []) = tc `hasKey` liftedTypeKindTyConKey
 isLiftedTypeKind _                = False
+
+-- | Is this a super-kind (i.e. a type-of-kinds)?
+isSuperKind :: Type -> Bool
+isSuperKind (TyConApp skc []) = skc `hasKey` superKindTyConKey
+isSuperKind _                 = False
+
+isTypeVar :: Var -> Bool
+isTypeVar v = isTKVar v && not (isSuperKind (varType v))
+
+isKindVar :: Var -> Bool 
+isKindVar v = isTKVar v && isSuperKind (varType v)
 \end{code}
 
 
@@ -282,6 +305,7 @@ tyVarsOfType (TyConApp _ tys)    = tyVarsOfTypes tys
 tyVarsOfType (FunTy arg res)     = tyVarsOfType arg `unionVarSet` tyVarsOfType res
 tyVarsOfType (AppTy fun arg)     = tyVarsOfType fun `unionVarSet` tyVarsOfType arg
 tyVarsOfType (ForAllTy tyvar ty) = delVarSet (tyVarsOfType ty) tyvar
+                                   `unionVarSet` tyVarsOfType (tyVarKind tyvar)
 
 tyVarsOfTypes :: [Type] -> TyVarSet
 tyVarsOfTypes tys = foldr (unionVarSet . tyVarsOfType) emptyVarSet tys
@@ -558,7 +582,10 @@ ppr_tvar tv  -- Note [Infix type variables]
 -------------------
 pprForAll :: [TyVar] -> SDoc
 pprForAll []  = empty
-pprForAll tvs = ptext (sLit "forall") <+> sep (map pprTvBndr tvs) <> dot
+pprForAll tvs = ptext (sLit "forall") <+> pprTvBndrs tvs <> dot
+
+pprTvBndrs :: [TyVar] -> SDoc
+pprTvBndrs tvs = sep (map pprTvBndr tvs)
 
 pprTvBndr :: TyVar -> SDoc
 pprTvBndr tv 
@@ -606,8 +633,10 @@ pprTcApp p pp tc tys
   = pprPromotionQuote tc <>
     tupleParens (tupleTyConSort tc) (sep (punctuate comma (map (pp TopPrec) tys)))
 
-  | tc `hasKey` eqTyConKey -- We need to special case the type equality TyCon because
+  | not opt_PprStyle_Debug
+  , tc `hasKey` eqTyConKey -- We need to special case the type equality TyCon because
   , [_, ty1,ty2] <- tys    -- with kind polymorphism it has 3 args, so won't get printed infix
+                           -- With -dppr-debug switch this off so we can see the kind
   = pprInfixApp p pp (ppr tc) ty1 ty2
 
   | otherwise

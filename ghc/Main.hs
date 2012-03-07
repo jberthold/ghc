@@ -78,7 +78,7 @@ import Data.Maybe
 main :: IO ()
 main = do
    hSetBuffering stdout NoBuffering
-   GHC.defaultErrorHandler defaultLogAction $ do
+   GHC.defaultErrorHandler defaultLogAction defaultFlushOut $ do
     -- 1. extract the -B flag from the args
     argv0 <- getArgs
 
@@ -155,6 +155,8 @@ main' postLoadMode dflags0 args flagWarnings = do
 
       -- turn on -fimplicit-import-qualified for GHCi now, so that it
       -- can be overriden from the command-line
+      -- XXX: this should really be in the interactive DynFlags, but
+      -- we don't set that until later in interactiveUI
       dflags1a | DoInteractive <- postLoadMode = imp_qual_enabled
                | DoEval _      <- postLoadMode = imp_qual_enabled
                | otherwise                 = dflags1

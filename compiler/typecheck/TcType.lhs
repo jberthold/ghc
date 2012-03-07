@@ -37,10 +37,11 @@ module TcType (
   isSigTyVar, isOverlappableTyVar,  isTyConableTyVar,
   isAmbiguousTyVar, metaTvRef, 
   isFlexi, isIndirect, isRuntimeUnkSkol,
+  isTypeVar, isKindVar,
 
   --------------------------------
   -- Builders
-  mkPhiTy, mkSigmaTy, 
+  mkPhiTy, mkSigmaTy, mkTcEqPred,
 
   --------------------------------
   -- Splitters  
@@ -118,7 +119,7 @@ module TcType (
   unliftedTypeKind, liftedTypeKind, argTypeKind,
   openTypeKind, constraintKind, mkArrowKind, mkArrowKinds, 
   isLiftedTypeKind, isUnliftedTypeKind, isSubOpenTypeKind, 
-  isSubArgTypeKind, isSubKind, splitKindFunTys, defaultKind,
+  isSubArgTypeKind, tcIsSubKind, splitKindFunTys, defaultKind,
   mkMetaKindVar,
 
   --------------------------------
@@ -133,7 +134,7 @@ module TcType (
   mkClassPred, mkIPPred,
   isDictLikeTy,
   tcSplitDFunTy, tcSplitDFunHead, 
-  mkEqPred,
+  mkEqPred, 
 
   -- Type substitutions
   TvSubst(..), 	-- Representation visible to a few friends
@@ -388,11 +389,7 @@ mkKindName unique = mkSystemName unique kind_var_occ
 
 mkMetaKindVar :: Unique -> IORef MetaDetails -> MetaKindVar
 mkMetaKindVar u r
-  = mkTcTyVar (mkKindName u)
-              superKind     -- not sure this is right,
-                            -- do we need kind vars for
-                            -- coercions?
-              (MetaTv TauTv r)
+  = mkTcTyVar (mkKindName u) superKind (MetaTv TauTv r)
 
 kind_var_occ :: OccName	-- Just one for all MetaKindVars
 			-- They may be jiggled by tidying
@@ -775,6 +772,17 @@ mkSigmaTy tyvars theta tau = mkForAllTys tyvars (mkPhiTy theta tau)
 
 mkPhiTy :: [PredType] -> Type -> Type
 mkPhiTy theta ty = foldr mkFunTy ty theta
+
+mkTcEqPred :: TcType -> TcType -> Type
+-- During type checking we build equalities between 
+-- type variables with OpenKind or ArgKind.  Ultimately
+-- they will all settle, but we want the equality predicate
+-- itself to have kind '*'.  I think.  
+--
+-- But this is horribly delicate: what about type variables
+-- that turn out to be bound to Int#?
+mkTcEqPred ty1 ty2
+  = mkNakedEqPred (defaultKind (typeKind ty1)) ty1 ty2
 \end{code}
 
 @isTauTy@ tests for nested for-alls.  It should not be called on a boxy type.
