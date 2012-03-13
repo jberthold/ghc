@@ -465,8 +465,11 @@ void rts_evalIO (/* inout */ Capability **cap,
     
     tso = createStrictIOThread(*cap, RtsFlags.GcFlags.initialStkSize, p);
 #if defined(PARALLEL_RTS)
-    // create a process, fill in this TSO as first member thread
-    newProcess(tso);
+    // if not shuting down (not called by flushStdHandles in RtsStartup.c)
+    if (p != flushStdHandles_closure){
+      // create a process, fill in this TSO as first member thread
+      newProcess(tso);
+    }
 #endif
     scheduleWaitThread(tso,ret,cap);
 }
