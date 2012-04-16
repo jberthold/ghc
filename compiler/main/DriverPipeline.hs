@@ -1672,7 +1672,7 @@ mk_wrapper_script ways executable executable_base = unlines $
 		     "$executable $debug$nprocessors @nonPVM_args"
 		 | WayParMPI `elem` ways = 
 		 -- currently not very extensive. Assuming shared directory!
-		     "mpirun $npstring $machinefile $executable_base $nprocessors @nonPVM_args"
+		     "mpirun $npstring $machinefile $executable $nprocessors @nonPVM_args"
 		 | otherwise = panic "Something wrong with compiler ways"
 
 
