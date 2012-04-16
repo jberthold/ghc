@@ -48,6 +48,7 @@ module DynFlags (
         safeHaskellOn, safeImportsOn, safeLanguageOn, safeInferOn,
         packageTrustOn,
         safeDirectImpsReq, safeImplicitImpsReq,
+        unsafeFlags,
 
         -- ** System tool settings and locations
         Settings(..),
@@ -229,7 +230,7 @@ data DynFlag
    | Opt_DoStgLinting
    | Opt_DoCmmLinting
    | Opt_DoAsmLinting
-   | Opt_NoLlvmMangler
+   | Opt_NoLlvmMangler                 -- hidden flag
 
    | Opt_WarnIsError                    -- -Werror; makes warnings fatal
 
@@ -252,11 +253,12 @@ data DynFlag
    | Opt_DictsCheap
    | Opt_EnableRewriteRules             -- Apply rewrite rules during simplification
    | Opt_Vectorise
+   | Opt_AvoidVect
    | Opt_RegsGraph                      -- do graph coloring register allocation
    | Opt_RegsIterative                  -- do iterative coalescing graph coloring register allocation
    | Opt_PedanticBottoms                -- Be picky about how we treat bottom
-   | Opt_LlvmTBAA                       -- Use LLVM TBAA infastructure for improving AA
-   | Opt_RegLiveness                    -- Use the STG Reg liveness information
+   | Opt_LlvmTBAA                       -- Use LLVM TBAA infastructure for improving AA (hidden flag)
+   | Opt_RegLiveness                    -- Use the STG Reg liveness information (hidden flag)
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -449,6 +451,7 @@ data ExtensionFlag
    | Opt_RankNTypes
    | Opt_ImpredicativeTypes
    | Opt_TypeOperators
+   | Opt_ExplicitNamespaces
    | Opt_PackageImports
    | Opt_ExplicitForAll
    | Opt_AlternativeLayoutRule
@@ -594,6 +597,7 @@ data DynFlags = DynFlags {
   flushErr              :: FlushErr,
 
   haddockOptions        :: Maybe String,
+  ghciScripts           :: [String],
 
   -- | what kind of {-# SCC #-} to add automatically
   profAuto              :: ProfAuto,
@@ -938,6 +942,7 @@ defaultDynFlags mySettings =
         haddockOptions = Nothing,
         flags = IntSet.fromList (map fromEnum defaultFlags),
         warningFlags = IntSet.fromList (map fromEnum standardWarnings),
+        ghciScripts = [],
         language = Nothing,
         safeHaskell = Sf_SafeInfered,
         thOnLoc = noSrcSpan,
@@ -1149,6 +1154,19 @@ combineSafeFlags a b | a == Sf_SafeInfered = return b
     where errm = "Incompatible Safe Haskell flags! ("
                     ++ showPpr a ++ ", " ++ showPpr b ++ ")"
 
+-- | A list of unsafe flags under Safe Haskell. Tuple elements are:
+--     * name of the flag
+--     * function to get srcspan that enabled the flag
+--     * function to test if the flag is on
+--     * function to turn the flag off
+unsafeFlags :: [(String, DynFlags -> SrcSpan, DynFlags -> Bool, DynFlags -> DynFlags)]
+unsafeFlags = [("-XGeneralizedNewtypeDeriving", newDerivOnLoc,
+                   xopt Opt_GeneralizedNewtypeDeriving,
+                   flip xopt_unset Opt_GeneralizedNewtypeDeriving),
+               ("-XTemplateHaskell", thOnLoc,
+                   xopt Opt_TemplateHaskell,
+                   flip xopt_unset Opt_TemplateHaskell)]
+
 -- | Retrieve the options corresponding to a particular @opt_*@ field in the correct order
 getOpts :: DynFlags             -- ^ 'DynFlags' to retrieve the options from
         -> (DynFlags -> [a])    -- ^ Relevant record accessor: one of the @opt_*@ accessors
@@ -1167,7 +1185,7 @@ setObjectDir, setHiDir, setStubDir, setDumpDir, setOutputDir,
          setDylibInstallName,
          setObjectSuf, setHiSuf, setHcSuf, parseDynLibLoaderMode,
          setPgmP, addOptl, addOptP,
-         addCmdlineFramework, addHaddockOpts
+         addCmdlineFramework, addHaddockOpts, addGhciScript
    :: String -> DynFlags -> DynFlags
 setOutputFile, setOutputHi, setDumpPrefixForce
    :: Maybe String -> DynFlags -> DynFlags
@@ -1238,6 +1256,8 @@ deOptDep x = case stripPrefix "-optdep" x of
 addCmdlineFramework f d = d{ cmdlineFrameworks = f : cmdlineFrameworks d}
 
 addHaddockOpts f d = d{ haddockOptions = Just f}
+
+addGhciScript f d = d{ ghciScripts = f : ghciScripts d}
 
 -- -----------------------------------------------------------------------------
 -- Command-line options
@@ -1362,12 +1382,13 @@ safeFlagCheck :: Bool -> DynFlags -> (DynFlags, [Located String])
 safeFlagCheck _  dflags | not (safeLanguageOn dflags || safeInferOn dflags)
                         = (dflags, [])
 
+-- safe or safe-infer ON
 safeFlagCheck cmdl dflags =
     case safeLanguageOn dflags of
         True -> (dflags', warns)
 
         -- throw error if -fpackage-trust by itself with no safe haskell flag
-        False | not cmdl && safeInferOn dflags && packageTrustOn dflags
+        False | not cmdl && packageTrustOn dflags
               -> (dopt_unset dflags' Opt_PackageTrust,
                   [L (pkgTrustOnLoc dflags') $
                       "-fpackage-trust ignored;" ++
@@ -1385,24 +1406,16 @@ safeFlagCheck cmdl dflags =
         -- TODO: Can we do better than this for inference?
         safeInfOk = not $ xopt Opt_OverlappingInstances dflags
 
-        (dflags', warns) = foldl check_method (dflags, []) bad_flags
+        (dflags', warns) = foldl check_method (dflags, []) unsafeFlags
 
         check_method (df, warns) (str,loc,test,fix)
-            | test df   = (apFix fix df, warns ++ safeFailure loc str)
+            | test df   = (apFix fix df, warns ++ safeFailure (loc dflags) str)
             | otherwise = (df, warns)
 
         apFix f = if safeInferOn dflags then id else f
 
         safeFailure loc str 
            = [L loc $ str ++ " is not allowed in Safe Haskell; ignoring " ++ str]
-
-        bad_flags = [("-XGeneralizedNewtypeDeriving", newDerivOnLoc dflags,
-                         xopt Opt_GeneralizedNewtypeDeriving,
-                         flip xopt_unset Opt_GeneralizedNewtypeDeriving),
-                     ("-XTemplateHaskell", thOnLoc dflags,
-                         xopt Opt_TemplateHaskell,
-                         flip xopt_unset Opt_TemplateHaskell)]
-
 
 {- **********************************************************************
 %*                                                                      *
@@ -1536,6 +1549,7 @@ dynamic_flags = [
   , Flag "haddock"        (NoArg (setDynFlag Opt_Haddock))
   , Flag "haddock-opts"   (hasArg addHaddockOpts)
   , Flag "hpcdir"         (SepArg setOptHpcDir)
+  , Flag "ghci-script"    (hasArg addGhciScript)
 
         ------- recompilation checker --------------------------------------
   , Flag "recomp"         (NoArg (do unSetDynFlag Opt_ForceRecomp
@@ -1639,7 +1653,7 @@ dynamic_flags = [
   , Flag "dshow-passes"            (NoArg (do forceRecompile
                                               setVerbosity $ Just 2))
   , Flag "dfaststring-stats"       (NoArg (setDynFlag Opt_D_faststring_stats))
-  , Flag "dno-llvm-mangler"        (NoArg (setDynFlag Opt_NoLlvmMangler))
+  , Flag "dno-llvm-mangler"        (NoArg (setDynFlag Opt_NoLlvmMangler)) -- hidden flag
 
         ------ Machine dependant (-m<blah>) stuff ---------------------------
 
@@ -1865,10 +1879,11 @@ fFlags = [
   ( "run-cpsz",                         Opt_RunCPSZ, nop ),
   ( "new-codegen",                      Opt_TryNewCodeGen, nop ),
   ( "vectorise",                        Opt_Vectorise, nop ),
+  ( "avoid-vect",                       Opt_AvoidVect, nop ),
   ( "regs-graph",                       Opt_RegsGraph, nop ),
   ( "regs-iterative",                   Opt_RegsIterative, nop ),
-  ( "llvm-tbaa",                        Opt_LlvmTBAA, nop),
-  ( "reg-liveness",                     Opt_RegLiveness, nop),
+  ( "llvm-tbaa",                        Opt_LlvmTBAA, nop), -- hidden flag
+  ( "regs-liveness",                    Opt_RegLiveness, nop), -- hidden flag
   ( "gen-manifest",                     Opt_GenManifest, nop ),
   ( "embed-manifest",                   Opt_EmbedManifest, nop ),
   ( "ext-core",                         Opt_EmitExternalCore, nop ),
@@ -1973,6 +1988,7 @@ xFlags = [
   ( "RankNTypes",                       Opt_RankNTypes, nop ),
   ( "ImpredicativeTypes",               Opt_ImpredicativeTypes, nop),
   ( "TypeOperators",                    Opt_TypeOperators, nop ),
+  ( "ExplicitNamespaces",               Opt_ExplicitNamespaces, nop ),
   ( "RecursiveDo",                      Opt_RecursiveDo,     -- Enables 'mdo'
     deprecatedForExtension "DoRec"),
   ( "DoRec",                            Opt_DoRec, nop ),    -- Enables 'rec' keyword
@@ -2084,7 +2100,11 @@ impliedFlags
     , (Opt_TypeFamilies,     turnOn, Opt_MonoLocalBinds)
 
     , (Opt_TypeFamilies,     turnOn, Opt_KindSignatures)  -- Type families use kind signatures
-                                                          -- all over the place
+
+    -- We turn this on so that we can export associated type
+    -- type synonyms in subordinates (e.g. MyClass(type AssocType))
+    , (Opt_TypeFamilies,     turnOn, Opt_ExplicitNamespaces)
+    , (Opt_TypeOperators, turnOn, Opt_ExplicitNamespaces)
 
     , (Opt_ImpredicativeTypes,  turnOn, Opt_RankNTypes)
 
@@ -2215,6 +2235,7 @@ glasgowExtsFlags = [
            , Opt_LiberalTypeSynonyms
            , Opt_RankNTypes
            , Opt_TypeOperators
+           , Opt_ExplicitNamespaces
            , Opt_DoRec
            , Opt_ParallelListComp
            , Opt_EmptyDataDecls

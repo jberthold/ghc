@@ -48,8 +48,6 @@ import Platform
 import SrcLoc
 import Bag
 import FastString
-
-import Control.Monad
 \end{code}
 
 \begin{code}
@@ -157,8 +155,8 @@ normaliseFfiType' env ty0 = go [] ty0
       = do (coi,nty1) <- go rec_nts ty1
            return (mkForAllCo tyvar coi, ForAllTy tyvar nty1)
 
-    go _ ty@(TyVarTy _)
-      = return (Refl ty, ty)
+    go _ ty@(TyVarTy {}) = return (Refl ty, ty)
+    go _ ty@(LitTy {})   = return (Refl ty, ty)
 
     add_co co rec_nts ty
         = do (co', ty') <- go rec_nts ty
@@ -210,39 +208,37 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport _ _ _ (CLabel _))
        ; return idecl }      -- NB check res_ty not sig_ty!
                              --    In case sig_ty is (forall a. ForeignPtr a)
 
-tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv _ _ CWrapper) = do
+tcCheckFIType sig_ty arg_tys res_ty (CImport cconv safety mh CWrapper) = do
         -- Foreign wrapper (former f.e.d.)
-        -- The type must be of the form ft -> IO (FunPtr ft), where ft is a
-        -- valid foreign type.  For legacy reasons ft -> IO (Ptr ft) as well
-        -- as ft -> IO Addr is accepted, too.  The use of the latter two forms
-        -- is DEPRECATED, though.
+        -- The type must be of the form ft -> IO (FunPtr ft), where ft is a valid
+        -- foreign type.  For legacy reasons ft -> IO (Ptr ft) is accepted, too.
+        -- The use of the latter form is DEPRECATED, though.
     checkCg checkCOrAsmOrLlvmOrInterp
-    checkCConv cconv
+    cconv' <- checkCConv cconv
     case arg_tys of
         [arg1_ty] -> do checkForeignArgs isFFIExternalTy arg1_tys
                         checkForeignRes nonIOok  checkSafe isFFIExportResultTy res1_ty
-                        checkForeignRes mustBeIO checkSafe isFFIDynResultTy    res_ty
-                                 -- ToDo: Why are res1_ty and res_ty not equal?
+                        checkForeignRes mustBeIO checkSafe (isFFIDynTy arg1_ty) res_ty
                   where
                      (arg1_tys, res1_ty) = tcSplitFunTys arg1_ty
         _ -> addErrTc (illegalForeignTyErr empty sig_ty)
-    return idecl
+    return (CImport cconv' safety mh CWrapper)
 
-tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ (CFunction target))
+tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety mh (CFunction target))
   | isDynamicTarget target = do -- Foreign import dynamic
       checkCg checkCOrAsmOrLlvmOrInterp
-      checkCConv cconv
-      case arg_tys of           -- The first arg must be Ptr, FunPtr, or Addr
+      cconv' <- checkCConv cconv
+      case arg_tys of           -- The first arg must be Ptr or FunPtr
         []                -> do
           check False (illegalForeignTyErr empty sig_ty)
-          return idecl
         (arg1_ty:arg_tys) -> do
           dflags <- getDynFlags
-          check (isFFIDynArgumentTy arg1_ty)
+          let curried_res_ty = foldr FunTy res_ty arg_tys
+          check (isFFIDynTy curried_res_ty arg1_ty)
                 (illegalForeignTyErr argument arg1_ty)
           checkForeignArgs (isFFIArgumentTy dflags safety) arg_tys
           checkForeignRes nonIOok checkSafe (isFFIImportResultTy dflags) res_ty
-          return idecl
+      return $ CImport cconv' safety mh (CFunction target)
   | cconv == PrimCallConv = do
       dflags <- getDynFlags
       check (xopt Opt_GHCForeignImportPrim dflags)
@@ -257,7 +253,7 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ (CFunction tar
       return idecl
   | otherwise = do              -- Normal foreign import
       checkCg checkCOrAsmOrLlvmOrDotNetOrInterp
-      checkCConv cconv
+      cconv' <- checkCConv cconv
       checkCTarget target
       dflags <- getDynFlags
       checkForeignArgs (isFFIArgumentTy dflags safety) arg_tys
@@ -268,7 +264,7 @@ tcCheckFIType sig_ty arg_tys res_ty idecl@(CImport cconv safety _ (CFunction tar
            | not (null arg_tys) ->
               addErrTc (text "`value' imports cannot have function types")
           _ -> return ()
-      return idecl
+      return $ CImport cconv' safety mh (CFunction target)
 
 
 -- This makes a convenient place to check
@@ -315,7 +311,7 @@ tcFExport fo@(ForeignExport (L loc nm) hs_ty _ spec)
 
     (norm_co, norm_sig_ty) <- normaliseFfiType sig_ty
 
-    tcCheckFEType norm_sig_ty spec
+    spec' <- tcCheckFEType norm_sig_ty spec
 
            -- we're exporting a function, but at a type possibly more
            -- constrained than its declared/inferred type. Hence the need
@@ -327,20 +323,21 @@ tcFExport fo@(ForeignExport (L loc nm) hs_ty _ spec)
     -- is *stable* (i.e. the compiler won't change it later),
     -- because this name will be referred to by the C code stub.
     id  <- mkStableIdFromName nm sig_ty loc mkForeignExportOcc
-    return (mkVarBind id rhs, ForeignExport (L loc id) undefined norm_co spec)
+    return (mkVarBind id rhs, ForeignExport (L loc id) undefined norm_co spec')
 tcFExport d = pprPanic "tcFExport" (ppr d)
 \end{code}
 
 ------------ Checking argument types for foreign export ----------------------
 
 \begin{code}
-tcCheckFEType :: Type -> ForeignExport -> TcM ()
+tcCheckFEType :: Type -> ForeignExport -> TcM ForeignExport
 tcCheckFEType sig_ty (CExport (CExportStatic str cconv)) = do
     checkCg checkCOrAsmOrLlvm
     check (isCLabelString str) (badCName str)
-    checkCConv cconv
+    cconv' <- checkCConv cconv
     checkForeignArgs isFFIExternalTy arg_tys
     checkForeignRes nonIOok noCheckSafe isFFIExportResultTy res_ty
+    return (CExport (CExportStatic str cconv'))
   where
       -- Drop the foralls before inspecting n
       -- the structure of the foreign type.
@@ -449,15 +446,18 @@ checkCg check = do
 Calling conventions
 
 \begin{code}
-checkCConv :: CCallConv -> TcM ()
-checkCConv CCallConv    = return ()
-checkCConv CApiConv     = return ()
+checkCConv :: CCallConv -> TcM CCallConv
+checkCConv CCallConv    = return CCallConv
+checkCConv CApiConv     = return CApiConv
 checkCConv StdCallConv  = do dflags <- getDynFlags
                              let platform = targetPlatform dflags
-                             unless (platformArch platform == ArchX86) $
-                                 -- This is a warning, not an error. see #3336
-                                 addWarnTc (text "the 'stdcall' calling convention is unsupported on this platform," $$ text "treating as ccall")
-checkCConv PrimCallConv = addErrTc (text "The `prim' calling convention can only be used with `foreign import'")
+                             if platformArch platform == ArchX86
+                                 then return StdCallConv
+                                 else do -- This is a warning, not an error. see #3336
+                                         addWarnTc (text "the 'stdcall' calling convention is unsupported on this platform," $$ text "treating as ccall")
+                                         return CCallConv
+checkCConv PrimCallConv = do addErrTc (text "The `prim' calling convention can only be used with `foreign import'")
+                             return PrimCallConv
 checkCConv CmmCallConv  = panic "checkCConv CmmCallConv"
 \end{code}
 

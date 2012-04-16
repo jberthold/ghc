@@ -39,7 +39,7 @@ import BasicTypes       ( RuleName )
 import Control.Monad    ( when )
 import Outputable
 import FastString
-import TrieMap
+import TrieMap () -- DV: for now
 import DynFlags
 
 \end{code}
@@ -384,8 +384,9 @@ simplifyWithApprox wanted
  = do { traceTcS "simplifyApproxLoop" (ppr wanted)
 
       ; let all_flats = wc_flat wanted `unionBags` keepWanted (wc_insol wanted) 
-      ; solveInteractCts $ bagToList all_flats
-      ; unsolved_implics <- simpl_loop 1 (wc_impl wanted)
+      ; implics_from_flats <- solveInteractCts $ bagToList all_flats
+      ; unsolved_implics <- simpl_loop 1 (wc_impl wanted `unionBags` 
+                                               implics_from_flats)
 
       ; let (residual_implics,floats) = approximateImplications unsolved_implics
 
@@ -597,13 +598,22 @@ simplifyRule name tv_bndrs lhs_wanted rhs_wanted
 	     	 -- We allow ourselves to unify environment 
 		 -- variables; hence *no untouchables*
 
+-- DV: SPJ and I discussed a new plan here:
+-- Step 1: Simplify everything in the same bag
+-- Step 2: zonk away the lhs constraints and get only the non-trivial ones
+-- Step 3: do the implications with these constraints
+-- This will have the advantage that (i) we no longer need simplEqsOnly flag
+-- and (ii) will fix problems appearing from touchable unification variables
+-- in the givens, manifested by #5853
+-- TODO ... 
+
        ; (lhs_results, lhs_binds)
               <- runTcS (SimplRuleLhs name) untch emptyInert emptyWorkList $
                  solveWanteds zonked_lhs
 
        ; traceTc "simplifyRule" $
          vcat [ text "zonked_lhs"   <+> ppr zonked_lhs 
-              , text "lhs_results" <+> ppr lhs_results
+              , text "lhs_results"  <+> ppr lhs_results
               , text "lhs_binds"    <+> ppr lhs_binds 
               , text "rhs_wanted"   <+> ppr rhs_wanted ]
 
@@ -611,8 +621,11 @@ simplifyRule name tv_bndrs lhs_wanted rhs_wanted
        -- Don't quantify over equalities (judgement call here)
        ; let (eqs, dicts) = partitionBag (isEqPred . ctPred)
                                          (wc_flat lhs_results)
-             lhs_dicts    = map cc_id (bagToList dicts)
+             lhs_dicts    = map ctId (bagToList dicts)
                                  -- Dicts and implicit parameters
+                                 -- NB: dicts come from lhs_results which
+                                 -- are all Wanted, hence have ids, hence
+                                 -- it's fine to call ctId on them
 
            -- Fail if we have not got down to unsolved flats
        ; ev_binds_var <- newTcEvBinds
@@ -695,10 +708,12 @@ simplifyCheck ctxt wanteds
 
        ; traceTc "simplifyCheck }" $ ptext (sLit "unsolved =") <+> ppr unsolved
 
+       ; traceTc "reportUnsolved {" empty
        -- See Note [Deferring coercion errors to runtime]
        ; runtimeCoercionErrors <- doptM Opt_DeferTypeErrors
        ; eb2 <- reportUnsolved runtimeCoercionErrors unsolved 
-       
+       ; traceTc "reportUnsolved }" empty
+
        ; return (eb1 `unionBags` eb2) }
 \end{code}
 
@@ -763,11 +778,11 @@ solve_wanteds wanted@(WC { wc_flat = flats, wc_impl = implics, wc_insol = insols
                  -- wrong anyway!
 
        ; let all_flats = flats `unionBags` keepWanted insols
-       ; solveInteractCts $ bagToList all_flats
+       ; impls_from_flats <- solveInteractCts $ bagToList all_flats
 
        -- solve_wanteds iterates when it is able to float equalities 
        -- out of one or more of the implications. 
-       ; unsolved_implics <- simpl_loop 1 implics
+       ; unsolved_implics <- simpl_loop 1 (implics `unionBags` impls_from_flats)
 
        ; (insoluble_flats,unsolved_flats) <- extractUnsolvedTcS 
 
@@ -807,18 +822,10 @@ simpl_loop n implics
 
        ; inerts <- getTcSInerts
        ; let ((_,unsolved_flats),_) = extractUnsolved inerts
-
-       ; ecache_pre <- getTcSEvVarCacheMap
-       ; let pr = ppr ((\k z m -> foldTM k m z) (:) [] ecache_pre)
-       ; traceTcS "ecache_pre"  $ pr
-
+                                      
        ; improve_eqs <- if not (isEmptyBag implic_eqs)
                         then return implic_eqs
                         else applyDefaultingRules unsolved_flats
-
-       ; ecache_post <- getTcSEvVarCacheMap
-       ; let po = ppr ((\k z m -> foldTM k m z) (:) [] ecache_post)
-       ; traceTcS "ecache_po"  $ po
 
        ; traceTcS "solveWanteds: simpl_loop end" $
              vcat [ text "improve_eqs      =" <+> ppr improve_eqs
@@ -826,8 +833,9 @@ simpl_loop n implics
                   , text "unsolved_implics =" <+> ppr unsolved_implics ]
 
        ; if isEmptyBag improve_eqs then return unsolved_implics 
-         else do { solveInteractCts $ bagToList improve_eqs
-                 ; simpl_loop (n+1) unsolved_implics } }
+         else do { impls_from_eqs <- solveInteractCts $ bagToList improve_eqs
+                 ; simpl_loop (n+1) (unsolved_implics `unionBags` 
+                                                 impls_from_eqs)} }
 
 solveNestedImplications :: Bag Implication
                         -> TcS (Cts, Bag Implication)
@@ -849,7 +857,9 @@ solveNestedImplications implics
 	         -- Push the unsolved wanteds inwards, but as givens
                  ; traceTcS "solveWanteds: preparing inerts for implications {" $ 
                    vcat [ppr tcs_untouchables, ppr pushed_givens]
-                 ; solveInteractCts pushed_givens 
+                 ; impls_from_givens <- solveInteractCts pushed_givens 
+                 ; MASSERT (isEmptyBag impls_from_givens)
+                   
                  ; traceTcS "solveWanteds: } now doing nested implications {" empty
                  ; flatMapBagPairM (solveImplication tcs_untouchables) implics }
 
@@ -865,7 +875,10 @@ solveNestedImplications implics
   where givens_from_wanteds = foldrBag get_wanted []
         get_wanted cc rest_givens
             | pushable_wanted cc
-            = let this_given = cc { cc_flavor = mkGivenFlavor (cc_flavor cc) UnkSkol }
+            = let fl = cc_flavor cc
+                  wloc = flav_wloc fl
+                  gfl = Given (mkGivenLoc wloc UnkSkol) (flav_evar fl) 
+                  this_given = cc { cc_flavor = gfl }
               in this_given : rest_givens
             | otherwise = rest_givens 
 
@@ -895,8 +908,9 @@ solveImplication tcs_untouchables
     do { traceTcS "solveImplication {" (ppr imp) 
 
          -- Solve flat givens
-       ; solveInteractGiven loc givens 
-
+       ; impls_from_givens <- solveInteractGiven loc givens 
+       ; MASSERT (isEmptyBag impls_from_givens)
+         
          -- Simplify the wanteds
        ; WC { wc_flat = unsolved_flats
             , wc_impl = unsolved_implics
@@ -932,7 +946,10 @@ floatEqualities skols can_given wantders
   | hasEqualities can_given = (emptyBag, wantders)
           -- Note [Float Equalities out of Implications]
   | otherwise = partitionBag is_floatable wantders
-  
+
+-- TODO: Maybe we should try out /not/ floating constraints that contain touchables only, 
+-- since they are inert and not going to interact with anything more in a more global scope.
+
   where skol_set = mkVarSet skols
         is_floatable :: Ct -> Bool
         is_floatable ct
@@ -948,6 +965,7 @@ floatEqualities skols can_given wantders
           | FlatSkol ty <- tcTyVarDetails tv = tvs_under_fsks ty
           | otherwise                        = unitVarSet tv
         tvs_under_fsks (TyConApp _ tys) = unionVarSets (map tvs_under_fsks tys)
+        tvs_under_fsks (LitTy {})       = emptyVarSet
         tvs_under_fsks (FunTy arg res)  = tvs_under_fsks arg `unionVarSet` tvs_under_fsks res
         tvs_under_fsks (AppTy fun arg)  = tvs_under_fsks fun `unionVarSet` tvs_under_fsks arg
         tvs_under_fsks (ForAllTy tv ty) -- The kind of a coercion binder 
@@ -1077,6 +1095,8 @@ Note [Float Equalities out of Implications]
 We want to float equalities out of vanilla existentials, but *not* out 
 of GADT pattern matches. 
 
+---> TODO Expand in accordance to our discussion
+
 
 \begin{code}
 
@@ -1096,23 +1116,22 @@ solveCTyFunEqs cts
 
       ; return (niFixTvSubst ni_subst, unsolved_can_cts) }
   where
-    solve_one (cv,tv,ty) = do { setWantedTyBind tv ty
-                              ; _ <- setEqBind cv (mkTcReflCo ty) $
-                                       (Wanted $ panic "Met an already solved function equality!")
-                              ; return () -- Don't care about flavors etc this is
-                                          -- the last thing happening
-                              }
-
+    solve_one (Wanted _ cv,tv,ty) 
+      = setWantedTyBind tv ty >> setEvBind cv (EvCoercion (mkTcReflCo ty))
+    solve_one (Derived {}, tv, ty)
+      = setWantedTyBind tv ty
+    solve_one arg
+      = pprPanic "solveCTyFunEqs: can't solve a /given/ family equation!" $ ppr arg
 ------------
-type FunEqBinds = (TvSubstEnv, [(CoVar, TcTyVar, TcType)])
+type FunEqBinds = (TvSubstEnv, [(CtFlavor, TcTyVar, TcType)])
   -- The TvSubstEnv is not idempotent, but is loop-free
   -- See Note [Non-idempotent substitution] in Unify
 emptyFunEqBinds :: FunEqBinds
 emptyFunEqBinds = (emptyVarEnv, [])
 
-extendFunEqBinds :: FunEqBinds -> CoVar -> TcTyVar -> TcType -> FunEqBinds
-extendFunEqBinds (tv_subst, cv_binds) cv tv ty
-  = (extendVarEnv tv_subst tv ty, (cv, tv, ty):cv_binds)
+extendFunEqBinds :: FunEqBinds -> CtFlavor -> TcTyVar -> TcType -> FunEqBinds
+extendFunEqBinds (tv_subst, cv_binds) fl tv ty
+  = (extendVarEnv tv_subst tv ty, (fl, tv, ty):cv_binds)
 
 ------------
 getSolvableCTyFunEqs :: TcsUntouchables
@@ -1124,8 +1143,7 @@ getSolvableCTyFunEqs untch cts
     dflt_funeq :: (Cts, FunEqBinds) -> Ct
                -> (Cts, FunEqBinds)
     dflt_funeq (cts_in, feb@(tv_subst, _))
-               (CFunEqCan { cc_id = cv
-                          , cc_flavor = fl
+               (CFunEqCan { cc_flavor = fl
                           , cc_fun = tc
                           , cc_tyargs = xis
                           , cc_rhs = xi })
@@ -1145,7 +1163,7 @@ getSolvableCTyFunEqs untch cts
       , not (tv `elemVarSet` niSubstTvSet tv_subst (tyVarsOfTypes xis))
            -- Occurs check: see Note [Solving Family Equations], Point 2
       = ASSERT ( not (isGivenOrSolved fl) )
-        (cts_in, extendFunEqBinds feb cv tv (mkTyConApp tc xis))
+        (cts_in, extendFunEqBinds feb fl tv (mkTyConApp tc xis))
 
     dflt_funeq (cts_in, fun_eq_binds) ct
       = (cts_in `extendCts` ct, fun_eq_binds)
@@ -1283,12 +1301,19 @@ defaultTyVar untch the_tv
   , not (k `eqKind` default_k)
   = tryTcS $ -- Why tryTcS? See Note [tryTcS in defaulting]
     do { let loc = CtLoc DefaultOrigin (getSrcSpan the_tv) [] -- Yuk
-             fl  = Wanted loc
-       ; eqv <- TcSMonad.newKindConstraint the_tv default_k fl
-       ; if isNewEvVar eqv then 
+       ; eqv <- TcSMonad.newKindConstraint the_tv default_k
+       ; case eqv of
+           Fresh x -> 
+             return $ unitBag $
+             CNonCanonical { cc_flavor = Wanted loc x, cc_depth = 0 }
+           Cached _ -> return emptyBag }
+{- DELETEME
+         if isNewEvVar eqv then 
              return $ unitBag (CNonCanonical { cc_id = evc_the_evvar eqv
                                              , cc_flavor = fl, cc_depth = 0 })
          else return emptyBag }
+-}
+
   | otherwise            
   = return emptyBag	 -- The common case
   where
@@ -1364,15 +1389,24 @@ disambigGroup []  _grp
 disambigGroup (default_ty:default_tys) group
   = do { traceTcS "disambigGroup" (ppr group $$ ppr default_ty)
        ; success <- tryTcS $ -- Why tryTcS? See Note [tryTcS in defaulting]
-                    do { let der_flav = mk_derived_flavor (cc_flavor the_ct) 
-                       ; derived_eq <- tryTcS $
+                    do { derived_eq <- tryTcS $
                                        -- I need a new tryTcS because we will call solveInteractCts below!
-                                       do { eqv <- TcSMonad.newEqVar der_flav (mkTyVarTy the_tv) default_ty
-                                          ; return [ CNonCanonical { cc_id = evc_the_evvar eqv
-                                                                   , cc_flavor = der_flav, cc_depth = 0 } ] }
+                            do { md <- newDerived (mkTcEqPred (mkTyVarTy the_tv) default_ty)
+                               ; case md of 
+                                    Cached _ -> return []
+                                    Fresh pty -> 
+                                      -- flav_wloc because constraint is not Given/Solved!
+                                      let dfl = Derived (flav_wloc the_fl) pty
+                                      in return [ CNonCanonical { cc_flavor = dfl, cc_depth = 0 } ] }
+                            
                        ; traceTcS "disambigGroup (solving) {" 
-                                  (text "trying to solve constraints along with default equations ...") 
-                       ; solveInteractCts (derived_eq ++ wanteds)
+                                  (text "trying to solve constraints along with default equations ...")
+                       ; implics_from_defaulting <- 
+                                    solveInteractCts (derived_eq ++ wanteds)
+                       ; MASSERT (isEmptyBag implics_from_defaulting)
+                                     -- Ignore implics: I don't think that a defaulting equation can cause
+                                     -- new implications to be emitted. Maybe we have to revisit this.
+                                     
                        ; (_,unsolved) <- extractUnsolvedTcS 
                        ; traceTcS "disambigGroup (solving) }"
                                   (text "disambigGroup unsolved =" <+> ppr (keepWanted unsolved))
@@ -1392,10 +1426,8 @@ disambigGroup (default_ty:default_tys) group
                        ; disambigGroup default_tys group } }
   where
     ((the_ct,the_tv):_) = group
+    the_fl              = cc_flavor the_ct
     wanteds             = map fst group
-    mk_derived_flavor :: CtFlavor -> CtFlavor
-    mk_derived_flavor (Wanted loc) = Derived loc
-    mk_derived_flavor _ = panic "Asked  to disambiguate given or derived!"
 \end{code}
 
 Note [Avoiding spurious errors]
@@ -1425,9 +1457,8 @@ newFlatWanteds orig theta
   = do { loc <- getCtLoc orig
        ; mapM (inst_to_wanted loc) theta }
   where inst_to_wanted loc pty 
-          = do { v <- newWantedEvVar pty 
+          = do { v <- TcMType.newWantedEvVar pty 
                ; return $ 
-                 CNonCanonical { cc_id = v
-                               , cc_flavor = Wanted loc
+                 CNonCanonical { cc_flavor = Wanted loc v
                                , cc_depth = 0 } }
 \end{code}

@@ -172,7 +172,7 @@ GhcWithSMP=$(strip $(if $(filter YESNO, $(ArchSupportsSMP)$(GhcUnregisterised)),
 # has support for this OS/ARCH combination.
 
 OsSupportsGHCi=$(strip $(patsubst $(TargetOS_CPP), YES, $(findstring $(TargetOS_CPP), mingw32 cygwin32 linux solaris2 freebsd dragonfly netbsd openbsd darwin kfreebsdgnu)))
-ArchSupportsGHCi=$(strip $(patsubst $(TargetArch_CPP), YES, $(findstring $(TargetArch_CPP), i386 x86_64 powerpc sparc sparc64)))
+ArchSupportsGHCi=$(strip $(patsubst $(TargetArch_CPP), YES, $(findstring $(TargetArch_CPP), i386 x86_64 powerpc sparc sparc64 arm)))
 
 ifeq "$(OsSupportsGHCi)$(ArchSupportsGHCi)" "YESYES"
 GhcWithInterpreter=YES
@@ -642,6 +642,12 @@ SRC_HSC2HS_OPTS += $(addprefix --cflag=,$(filter-out -O,$(SRC_CC_OPTS) $(CONF_CC
 SRC_HSC2HS_OPTS += $(foreach d,$(GMP_INCLUDE_DIRS),-I$(d))
 ifeq "$(CrossCompiling)" "YES"
 SRC_HSC2HS_OPTS += --cross-compile
+endif
+
+ifeq "$(TARGETPLATFORM)" "i386-unknown-mingw32"
+WINDRES = $(INPLACE_MINGW)/bin/windres
+else ifeq "$(TARGETPLATFORM)" "x86_64-unknown-mingw32"
+WINDRES = $(INPLACE_MINGW)/bin/x86_64-w64-mingw32-windres
 endif
 
 #-----------------------------------------------------------------------------

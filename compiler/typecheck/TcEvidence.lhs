@@ -17,6 +17,7 @@ module TcEvidence (
   EvBind(..), emptyTcEvBinds, isEmptyTcEvBinds, 
 
   EvTerm(..), mkEvCast, evVarsOfTerm, mkEvKindCast,
+  EvLit(..),
 
   -- TcCoercion
   TcCoercion(..), 
@@ -262,6 +263,7 @@ liftTcCoSubstWith tvs cos ty
                              Nothing -> mkTcReflCo ty
     go (AppTy t1 t2)     = mkTcAppCo (go t1) (go t2)
     go (TyConApp tc tys) = mkTcTyConAppCo tc (map go tys)
+    go ty@(LitTy {})     = mkTcReflCo ty
     go (ForAllTy tv ty)  = mkTcForAllCo tv (go ty)
     go (FunTy t1 t2)     = mkTcFunCo (go t1) (go t2)
 \end{code}
@@ -470,8 +472,18 @@ data EvTerm
                                  -- selector Id.  We count up from _0_
 
   | EvKindCast EvVar TcCoercion  -- See Note [EvKindCast]
-           
+
+  | EvLit EvLit                  -- Dictionary for class "SingI" for type lits.
+                                 -- Note [EvLit]
+
   deriving( Data.Data, Data.Typeable)
+
+
+data EvLit
+  = EvNum Integer
+  | EvStr FastString
+    deriving( Data.Data, Data.Typeable)
+
 \end{code}
 
 Note [EvKindCast] 
@@ -505,6 +517,43 @@ Conclusion: a new wanted coercion variable should be made mutable.
  from super classes will be "given" and hence rigid]
 
 
+Note [EvLit]
+~~~~~~~~~~~~
+A part of the type-level literals implementation is the class "SingI",
+which provides a "smart" constructor for defining singleton values.
+
+newtype Sing n = Sing (SingRep n)
+
+class SingI n where
+  sing :: Sing n
+
+type family SingRep a
+type instance SingRep (a :: Nat)    = Integer
+type instance SingRep (a :: Symbol) = String
+
+Conceptually, this class has infinitely many instances:
+
+instance Sing 0       where sing = Sing 0
+instance Sing 1       where sing = Sing 1
+instance Sing 2       where sing = Sing 2
+instance Sing "hello" where sing = Sing "hello"
+...
+
+In practice, we solve "SingI" predicates in the type-checker because we can't
+have infinately many instances.  The evidence (aka "dictionary")
+for "SingI (n :: Nat)" is of the form "EvLit (EvNum n)".
+
+We make the following assumptions about dictionaries in GHC:
+  1. The "dictionary" for classes with a single method---like SingI---is
+     a newtype for the type of the method, so using a evidence amounts
+     to a coercion, and
+  2. Newtypes use the same representation as their definition types.
+
+So, the evidence for "SingI" is just a value of the representation type,
+wrapped in two newtype constructors: one to make it into a "Sing" value,
+and another to make it into "SingI" evidence.
+
+
 \begin{code}
 mkEvCast :: EvVar -> TcCoercion -> EvTerm
 mkEvCast ev lco
@@ -534,6 +583,7 @@ evVarsOfTerm (EvCast v co)        = v : varSetElems (coVarsOfTcCo co)
 evVarsOfTerm (EvTupleMk evs)      = evs
 evVarsOfTerm (EvDelayedError _ _) = []
 evVarsOfTerm (EvKindCast v co)   = v : varSetElems (coVarsOfTcCo co)
+evVarsOfTerm (EvLit _)            = []
 \end{code}
 
 
@@ -593,7 +643,12 @@ instance Outputable EvTerm where
   ppr (EvTupleMk vs)     = ptext (sLit "tupmk") <+> ppr vs
   ppr (EvSuperClass d n) = ptext (sLit "sc") <> parens (ppr (d,n))
   ppr (EvDFunApp df tys ts) = ppr df <+> sep [ char '@' <> ppr tys, ppr ts ]
+  ppr (EvLit l)          = ppr l
   ppr (EvDelayedError ty msg) =     ptext (sLit "error") 
                                 <+> sep [ char '@' <> ppr ty, ppr msg ]
+
+instance Outputable EvLit where
+  ppr (EvNum n) = integer n
+  ppr (EvStr s) = text (show s)
 \end{code}
 

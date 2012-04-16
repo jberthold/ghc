@@ -1946,6 +1946,7 @@ simplAlts :: SimplEnv
           -> SimplM (OutExpr, OutId, [OutAlt])  -- Includes the continuation
 -- Like simplExpr, this just returns the simplified alternatives;
 -- it does not return an environment
+-- The returned alternatives can be empty, none are possible
 
 simplAlts env scrut case_bndr alts cont'
   = -- pprTrace "simplAlts" (ppr alts $$ ppr (seTvSubst env)) $
@@ -1958,6 +1959,8 @@ simplAlts env scrut case_bndr alts cont'
 						       case_bndr case_bndr1 alts
 
         ; (imposs_deflt_cons, in_alts) <- prepareAlts scrut' case_bndr' alts
+          -- NB: it's possible that the returned in_alts is empty: this is handled
+          -- by the caller (rebuildCase) in the missingAlt function
 
 	; let mb_var_scrut = case scrut' of { Var v -> Just v; _ -> Nothing }
         ; alts' <- mapM (simplAlt alt_env' mb_var_scrut

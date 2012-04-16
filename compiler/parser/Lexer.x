@@ -56,6 +56,8 @@ module Lexer (
    getLexState, popLexState, pushLexState,
    extension, bangPatEnabled, datatypeContextsEnabled,
    traditionalRecordSyntaxEnabled,
+   typeLiteralsEnabled,
+   explicitNamespacesEnabled,
    addWarning,
    lexTokenStream
   ) where
@@ -319,6 +321,10 @@ $tab+         { warn Opt_WarnTabs (text "Tab character") }
 
   "[" @varid "|"  / { ifExtension qqEnabled }
                      { lex_quasiquote_tok }
+
+  -- qualified quasi-quote (#5555)
+  "[" @qual @varid "|"  / { ifExtension qqEnabled }
+                          { lex_qquasiquote_tok }
 }
 
 <0> {
@@ -560,7 +566,14 @@ data Token
   | ITidEscape   FastString     --  $x
   | ITparenEscape               --  $(
   | ITtyQuote                   --  ''
-  | ITquasiQuote (FastString,FastString,RealSrcSpan) --  [:...|...|]
+  | ITquasiQuote (FastString,FastString,RealSrcSpan)
+    -- ITquasiQuote(quoter, quote, loc)
+    -- represents a quasi-quote of the form
+    -- [quoter| quote |]
+  | ITqQuasiQuote (FastString,FastString,FastString,RealSrcSpan)
+    -- ITqQuasiQuote(Qual, quoter, quote, loc)
+    -- represents a qualified quasi-quote of the form
+    -- [Qual.quoter| quote |]
 
   -- Arrow notation extension
   | ITproc
@@ -1421,6 +1434,18 @@ getCharOrFail i =  do
 -- -----------------------------------------------------------------------------
 -- QuasiQuote
 
+lex_qquasiquote_tok :: Action
+lex_qquasiquote_tok span buf len = do
+  let (qual, quoter) = splitQualName (stepOn buf) (len - 2) False
+  quoteStart <- getSrcLoc
+  quote <- lex_quasiquote quoteStart ""
+  end <- getSrcLoc
+  return (L (mkRealSrcSpan (realSrcSpanStart span) end)
+           (ITqQuasiQuote (qual,
+                           quoter,
+                           mkFastString (reverse quote),
+                           mkRealSrcSpan quoteStart end)))
+
 lex_quasiquote_tok :: Action
 lex_quasiquote_tok span buf len = do
   let quoter = tail (lexemeToString buf (len - 1))
@@ -1806,6 +1831,11 @@ safeHaskellBit :: Int
 safeHaskellBit = 26
 traditionalRecordSyntaxBit :: Int
 traditionalRecordSyntaxBit = 27
+typeLiteralsBit :: Int
+typeLiteralsBit = 28
+explicitNamespacesBit :: Int
+explicitNamespacesBit = 29
+
 
 always :: Int -> Bool
 always           _     = True
@@ -1849,6 +1879,11 @@ nondecreasingIndentation :: Int -> Bool
 nondecreasingIndentation flags = testBit flags nondecreasingIndentationBit
 traditionalRecordSyntaxEnabled :: Int -> Bool
 traditionalRecordSyntaxEnabled flags = testBit flags traditionalRecordSyntaxBit
+typeLiteralsEnabled :: Int -> Bool
+typeLiteralsEnabled flags = testBit flags typeLiteralsBit
+
+explicitNamespacesEnabled :: Int -> Bool
+explicitNamespacesEnabled flags = testBit flags explicitNamespacesBit
 
 -- PState for parsing options pragmas
 --
@@ -1908,6 +1943,8 @@ mkPState flags buf loc =
                .|. nondecreasingIndentationBit `setBitIf` xopt Opt_NondecreasingIndentation flags
                .|. safeHaskellBit              `setBitIf` safeImportsOn                     flags
                .|. traditionalRecordSyntaxBit  `setBitIf` xopt Opt_TraditionalRecordSyntax  flags
+               .|. typeLiteralsBit             `setBitIf` xopt Opt_DataKinds flags
+               .|. explicitNamespacesBit       `setBitIf` xopt Opt_ExplicitNamespaces flags
       --
       setBitIf :: Int -> Bool -> Int
       b `setBitIf` cond | cond      = bit b
