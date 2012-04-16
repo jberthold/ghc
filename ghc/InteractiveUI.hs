@@ -130,7 +130,7 @@ builtin_commands = [
   ("def",       keepGoing (defineMacro False),  completeExpression),
   ("def!",      keepGoing (defineMacro True),   completeExpression),
   ("delete",    keepGoing deleteCmd,            noCompletion),
-  ("edit",      keepGoing editFile,             completeFilename),
+  ("edit",      keepGoing' editFile,            completeFilename),
   ("etags",     keepGoing createETagsFileCmd,   completeFilename),
   ("force",     keepGoing forceCmd,             completeExpression),
   ("forward",   keepGoing forwardCmd,           noCompletion),
@@ -1030,15 +1030,16 @@ trySuccess act =
 -----------------------------------------------------------------------------
 -- :edit
 
-editFile :: String -> GHCi ()
+editFile :: String -> InputT GHCi ()
 editFile str =
-  do file <- if null str then chooseEditFile else return str
-     st <- getGHCiState
+  do file <- if null str then lift chooseEditFile else return str
+     st <- lift getGHCiState
      let cmd = editor st
      when (null cmd) 
        $ ghcError (CmdLineError "editor not set, use :set editor")
-     _ <- liftIO $ system (cmd ++ ' ':file)
-     return ()
+     code <- liftIO $ system (cmd ++ ' ':file)
+     when (code == ExitSuccess)
+       $ reloadModule ""
 
 -- The user didn't specify a file so we pick one for them.
 -- Our strategy is to pick the first module that failed to load,
@@ -1626,7 +1627,7 @@ remModulesFromContext as bs = do
 addImportToContext :: String -> GHCi ()
 addImportToContext str = do
   idecl <- GHC.parseImportDecl str
-  _ <- GHC.lookupModule (unLoc (ideclName idecl)) Nothing  -- #5836
+  _ <- GHC.lookupModule (unLoc (ideclName idecl)) (ideclPkgQual idecl)  -- #5836
   modifyGHCiState $ \st ->
      st { remembered_ctx = addNotSubsumed (IIDecl idecl) (remembered_ctx st)
         , transient_ctx = filter (not . ((IIDecl idecl) `iiSubsumes`))
