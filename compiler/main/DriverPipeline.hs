@@ -1643,6 +1643,9 @@ mk_wrapper_script ways executable executable_base = unlines $
   "",
   "if ( -e $machinefile ) { $machinefile = \"-machinefile \" . $machinefile",
   "} else { $machinefile = \"\" }",
+  "",  
+  "if ( $nprocessors ) { $npstring = \"-np \" . $nprocessors",
+  "} else { $npstring = \"\" }",
   "",
   "local($return_val) = 0;",
   "# Start the parallel execution by calling the real executable with suitable arguments",
@@ -1669,7 +1672,7 @@ mk_wrapper_script ways executable executable_base = unlines $
 		     "$executable $debug$nprocessors @nonPVM_args"
 		 | WayParMPI `elem` ways = 
 		 -- currently not very extensive. Assuming shared directory!
-		     "mpirun -np $nprocessors $machinefile $executable_base $nprocessors @nonPVM_args"
+		     "mpirun $npstring $machinefile $executable_base $nprocessors @nonPVM_args"
 		 | otherwise = panic "Something wrong with compiler ways"
 
 
