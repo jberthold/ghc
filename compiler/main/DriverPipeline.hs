@@ -1469,6 +1469,7 @@ runPhase_MoveBinary dflags input_fn
     | otherwise = return ()
   where isParallel = WayParPvm `elem` (wayNames dflags)
                      || WayParMPI `elem` (wayNames dflags)
+                     || WayParCp `elem` (wayNames dflags)
 
 mkExtraObj :: DynFlags -> Suffix -> String -> IO FilePath
 mkExtraObj dflags extn xs
@@ -1673,6 +1674,8 @@ mk_wrapper_script ways executable executable_base = unlines $
 		 | WayParMPI `elem` ways = 
 		 -- currently not very extensive. Assuming shared directory!
 		     "mpirun $npstring $machinefile $executable $nprocessors @nonPVM_args"
+                 | WayParCp `elem` ways =
+                   "$executable $nprocessors @nonPVM_args"
 		 | otherwise = panic "Something wrong with compiler ways"
 
 

@@ -23,6 +23,12 @@
 #include "MPSystem.h"
 #include "Trace.h"
 
+#if defined(mingw32_HOST_OS)
+#define srand48(s) srand(s)
+#define drand48() (((double)rand())/((double)RAND_MAX))
+#define lrand48() rand()
+#endif
+
 #include "Threads.h" // updateThunk
 
 #include <unistd.h> // getpid, in choosePE
