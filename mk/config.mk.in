@@ -261,7 +261,8 @@ GhcRTSWays=l
 # parallel Haskell support (Eden Group Marburg)
 #
 # do we build a parallel version (default=yes in this source bundle!!!)
-ParallelRts=@ParallelRts@
+#ParallelRts=@ParallelRts@
+ParallelRts = YES
 HavePvm=@HavePvm@
 HaveMPI=@HaveMPI@
 # if user has given --enable-parallel, override the previous default.
