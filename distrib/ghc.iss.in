@@ -1,11 +1,11 @@
 ; Inno Setup documentation: http://www.jrsoftware.org/ishelp/
 
 [Setup]
-AppName=GHC
-AppVerName=GHC @ProjectVersion@
-DefaultDirName={sd}\ghc\ghc-@ProjectVersion@
+AppName=GHC-Eden
+AppVerName=GHC-Eden @ProjectVersion@
+DefaultDirName={sd}\ghc\ghc-eden@ProjectVersion@
 UsePreviousAppDir=no
-DefaultGroupName=GHC
+DefaultGroupName=GHC-Eden
 UninstallDisplayIcon={app}\bin\ghci.exe
 Compression=lzma
 SolidCompression=yes
@@ -30,10 +30,11 @@ Source: "distrib\hsicon.ico"; DestDir: "{app}\icons"
 
 ; Start Menu shortcuts
 [Icons]
-Name: "{group}\@ProjectVersion@\GHCi"; Filename: "{app}\bin\ghci.exe"; WorkingDir: "{app}\bin"
-Name: "{group}\@ProjectVersion@\GHC Documentation"; Filename: "{app}\doc\html\index.html"
+Name: "{group}\@ProjectVersion@\GHCi-Eden"; Filename: "{app}\bin\ghci.exe"; WorkingDir: "{app}\bin"
+;Name: "{group}\@ProjectVersion@\GHC Documentation"; Filename: "{app}\doc\html\index.html"
 Name: "{group}\@ProjectVersion@\GHC Library Documentation"; Filename: "{app}\doc\html\libraries\index.html"
-Name: "{group}\@ProjectVersion@\GHC Flag Reference"; Filename: "{app}\doc\html\users_guide\flag-reference.html"
+Name: "{group}\@ProjectVersion@\Eden-Modules Documentation"; Filename: "{app}\doc\html\libraries\edenmodules-1.1.0.1\index.html"
+;Name: "{group}\@ProjectVersion@\GHC Flag Reference"; Filename: "{app}\doc\html\users_guide\flag-reference.html"
 
 [Registry]
 ; set up file associations
@@ -85,7 +86,8 @@ begin
     else
     begin
       // Log('Found Gtk2Hs bin dir in %PATH% so will not add it again');
-      Result := False;
+	  // Edit for Eden: switch to True to use GHC-Eden Compiler as default GHC
+      Result := True;
     end
   end
   else // The key probably doesn't exist
