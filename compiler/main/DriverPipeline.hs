@@ -1468,8 +1468,10 @@ runPhase_MoveBinary dflags input_fn
                             ("Cannot move parallel executable " 
                              ++ executable_base ++ ": " ++ show e)))
 	-- generate a wrapper script for running a parallel prg.
-	Exception.catchIO (writeFile script_name (mk_wrapper_script 
-					       ways executable executable_base))
+	Exception.catchIO (do ps <- getPermissions executable
+                              writeFile script_name (mk_wrapper_script 
+					       ways executable executable_base)
+                              setPermissions script_name ps)
            (\e -> ghcError (InstallationError 
                             ("Cannot generate start script " 
                              ++ input_fn ++ ": " ++ show e)))
