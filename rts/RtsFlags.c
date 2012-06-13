@@ -1998,6 +1998,31 @@ setProgArgv(int argc, char *argv[])
     prog_argc = argc;
     prog_argv = copyArgv(argc,argv);
     setProgName(prog_argv);
+#if defined(PARALLEL_RTS) 
+#if defined(mingw32_HOST_OS)
+  // MD: code above with no effect on windows
+  //     maybe this will help
+  // drawback: no unicode support
+  // FUTURE FIX: get rid of startscript
+  wchar_t **argv2;
+  argv2 = stgCallocBytes(argc + 1, sizeof (wchar_t *),
+                                    "set argv2* 1");
+  int i,l;
+  for (i = 0; i < argc; i++) {
+      l = strlen(argv[i]) + 1;
+      argv2[i] = stgMallocBytes(l * sizeof(wchar_t),
+                                          "set argv2* 2");
+      mbstowcs(argv2[i],argv[i], l);
+  }
+  argv2[argc] = NULL;
+  setWin32ProgArgv(argc,argv2);
+  for (i = 0; i < argc; i++) {
+     stgFree(argv2[i]);
+   }
+   stgFree(argv2);
+   argv2 = NULL;
+#endif
+#endif
 }
 
 static void

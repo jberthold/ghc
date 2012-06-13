@@ -1459,6 +1459,9 @@ cpw_shm_slot_t *stored_msgs = NULL; /* Linked List used to free buffer */
 
 cpw_shm_t  shared_memory;        /* shared memory structure */
 
+char *args; /* Save string for argv in MPStart to use it in MPSync */
+char buffer[256];
+
 /**************************************************************
  * Startup and Shutdown routines (used inside ParInit.c only) */
 
@@ -1483,8 +1486,7 @@ rtsBool MP_start(int* argc, char** argv) {
      Either move the startup entirely to MP_sync() or move the parsing.
      For now just do an additional parse...
   */
-  parse_rts_flags(argc,argv);
-
+//  parse_rts_flags(argc,argv);
   /* first argument is number of PEs
      (handled by startup script in compiler/main/DriverPipeline.hs */
   ASSERT(argv && argv[1]);
@@ -1492,6 +1494,29 @@ rtsBool MP_start(int* argc, char** argv) {
   if (nPEs == (nat)0)
     nPEs = 1;
 
+  args = cpw_mk_argv_string(*argc, argv);
+ 
+  /* is Environment Var set? then we are a child */
+  buffer[0] = '0';
+  buffer[1] = '\0';
+  GetEnvironmentVariable("IsEdenChild", buffer, 256);
+  sscanf(buffer, "%i", &thisPE);
+  //printf("IsEdenChild = %i\n", thisPE);
+ if(thisPE == 0) {
+    thisPE = 1;
+    IAmMainThread = rtsTrue;
+  }
+
+  return rtsTrue;
+}
+
+/* MP_sync synchronises all nodes in a parallel computation:
+ *  sets global var.: 
+ *    thisPE - GlobalTaskId: node's own task Id 
+ *             (logical node address for messages)
+ * Returns: Bool: success (1) or failure (0)
+ */
+rtsBool MP_sync(void){
 
   /* set buffer sizes */
   num_msgs = RtsFlags.ParFlags.sendBufferSize * (int)nPEs;
@@ -1501,22 +1526,10 @@ rtsBool MP_start(int* argc, char** argv) {
      init process
   */
 
-  /* is Environment Var set? then we are a child */
-  char buffer[256];
-  buffer[0] = '0';
-  buffer[1] = '\0';
-  GetEnvironmentVariable("IsEdenChild", buffer, 256);
-  sscanf(buffer, "%i", &thisPE);
-  //printf("IsEdenChild = %i\n", thisPE);
-
-  if(thisPE == 0) {
-    thisPE = 1;
-    IAmMainThread = rtsTrue;
-
+  if(thisPE == 1) {
     if (cpw_shm_create() != CPW_NOERROR) {
       barf(" MPSystem CpWay: error creating shared memory!\n");
     }
-
     STARTUPINFO si;
     GetStartupInfo(&si);
     PROCESS_INFORMATION *pi = malloc(sizeof(PROCESS_INFORMATION) *(nPEs -1));
@@ -1529,12 +1542,14 @@ rtsBool MP_start(int* argc, char** argv) {
       SetEnvironmentVariable("IsEdenChild", buffer);
       sprintf(buffer, "%lu", (DWORD) shared_memory.hShm);
       SetEnvironmentVariable("SHMHandle", buffer);		
-      char *args = cpw_mk_argv_string(*argc, argv);
+      char *argsTmp = stgMallocBytes(strlen(args)+1, "args");
+	  strcpy(argsTmp, args);
 	  
-      CreateProcess(NULL, args, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi[i-2]);
+      CreateProcess(NULL, argsTmp, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi[i-2]);
       
-	  free(args);
+	  free(argsTmp);
     }
+	free(args);
   }
   else {
     GetEnvironmentVariable("SHMHandle", buffer, 256);
@@ -1548,17 +1563,6 @@ rtsBool MP_start(int* argc, char** argv) {
 	cpw_shm_debug_info(&shared_memory);
   /* check errors before forking */
   cpw_shm_check_errors();
-
-  return rtsTrue;
-}
-
-/* MP_sync synchronises all nodes in a parallel computation:
- *  sets global var.: 
- *    thisPE - GlobalTaskId: node's own task Id 
- *             (logical node address for messages)
- * Returns: Bool: success (1) or failure (0)
- */
-rtsBool MP_sync(void){
   //printf("MP_sync()\n");
 
   /* check for fork errors */

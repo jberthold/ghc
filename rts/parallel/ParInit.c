@@ -161,12 +161,10 @@ startupParallelSystem(int* argc, char **argv[]) {
   
   (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
   (*argv)++; (*argc)--;
-
-  /* Only in debug mode? */
-  fprintf(stderr, "==== Starting parallel execution on %d processors ...\n", 
-	  nPEs);
+  if (thisPE==1){
+	/* Only in debug mode? */
+	fprintf(stderr, "==== Starting parallel execution on %d processors ...\n", 
+		nPEs);
+  }
 }
-
-
-
 #endif /* PARALLEL_RTS -- whole file */

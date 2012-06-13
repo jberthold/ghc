@@ -1454,7 +1454,7 @@ runPhase_MoveBinary dflags input_fn
 #if defined(mingw32_HOST_OS)
         user <- getEnv "USERNAME"
 #else    
-        user <- getenv "USER"
+        user <- getEnv "USER"
 #endif  
   -- mingw32
         let ways = wayNames dflags
@@ -1475,7 +1475,8 @@ runPhase_MoveBinary dflags input_fn
                -- argh SysTools:copy does not preserve permissions
                ps <- getPermissions input_fn
                copy dflags "copying parallel executable" input_fn executable
-               setPermissions executable ps)
+               setPermissions executable ps
+               removeFile input_fn)
            (\e -> ghcError (InstallationError 
                             ("Cannot move parallel executable " 
                              ++ executable_base ++ ": " ++ show e)))
@@ -1742,10 +1743,13 @@ mk_wrapper_script ways executable executable_base = unlines $
   "",
   "# trace post-processing",
   "if ($dotrace) {",
-  "  print \"Trace post-processing...\\n\";",
- -- "  # wait for trace files to be completed",
- -- "sleep(4);",
-  "# trace copying or archive creation ",
+  "  print \"Trace post-processing...\\n\";"]
+  ++
+  if (WayParPvm `elem` ways) 
+    then ["  # wait for trace files to be completed", "sleep(2);"]
+    else []
+  ++
+  ["# trace copying or archive creation ",
   "system(\"if which zip &> /dev/null; then if test -f $trcfile.parevents; then rm $trcfile.parevents; fi; zip -m $trcfile.parevents $executable_base\\#[0123456789]*.eventlog; else mkdir $trcfile\\_parevents; mv $executable_base\\#[0123456789]*.eventlog $trcfile\\_parevents; fi\");",
   "if ( -f \"$ENV{'HOME'}/$executable_base\\#2.eventlog\") {",
   "# move trace files from home to here",
