@@ -2079,12 +2079,16 @@ stg_duplicatezh
     DuplicateNearbyGraph(original "ptr", CurrentTSO "ptr", 
 			 MyCapability() "ptr") [];
 #else
-  copy = original;
+  // system does not support parallel primops, complain and crash the thread
+  foreign "C" debugBelch("Thread %ld: compiled without parallel primitives.",
+			 StgTSO_id(CurrentTSO))[R1];
+  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
+				    CurrentTSO "ptr", NULL)[R1];
 #endif
   RET_P(copy);
 }
 
-// experimental feature: serialisation into a Haskell Byte Array
+// serialisation into a Haskell Byte Array
 stg_serializzezh
 {
   // args: R1: closure (graph root to serialize)
@@ -2129,7 +2133,7 @@ stg_serializzezh
   RET_P(buff);
 }
 
-/* for testing: duplicate a heap graph by packing/unpacking it */
+/* inverse to the serializze primop above */
 stg_deserializzezh
 {
   // args: R1 ByteArray# containing a serialized subgraph
@@ -2168,9 +2172,11 @@ stg_expectDatazh
   (proc) = foreign "C" MyProcess(CurrentTSO "ptr") [];
   (id)   = foreign "C" addInport(proc, retBH "ptr") [];
 #else
-  id = 0;
-  proc = 0;
-  retBH = NULL;
+  // system does not support parallel primops, complain and crash the thread
+  foreign "C" debugBelch("Thread %ld: compiled without parallel primitives.",
+			 StgTSO_id(CurrentTSO))[R1];
+  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
+				    CurrentTSO "ptr", NULL)[R1];
 #endif
   RET_NNP(id, proc, retBH); 
 }
@@ -2212,8 +2218,11 @@ stg_sendDatazh
   (success) = foreign "C" sendWrapper(CurrentTSO "ptr", mode, graphroot "ptr") [];
   // ( 0=blocked, -1=send failed, otherwise successfully packed/sent away )
 #else
-  // seq. system: no operation. Could instead fill a blackhole locally.
-    success = 2;
+  // system does not support parallel primops, complain and crash the thread
+  foreign "C" debugBelch("Thread %ld: compiled without parallel primitives.",
+			 StgTSO_id(CurrentTSO))[R1];
+  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
+				    CurrentTSO "ptr", NULL)[R1];
 #endif
 
   if (success == 0) {
