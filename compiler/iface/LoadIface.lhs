@@ -49,6 +49,7 @@ import Maybes
 import ErrUtils
 import Finder
 import UniqFM
+import SrcLoc
 import StaticFlags
 import Outputable
 import BinIface
@@ -63,7 +64,7 @@ import Control.Monad
 
 %************************************************************************
 %*                                                                      *
-        loadSrcInterface, loadOrphanModules, loadHomeInterface
+        loadSrcInterface, loadOrphanModules, loadInterfaceForName
 
                 These three are called from TcM-land    
 %*                                                                      *
@@ -161,8 +162,9 @@ loadUserInterface is_boot doc mod_name
 loadInterfaceWithException :: SDoc -> Module -> WhereFrom -> IfM lcl ModIface
 loadInterfaceWithException doc mod_name where_from
   = do  { mb_iface <- loadInterface doc mod_name where_from
+        ; dflags <- getDynFlags
         ; case mb_iface of 
-            Failed err      -> ghcError (ProgramError (showSDoc err))
+            Failed err      -> ghcError (ProgramError (showSDoc dflags err))
             Succeeded iface -> return iface }
 
 ------------------
@@ -643,7 +645,8 @@ showIface hsc_env filename = do
    -- non-profiled interfaces, for example.
    iface <- initTcRnIf 's' hsc_env () () $
        readBinIface IgnoreHiWay TraceBinIFaceReading filename
-   printDump (pprModIface iface)
+   let dflags = hsc_dflags hsc_env
+   log_action dflags dflags SevDump noSrcSpan defaultDumpStyle (pprModIface iface)
 \end{code}
 
 \begin{code}

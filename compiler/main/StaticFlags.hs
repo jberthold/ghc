@@ -27,9 +27,7 @@ module StaticFlags (
 	WayName(..), Way(..), v_Ways, isRTSWay, mkBuildTag,
 
 	-- Output style options
-	opt_PprUserLength,
 	opt_PprCols,
-	opt_PprCaseAsLet,
 	opt_PprStyle_Debug, opt_TraceLevel,
         opt_NoDebugOutput,
 
@@ -251,10 +249,6 @@ opt_SuppressUniques :: Bool
 opt_SuppressUniques
 	=  lookUp  (fsLit "-dsuppress-uniques")
 
--- | Display case expressions with a single alternative as strict let bindings
-opt_PprCaseAsLet :: Bool
-opt_PprCaseAsLet	= lookUp   (fsLit "-dppr-case-as-let")
-
 -- | Set the maximum width of the dumps
 --   If GHC's command line options are bad then the options parser uses the
 --   pretty printer display the error message. In this case the staticFlags
@@ -275,9 +269,6 @@ opt_PprStyle_Debug              = lookUp  (fsLit "-dppr-debug")
 opt_TraceLevel :: Int
 opt_TraceLevel = lookup_def_int "-dtrace-level" 1  	-- Standard level is 1
 	       	 			    	        -- Less verbose is 0
-
-opt_PprUserLength   :: Int
-opt_PprUserLength	        = lookup_def_int "-dppr-user-length" 5 --ToDo: give this a name
 
 opt_Fuel            :: Int
 opt_Fuel                        = lookup_def_int "-dopt-fuel" maxBound
@@ -345,7 +336,12 @@ opt_UF_CreationThreshold, opt_UF_UseThreshold :: Int
 opt_UF_DearOp, opt_UF_FunAppDiscount, opt_UF_DictDiscount :: Int
 opt_UF_KeenessFactor :: Float
 
-opt_UF_CreationThreshold = lookup_def_int "-funfolding-creation-threshold" (450::Int)
+opt_UF_CreationThreshold = lookup_def_int "-funfolding-creation-threshold" (750::Int)
+  -- This threshold must be reasonably high to take 
+  -- account of possible discounts.  
+  -- E.g. 450 is not enough in 'fulsom' for Interval.sqr to inline into Csg.calc
+  --      (The unfolding for sqr never makes it into the interface file.)
+
 opt_UF_UseThreshold      = lookup_def_int "-funfolding-use-threshold"      (60::Int)
 opt_UF_FunAppDiscount    = lookup_def_int "-funfolding-fun-discount"       (60::Int)
 

@@ -13,7 +13,7 @@ module MkCore (
         mkCoreApp, mkCoreApps, mkCoreConApps,
         mkCoreLams, mkWildCase, mkIfThenElse,
         mkWildValBinder, mkWildEvBinder,
-        sortQuantVars,
+        sortQuantVars, castBottomExpr,
         
         -- * Constructing boxed literals
         mkWordExpr, mkWordExprWord,
@@ -24,9 +24,6 @@ module MkCore (
 
         -- * Floats
         FloatBind(..), wrapFloat,
-
-        -- * Constructing/deconstructing implicit parameter boxes
-        mkIPUnbox, mkIPBox,
 
         -- * Constructing/deconstructing equality evidence boxes
         mkEqBox,
@@ -62,7 +59,7 @@ module MkCore (
 #include "HsVersions.h"
 
 import Id
-import Var      ( IpId, EvVar, setTyVarUnique )
+import Var      ( EvVar, setTyVarUnique )
 
 import CoreSyn
 import CoreUtils        ( exprType, needsCaseBinding, bindNonRec )
@@ -72,8 +69,7 @@ import HscTypes
 import TysWiredIn
 import PrelNames
 
-import IParam           ( ipCoAxiom )
-import TcType		( mkSigmaTy, evVarPred )
+import TcType		( mkSigmaTy )
 import Type
 import Coercion
 import TysPrim
@@ -85,7 +81,7 @@ import Outputable
 import FastString
 import UniqSupply
 import BasicTypes
-import Util             ( notNull, zipEqual, sortLe )
+import Util
 import Pair
 import Constants
 
@@ -209,6 +205,16 @@ mkIfThenElse guard then_expr else_expr
   = mkWildCase guard boolTy (exprType then_expr) 
 	 [ (DataAlt falseDataCon, [], else_expr),	-- Increasing order of tag!
     	   (DataAlt trueDataCon,  [], then_expr) ]
+
+castBottomExpr :: CoreExpr -> Type -> CoreExpr
+-- (castBottomExpr e ty), assuming that 'e' diverges, 
+-- return an expression of type 'ty'
+-- See Note [Empty case alternatives] in CoreSyn
+castBottomExpr e res_ty
+  | e_ty `eqType` res_ty = e
+  | otherwise            = Case e (mkWildValBinder e_ty) res_ty []
+  where
+    e_ty = exprType e
 \end{code}
 
 The functions from this point don't really do anything cleverer than
@@ -247,8 +253,8 @@ mkWordExprWord w = mkConApp wordDataCon [mkWordLitWord w]
 
 -- | Create a 'CoreExpr' which will evaluate to the given @Integer@
 mkIntegerExpr  :: MonadThings m => Integer -> m CoreExpr  -- Result :: Integer
-mkIntegerExpr i = do mkIntegerId <- lookupId mkIntegerName
-                     return (Lit (mkLitInteger i mkIntegerId))
+mkIntegerExpr i = do t <- lookupTyCon integerTyConName
+                     return (Lit (mkLitInteger i (mkTyConTy t)))
 
 -- | Create a 'CoreExpr' which will evaluate to the given @Float@
 mkFloatExpr :: Float -> CoreExpr
@@ -289,21 +295,6 @@ mkStringExprFS str
   where
     chars = unpackFS str
     safeChar c = ord c >= 1 && ord c <= 0x7F
-\end{code}
-
-\begin{code}
-
-mkIPBox :: IPName IpId -> CoreExpr -> CoreExpr
-mkIPBox ipx e = e `Cast` mkSymCo (mkAxInstCo (ipCoAxiom ip) [ty])
-  where x = ipNameName ipx
-        Just (ip, ty) = getIPPredTy_maybe (evVarPred x)
-        -- NB: don't use the DataCon work id because we don't generate code for it
-
-mkIPUnbox :: IPName IpId -> CoreExpr
-mkIPUnbox ipx = Var x `Cast` mkAxInstCo (ipCoAxiom ip) [ty]
-  where x = ipNameName ipx
-        Just (ip, ty) = getIPPredTy_maybe (evVarPred x)
-
 \end{code}
 
 \begin{code}

@@ -658,7 +658,8 @@ reservedWordsFM = listToUFM $
          ( "capi",           ITcapiconv,      bit cApiFfiBit),
          ( "prim",           ITprimcallconv,  bit ffiBit),
 
-         ( "rec",            ITrec,           bit recBit),
+         ( "rec",            ITrec,           bit arrowsBit .|. 
+                                              bit recursiveDoBit),
          ( "proc",           ITproc,          bit arrowsBit)
      ]
 
@@ -766,13 +767,17 @@ pop_and act span buf len = do _ <- popLexState
 nextCharIs :: StringBuffer -> (Char -> Bool) -> Bool
 nextCharIs buf p = not (atEnd buf) && p (currentChar buf)
 
+{-# INLINE nextCharIsNot #-}
+nextCharIsNot :: StringBuffer -> (Char -> Bool) -> Bool
+nextCharIsNot buf p = not (nextCharIs buf p)
+
 notFollowedBy :: Char -> AlexAccPred Int
 notFollowedBy char _ _ _ (AI _ buf)
-  = nextCharIs buf (/=char)
+  = nextCharIsNot buf (== char)
 
 notFollowedBySymbol :: AlexAccPred Int
 notFollowedBySymbol _ _ _ (AI _ buf)
-  = nextCharIs buf (`notElem` "!#$%&*+./<=>?@\\^|-~")
+  = nextCharIsNot buf (`elem` "!#$%&*+./<=>?@\\^|-~")
 
 -- We must reject doc comments as being ordinary comments everywhere.
 -- In some cases the doc comment will be selected as the lexeme due to
@@ -782,13 +787,16 @@ notFollowedBySymbol _ _ _ (AI _ buf)
 isNormalComment :: AlexAccPred Int
 isNormalComment bits _ _ (AI _ buf)
   | haddockEnabled bits = notFollowedByDocOrPragma
-  | otherwise           = nextCharIs buf (/='#')
+  | otherwise           = nextCharIsNot buf (== '#')
   where
     notFollowedByDocOrPragma
-       = not $ spaceAndP buf (`nextCharIs` (`elem` "|^*$#"))
+       = afterOptionalSpace buf (\b -> nextCharIsNot b (`elem` "|^*$#"))
 
-spaceAndP :: StringBuffer -> (StringBuffer -> Bool) -> Bool
-spaceAndP buf p = p buf || nextCharIs buf (==' ') && p (snd (nextChar buf))
+afterOptionalSpace :: StringBuffer -> (StringBuffer -> Bool) -> Bool
+afterOptionalSpace buf p
+    = if nextCharIs buf (== ' ')
+      then p (snd (nextChar buf))
+      else p buf
 
 atEOL :: AlexAccPred Int
 atEOL _ _ _ (AI _ buf) = atEnd buf || currentChar buf == '\n'
@@ -1819,8 +1827,6 @@ inRulePragBit :: Int
 inRulePragBit = 19
 rawTokenStreamBit :: Int
 rawTokenStreamBit = 20 -- producing a token stream with all comments included
-recBit :: Int
-recBit = 22 -- rec
 alternativeLayoutRuleBit :: Int
 alternativeLayoutRuleBit = 23
 relaxedLayoutBit :: Int
@@ -1930,8 +1936,6 @@ mkPState flags buf loc =
                .|. magicHashBit                `setBitIf` xopt Opt_MagicHash                flags
                .|. kindSigsBit                 `setBitIf` xopt Opt_KindSignatures           flags
                .|. recursiveDoBit              `setBitIf` xopt Opt_RecursiveDo              flags
-               .|. recBit                      `setBitIf` xopt Opt_DoRec                    flags
-               .|. recBit                      `setBitIf` xopt Opt_Arrows                   flags
                .|. unicodeSyntaxBit            `setBitIf` xopt Opt_UnicodeSyntax            flags
                .|. unboxedTuplesBit            `setBitIf` xopt Opt_UnboxedTuples            flags
                .|. datatypeContextsBit         `setBitIf` xopt Opt_DatatypeContexts         flags
@@ -1953,7 +1957,7 @@ mkPState flags buf loc =
 addWarning :: WarningFlag -> SrcSpan -> SDoc -> P ()
 addWarning option srcspan warning
  = P $ \s@PState{messages=(ws,es), dflags=d} ->
-       let warning' = mkWarnMsg srcspan alwaysQualify warning
+       let warning' = mkWarnMsg d srcspan alwaysQualify warning
            ws' = if wopt option d then ws `snocBag` warning' else ws
        in POk s{messages=(ws', es)} ()
 
@@ -2341,7 +2345,7 @@ dispatch_pragmas prags span buf len = case Map.lookup (clean_pragma (lexemeToStr
 
 known_pragma :: Map String Action -> AlexAccPred Int
 known_pragma prags _ _ len (AI _ buf) = (isJust $ Map.lookup (clean_pragma (lexemeToString (offsetBytes (- len) buf) len)) prags)
-                                          && (nextCharIs buf (\c -> not (isAlphaNum c || c == '_')))
+                                          && (nextCharIsNot buf (\c -> isAlphaNum c || c == '_'))
 
 clean_pragma :: String -> String
 clean_pragma prag = canon_ws (map toLower (unprefix prag))

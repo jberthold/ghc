@@ -115,10 +115,10 @@ module TcType (
   --------------------------------
   -- Rexported from Kind
   Kind, typeKind,
-  unliftedTypeKind, liftedTypeKind, argTypeKind,
+  unliftedTypeKind, liftedTypeKind,
   openTypeKind, constraintKind, mkArrowKind, mkArrowKinds, 
   isLiftedTypeKind, isUnliftedTypeKind, isSubOpenTypeKind, 
-  isSubArgTypeKind, tcIsSubKind, splitKindFunTys, defaultKind,
+  tcIsSubKind, splitKindFunTys, defaultKind,
   mkMetaKindVar,
 
   --------------------------------
@@ -130,7 +130,7 @@ module TcType (
   mkTyVarTy, mkTyVarTys, mkTyConTy,
 
   isClassPred, isEqPred, isIPPred,
-  mkClassPred, mkIPPred,
+  mkClassPred,
   isDictLikeTy,
   tcSplitDFunTy, tcSplitDFunHead, 
   mkEqPred, 
@@ -152,7 +152,7 @@ module TcType (
   tyVarsOfType, tyVarsOfTypes,
   tcTyVarsOfType, tcTyVarsOfTypes,
 
-  pprKind, pprParendKind,
+  pprKind, pprParendKind, pprSigmaType,
   pprType, pprParendType, pprTypeApp, pprTyThingCategory,
   pprTheta, pprThetaArrowTy, pprClassPred
 
@@ -352,6 +352,8 @@ data UserTypeCtxt
 			-- 	f (x::t) = ...
   | BindPatSigCtxt	-- Type sig in pattern binding pattern
 			--	(x::t, y) = e
+  | RuleSigCtxt Name    -- LHS of a RULE forall
+                        --    RULE "foo" forall (x :: a -> a). f (Just x) = ...
   | ResSigCtxt		-- Result type sig
 			-- 	f x :: t = ....
   | ForSigCtxt Name	-- Foreign import or export signature
@@ -417,6 +419,7 @@ pprTcTyVarDetails (MetaTv SigTv _) = ptext (sLit "sig")
 pprUserTypeCtxt :: UserTypeCtxt -> SDoc
 pprUserTypeCtxt (InfSigCtxt n)    = ptext (sLit "the inferred type for") <+> quotes (ppr n)
 pprUserTypeCtxt (FunSigCtxt n)    = ptext (sLit "the type signature for") <+> quotes (ppr n)
+pprUserTypeCtxt (RuleSigCtxt n)    = ptext (sLit "a RULE for") <+> quotes (ppr n)
 pprUserTypeCtxt ExprSigCtxt       = ptext (sLit "an expression type signature")
 pprUserTypeCtxt (ConArgCtxt c)    = ptext (sLit "the type of the constructor") <+> quotes (ppr c)
 pprUserTypeCtxt (TySynCtxt c)     = ptext (sLit "the RHS of the type synonym") <+> quotes (ppr c)
@@ -606,8 +609,8 @@ tidyCos env = map (tidyCo env)
 %************************************************************************
 
 \begin{code}
-
--- | Finds type family instances occuring in a type after expanding synonyms.
+-- | Finds outermost type-family applications occuring in a type,
+-- after expanding synonyms.
 tcTyFamInsts :: Type -> [(TyCon, [Type])]
 tcTyFamInsts ty 
   | Just exp_ty <- tcView ty    = tcTyFamInsts exp_ty
@@ -781,12 +784,18 @@ mkTcEqPred :: TcType -> TcType -> Type
 -- During type checking we build equalities between 
 -- type variables with OpenKind or ArgKind.  Ultimately
 -- they will all settle, but we want the equality predicate
--- itself to have kind '*'.  I think.  
+-- itself to have kind '*'.  I think.
+--
+-- But for now we call mkTyConApp, not mkEqPred, because the invariants
+-- of the latter might not be satisfied during type checking.
+-- Notably when we form an equalty   (a : OpenKind) ~ (Int : *)
 --
 -- But this is horribly delicate: what about type variables
 -- that turn out to be bound to Int#?
 mkTcEqPred ty1 ty2
-  = mkNakedEqPred (defaultKind (typeKind ty1)) ty1 ty2
+  = mkTyConApp eqTyCon [k, ty1, ty2]
+  where
+    k = defaultKind (typeKind ty1)
 \end{code}
 
 @isTauTy@ tests for nested for-alls.  It should not be called on a boxy type.
@@ -1082,9 +1091,6 @@ shallowPredTypePredTree ev_ty
       () | tc `hasKey` eqTyConKey
          , let [_, ty1, ty2] = tys
          -> EqPred ty1 ty2
-      () | Just ip <- tyConIP_maybe tc
-         , let [ty] = tys
-         -> IPPred ip ty
       () | isTupleTyCon tc
          -> TuplePred tys
       _ -> IrredPred ev_ty
@@ -1119,7 +1125,7 @@ mkMinimalBySCs ptys = [ ploc |  ploc <- ptys
                              ,  ploc `not_in_preds` rec_scs ]
  where
    rec_scs = concatMap trans_super_classes ptys
-   not_in_preds p ps = null (filter (eqPred p) ps)
+   not_in_preds p ps = not (any (eqPred p) ps)
 
    trans_super_classes pred   -- Superclasses of pred, excluding pred itself
      = case classifyPredType pred of

@@ -322,10 +322,10 @@ mkIface_ hsc_env maybe_old_fingerprint
                 | otherwise                     = emptyBag
               errs_and_warns = (orph_warnings, emptyBag)
               unqual = mkPrintUnqualified dflags rdr_env
-              inst_warns = listToBag [ instOrphWarn unqual d 
+              inst_warns = listToBag [ instOrphWarn dflags unqual d 
                                      | (d,i) <- insts `zip` iface_insts
                                      , isNothing (ifInstOrph i) ]
-              rule_warns = listToBag [ ruleOrphWarn unqual this_mod r 
+              rule_warns = listToBag [ ruleOrphWarn dflags unqual this_mod r 
                                      | r <- iface_rules
                                      , isNothing (ifRuleOrph r)
                                      , if ifRuleAuto r then warn_auto_orphs
@@ -849,14 +849,14 @@ oldMD5 dflags bh = do
         return $! readHexFingerprint hash_str
 -}
 
-instOrphWarn :: PrintUnqualified -> ClsInst -> WarnMsg
-instOrphWarn unqual inst
-  = mkWarnMsg (getSrcSpan inst) unqual $
+instOrphWarn :: DynFlags -> PrintUnqualified -> ClsInst -> WarnMsg
+instOrphWarn dflags unqual inst
+  = mkWarnMsg dflags (getSrcSpan inst) unqual $
     hang (ptext (sLit "Orphan instance:")) 2 (pprInstanceHdr inst)
 
-ruleOrphWarn :: PrintUnqualified -> Module -> IfaceRule -> WarnMsg
-ruleOrphWarn unqual mod rule
-  = mkWarnMsg silly_loc unqual $
+ruleOrphWarn :: DynFlags -> PrintUnqualified -> Module -> IfaceRule -> WarnMsg
+ruleOrphWarn dflags unqual mod rule
+  = mkWarnMsg dflags silly_loc unqual $
     ptext (sLit "Orphan rule:") <+> ppr rule
   where
     silly_loc = srcLocSpan (mkSrcLoc (moduleNameFS (moduleName mod)) 1 1)
@@ -1095,8 +1095,6 @@ data RecompileRequired
   | RecompBecause String
        -- ^ The .o/.hi files are up to date, but something else has changed
        -- to force recompilation; the String says what (one-line summary)
-  | RecompForcedByTH
-       -- ^ recompile is forced due to use of TH by the module
    deriving Eq
 
 recompileRequired :: RecompileRequired -> Bool
@@ -1118,8 +1116,9 @@ checkOldIface :: HscEnv
               -> IO (RecompileRequired, Maybe ModIface)
 
 checkOldIface hsc_env mod_summary source_modified maybe_iface
-  = do  showPass (hsc_dflags hsc_env) $
-            "Checking old interface for " ++ (showSDoc $ ppr $ ms_mod mod_summary)
+  = do  let dflags = hsc_dflags hsc_env
+        showPass dflags $
+            "Checking old interface for " ++ (showPpr dflags $ ms_mod mod_summary)
         initIfaceCheck hsc_env $
             check_old_iface hsc_env mod_summary source_modified maybe_iface
 
@@ -1767,7 +1766,9 @@ toIfaceExpr (Type ty)       = IfaceType (toIfaceType ty)
 toIfaceExpr (Coercion co)   = IfaceCo   (coToIfaceType co)
 toIfaceExpr (Lam x b)       = IfaceLam (toIfaceBndr x) (toIfaceExpr b)
 toIfaceExpr (App f a)       = toIfaceApp f [a]
-toIfaceExpr (Case s x _ as) = IfaceCase (toIfaceExpr s) (getFS x) (map toIfaceAlt as)
+toIfaceExpr (Case s x ty as) 
+  | null as                 = IfaceECase (toIfaceExpr s) (toIfaceType ty)
+  | otherwise               = IfaceCase (toIfaceExpr s) (getFS x) (map toIfaceAlt as)
 toIfaceExpr (Let b e)       = IfaceLet (toIfaceBind b) (toIfaceExpr e)
 toIfaceExpr (Cast e co)     = IfaceCast (toIfaceExpr e) (coToIfaceType co)
 toIfaceExpr (Tick t e)    = IfaceTick (toIfaceTickish t) (toIfaceExpr e)

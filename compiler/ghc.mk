@@ -27,8 +27,6 @@ endef
 # The 'echo' commands simply spit the values of various make variables
 # into Config.hs, whence they can be compiled and used by GHC itself
 
-compiler_CONFIG_HS = compiler/main/Config.hs
-
 # This is just to avoid generating a warning when generating deps
 # involving RtsFlags.h
 compiler_stage1_MKDEPENDC_OPTS = -DMAKING_GHC_BUILD_SYSTEM_DEPENDENCIES
@@ -501,11 +499,11 @@ compiler/main/Constants_HC_OPTS  += -fforce-recomp
 # LibFFI.hs #includes ffi.h
 compiler/stage2/build/LibFFI.hs : $(libffi_HEADERS)
 # On Windows it seems we also need to link directly to libffi
-ifeq  "$(HOSTPLATFORM)" "i386-unknown-mingw32"
+ifeq "$(HostOS_CPP)" "mingw32"
 define windowsDynLinkToFfi
 # $1 = way
 ifneq "$$(findstring dyn, $1)" ""
-compiler_stage2_$1_ALL_HC_OPTS += -lffi-5
+compiler_stage2_$1_ALL_HC_OPTS += -l$$(LIBFFI_WINDOWS_LIB)
 endif
 endef
 $(foreach way,$(GhcLibWays),$(eval $(call windowsDynLinkToFfi,$(way))))

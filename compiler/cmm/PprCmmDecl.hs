@@ -48,6 +48,7 @@ import CLabel
 import PprCmmExpr
 import Cmm
 
+import DynFlags
 import Outputable
 import Platform
 import FastString
@@ -60,37 +61,35 @@ import SMRep
 #include "../includes/rts/storage/FunTypes.h"
 
 
-pprCmms :: (PlatformOutputable info, PlatformOutputable g)
-        => Platform -> [GenCmmGroup CmmStatics info g] -> SDoc
-pprCmms platform cmms = pprCode CStyle (vcat (intersperse separator $ map (pprPlatform platform) cmms))
+pprCmms :: (Outputable info, Outputable g)
+        => [GenCmmGroup CmmStatics info g] -> SDoc
+pprCmms cmms = pprCode CStyle (vcat (intersperse separator $ map ppr cmms))
         where
           separator = space $$ ptext (sLit "-------------------") $$ space
 
-writeCmms :: (PlatformOutputable info, PlatformOutputable g)
-          => Platform -> Handle -> [GenCmmGroup CmmStatics info g] -> IO ()
-writeCmms platform handle cmms = printForC handle (pprCmms platform cmms)
+writeCmms :: (Outputable info, Outputable g)
+          => DynFlags -> Handle -> [GenCmmGroup CmmStatics info g] -> IO ()
+writeCmms dflags handle cmms = printForC dflags handle (pprCmms cmms)
 
 -----------------------------------------------------------------------------
 
-instance (PlatformOutputable d, PlatformOutputable info, PlatformOutputable i)
-      => PlatformOutputable (GenCmmDecl d info i) where
-    pprPlatform platform t = pprTop platform t
+instance (Outputable d, Outputable info, Outputable i)
+      => Outputable (GenCmmDecl d info i) where
+    ppr t = sdocWithPlatform $ \platform -> pprTop platform t
 
-instance PlatformOutputable CmmStatics where
-    pprPlatform = pprStatics
+instance Outputable CmmStatics where
+    ppr x = sdocWithPlatform $ \platform -> pprStatics platform x
 
-instance PlatformOutputable CmmStatic where
-    pprPlatform = pprStatic
+instance Outputable CmmStatic where
+    ppr x = sdocWithPlatform $ \platform -> pprStatic platform x
 
-instance PlatformOutputable CmmInfoTable where
-    pprPlatform = pprInfoTable
+instance Outputable CmmInfoTable where
+    ppr = pprInfoTable
 
 
 -----------------------------------------------------------------------------
 
-pprCmmGroup :: (PlatformOutputable d,
-                PlatformOutputable info,
-                PlatformOutputable g)
+pprCmmGroup :: (Outputable d, Outputable info, Outputable g)
             => Platform -> GenCmmGroup d info g -> SDoc
 pprCmmGroup platform tops
     = vcat $ intersperse blankLine $ map (pprTop platform) tops
@@ -98,14 +97,14 @@ pprCmmGroup platform tops
 -- --------------------------------------------------------------------------
 -- Top level `procedure' blocks.
 --
-pprTop :: (PlatformOutputable d, PlatformOutputable info, PlatformOutputable i)
+pprTop :: (Outputable d, Outputable info, Outputable i)
        => Platform -> GenCmmDecl d info i -> SDoc
 
 pprTop platform (CmmProc info lbl graph)
 
   = vcat [ pprCLabel platform lbl <> lparen <> rparen
-         , nest 8 $ lbrace <+> pprPlatform platform info $$ rbrace
-         , nest 4 $ pprPlatform platform graph
+         , nest 8 $ lbrace <+> ppr info $$ rbrace
+         , nest 4 $ ppr graph
          , rbrace ]
 
 -- --------------------------------------------------------------------------
@@ -113,32 +112,30 @@ pprTop platform (CmmProc info lbl graph)
 --
 --      section "data" { ... }
 --
-pprTop platform (CmmData section ds) =
-    (hang (pprSection section <+> lbrace) 4 (pprPlatform platform ds))
+pprTop _ (CmmData section ds) =
+    (hang (pprSection section <+> lbrace) 4 (ppr ds))
     $$ rbrace
 
 -- --------------------------------------------------------------------------
 -- Info tables.
 
-pprInfoTable :: Platform -> CmmInfoTable -> SDoc
-pprInfoTable _ CmmNonInfoTable
+pprInfoTable :: CmmInfoTable -> SDoc
+pprInfoTable CmmNonInfoTable
   = empty
-pprInfoTable platform
-             (CmmInfoTable { cit_lbl = lbl, cit_rep = rep
+pprInfoTable (CmmInfoTable { cit_lbl = lbl, cit_rep = rep
                            , cit_prof = prof_info
                            , cit_srt = _srt })  
-  = vcat [ ptext (sLit "label:") <+> pprPlatform platform lbl
+  = vcat [ ptext (sLit "label:") <+> ppr lbl
          , ptext (sLit "rep:") <> ppr rep
          , case prof_info of
 	     NoProfilingInfo -> empty
              ProfilingInfo ct cd -> vcat [ ptext (sLit "type:") <+> pprWord8String ct
                                          , ptext (sLit "desc: ") <> pprWord8String cd ] ]
 
-instance PlatformOutputable C_SRT where
-  pprPlatform _ (NoC_SRT) = ptext (sLit "_no_srt_")
-  pprPlatform platform (C_SRT label off bitmap)
-      = parens (pprPlatform platform label <> comma <> ppr off
-                                           <> comma <> text (show bitmap))
+instance Outputable C_SRT where
+  ppr NoC_SRT = ptext (sLit "_no_srt_")
+  ppr (C_SRT label off bitmap)
+      = parens (ppr label <> comma <> ppr off <> comma <> text (show bitmap))
 
 instance Outputable ForeignHint where
   ppr NoHint     = empty
@@ -146,8 +143,6 @@ instance Outputable ForeignHint where
 --  ppr AddrHint   = quotes(text "address")
 -- Temp Jan08
   ppr AddrHint   = (text "PtrHint")
-instance PlatformOutputable ForeignHint where
-    pprPlatform _ = ppr
 
 -- --------------------------------------------------------------------------
 -- Static data.
@@ -155,7 +150,8 @@ instance PlatformOutputable ForeignHint where
 --      following C--
 --
 pprStatics :: Platform -> CmmStatics -> SDoc
-pprStatics platform (Statics lbl ds) = vcat ((pprCLabel platform lbl <> colon) : map (pprPlatform platform) ds)
+pprStatics platform (Statics lbl ds)
+    = vcat ((pprCLabel platform lbl <> colon) : map ppr ds)
 
 pprStatic :: Platform -> CmmStatic -> SDoc
 pprStatic platform s = case s of

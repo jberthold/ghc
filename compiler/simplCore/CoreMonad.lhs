@@ -71,7 +71,6 @@ import CoreSyn
 import PprCore
 import CoreUtils
 import CoreLint		( lintCoreBindings )
-import PrelNames        ( iNTERACTIVE )
 import HscTypes
 import Module           ( Module )
 import DynFlags
@@ -84,13 +83,14 @@ import Id		( Id )
 import IOEnv hiding     ( liftIO, failM, failWithM )
 import qualified IOEnv  ( liftIO )
 import TcEnv            ( tcLookupGlobal )
-import TcRnMonad        ( TcM, initTc )
+import TcRnMonad        ( initTcForLookup )
 
 import Outputable
 import FastString
 import qualified ErrUtils as Err
 import Bag
 import Maybes
+import SrcLoc
 import UniqSupply
 import UniqFM       ( UniqFM, mapUFM, filterUFM )
 import MonadUtils
@@ -133,7 +133,7 @@ stuff before and after core passes, and do Core Lint when necessary.
 
 \begin{code}
 showPass :: DynFlags -> CoreToDo -> IO ()
-showPass dflags pass = Err.showPass dflags (showSDoc (ppr pass))
+showPass dflags pass = Err.showPass dflags (showPpr dflags pass)
 
 endPass :: DynFlags -> CoreToDo -> CoreProgram -> [CoreRule] -> IO ()
 endPass dflags pass binds rules
@@ -145,9 +145,9 @@ endPass dflags pass binds rules
                            | dopt Opt_D_verbose_core2core dflags -> Just dflag
                 _ -> Nothing
 
-dumpIfSet :: Bool -> CoreToDo -> SDoc -> SDoc -> IO ()
-dumpIfSet dump_me pass extra_info doc
-  = Err.dumpIfSet dump_me (showSDoc (ppr pass <+> extra_info)) doc
+dumpIfSet :: DynFlags -> Bool -> CoreToDo -> SDoc -> SDoc -> IO ()
+dumpIfSet dflags dump_me pass extra_info doc
+  = Err.dumpIfSet dflags dump_me (showSDoc dflags (ppr pass <+> extra_info)) doc
 
 dumpPassResult :: DynFlags 
                -> Maybe DynFlag		-- Just df => show details in a file whose
@@ -158,17 +158,18 @@ dumpPassResult :: DynFlags
                -> IO ()
 dumpPassResult dflags mb_flag hdr extra_info binds rules
   | Just dflag <- mb_flag
-  = Err.dumpSDoc dflags dflag (showSDoc hdr) dump_doc
+  = Err.dumpSDoc dflags dflag (showSDoc dflags hdr) dump_doc
 
   | otherwise
-  = Err.debugTraceMsg dflags 2 $
-    (sep [text "Result size of" <+> hdr, nest 2 (equals <+> ppr (coreBindsStats binds))])
+  = Err.debugTraceMsg dflags 2 size_doc
           -- Report result size 
 	  -- This has the side effect of forcing the intermediate to be evaluated
 
   where
+    size_doc = sep [text "Result size of" <+> hdr, nest 2 (equals <+> ppr (coreBindsStats binds))]
+
     dump_doc  = vcat [ nest 2 extra_info
-		     , nest 2 (text "Result size =" <+> int (coreBindsSize binds))
+		     , size_doc
                      , blankLine
                      , pprCoreBindings binds 
                      , ppUnless (null rules) pp_rules ]
@@ -180,7 +181,7 @@ lintPassResult :: DynFlags -> CoreToDo -> CoreProgram -> IO ()
 lintPassResult dflags pass binds
   = when (dopt Opt_DoCoreLinting dflags) $
     do { let (warns, errs) = lintCoreBindings binds
-       ; Err.showPass dflags ("Core Linted result of " ++ showSDoc (ppr pass))
+       ; Err.showPass dflags ("Core Linted result of " ++ showPpr dflags pass)
        ; displayLintResults dflags pass warns errs binds  }
 
 displayLintResults :: DynFlags -> CoreToDo
@@ -188,10 +189,11 @@ displayLintResults :: DynFlags -> CoreToDo
                    -> IO ()
 displayLintResults dflags pass warns errs binds
   | not (isEmptyBag errs)
-  = do { printDump (vcat [ banner "errors", Err.pprMessageBag errs
-			 , ptext (sLit "*** Offending Program ***")
-			 , pprCoreBindings binds
-			 , ptext (sLit "*** End of Offense ***") ])
+  = do { log_action dflags dflags Err.SevDump noSrcSpan defaultDumpStyle
+           (vcat [ banner "errors", Err.pprMessageBag errs
+                 , ptext (sLit "*** Offending Program ***")
+                 , pprCoreBindings binds
+                 , ptext (sLit "*** End of Offense ***") ])
        ; Err.ghcExit dflags 1 }
 
   | not (isEmptyBag warns)
@@ -202,7 +204,8 @@ displayLintResults dflags pass warns errs binds
 	-- group.  Only afer a round of simplification are they unravelled.
   , not opt_NoDebugOutput
   , showLintWarnings pass
-  = printDump (banner "warnings" $$ Err.pprMessageBag warns)
+  = log_action dflags dflags Err.SevDump noSrcSpan defaultDumpStyle
+        (banner "warnings" $$ Err.pprMessageBag warns)
 
   | otherwise = return ()
   where
@@ -1016,13 +1019,6 @@ debugTraceMsg = msg (flip Err.debugTraceMsg 3)
 -- | Show some labelled 'SDoc' if a particular flag is set or at a verbosity level of @-v -ddump-most@ or higher
 dumpIfSet_dyn :: DynFlag -> String -> SDoc -> CoreM ()
 dumpIfSet_dyn flag str = msg (\dflags -> Err.dumpIfSet_dyn dflags flag str)
-\end{code}
-
-\begin{code}
-
-initTcForLookup :: HscEnv -> TcM a -> IO a
-initTcForLookup hsc_env = liftM (expectJust "initTcInteractive" . snd) . initTc hsc_env HsSrcFile False iNTERACTIVE
-
 \end{code}
 
 

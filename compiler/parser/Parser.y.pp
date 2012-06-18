@@ -651,20 +651,21 @@ ty_decl :: { LTyClDecl RdrName }
 inst_decl :: { LInstDecl RdrName }
         : 'instance' inst_type where_inst
                  { let (binds, sigs, _, ats, _) = cvBindsAndSigs (unLoc $3)
-                   in L (comb3 $1 $2 $3) (ClsInstD $2 binds sigs ats) }
+                   in L (comb3 $1 $2 $3) (ClsInstD { cid_poly_ty = $2, cid_binds = binds
+                                                   , cid_sigs = sigs, cid_fam_insts = ats }) }
 
            -- type instance declarations
         | 'type' 'instance' type '=' ctype
                 -- Note the use of type for the head; this allows
                 -- infix type constructors and type patterns
                 {% do { L loc d <- mkFamInstSynonym (comb2 $1 $5) $3 $5
-                      ; return (L loc (FamInstD d)) } }
+                      ; return (L loc (FamInstD { lid_inst = d })) } }
 
           -- data/newtype instance declaration
         | data_or_newtype 'instance' tycl_hdr constrs deriving
                 {% do { L loc d <- mkFamInstData (comb4 $1 $3 $4 $5) (unLoc $1) Nothing $3
                                       Nothing (reverse (unLoc $4)) (unLoc $5)
-                      ; return (L loc (FamInstD d)) } }
+                      ; return (L loc (FamInstD { lid_inst = d })) } }
 
           -- GADT instance declaration
         | data_or_newtype 'instance' tycl_hdr opt_kind_sig 
@@ -672,7 +673,7 @@ inst_decl :: { LInstDecl RdrName }
                  deriving
                 {% do { L loc d <- mkFamInstData (comb4 $1 $3 $5 $6) (unLoc $1) Nothing $3
                                             (unLoc $4) (unLoc $5) (unLoc $6)
-                      ; return (L loc (FamInstD d)) } }
+                      ; return (L loc (FamInstD { lid_inst = d })) } }
         
 -- Associated type family declarations
 --
@@ -700,7 +701,7 @@ at_decl_cls :: { LHsDecl RdrName }
                 -- Note the use of type for the head; this allows
                 -- infix type constructors and type patterns
                 {% do { L loc fid <- mkFamInstSynonym (comb2 $1 $4) $2 $4
-                      ; return (L loc (InstD (FamInstD fid))) } }
+                      ; return (L loc (InstD (FamInstD { lid_inst = fid }))) } }
 
 -- Associated type instances
 --
@@ -727,9 +728,9 @@ data_or_newtype :: { Located NewOrData }
         : 'data'        { L1 DataType }
         | 'newtype'     { L1 NewType }
 
-opt_kind_sig :: { Located (Maybe (HsBndrSig (LHsKind RdrName))) }
+opt_kind_sig :: { Located (Maybe (LHsKind RdrName)) }
         :                               { noLoc Nothing }
-        | '::' kind                     { LL (Just (HsBSig $2 placeHolderBndrs)) }
+        | '::' kind                     { LL (Just $2) }
 
 -- tycl_hdr parses the header of a class or data type decl,
 -- which takes the form
@@ -791,7 +792,7 @@ where_cls :: { Located (OrdList (LHsDecl RdrName)) }    -- Reversed
 -- Declarations in instance bodies
 --
 decl_inst  :: { Located (OrdList (LHsDecl RdrName)) }
-decl_inst  : at_decl_inst               { LL (unitOL (L1 (InstD (FamInstD (unLoc $1))))) }
+decl_inst  : at_decl_inst               { LL (unitOL (L1 (InstD (FamInstD { lid_inst = unLoc $1 })))) }
            | decl                       { $1 }
 
 decls_inst :: { Located (OrdList (LHsDecl RdrName)) }   -- Reversed
@@ -876,7 +877,7 @@ rule_var_list :: { [RuleBndr RdrName] }
 
 rule_var :: { RuleBndr RdrName }
         : varid                                 { RuleBndr $1 }
-        | '(' varid '::' ctype ')'              { RuleBndrSig $2 (HsBSig $4 placeHolderBndrs) }
+        | '(' varid '::' ctype ')'              { RuleBndrSig $2 (mkHsWithBndrs $4) }
 
 -----------------------------------------------------------------------------
 -- Warnings and deprecations (c.f. rules)
@@ -1112,7 +1113,7 @@ tv_bndrs :: { [LHsTyVarBndr RdrName] }
 
 tv_bndr :: { LHsTyVarBndr RdrName }
         : tyvar                         { L1 (UserTyVar (unLoc $1)) }
-        | '(' tyvar '::' kind ')'       { LL (KindedTyVar (unLoc $2) (HsBSig $4 placeHolderBndrs)) }
+        | '(' tyvar '::' kind ')'       { LL (KindedTyVar (unLoc $2) $4) }
 
 fds :: { Located [Located (FunDep RdrName)] }
         : {- empty -}                   { noLoc [] }
@@ -1581,7 +1582,8 @@ flattenedpquals :: { Located [LStmt RdrName] }
                     -- We just had one thing in our "parallel" list so 
                     -- we simply return that thing directly
                     
-                    qss -> L1 [L1 $ ParStmt [(qs, undefined) | qs <- qss] noSyntaxExpr noSyntaxExpr noSyntaxExpr]
+                    qss -> L1 [L1 $ ParStmt [ParStmtBlock qs undefined noSyntaxExpr | qs <- qss] 
+                                            noSyntaxExpr noSyntaxExpr]
                     -- We actually found some actual parallel lists so
                     -- we wrap them into as a ParStmt
                 }
@@ -1760,10 +1762,10 @@ dbinds  :: { Located [LIPBind RdrName] }
 --      | {- empty -}                   { [] }
 
 dbind   :: { LIPBind RdrName }
-dbind   : ipvar '=' exp                 { LL (IPBind (unLoc $1) $3) }
+dbind   : ipvar '=' exp                 { LL (IPBind (Left (unLoc $1)) $3) }
 
-ipvar   :: { Located (IPName RdrName) }
-        : IPDUPVARID            { L1 (IPName (mkUnqual varName (getIPDUPVARID $1))) }
+ipvar   :: { Located HsIPName }
+        : IPDUPVARID            { L1 (HsIPName (getIPDUPVARID $1)) }
 
 -----------------------------------------------------------------------------
 -- Warnings and deprecations

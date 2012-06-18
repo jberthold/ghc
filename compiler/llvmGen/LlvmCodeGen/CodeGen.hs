@@ -473,12 +473,13 @@ cmmPrimOpFunctions env mop
 
     (MO_PopCnt w) -> fsLit $ "llvm.ctpop."  ++ show (widthToLlvmInt w)
 
-    MO_S_QuotRem {} -> unsupported
-    MO_U_QuotRem {} -> unsupported
-    MO_Add2 {}      -> unsupported
-    MO_U_Mul2 {}    -> unsupported
-    MO_WriteBarrier -> unsupported
-    MO_Touch        -> unsupported
+    MO_S_QuotRem {}  -> unsupported
+    MO_U_QuotRem {}  -> unsupported
+    MO_U_QuotRem2 {} -> unsupported
+    MO_Add2 {}       -> unsupported
+    MO_U_Mul2 {}     -> unsupported
+    MO_WriteBarrier  -> unsupported
+    MO_Touch         -> unsupported
 
     where
         intrinTy1 = (if getLlvmVer env >= 28
@@ -949,7 +950,10 @@ genMachOp_slow env opt op [x, y] = case op of
 
                 else do
                     -- Error. Continue anyway so we can debug the generated ll file.
-                    let cmmToStr = (lines . show . llvmSDoc . PprCmm.pprExpr (getLlvmPlatform env))
+                    let dflags = getDflags env
+                        style = mkCodeStyle CStyle
+                        toString doc = renderWithStyle dflags doc style
+                        cmmToStr = (lines . toString . PprCmm.pprExpr (getLlvmPlatform env))
                     let dx = Comment $ map fsLit $ cmmToStr x
                     let dy = Comment $ map fsLit $ cmmToStr y
                     (v1, s1) <- doExpr (ty vx) $ binOp vx vy

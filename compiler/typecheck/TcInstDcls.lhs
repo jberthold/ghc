@@ -19,8 +19,12 @@ module TcInstDcls ( tcInstDecls1, tcInstDecls2 ) where
 
 import HsSyn
 import TcBinds
-import TcTyClsDecls
-import TcClassDcl
+import TcTyClsDecls( tcAddImplicits, tcAddFamInstCtxt, tcSynFamInstDecl, 
+                     wrongKindOfFamily, tcFamTyPats, kcTyDefn, dataDeclChecks,
+                     tcConDecls, checkValidTyCon, badATErr, wrongATArgErr )
+import TcClassDcl( tcClassDecl2, 
+                   HsSigFun, lookupHsSig, mkHsSigFun, emptyHsSigs,
+                   findMethodBind, instantiateMethod, tcInstanceMethodBody )
 import TcPat      ( addInlinePrags )
 import TcRnMonad
 import TcMType
@@ -51,6 +55,7 @@ import PrelNames  ( typeableClassNames )
 import Bag
 import BasicTypes
 import DynFlags
+import ErrUtils
 import FastString
 import Id
 import MkId
@@ -370,31 +375,31 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
             -- (they recover, so that we get more than one error each
             -- round)
 
-            -- (1) Do class and family instance declarations
-       ; inst_decl_stuff <- mapAndRecoverM tcLocalInstDecl1 inst_decls
+            -- Do class and family instance declarations
+       ; stuff <- mapAndRecoverM tcLocalInstDecl inst_decls
+       ; let (local_infos_s, fam_insts_s) = unzip stuff
+             local_infos = concat local_infos_s
+             fam_insts   = concat fam_insts_s
+       ; addClsInsts local_infos $
+         addFamInsts fam_insts   $ 
 
-       ; let { (local_infos_s, fam_insts_s) = unzip inst_decl_stuff
-             ; all_fam_insts = concat fam_insts_s
-             ; local_infos   = concat local_infos_s }
-
-            -- (2) Next, construct the instance environment so far, consisting of
-            --   (a) local instance decls
-            --   (b) local family instance decls
-       ; addClsInsts local_infos     $
-         addFamInsts all_fam_insts   $ do
-
-            -- (3) Compute instances from "deriving" clauses;
+    do {    -- Compute instances from "deriving" clauses;
             -- This stuff computes a context for the derived instance
             -- decl, so it needs to know about all the instances possible
             -- NB: class instance declarations can contain derivings as
             --     part of associated data type declarations
-       { failIfErrsM    -- If the addInsts stuff gave any errors, don't
+         failIfErrsM    -- If the addInsts stuff gave any errors, don't
                         -- try the deriving stuff, because that may give
                         -- more errors still
 
        ; traceTc "tcDeriving" empty
+       ; th_stage <- getStage   -- See Note [Deriving inside TH brackets ]
        ; (gbl_env, deriv_inst_info, deriv_binds)
-              <- tcDeriving tycl_decls inst_decls deriv_decls
+              <- if isBrackStage th_stage 
+                 then do { gbl_env <- getGblEnv
+                         ; return (gbl_env, emptyBag, emptyValBindsOut) }
+                 else tcDeriving tycl_decls inst_decls deriv_decls
+
 
        -- Check that if the module is compiled with -XSafe, there are no
        -- hand written instances of Typeable as then unsafe casts could be
@@ -436,21 +441,38 @@ addFamInsts fam_insts thing_inside
     things = map ATyCon tycons ++ map ACoAxiom axioms 
 \end{code}
 
+Note [Deriving inside TH brackets]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Given a declaration bracket
+  [d| data T = A | B deriving( Show ) |]
+
+there is really no point in generating the derived code for deriving(
+Show) and then type-checking it. This will happen at the call site
+anyway, and the type check should never fail!  Moreover (Trac #6005)
+the scoping of the generated code inside the bracket does not seem to 
+work out.  
+
+The easy solution is simply not to generate the derived instances at
+all.  (A less brutal solution would be to generate them with no
+bindings.)  This will become moot when we shift to the new TH plan, so 
+the brutal solution will do.
+
+
 \begin{code}
-tcLocalInstDecl1 :: LInstDecl Name
-                 -> TcM ([InstInfo Name], [FamInst])
+tcLocalInstDecl :: LInstDecl Name
+                -> TcM ([InstInfo Name], [FamInst])
         -- A source-file instance declaration
         -- Type-check all the stuff before the "where"
         --
         -- We check for respectable instance type, and context
-tcLocalInstDecl1 (L loc (FamInstD decl))
+tcLocalInstDecl (L loc (FamInstD { lid_inst = decl }))
   = setSrcSpan loc      $
     tcAddFamInstCtxt decl  $
     do { fam_inst <- tcFamInstDecl TopLevel decl
        ; return ([], [fam_inst]) }
 
-tcLocalInstDecl1 (L loc (ClsInstD { cid_poly_ty = poly_ty, cid_binds = binds
-                                  , cid_sigs = uprags, cid_fam_insts = ats }))
+tcLocalInstDecl (L loc (ClsInstD { cid_poly_ty = poly_ty, cid_binds = binds
+                                 , cid_sigs = uprags, cid_fam_insts = ats }))
   = setSrcSpan loc                      $
     addErrCtxt (instDeclCtxt1 poly_ty)  $
 
@@ -759,7 +781,7 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
              mk_sc_ev_term sc
                | null inst_tv_tys
                , null dfun_ev_vars = EvId sc
-               | otherwise         = EvDFunApp sc inst_tv_tys dfun_ev_vars
+               | otherwise         = EvDFunApp sc inst_tv_tys (map EvId dfun_ev_vars)
 
              inst_tv_tys    = mkTyVarTys inst_tyvars
              arg_wrapper = mkWpEvVarApps dfun_ev_vars <.> mkWpTyApps inst_tv_tys
@@ -797,7 +819,6 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
    loc       = getSrcSpan dfun_id
 
 ------------------------------
-----------------------
 mkMethIds :: HsSigFun -> Class -> [TcTyVar] -> [EvVar] 
           -> [TcType] -> Id -> TcM (TcId, TcSigInfo)
 mkMethIds sig_fn clas tyvars dfun_ev_vars inst_tys sel_id
@@ -1039,14 +1060,15 @@ tcInstanceMethods dfun_id clas tyvars dfun_ev_vars inst_tys
            ; warnMissingMethodOrAT "method" (idName sel_id)
            ; (meth_id, _) <- mkMethIds sig_fn clas tyvars dfun_ev_vars
                                          inst_tys sel_id
+           ; dflags <- getDynFlags
            ; return (meth_id, mkVarBind meth_id $
-                              mkLHsWrap lam_wrapper error_rhs) }
+                              mkLHsWrap lam_wrapper (error_rhs dflags)) }
       where
-        error_rhs    = L loc $ HsApp error_fun error_msg
+        error_rhs dflags = L loc $ HsApp error_fun (error_msg dflags)
         error_fun    = L loc $ wrapId (WpTyApp meth_tau) nO_METHOD_BINDING_ERROR_ID
-        error_msg    = L loc (HsLit (HsStringPrim (mkFastString error_string)))
+        error_msg dflags = L loc (HsLit (HsStringPrim (mkFastString (error_string dflags))))
         meth_tau     = funResultTy (applyTys (idType sel_id) inst_tys)
-        error_string = showSDoc (hcat [ppr loc, text "|", ppr sel_id ])
+        error_string dflags = showSDoc dflags (hcat [ppr loc, text "|", ppr sel_id ])
         lam_wrapper  = mkWpTyLams tyvars <.> mkWpLams dfun_ev_vars
 
     tc_default sig_fn sel_id (DefMeth dm_name) -- A polymorphic default method
@@ -1060,7 +1082,7 @@ tcInstanceMethods dfun_id clas tyvars dfun_ev_vars inst_tys
 
            ; self_dict <- newDict clas inst_tys
            ; let self_ev_bind = EvBind self_dict
-                                (EvDFunApp dfun_id (mkTyVarTys tyvars) dfun_ev_vars)
+                                (EvDFunApp dfun_id (mkTyVarTys tyvars) (map EvId dfun_ev_vars))
 
            ; (meth_id, local_meth_sig) <- mkMethIds sig_fn clas tyvars dfun_ev_vars
                                                    inst_tys sel_id
@@ -1193,6 +1215,22 @@ tcInstanceMethods dfun_id clas tyvars dfun_ev_vars inst_tys
          (sel_tvs, sel_rho) = tcSplitForAllTys (idType sel_id)
          (_, local_meth_ty) = tcSplitPredFunTy_maybe sel_rho
                               `orElse` pprPanic "tcInstanceMethods" (ppr sel_id)
+
+------------------
+mkGenericDefMethBind :: Class -> [Type] -> Id -> Name -> TcM (LHsBind Name)
+mkGenericDefMethBind clas inst_tys sel_id dm_name
+  = 	-- A generic default method
+    	-- If the method is defined generically, we only have to call the
+        -- dm_name.
+    do	{ dflags <- getDynFlags
+	; liftIO (dumpIfSet_dyn dflags Opt_D_dump_deriv "Filling in method body"
+		   (vcat [ppr clas <+> ppr inst_tys,
+			  nest 2 (ppr sel_id <+> equals <+> ppr rhs)]))
+
+        ; return (noLoc $ mkTopFunBind (noLoc (idName sel_id))
+                                       [mkSimpleMatch [] rhs]) }
+  where
+    rhs = nlHsVar dm_name
 
 ----------------------
 wrapId :: HsWrapper -> id -> HsExpr id
