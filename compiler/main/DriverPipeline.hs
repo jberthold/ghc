@@ -1719,8 +1719,8 @@ mk_wrapper_script ways executable executable_base = unlines $
   "",
   "if ( -e $machinefile ) { $machinefile = \"-machinefile \" . $machinefile",
   "}  else { if ($machinefile ne \"mpihosts\") {",
-  "          print \"specified hostfile \\"$machinefile\\" doesn't exist, using localhost only.\\n\";",
-  "        };".
+  "          print \"specified hostfile \\\"$machinefile\\\" doesn't exist, using localhost only.\\n\";",
+  "        };",
   "        $machinefile = \"\";",
   "      }",
   "",  

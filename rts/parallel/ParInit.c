@@ -161,7 +161,7 @@ startupParallelSystem(int* argc, char **argv[]) {
   
   (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
   (*argv)++; (*argc)--;
-  if (thisPE==1){
+  if (IAmMainThread){
 	/* Only in debug mode? */
 	fprintf(stderr, "==== Starting parallel execution on %d processors ...\n", 
 		nPEs);
