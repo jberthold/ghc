@@ -259,7 +259,7 @@ nativeCodeGen' dflags ncgImpl h us cmms
                                 $ Linear.pprStats (concat native) stats)
 
         -- write out the imports
-        Pretty.printDoc Pretty.LeftMode h
+        Pretty.printDoc Pretty.LeftMode (pprCols dflags) h
                 $ withPprStyleDoc dflags (mkCodeStyle AsmStyle)
                 $ makeImportsDoc dflags (concat imports)
 
@@ -360,7 +360,7 @@ cmmNativeGen dflags ncgImpl us cmm count
 
         dumpIfSet_dyn dflags
                 Opt_D_dump_opt_cmm "Optimised Cmm"
-                (pprCmmGroup platform [opt_cmm])
+                (pprCmmGroup [opt_cmm])
 
         -- generate native code from cmm
         let ((native, lastMinuteImports), usGen) =
@@ -891,11 +891,10 @@ cmmStmtConFold stmt
         CmmCondBranch test dest
            -> do test' <- cmmExprConFold DataReference test
                  dflags <- getDynFlags
-                 let platform = targetPlatform dflags
                  return $ case test' of
                    CmmLit (CmmInt 0 _) ->
                      CmmComment (mkFastString ("deleted: " ++
-                                        showSDoc dflags (pprStmt platform stmt)))
+                                        showSDoc dflags (pprStmt stmt)))
 
                    CmmLit (CmmInt _ _) -> CmmBranch dest
                    _other -> CmmCondBranch test' dest

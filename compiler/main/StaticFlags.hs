@@ -27,7 +27,6 @@ module StaticFlags (
 	WayName(..), Way(..), v_Ways, isRTSWay, mkBuildTag,
 
 	-- Output style options
-	opt_PprCols,
 	opt_PprStyle_Debug,
         opt_NoDebugOutput,
 
@@ -49,8 +48,6 @@ module StaticFlags (
 
 	-- language opts
 	opt_DictsStrict,
-	opt_IrrefutableTuples,
-	opt_Parallel,
 
 	-- optimisation opts
 	opt_NoStateHack,
@@ -77,10 +74,7 @@ module StaticFlags (
 	opt_Static,
 
 	-- misc opts
-	opt_IgnoreDotGhci,
 	opt_ErrorSpans,
-	opt_GranMacros,
-	opt_HiVersion,
 	opt_HistorySize,
         opt_Unregisterised,
 	v_Ld_inputs,
@@ -104,6 +98,7 @@ import Maybes		( firstJusts )
 import Panic
 
 import Control.Monad    ( liftM3 )
+import Data.Function
 import Data.Maybe       ( listToMaybe )
 import Data.IORef
 import System.IO.Unsafe	( unsafePerformIO )
@@ -196,9 +191,6 @@ unpacked_opts =
    expandAts l = [l]
 -}
 
-opt_IgnoreDotGhci :: Bool
-opt_IgnoreDotGhci		= lookUp (fsLit "-ignore-dot-ghci")
-
 -- debugging options
 -- | Suppress all that is suppressable in core dumps.
 --   Except for uniques, as some simplifier phases introduce new varibles that
@@ -249,19 +241,6 @@ opt_SuppressUniques :: Bool
 opt_SuppressUniques
 	=  lookUp  (fsLit "-dsuppress-uniques")
 
--- | Set the maximum width of the dumps
---   If GHC's command line options are bad then the options parser uses the
---   pretty printer display the error message. In this case the staticFlags
---   won't be initialized yet, so we must check for this case explicitly
---   and return the default value.
-opt_PprCols :: Int
-opt_PprCols
- = unsafePerformIO
- $ do	ready <- readIORef v_opt_C_ready
-	if (not ready)
-		then return 100
-		else return $ lookup_def_int "-dppr-cols" 100
-
 
 opt_PprStyle_Debug  :: Bool
 opt_PprStyle_Debug              = lookUp  (fsLit "-dppr-debug")
@@ -284,12 +263,6 @@ opt_Hpc				= lookUp (fsLit "-fhpc")
 opt_DictsStrict :: Bool
 opt_DictsStrict			= lookUp  (fsLit "-fdicts-strict")
 
-opt_IrrefutableTuples :: Bool
-opt_IrrefutableTuples		= lookUp  (fsLit "-firrefutable-tuples")
-
-opt_Parallel :: Bool
-opt_Parallel			= lookUp  (fsLit "-fparallel")
-
 opt_SimpleListLiterals :: Bool
 opt_SimpleListLiterals	        = lookUp  (fsLit "-fsimple-list-literals")
 
@@ -301,12 +274,6 @@ opt_CprOff			= lookUp  (fsLit "-fcpr-off")
 	-- Switch off CPR analysis in the new demand analyser
 opt_MaxWorkerArgs :: Int
 opt_MaxWorkerArgs		= lookup_def_int "-fmax-worker-args" (10::Int)
-
-opt_GranMacros :: Bool
-opt_GranMacros			= lookUp  (fsLit "-fgransim")
-
-opt_HiVersion :: Integer
-opt_HiVersion			= read (cProjectVersionInt ++ cProjectPatchLevel) :: Integer
 
 opt_HistorySize :: Int
 opt_HistorySize			= lookup_def_int "-fhistory-size" 20

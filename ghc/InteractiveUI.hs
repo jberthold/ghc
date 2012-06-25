@@ -21,12 +21,14 @@ import Debugger
 
 -- The GHC interface
 import DynFlags
+import GhcMonad ( modifySession )
 import qualified GHC
 import GHC ( LoadHowMuch(..), Target(..),  TargetId(..), InteractiveImport(..),
              TyThing(..), Phase, BreakIndex, Resume, SingleStep, Ghc,
              handleSourceError )
 import HsImpExp
-import HscTypes ( tyThingParent_maybe, handleFlagWarnings, getSafeMode, dep_pkgs )
+import HscTypes ( tyThingParent_maybe, handleFlagWarnings, getSafeMode, dep_pkgs, hsc_IC, 
+                  setInteractivePrintName )
 import Module
 import Name
 import Packages ( trusted, getPackageDetails, exposed, exposedModules, pkgIdMap )
@@ -49,7 +51,6 @@ import Linker
 import Maybes ( orElse, expectJust )
 import NameSet
 import Panic hiding ( showException )
-import StaticFlags
 import Util
 
 -- Haskell Libraries
@@ -63,6 +64,7 @@ import Control.Monad.IO.Class
 import Data.Array
 import qualified Data.ByteString.Char8 as BS
 import Data.Char
+import Data.Function
 import Data.IORef ( IORef, readIORef, writeIORef )
 import Data.List ( find, group, intercalate, intersperse, isPrefixOf, nub,
                    partition, sort, sortBy )
@@ -389,8 +391,9 @@ withGhcAppData right left = do
 
 runGHCi :: [(FilePath, Maybe Phase)] -> Maybe [String] -> GHCi ()
 runGHCi paths maybe_exprs = do
+  dflags <- getDynFlags
   let
-   read_dot_files = not opt_IgnoreDotGhci
+   read_dot_files = not (dopt Opt_IgnoreDotGhci dflags)
 
    current_dir = return (Just ".ghci")
 
@@ -431,7 +434,6 @@ runGHCi paths maybe_exprs = do
 
   setGHCContextFromGHCiState
 
-  dflags <- getDynFlags
   when (read_dot_files) $ do
     mcfgs0 <- sequence $ [ current_dir, app_user_dir, home_dir ] ++ map (return . Just ) (ghciScripts dflags)
     mcfgs <- liftIO $ mapM canonicalizePath' (catMaybes mcfgs0)
@@ -449,6 +451,8 @@ runGHCi paths maybe_exprs = do
                     loadModule paths
      when (isJust maybe_exprs && failed ok) $
         liftIO (exitWith (ExitFailure 1))
+
+  installInteractivePrint (interactivePrint dflags) (isJust maybe_exprs)
 
   -- if verbosity is greater than 0, or we are connected to a
   -- terminal, display the prompt in the interactive loop.
@@ -606,6 +610,18 @@ queryQueue = do
     []   -> return Nothing
     c:cs -> do setGHCiState st{ cmdqueue = cs }
                return (Just c)
+
+-- Reconfigurable pretty-printing Ticket #5461
+installInteractivePrint :: Maybe String -> Bool -> GHCi ()
+installInteractivePrint Nothing _  = return ()
+installInteractivePrint (Just ipFun) exprmode = do
+  ok <- trySuccess $ do
+                (name:_) <- GHC.parseName ipFun
+                modifySession (\he -> let new_ic = setInteractivePrintName (hsc_IC he) name 
+                                      in he{hsc_IC = new_ic})
+                return Succeeded
+
+  when (failed ok && exprmode) $ liftIO (exitWith (ExitFailure 1))
 
 -- | The main read-eval-print loop
 runCommands :: InputT GHCi (Maybe String) -> InputT GHCi ()
@@ -990,12 +1006,12 @@ filterOutChildren get_thing xs
 pprInfo :: PrintExplicitForalls -> (TyThing, Fixity, [GHC.ClsInst]) -> SDoc
 pprInfo pefas (thing, fixity, insts)
   =  pprTyThingInContextLoc pefas thing
-  $$ show_fixity fixity
+  $$ show_fixity
   $$ vcat (map GHC.pprInstance insts)
   where
-    show_fixity fix
-        | fix == GHC.defaultFixity = empty
-        | otherwise                = ppr fix <+> pprInfixName (GHC.getName thing)
+    show_fixity
+        | fixity == GHC.defaultFixity = empty
+        | otherwise                   = ppr fixity <+> pprInfixName (GHC.getName thing)
 
 -----------------------------------------------------------------------------
 -- :main
@@ -1975,6 +1991,7 @@ newDynFlags interactive_only minus_opts = do
               packageFlags idflags1 /= packageFlags idflags0) $ do
           liftIO $ hPutStrLn stderr "cannot set package flags with :seti; use :set"
       GHC.setInteractiveDynFlags idflags1
+      installInteractivePrint (interactivePrint idflags1) False
 
       dflags0 <- getDynFlags
       when (not interactive_only) $ do
@@ -2152,11 +2169,11 @@ showBindings = do
     pprTT :: PrintExplicitForalls -> (TyThing, Fixity, [GHC.ClsInst]) -> SDoc
     pprTT pefas (thing, fixity, _insts) =
         pprTyThing pefas thing
-        $$ show_fixity fixity
+        $$ show_fixity
       where
-        show_fixity fix
-            | fix == GHC.defaultFixity  = empty
-            | otherwise                 = ppr fix <+> ppr (GHC.getName thing)
+        show_fixity
+            | fixity == GHC.defaultFixity  = empty
+            | otherwise                    = ppr fixity <+> ppr (GHC.getName thing)
 
 
 printTyThing :: TyThing -> GHCi ()

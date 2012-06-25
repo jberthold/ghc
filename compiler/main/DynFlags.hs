@@ -269,6 +269,7 @@ data DynFlag
    | Opt_PedanticBottoms                -- Be picky about how we treat bottom
    | Opt_LlvmTBAA                       -- Use LLVM TBAA infastructure for improving AA (hidden flag)
    | Opt_RegLiveness                    -- Use the STG Reg liveness information (hidden flag)
+   | Opt_IrrefutableTuples
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -303,10 +304,13 @@ data DynFlag
    | Opt_BuildingCabalPackage
    | Opt_SSE2
    | Opt_SSE4_2
+   | Opt_IgnoreDotGhci
    | Opt_GhciSandbox
    | Opt_GhciHistory
    | Opt_HelpfulErrors
    | Opt_DeferTypeErrors
+   | Opt_Parallel
+   | Opt_GranMacros
 
    -- output style opts
    | Opt_PprCaseAsLet
@@ -616,10 +620,13 @@ data DynFlags = DynFlags {
 
   -- Output style options
   pprUserLength         :: Int,
+  pprCols               :: Int,
   traceLevel            :: Int, -- Standard level is 1. Less verbose is 0.
 
   -- | what kind of {-# SCC #-} to add automatically
   profAuto              :: ProfAuto,
+
+  interactivePrint      :: Maybe String,
 
   llvmVersion           :: IORef (Int)
  }
@@ -975,9 +982,11 @@ defaultDynFlags mySettings =
         flushOut = defaultFlushOut,
         flushErr = defaultFlushErr,
         pprUserLength = 5,
+        pprCols = 100,
         traceLevel = 1,
         profAuto = NoProfAuto,
-        llvmVersion = panic "defaultDynFlags: No llvmVersion"
+        llvmVersion = panic "defaultDynFlags: No llvmVersion",
+        interactivePrint = Nothing
       }
 
 -- Do not use tracingDynFlags!
@@ -1013,7 +1022,8 @@ defaultLogAction dflags severity srcSpan style msg
 
 defaultLogActionHPrintDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
 defaultLogActionHPrintDoc dflags h d sty
-    = do Pretty.printDoc Pretty.PageMode h (runSDoc d (initSDocContext dflags sty))
+    = do let doc = runSDoc d (initSDocContext dflags sty)
+         Pretty.printDoc Pretty.PageMode (pprCols dflags) h doc
          hFlush h
 
 newtype FlushOut = FlushOut (IO ())
@@ -1238,7 +1248,8 @@ setObjectDir, setHiDir, setStubDir, setDumpDir, setOutputDir,
          setDylibInstallName,
          setObjectSuf, setHiSuf, setHcSuf, parseDynLibLoaderMode,
          setPgmP, addOptl, addOptP,
-         addCmdlineFramework, addHaddockOpts, addGhciScript
+         addCmdlineFramework, addHaddockOpts, addGhciScript, 
+         setInteractivePrint
    :: String -> DynFlags -> DynFlags
 setOutputFile, setOutputHi, setDumpPrefixForce
    :: Maybe String -> DynFlags -> DynFlags
@@ -1311,6 +1322,8 @@ addCmdlineFramework f d = d{ cmdlineFrameworks = f : cmdlineFrameworks d}
 addHaddockOpts f d = d{ haddockOptions = Just f}
 
 addGhciScript f d = d{ ghciScripts = f : ghciScripts d}
+
+setInteractivePrint f d = d{ interactivePrint = Just f}
 
 -- -----------------------------------------------------------------------------
 -- Command-line options
@@ -1603,7 +1616,7 @@ dynamic_flags = [
   , Flag "haddock-opts"   (hasArg addHaddockOpts)
   , Flag "hpcdir"         (SepArg setOptHpcDir)
   , Flag "ghci-script"    (hasArg addGhciScript)
-
+  , Flag "interactive-print" (hasArg setInteractivePrint)
         ------- recompilation checker --------------------------------------
   , Flag "recomp"         (NoArg (do unSetDynFlag Opt_ForceRecomp
                                      deprecate "Use -fno-force-recomp instead"))
@@ -1620,6 +1633,7 @@ dynamic_flags = [
 
         ------ Output style options -----------------------------------------
   , Flag "dppr-user-length" (intSuffix (\n d -> d{ pprUserLength = n }))
+  , Flag "dppr-cols"        (intSuffix (\n d -> d{ pprCols = n }))
   , Flag "dtrace-level"     (intSuffix (\n d -> d{ traceLevel = n }))
 
         ------ Debugging ----------------------------------------------------
@@ -1794,6 +1808,8 @@ dynamic_flags = [
   , Flag "fpackage-trust"   (NoArg setPackageTrust)
   , Flag "fno-safe-infer"   (NoArg (setSafeHaskell Sf_None))
  ]
+ ++ map (mkFlag turnOn  ""     setDynFlag  ) negatableFlags
+ ++ map (mkFlag turnOff "no-"  unSetDynFlag) negatableFlags
  ++ map (mkFlag turnOn  "d"    setDynFlag  ) dFlags
  ++ map (mkFlag turnOff "dno-" unSetDynFlag) dFlags
  ++ map (mkFlag turnOn  "f"    setDynFlag  ) fFlags
@@ -1916,6 +1932,11 @@ fWarningFlags = [
   ( "warn-pointless-pragmas",           Opt_WarnPointlessPragmas, nop ),
   ( "warn-unsupported-calling-conventions", Opt_WarnUnsupportedCallingConventions, nop ) ]
 
+-- | These @-\<blah\>@ flags can all be reversed with @-no-\<blah\>@
+negatableFlags :: [FlagSpec DynFlag]
+negatableFlags = [
+  ( "ignore-dot-ghci",                  Opt_IgnoreDotGhci, nop ) ]
+
 -- | These @-d\<blah\>@ flags can all be reversed with @-dno-\<blah\>@
 dFlags :: [FlagSpec DynFlag]
 dFlags = [
@@ -1963,6 +1984,7 @@ fFlags = [
   ( "regs-iterative",                   Opt_RegsIterative, nop ),
   ( "llvm-tbaa",                        Opt_LlvmTBAA, nop), -- hidden flag
   ( "regs-liveness",                    Opt_RegLiveness, nop), -- hidden flag
+  ( "irrefutable-tuples",               Opt_IrrefutableTuples, nop ),
   ( "gen-manifest",                     Opt_GenManifest, nop ),
   ( "embed-manifest",                   Opt_EmbedManifest, nop ),
   ( "ext-core",                         Opt_EmitExternalCore, nop ),
@@ -1971,6 +1993,8 @@ fFlags = [
   ( "ghci-history",                     Opt_GhciHistory, nop ),
   ( "helpful-errors",                   Opt_HelpfulErrors, nop ),
   ( "defer-type-errors",                Opt_DeferTypeErrors, nop ),
+  ( "parallel",                         Opt_Parallel, nop ),
+  ( "gransim",                          Opt_GranMacros, nop ),
   ( "building-cabal-package",           Opt_BuildingCabalPackage, nop ),
   ( "implicit-import-qualified",        Opt_ImplicitImportQualified, nop ),
   ( "prof-count-entries",               Opt_ProfCountEntries, nop ),
