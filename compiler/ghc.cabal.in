@@ -67,7 +67,7 @@ Library
     else
         Build-Depends: unix
 
-    GHC-Options: -Wall -fno-warn-name-shadowing -fno-warn-orphans
+    GHC-Options: -Wall -fno-warn-name-shadowing
 
     if flag(ghci)
         Build-Depends: template-haskell
@@ -100,7 +100,6 @@ Library
 
     c-sources:
         parser/cutils.c
-        utils/md5.c
 
     if flag(dynlibs)
         c-sources:
@@ -185,22 +184,23 @@ Library
         CmmOpt
         CmmParse
         CmmProcPoint
-        CmmSpillReload
         CmmRewriteAssignments
-        CmmStackLayout
+        CmmSink
         CmmType
         CmmUtils
+        CmmLayoutStack
         MkGraph
         OldCmm
+        OldCmmLint
         OldCmmUtils
         OldPprCmm
-        OptimizationFuel
         PprBase
         PprC
         PprCmm
         PprCmmDecl
         PprCmmExpr
         Bitmap
+        CallerSaves
         CgBindery
         CgCallConv
         CgCase
@@ -440,6 +440,7 @@ Library
         Pretty
         Serialized
         State
+        Stream
         StringBuffer
         UniqFM
         UniqSet
@@ -473,6 +474,8 @@ Library
         Vectorise.Env
         Vectorise.Exp
         Vectorise
+        Hoopl.Dataflow
+        Hoopl
 
     Exposed-Modules:
             AsmCodeGen

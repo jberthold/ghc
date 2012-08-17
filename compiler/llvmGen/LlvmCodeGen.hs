@@ -41,11 +41,11 @@ llvmCodeGen dflags h us cmms
         (cdata,env) = {-# SCC "llvm_split" #-}
                       foldr split ([], initLlvmEnv dflags) cmm
         split (CmmData s d' ) (d,e) = ((s,d'):d,e)
-        split (CmmProc i l _) (d,e) =
-            let lbl = strCLabel_llvm env $ case i of
+        split p@(CmmProc _ l _) (d,e) =
+            let lbl = strCLabel_llvm env $ case topInfoTable p of
                         Nothing                   -> l
                         Just (Statics info_lbl _) -> info_lbl
-                env' = funInsert lbl llvmFunTy e
+                env' = funInsert lbl (llvmFunTy dflags) e
             in (d,env')
     in do
         showPass dflags "LlVM CodeGen"
@@ -68,11 +68,11 @@ llvmCodeGen dflags h us cmms
         writeIORef (llvmVersion dflags) ver
         when (ver < minSupportLlvmVersion) $
             errorMsg dflags (text "You are using an old version of LLVM that"
-                             <> text "isn't supported anymore!"
+                             <> text " isn't supported anymore!"
                              $+$ text "We will try though...")
         when (ver > maxSupportLlvmVersion) $
             putMsg dflags (text "You are using a new version of LLVM that"
-                           <> text "hasn't been tested yet!"
+                           <> text " hasn't been tested yet!"
                            $+$ text "We will try though...")
         return ver
 

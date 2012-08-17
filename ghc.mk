@@ -310,7 +310,7 @@ endif
 # They do not say "this package will be built"; see $(PACKAGES_xx) for that
 
 # Packages that are built but not installed
-PKGS_THAT_ARE_INTREE_ONLY := haskeline transformers terminfo utf8-string xhtml
+PKGS_THAT_ARE_INTREE_ONLY := haskeline transformers terminfo xhtml
 
 PKGS_THAT_ARE_DPH := \
     dph/dph-base \
@@ -389,6 +389,9 @@ endif
 endif
 endef
 
+# Add all the packages. Note that we need to add them in dependency
+# order, as this is the order that they get configured in.
+
 $(eval $(call addPackage,ghc-prim))
 ifeq "$(CLEANING)" "YES"
 $(eval $(call addPackage,integer-gmp))
@@ -402,13 +405,13 @@ $(eval $(call addPackage,array))
 $(eval $(call addPackage,deepseq))
 $(eval $(call addPackage,bytestring))
 $(eval $(call addPackage,containers))
-
-$(eval $(call addPackage,Win32,($$(Windows),YES)))
-$(eval $(call addPackage,unix,($$(Windows),NO)))
-
 $(eval $(call addPackage,old-locale))
 $(eval $(call addPackage,old-time))
+
+$(eval $(call addPackage,Win32,($$(Windows),YES)))
 $(eval $(call addPackage,time))
+$(eval $(call addPackage,unix,($$(Windows),NO)))
+
 $(eval $(call addPackage,directory))
 $(eval $(call addPackage,process))
 $(eval $(call addPackage,haskell98))
@@ -421,7 +424,6 @@ $(eval $(call addPackage,binary))
 $(eval $(call addPackage,bin-package-db))
 $(eval $(call addPackage,hoopl))
 $(eval $(call addPackage,transformers))
-$(eval $(call addPackage,utf8-string))
 $(eval $(call addPackage,xhtml))
 $(eval $(call addPackage,terminfo,($$(Windows),NO)))
 $(eval $(call addPackage,haskeline))
@@ -526,6 +528,18 @@ libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-simple
 else
 $(error Unknown integer library: $(INTEGER_LIBRARY))
 endif
+endif
+
+# ----------------------------------------
+# Workarounds for problems building DLLs on Windows
+
+ifeq "$(TargetOS_CPP)" "mingw32"
+# We don't build the GHC package the dyn way on Windows, so
+# we can't build these packages the dyn way either. See trac #5987
+libraries/dph/dph-lifted-base_dist-install_EXCLUDED_WAYS := dyn
+libraries/dph/dph-lifted-boxed_dist-install_EXCLUDED_WAYS := dyn
+libraries/dph/dph-lifted-copy_dist-install_EXCLUDED_WAYS := dyn
+libraries/dph/dph-lifted-vseg_dist-install_EXCLUDED_WAYS := dyn
 endif
 
 # ----------------------------------------------

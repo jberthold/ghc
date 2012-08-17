@@ -7,6 +7,7 @@ TcSplice: Template Haskell splices
 
 
 \begin{code}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 module TcSplice( tcSpliceType, tcSpliceExpr, tcSpliceDecls, tcBracket,
                  lookupThName_maybe,
                  runQuasiQuoteExpr, runQuasiQuotePat,
@@ -1296,12 +1297,13 @@ reifyClass cls
 ------------------------------
 reifyClassInstance :: ClsInst -> TcM TH.Dec
 reifyClassInstance i
-  = do { cxt <- reifyCxt theta
+  = do { cxt <- reifyCxt (drop n_silent theta)
        ; thtypes <- reifyTypes types
        ; let head_ty = foldl TH.AppT (TH.ConT (reifyName cls)) thtypes
        ; return $ (TH.InstanceD cxt head_ty []) }
   where
      (_tvs, theta, cls, types) = instanceHead i
+     n_silent = dfunNSilent (instanceDFunId i)
 
 ------------------------------
 reifyFamilyInstance :: FamInst -> TcM TH.Dec

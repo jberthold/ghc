@@ -32,6 +32,7 @@
 -- A useful example pass over Cmm is in nativeGen/MachCodeGen.hs
 --
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 module PprCmmExpr
     ( pprExpr, pprLit
     , pprExpr9 {-only to import in OldPprCmm. When it dies, remove the export -}
@@ -237,12 +238,8 @@ pprLocalReg (LocalReg uniq rep)
 
 -- Stack areas
 pprArea :: Area -> SDoc
-pprArea (RegSlot r)   = hcat [ text "slot<", ppr r, text ">" ]
-pprArea (CallArea id) = pprAreaId id
-
-pprAreaId :: AreaId -> SDoc
-pprAreaId Old        = text "old"
-pprAreaId (Young id) = hcat [ text "young<", ppr id, text ">" ]
+pprArea Old        = text "old"
+pprArea (Young id) = hcat [ text "young<", ppr id, text ">" ]
 
 -- needs to be kept in syn with CmmExpr.hs.GlobalReg
 --

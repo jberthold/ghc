@@ -158,8 +158,11 @@
                                          par_n_threads,
                                          par_max_copied, par_tot_copied) */
 #define EVENT_GC_GLOBAL_SYNC      54 /* ()                     */
+#define EVENT_TASK_CREATE         55 /* (taskID, cap, tid)       */
+#define EVENT_TASK_MIGRATE        56 /* (taskID, cap, new_cap)   */
+#define EVENT_TASK_DELETE         57 /* (taskID)                 */
 
-/* Range 55 - 59 is available for new GHC and common events */
+/* Range 58 - 59 is available for new GHC and common events. */
 
 /* Range 60 - 80 is used by eden for parallel tracing
  * see http://www.mathematik.uni-marburg.de/~eden/
@@ -182,7 +185,9 @@
 #define EVENT_SEND_RECEIVE_LOCAL_MESSAGE 69 /* (tag, sender_process, sender_thread, receiver_process, receiver_inport) */
 
 
-/* Range 100 - 139 is reserved for Mercury */
+/* Range 100 - 139 is reserved for Mercury. */
+
+/* Range 140 - 159 is reserved for Perf events. */
 
 /*
  * The highest event code +1 that ghc itself emits. Note that some event
@@ -243,6 +248,8 @@ typedef StgWord16 EventPayloadSize; /* variable-size events */
 typedef StgWord16 EventThreadStatus; /* status for EVENT_STOP_THREAD */
 typedef StgWord32 EventCapsetID;
 typedef StgWord16 EventCapsetType;   /* types for EVENT_CAPSET_CREATE */
+typedef StgWord64 EventTaskId;         /* for EVENT_TASK_* */
+typedef StgWord64 EventKernelThreadId; /* for EVENT_TASK_CREATE */
 
 typedef StgWord32 EventProcessID;
 typedef StgWord16 EventMachineID;

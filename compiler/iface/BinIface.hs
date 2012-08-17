@@ -2,6 +2,7 @@
 --  (c) The University of Glasgow 2002-2006
 --
 
+{-# OPTIONS_GHC -fno-warn-orphans #-}
 {-# OPTIONS_GHC -O #-}
 -- We always optimise this, otherwise performance of a non-optimised
 -- compiler is severely affected
@@ -23,6 +24,7 @@ import TyCon      (TyCon, tyConName, tupleTyConSort, tupleTyConArity, isTupleTyC
 import DataCon    (dataConName, dataConWorkId, dataConTyCon)
 import PrelInfo   (wiredInThings, basicKnownKeyNames)
 import Id         (idName, isDataConWorkId_maybe)
+import CoreSyn    (DFunArg(..))
 import TysWiredIn
 import IfaceEnv
 import HscTypes
@@ -42,7 +44,6 @@ import Panic
 import Binary
 import SrcLoc
 import ErrUtils
-import Config
 import FastMutInt
 import Unique
 import Outputable
@@ -570,8 +571,8 @@ instance Binary ModIface where
 
 getWayDescr :: DynFlags -> String
 getWayDescr dflags
-  | cGhcUnregisterised == "YES" = 'u':tag
-  | otherwise                   = tag
+  | platformUnregisterised (targetPlatform dflags) = 'u':tag
+  | otherwise                                      =     tag
   where tag = buildTag dflags
         -- if this is an unregisterised build, make sure our interfaces
         -- can't be used by a registerised build.
@@ -1180,13 +1181,21 @@ instance Binary IfaceBinding where
 instance Binary IfaceIdDetails where
     put_ bh IfVanillaId      = putByte bh 0
     put_ bh (IfRecSelId a b) = putByte bh 1 >> put_ bh a >> put_ bh b
-    put_ bh IfDFunId         = putByte bh 2
+    put_ bh (IfDFunId n)     = do { putByte bh 2; put_ bh n }
     get bh = do
         h <- getByte bh
         case h of
             0 -> return IfVanillaId
             1 -> do { a <- get bh; b <- get bh; return (IfRecSelId a b) }
-            _ -> return IfDFunId
+            _ -> do { n <- get bh; return (IfDFunId n) }
+
+instance Binary (DFunArg IfaceExpr) where
+    put_ bh (DFunPolyArg  e) = putByte bh 0 >> put_ bh e
+    put_ bh (DFunLamArg i)   = putByte bh 1 >> put_ bh i
+    get bh = do { h <- getByte bh
+                ; case h of
+                    0 -> do { a <- get bh; return (DFunPolyArg a) }
+                    _ -> do { a <- get bh; return (DFunLamArg a) } }
 
 instance Binary IfaceIdInfo where
     put_ bh NoInfo      = putByte bh 0

@@ -13,8 +13,8 @@ stuff fits into the Big Picture.
 module CgMonad (
         Code, FCode,
 
-        initC, thenC, thenFC, listCs, listFCs, mapCs, mapFCs,
-        returnFC, fixC, fixC_, checkedAbsC,
+        initC, runC, thenC, thenFC, listCs, listFCs, mapCs, mapFCs,
+        returnFC, fixC, fixC_, checkedAbsC, 
         stmtC, stmtsC, labelC, emitStmts, nopC, whenC, newLabelC,
         newUnique, newUniqSupply,
 
@@ -386,11 +386,12 @@ instance Monad FCode where
 {-# INLINE thenFC #-}
 {-# INLINE returnFC #-}
 
-initC :: DynFlags -> Module -> FCode a -> IO a
-initC dflags mod (FCode code) = do
-    uniqs <- mkSplitUniqSupply 'c'
-    case code (initCgInfoDown dflags mod) (initCgState uniqs) of
-        (res, _) -> return res
+initC :: IO CgState
+initC  = do { uniqs <- mkSplitUniqSupply 'c'
+            ; return (initCgState uniqs) }
+
+runC :: DynFlags -> Module -> CgState -> FCode a -> (a,CgState)
+runC dflags mod st (FCode code) = code (initCgInfoDown dflags mod) st
 
 returnFC :: a -> FCode a
 returnFC val = FCode $ \_ state -> (val, state)
@@ -708,11 +709,16 @@ emitDecl decl = do
     state <- getState
     setState $ state { cgs_tops = cgs_tops state `snocOL` decl }
 
-emitProc :: CmmInfo -> CLabel -> [CmmFormal] -> [CmmBasicBlock] -> Code
-emitProc info lbl [] blocks = do
-    let proc_block = CmmProc info lbl (ListGraph blocks)
+emitProc :: Maybe CmmInfoTable -> CLabel -> [CmmFormal] -> [CmmBasicBlock] -> Code
+emitProc mb_info lbl [] blocks = do
+    let proc_block = CmmProc infos lbl (ListGraph blocks)
     state <- getState
     setState $ state { cgs_tops = cgs_tops state `snocOL` proc_block }
+  where
+    infos = case (blocks,mb_info) of
+                (b:_, Just info) -> mapSingleton (blockId b) info
+                _other           -> mapEmpty
+
 emitProc _ _ (_:_) _ = panic "emitProc called with nonempty args"
 
 -- Emit a procedure whose body is the specified code; no info table
@@ -720,7 +726,7 @@ emitSimpleProc :: CLabel -> Code -> Code
 emitSimpleProc lbl code = do
     stmts <- getCgStmts code
     blks <- cgStmtsToBlocks stmts
-    emitProc (CmmInfo Nothing Nothing CmmNonInfoTable) lbl [] blks
+    emitProc Nothing lbl [] blks
 
 -- Get all the CmmTops (there should be no stmts)
 -- Return a single Cmm which may be split from other Cmms by

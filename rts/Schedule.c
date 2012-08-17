@@ -1901,7 +1901,12 @@ delete_threads_and_gc:
             while (!emptyRunQueue(tmp_cap)) {
                 tso = popRunQueue(tmp_cap);
                 migrateThread(tmp_cap, tso, dest_cap);
-                if (tso->bound) { tso->bound->task->cap = dest_cap; }
+                if (tso->bound) {
+                  traceTaskMigrate(tso->bound->task,
+                                   tso->bound->task->cap,
+                                   dest_cap);
+                  tso->bound->task->cap = dest_cap;
+                }
             }
         }
     }
@@ -1920,21 +1925,30 @@ delete_threads_and_gc:
 
     traceSparkCounters(cap);
 
-    if (recent_activity == ACTIVITY_INACTIVE && force_major)
-    {
-        // We are doing a GC because the system has been idle for a
-        // timeslice and we need to check for deadlock.  Record the
-        // fact that we've done a GC and turn off the timer signal;
-        // it will get re-enabled if we run any threads after the GC.
-        recent_activity = ACTIVITY_DONE_GC;
-        stopTimer();
-    }
-    else
-    {
+    switch (recent_activity) {
+    case ACTIVITY_INACTIVE:
+        if (force_major) {
+            // We are doing a GC because the system has been idle for a
+            // timeslice and we need to check for deadlock.  Record the
+            // fact that we've done a GC and turn off the timer signal;
+            // it will get re-enabled if we run any threads after the GC.
+            recent_activity = ACTIVITY_DONE_GC;
+            stopTimer();
+            break;
+        }
+        // fall through...
+
+    case ACTIVITY_MAYBE_NO:
         // the GC might have taken long enough for the timer to set
-        // recent_activity = ACTIVITY_INACTIVE, but we aren't
-        // necessarily deadlocked:
+        // recent_activity = ACTIVITY_MAYBE_NO or ACTIVITY_INACTIVE,
+        // but we aren't necessarily deadlocked:
         recent_activity = ACTIVITY_YES;
+        break;
+
+    case ACTIVITY_DONE_GC:
+        // If we are actually active, the scheduler will reset the
+        // recent_activity flag and re-enable the timer.
+        break;
     }
 
 #if defined(THREADED_RTS)
@@ -2165,6 +2179,10 @@ forkProcess(HsStablePtr *entry
         // the timer again.
         initTimer();
         startTimer();
+
+        // TODO: need to trace various other things in the child
+        // like startup event, capabilities, process info etc
+        traceTaskCreate(task, cap);
 
 #if defined(THREADED_RTS)
         ioManagerStartCap(&cap);
@@ -2736,7 +2754,7 @@ exitScheduler (rtsBool wait_foreign USED_IF_THREADS)
 	sched_state = SCHED_INTERRUPTING;
         Capability *cap = task->cap;
         waitForReturnCapability(&cap,task);
-        scheduleDoGC(&cap,task,rtsFalse);
+        scheduleDoGC(&cap,task,rtsTrue);
         ASSERT(task->incall->tso == NULL);
         releaseCapability(cap);
     }
@@ -2803,6 +2821,8 @@ performGC_(rtsBool force_major)
     // associated with a particular Capability, and chained onto the 
     // suspended_ccalls queue.
     task = newBoundTask();
+    
+    // TODO: do we need to traceTask*() here?
 
     waitForReturnCapability(&cap,task);
     scheduleDoGC(&cap,task,force_major);

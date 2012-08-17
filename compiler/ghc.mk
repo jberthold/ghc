@@ -71,10 +71,6 @@ compiler/stage%/build/Config.hs : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo 'cBooterVersion        = "$(GhcVersion)"'                     >> $@
 	@echo 'cStage                :: String'                             >> $@
 	@echo 'cStage                = show (STAGE :: Int)'                 >> $@
-	@echo 'cGccLinkerOpts        :: [String]'                           >> $@
-	@echo 'cGccLinkerOpts        = words "$(CONF_GCC_LINKER_OPTS_STAGE$*)"' >> $@
-	@echo 'cLdLinkerOpts         :: [String]'                           >> $@
-	@echo 'cLdLinkerOpts         = words "$(CONF_LD_LINKER_OPTS_STAGE$*)"'  >> $@
 	@echo 'cIntegerLibrary       :: String'                             >> $@
 	@echo 'cIntegerLibrary       = "$(INTEGER_LIBRARY)"'                >> $@
 	@echo 'cIntegerLibraryType   :: IntegerLibrary'                     >> $@
@@ -95,22 +91,12 @@ endif
 	@echo 'cGhcWithSMP           = "$(GhcWithSMP)"'                     >> $@
 	@echo 'cGhcRTSWays           :: String'                             >> $@
 	@echo 'cGhcRTSWays           = "$(GhcRTSWays)"'                     >> $@
-	@echo 'cGhcUnregisterised    :: String'                             >> $@
-	@echo 'cGhcUnregisterised    = "$(GhcUnregisterised)"'              >> $@
 	@echo 'cGhcEnableTablesNextToCode :: String'                        >> $@
 	@echo 'cGhcEnableTablesNextToCode = "$(GhcEnableTablesNextToCode)"' >> $@
 	@echo 'cLeadingUnderscore    :: String'                             >> $@
 	@echo 'cLeadingUnderscore    = "$(LeadingUnderscore)"'              >> $@
 	@echo 'cRAWCPP_FLAGS         :: String'                             >> $@
 	@echo 'cRAWCPP_FLAGS         = "$(RAWCPP_FLAGS)"'                   >> $@
-	@echo 'cLdHasNoCompactUnwind :: String'                             >> $@
-	@echo 'cLdHasNoCompactUnwind = "$(LdHasNoCompactUnwind)"'           >> $@
-	@echo 'cLdIsGNULd            :: String'                             >> $@
-	@echo 'cLdIsGNULd            = "$(LdIsGNULd)"'                      >> $@
-	@echo 'cLdHasBuildId         :: String'                             >> $@
-	@echo 'cLdHasBuildId         = "$(LdHasBuildId)"'                   >> $@
-	@echo 'cLD_X                 :: String'                             >> $@
-	@echo 'cLD_X                 = "$(LD_X)"'                           >> $@
 	@echo 'cGHC_DRIVER_DIR       :: String'                             >> $@
 	@echo 'cGHC_DRIVER_DIR       = "$(GHC_DRIVER_DIR)"'                 >> $@
 	@echo 'cGHC_UNLIT_PGM        :: String'                             >> $@
@@ -316,6 +302,9 @@ ifeq "$(GhcWithInterpreter)" "YES"
 compiler_stage2_CONFIGURE_OPTS += --flags=ghci
 
 ifeq "$(BuildSharedLibs)" "YES"
+# There are too many symbols to make a Windows DLL for the ghc package,
+# so we don't build it the dyn way; see trac #5987
+ifneq "$(TargetOS_CPP)" "mingw32"
 compiler_stage2_CONFIGURE_OPTS += --enable-shared
 # If we are going to use dynamic libraries instead of .o files for ghci,
 # we will need to always retain CAFs in the compiler.
@@ -323,6 +312,7 @@ compiler_stage2_CONFIGURE_OPTS += --enable-shared
 # function which sets the keepCAFs flag for the RTS before any Haskell
 # code is run.
 compiler_stage2_CONFIGURE_OPTS += --flags=dynlibs
+endif
 endif
 
 ifeq "$(GhcEnableTablesNextToCode) $(GhcUnregisterised)" "YES NO"
@@ -357,7 +347,7 @@ ifeq "$(GhcProfiled)" "YES"
 # parts of the compiler of interest, and then add further cost centres
 # as necessary.  Turn on -auto-all for individual modules like this:
 
-compiler/main/DriverPipeline_HC_OPTS += -auto-all
+# compiler/main/DriverPipeline_HC_OPTS += -auto-all
 compiler/main/GhcMake_HC_OPTS        += -auto-all
 compiler/main/GHC_HC_OPTS            += -auto-all
 
@@ -428,6 +418,14 @@ compiler_stage3_DO_HADDOCK = NO
 compiler_stage1_SplitObjs = NO
 compiler_stage2_SplitObjs = NO
 compiler_stage3_SplitObjs = NO
+
+ifeq "$(TargetOS_CPP)" "mingw32"
+# There are too many symbols to make a Windows DLL for the ghc package,
+# so we don't build it the dyn way; see trac #5987
+compiler_stage1_EXCLUDED_WAYS := dyn
+compiler_stage2_EXCLUDED_WAYS := dyn
+compiler_stage3_EXCLUDED_WAYS := dyn
+endif
 
 # if stage is set to something other than "1" or "", disable stage 1
 ifneq "$(filter-out 1,$(stage))" ""

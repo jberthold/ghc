@@ -49,6 +49,7 @@ module CoreSyn (
 
         -- * Unfolding data types
         Unfolding(..),  UnfoldingGuidance(..), UnfoldingSource(..),
+        DFunArg(..), dfunArgExprs,
 
 	-- ** Constructing 'Unfolding's
 	noUnfolding, evaldUnfolding, mkOtherCon,
@@ -297,6 +298,19 @@ data Bind b = NonRec b (Expr b)
 	    | Rec [(b, (Expr b))]
   deriving (Data, Typeable)
 \end{code}
+
+Note [Shadowing]
+~~~~~~~~~~~~~~~~
+While various passes attempt to rename on-the-fly in a manner that
+avoids "shadowing" (thereby simplifying downstream optimizations),
+neither the simplifier nor any other pass GUARANTEES that shadowing is
+avoided. Thus, all passes SHOULD work fine even in the presence of
+arbitrary shadowing in their inputs.
+
+In particular, scrutinee variables `x` in expressions of the form
+`Case e x t` are often renamed to variables with a prefix
+"wild_". These "wild" variables may appear in the body of the
+case-expression, and further, may be shadowed within the body.
 
 Note [Literal alternatives]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -635,7 +649,7 @@ data Unfolding
 
         DataCon 	-- The dictionary data constructor (possibly a newtype datacon)
 
-        [CoreExpr]      -- Specification of superclasses and methods, in positional order
+        [DFunArg CoreExpr]  -- Specification of superclasses and methods, in positional order
 
   | CoreUnfolding {		-- An unfolding for an Id with no pragma, 
                                 -- or perhaps a NOINLINE pragma
@@ -671,6 +685,21 @@ data Unfolding
   --     Basically this is a cached version of 'exprIsWorkFree'
   --
   --  uf_guidance:  Tells us about the /size/ of the unfolding template
+
+------------------------------------------------
+data DFunArg e   -- Given (df a b d1 d2 d3)
+  = DFunPolyArg  e      -- Arg is (e a b d1 d2 d3)
+  | DFunLamArg   Int    -- Arg is one of [a,b,d1,d2,d3], zero indexed
+  deriving( Functor )
+
+  -- 'e' is often CoreExpr, which are usually variables, but can
+  -- be trivial expressions instead (e.g. a type application).
+
+dfunArgExprs :: [DFunArg e] -> [e]
+dfunArgExprs []                    = []
+dfunArgExprs (DFunPolyArg  e : as) = e : dfunArgExprs as
+dfunArgExprs (DFunLamArg {}  : as) = dfunArgExprs as
+
 
 ------------------------------------------------
 data UnfoldingSource

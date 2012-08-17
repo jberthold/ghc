@@ -131,11 +131,12 @@ repTopDs group
 			val_ds  <- rep_val_binds (hs_valds group) ;
 			tycl_ds <- mapM repTyClD (concat (hs_tyclds group)) ;
 			inst_ds <- mapM repInstD (hs_instds group) ;
-			for_ds <- mapM repForD (hs_fords group) ;
+			rule_ds <- mapM repRuleD (hs_ruleds group) ;
+			for_ds  <- mapM repForD  (hs_fords group) ;
 			-- more needed
 			return (de_loc $ sort_by_loc $
                                 val_ds ++ catMaybes tycl_ds ++ fix_ds
-                                       ++ inst_ds ++ for_ds) }) ;
+                                       ++ inst_ds ++ rule_ds ++ for_ds) }) ;
 
 	decl_ty <- lookupType decQTyConName ;
 	let { core_list = coreList' decl_ty decls } ;
@@ -411,6 +412,25 @@ repFixD (L loc (FixitySig name (Fixity prec dir)))
        ; dec <- rep2 rep_fn [prec', name']
        ; return (loc, dec) }
 
+repRuleD :: LRuleDecl Name -> DsM (SrcSpan, Core TH.DecQ)
+repRuleD (L loc (HsRule n act bndrs lhs _ rhs _))
+  = do { n'     <- coreStringLit $ unpackFS n
+       ; phases <- repPhases act
+       ; bndrs' <- mapM repRuleBndr bndrs >>= coreList ruleBndrQTyConName
+       ; lhs'   <- repLE lhs
+       ; rhs'   <- repLE rhs
+       ; pragma <- repPragRule n' bndrs' lhs' rhs' phases
+       ; return (loc, pragma) }
+
+repRuleBndr :: RuleBndr Name -> DsM (Core TH.RuleBndrQ)
+repRuleBndr (RuleBndr n)
+  = do { MkC n' <- lookupLOcc n
+       ; rep2 ruleVarName [n'] }
+repRuleBndr (RuleBndrSig n (HsWB { hswb_cts = ty }))
+  = do { MkC n'  <- lookupLOcc n
+       ; MkC ty' <- repLTy ty
+       ; rep2 typedRuleVarName [n', ty'] }
+
 ds_msg :: SDoc
 ds_msg = ptext (sLit "Cannot desugar this Template Haskell declaration:")
 
@@ -541,6 +561,7 @@ rep_sig (L _   (GenericSig nm _))     = failWithDs msg
 
 rep_sig (L loc (InlineSig nm ispec))  = rep_inline nm ispec loc
 rep_sig (L loc (SpecSig nm ty ispec)) = rep_specialise nm ty ispec loc
+rep_sig (L loc (SpecInstSig ty))      = rep_specialiseInst ty loc
 rep_sig _                             = return []
 
 rep_ty_sig :: SrcSpan -> LHsType Name -> Located Name
@@ -570,9 +591,11 @@ rep_inline :: Located Name
            -> SrcSpan
            -> DsM [(SrcSpan, Core TH.DecQ)]
 rep_inline nm ispec loc
-  = do { nm1 <- lookupLOcc nm
-       ; ispec1 <- rep_InlinePrag ispec
-       ; pragma <- repPragInl nm1 ispec1
+  = do { nm1    <- lookupLOcc nm
+       ; inline <- repInline $ inl_inline ispec
+       ; rm     <- repRuleMatch $ inl_rule ispec
+       ; phases <- repPhases $ inl_act ispec
+       ; pragma <- repPragInl nm1 inline rm phases
        ; return [(loc, pragma)]
        }
 
@@ -581,12 +604,22 @@ rep_specialise :: Located Name -> LHsType Name -> InlinePragma -> SrcSpan
 rep_specialise nm ty ispec loc
   = do { nm1 <- lookupLOcc nm
        ; ty1 <- repLTy ty
-       ; pragma <- if isDefaultInlinePragma ispec
-                   then repPragSpec nm1 ty1                  -- SPECIALISE
-                   else do { ispec1 <- rep_InlinePrag ispec  -- SPECIALISE INLINE
-                           ; repPragSpecInl nm1 ty1 ispec1 }
+       ; phases <- repPhases $ inl_act ispec
+       ; let inline = inl_inline ispec
+       ; pragma <- if isEmptyInlineSpec inline
+                   then -- SPECIALISE
+                     repPragSpec nm1 ty1 phases
+                   else -- SPECIALISE INLINE
+                     do { inline1 <- repInline inline
+                        ; repPragSpecInl nm1 ty1 inline1 phases }
        ; return [(loc, pragma)]
        }
+
+rep_specialiseInst :: LHsType Name -> SrcSpan -> DsM [(SrcSpan, Core TH.DecQ)]
+rep_specialiseInst ty loc
+  = do { ty1    <- repLTy ty
+       ; pragma <- repPragSpecInst ty1
+       ; return [(loc, pragma)] }
 
 repInline :: InlineSpec -> DsM (Core TH.Inline)
 repInline NoInline  = dataCon noInlineDataConName
@@ -594,30 +627,16 @@ repInline Inline    = dataCon inlineDataConName
 repInline Inlinable = dataCon inlinableDataConName
 repInline spec      = notHandled "repInline" (ppr spec)
 
--- Extract all the information needed to build a TH.InlinePrag
---
-rep_InlinePrag :: InlinePragma	-- Never defaultInlinePragma
-               -> DsM (Core TH.InlineSpecQ)
-rep_InlinePrag (InlinePragma { inl_act = activation, inl_rule = match, inl_inline = inline })
-  | Just (flag, phase) <- activation1
-  = do { inline1 <- repInline inline
-       ; repInlineSpecPhase inline1 match1 flag phase }
-  | otherwise
-  = do { inline1 <- repInline inline
-       ; repInlineSpecNoPhase inline1 match1 }
-  where
-      match1      = coreBool (rep_RuleMatchInfo match)
-      activation1 = rep_Activation activation
-      rep_RuleMatchInfo FunLike = False
-      rep_RuleMatchInfo ConLike = True
+repRuleMatch :: RuleMatchInfo -> DsM (Core TH.RuleMatch)
+repRuleMatch ConLike = dataCon conLikeDataConName
+repRuleMatch FunLike = dataCon funLikeDataConName
 
-      rep_Activation NeverActive          = Nothing	-- We never have NOINLINE/AlwaysActive
-      rep_Activation AlwaysActive         = Nothing	-- or            INLINE/NeverActive
-      rep_Activation (ActiveBefore phase) = Just (coreBool False,
-                                                  MkC $ mkIntExprInt phase)
-      rep_Activation (ActiveAfter phase)  = Just (coreBool True,
-                                                  MkC $ mkIntExprInt phase)
-
+repPhases :: Activation -> DsM (Core TH.Phases)
+repPhases (ActiveBefore i) = do { MkC arg <- coreIntLit i
+                                ; dataCon' beforePhaseDataConName [arg] }
+repPhases (ActiveAfter i)  = do { MkC arg <- coreIntLit i
+                                ; dataCon' fromPhaseDataConName [arg] }
+repPhases _                = dataCon allPhasesDataConName
 
 -------------------------------------------------------
 -- 			Types
@@ -864,6 +883,9 @@ repE e@(HsIPVar _) = notHandled "Implicit parameters" (ppr e)
 repE (HsOverLit l) = do { a <- repOverloadedLiteral l; repLit a }
 repE (HsLit l)     = do { a <- repLiteral l;           repLit a }
 repE (HsLam (MatchGroup [m] _)) = repLambda m
+repE (HsLamCase _ (MatchGroup ms _))
+                   = do { ms' <- mapM repMatchTup ms
+                        ; repLamCase (nonEmptyCoreList ms') }
 repE (HsApp x y)   = do {a <- repLE x; b <- repLE y; repApp a b}
 
 repE (OpApp e1 op _ e2) =
@@ -878,14 +900,19 @@ repE (NegApp x _)        = do
 repE (HsPar x)            = repLE x
 repE (SectionL x y)       = do { a <- repLE x; b <- repLE y; repSectionL a b }
 repE (SectionR x y)       = do { a <- repLE x; b <- repLE y; repSectionR a b }
-repE (HsCase e (MatchGroup ms _)) = do { arg <- repLE e
-				       ; ms2 <- mapM repMatchTup ms
-				       ; repCaseE arg (nonEmptyCoreList ms2) }
+repE (HsCase e (MatchGroup ms _))
+                          = do { arg <- repLE e
+                               ; ms2 <- mapM repMatchTup ms
+                               ; repCaseE arg (nonEmptyCoreList ms2) }
 repE (HsIf _ x y z)         = do
 			      a <- repLE x
 			      b <- repLE y
 			      c <- repLE z
 			      repCond a b c
+repE (HsMultiIf _ alts)
+  = do { (binds, alts') <- liftM unzip $ mapM repLGRHS alts
+       ; expr' <- repMultiIf (nonEmptyCoreList alts')
+       ; wrapGenSyms (concat binds) expr' }
 repE (HsLet bs e)         = do { (ss,ds) <- repBinds bs
 			       ; e2 <- addBinds ss (repLE e)
 			       ; z <- repLetE ds e2
@@ -976,22 +1003,22 @@ repClauseTup (L _ (Match ps _ (GRHSs guards wheres))) =
 
 repGuards ::  [LGRHS Name] ->  DsM (Core TH.BodyQ)
 repGuards [L _ (GRHS [] e)]
-  = do {a <- repLE e; repNormal a }
-repGuards other
-  = do { zs <- mapM process other;
-     let {(xs, ys) = unzip zs};
-	 gd <- repGuarded (nonEmptyCoreList ys);
-     wrapGenSyms (concat xs) gd }
-  where
-    process :: LGRHS Name -> DsM ([GenSymBind], (Core (TH.Q (TH.Guard, TH.Exp))))
-    process (L _ (GRHS [L _ (ExprStmt e1 _ _ _)] e2))
-           = do { x <- repLNormalGE e1 e2;
-                  return ([], x) }
-    process (L _ (GRHS ss rhs))
-           = do (gs, ss') <- repLSts ss
-		rhs' <- addBinds gs $ repLE rhs
-                g <- repPatGE (nonEmptyCoreList ss') rhs'
-                return (gs, g)
+  = do { a <- repLE e
+       ; repNormal a }
+repGuards alts
+  = do { (binds, alts') <- liftM unzip $ mapM repLGRHS alts
+       ; body <- repGuarded (nonEmptyCoreList alts')
+       ; wrapGenSyms (concat binds) body }
+
+repLGRHS :: LGRHS Name -> DsM ([GenSymBind], (Core (TH.Q (TH.Guard, TH.Exp))))
+repLGRHS (L _ (GRHS [L _ (ExprStmt guard _ _ _)] rhs))
+  = do { guarded <- repLNormalGE guard rhs
+       ; return ([], guarded) }
+repLGRHS (L _ (GRHS stmts rhs))
+  = do { (gs, stmts') <- repLSts stmts
+       ; rhs'         <- addBinds gs $ repLE rhs
+       ; guarded      <- repPatGE (nonEmptyCoreList stmts') rhs'
+       ; return (gs, guarded) }
 
 repFields :: HsRecordBinds Name -> DsM (Core [TH.Q TH.FieldExp])
 repFields (HsRecFields { rec_flds = flds })
@@ -1381,9 +1408,12 @@ rep2 :: Name -> [ CoreExpr ] -> DsM (Core a)
 rep2 n xs = do { id <- dsLookupGlobalId n
                ; return (MkC (foldl App (Var id) xs)) }
 
+dataCon' :: Name -> [CoreExpr] -> DsM (Core a)
+dataCon' n args = do { id <- dsLookupDataCon n
+                     ; return $ MkC $ mkConApp id args }
+
 dataCon :: Name -> DsM (Core a)
-dataCon n = do { id <- dsLookupDataCon n
-               ; return $ MkC $ mkConApp id [] }
+dataCon n = dataCon' n []
 
 -- Then we make "repConstructors" which use the phantom types for each of the
 -- smart constructors of the Meta.Meta datatypes.
@@ -1455,6 +1485,9 @@ repApp (MkC x) (MkC y) = rep2 appEName [x,y]
 repLam :: Core [TH.PatQ] -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repLam (MkC ps) (MkC e) = rep2 lamEName [ps, e]
 
+repLamCase :: Core [TH.MatchQ] -> DsM (Core TH.ExpQ)
+repLamCase (MkC ms) = rep2 lamCaseEName [ms]
+
 repTup :: Core [TH.ExpQ] -> DsM (Core TH.ExpQ)
 repTup (MkC es) = rep2 tupEName [es]
 
@@ -1463,6 +1496,9 @@ repUnboxedTup (MkC es) = rep2 unboxedTupEName [es]
 
 repCond :: Core TH.ExpQ -> Core TH.ExpQ -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repCond (MkC x) (MkC y) (MkC z) = rep2 condEName [x,y,z]
+
+repMultiIf :: Core [TH.Q (TH.Guard, TH.Exp)] -> DsM (Core TH.ExpQ)
+repMultiIf (MkC alts) = rep2 multiIfEName [alts]
 
 repLetE :: Core [TH.DecQ] -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repLetE (MkC ds) (MkC e) = rep2 letEName [ds, e]
@@ -1589,16 +1625,28 @@ repClass :: Core TH.CxtQ -> Core TH.Name -> Core [TH.TyVarBndr]
 repClass (MkC cxt) (MkC cls) (MkC tvs) (MkC fds) (MkC ds)
   = rep2 classDName [cxt, cls, tvs, fds, ds]
 
-repPragInl :: Core TH.Name -> Core TH.InlineSpecQ -> DsM (Core TH.DecQ)
-repPragInl (MkC nm) (MkC ispec) = rep2 pragInlDName [nm, ispec]
+repPragInl :: Core TH.Name -> Core TH.Inline -> Core TH.RuleMatch
+           -> Core TH.Phases -> DsM (Core TH.DecQ)
+repPragInl (MkC nm) (MkC inline) (MkC rm) (MkC phases)
+  = rep2 pragInlDName [nm, inline, rm, phases]
 
-repPragSpec :: Core TH.Name -> Core TH.TypeQ -> DsM (Core TH.DecQ)
-repPragSpec (MkC nm) (MkC ty) = rep2 pragSpecDName [nm, ty]
+repPragSpec :: Core TH.Name -> Core TH.TypeQ -> Core TH.Phases
+            -> DsM (Core TH.DecQ)
+repPragSpec (MkC nm) (MkC ty) (MkC phases)
+  = rep2 pragSpecDName [nm, ty, phases]
 
-repPragSpecInl :: Core TH.Name -> Core TH.TypeQ -> Core TH.InlineSpecQ
-               -> DsM (Core TH.DecQ)
-repPragSpecInl (MkC nm) (MkC ty) (MkC ispec)
-  = rep2 pragSpecInlDName [nm, ty, ispec]
+repPragSpecInl :: Core TH.Name -> Core TH.TypeQ -> Core TH.Inline
+               -> Core TH.Phases -> DsM (Core TH.DecQ)
+repPragSpecInl (MkC nm) (MkC ty) (MkC inline) (MkC phases)
+  = rep2 pragSpecInlDName [nm, ty, inline, phases]
+
+repPragSpecInst :: Core TH.TypeQ -> DsM (Core TH.DecQ)
+repPragSpecInst (MkC ty) = rep2 pragSpecInstDName [ty]
+
+repPragRule :: Core String -> Core [TH.RuleBndrQ] -> Core TH.ExpQ
+            -> Core TH.ExpQ -> Core TH.Phases -> DsM (Core TH.DecQ)
+repPragRule (MkC nm) (MkC bndrs) (MkC lhs) (MkC rhs) (MkC phases)
+  = rep2 pragRuleDName [nm, bndrs, lhs, rhs, phases]
 
 repFamilyNoKind :: Core TH.FamFlavour -> Core TH.Name -> Core [TH.TyVarBndr]
                 -> DsM (Core TH.DecQ)
@@ -1610,16 +1658,6 @@ repFamilyKind :: Core TH.FamFlavour -> Core TH.Name -> Core [TH.TyVarBndr]
               -> DsM (Core TH.DecQ)
 repFamilyKind (MkC flav) (MkC nm) (MkC tvs) (MkC ki)
     = rep2 familyKindDName [flav, nm, tvs, ki]
-
-repInlineSpecNoPhase :: Core TH.Inline -> Core Bool
-                     -> DsM (Core TH.InlineSpecQ)
-repInlineSpecNoPhase (MkC inline) (MkC conlike)
-  = rep2 inlineSpecNoPhaseName [inline, conlike]
-
-repInlineSpecPhase :: Core TH.Inline -> Core Bool -> Core Bool -> Core Int
-                   -> DsM (Core TH.InlineSpecQ)
-repInlineSpecPhase (MkC inline) (MkC conlike) (MkC beforeFrom) (MkC phase)
-  = rep2 inlineSpecPhaseName [inline, conlike, beforeFrom, phase]
 
 repFunDep :: Core [TH.Name] -> Core [TH.Name] -> DsM (Core TH.FunDep)
 repFunDep (MkC xs) (MkC ys) = rep2 funDepName [xs, ys]
@@ -1837,11 +1875,7 @@ nonEmptyCoreList xs@(MkC x:_) = MkC (mkListExpr (exprType x) (map unC xs))
 coreStringLit :: String -> DsM (Core String)
 coreStringLit s = do { z <- mkStringExpr s; return(MkC z) }
 
------------- Bool, Literals & Variables -------------------
-
-coreBool :: Bool -> Core Bool
-coreBool False = MkC $ mkConApp falseDataCon []
-coreBool True  = MkC $ mkConApp trueDataCon  []
+------------ Literals & Variables -------------------
 
 coreIntLit :: Int -> DsM (Core Int)
 coreIntLit i = return (MkC (mkIntExprInt i))
@@ -1893,9 +1927,9 @@ templateHaskellNames = [
     clauseName,
     -- Exp
     varEName, conEName, litEName, appEName, infixEName,
-    infixAppName, sectionLName, sectionRName, lamEName,
+    infixAppName, sectionLName, sectionRName, lamEName, lamCaseEName,
     tupEName, unboxedTupEName,
-    condEName, letEName, caseEName, doEName, compEName,
+    condEName, multiIfEName, letEName, caseEName, doEName, compEName,
     fromEName, fromThenEName, fromToEName, fromThenToEName,
     listEName, sigEName, recConEName, recUpdEName,
     -- FieldExp
@@ -1909,7 +1943,8 @@ templateHaskellNames = [
     -- Dec
     funDName, valDName, dataDName, newtypeDName, tySynDName,
     classDName, instanceDName, sigDName, forImpDName,
-    pragInlDName, pragSpecDName, pragSpecInlDName,
+    pragInlDName, pragSpecDName, pragSpecInlDName, pragSpecInstDName,
+    pragRuleDName,
     familyNoKindDName, familyKindDName, dataInstDName, newtypeInstDName,
     tySynInstDName, infixLDName, infixRDName, infixNDName,
     -- Cxt
@@ -1943,8 +1978,12 @@ templateHaskellNames = [
     interruptibleName,
     -- Inline
     noInlineDataConName, inlineDataConName, inlinableDataConName,
-    -- InlineSpec
-    inlineSpecNoPhaseName, inlineSpecPhaseName,
+    -- RuleMatch
+    conLikeDataConName, funLikeDataConName,
+    -- Phases
+    allPhasesDataConName, fromPhaseDataConName, beforePhaseDataConName,
+    -- RuleBndr
+    ruleVarName, typedRuleVarName,
     -- FunDep
     funDepName,
     -- FamFlavour
@@ -1957,7 +1996,7 @@ templateHaskellNames = [
     varStrictTypeQTyConName, typeQTyConName, expTyConName, decTyConName,
     typeTyConName, tyVarBndrTyConName, matchTyConName, clauseTyConName,
     patQTyConName, fieldPatQTyConName, fieldExpQTyConName, funDepTyConName,
-    predQTyConName, decsQTyConName,
+    predQTyConName, decsQTyConName, ruleBndrQTyConName,
 
     -- Quasiquoting
     quoteDecName, quoteTypeName, quoteExpName, quotePatName]
@@ -2058,8 +2097,9 @@ clauseName = libFun (fsLit "clause") clauseIdKey
 
 -- data Exp = ...
 varEName, conEName, litEName, appEName, infixEName, infixAppName,
-    sectionLName, sectionRName, lamEName, tupEName, unboxedTupEName, condEName,
-    letEName, caseEName, doEName, compEName :: Name
+    sectionLName, sectionRName, lamEName, lamCaseEName, tupEName,
+    unboxedTupEName, condEName, multiIfEName, letEName, caseEName,
+    doEName, compEName :: Name
 varEName        = libFun (fsLit "varE")        varEIdKey
 conEName        = libFun (fsLit "conE")        conEIdKey
 litEName        = libFun (fsLit "litE")        litEIdKey
@@ -2069,9 +2109,11 @@ infixAppName    = libFun (fsLit "infixApp")    infixAppIdKey
 sectionLName    = libFun (fsLit "sectionL")    sectionLIdKey
 sectionRName    = libFun (fsLit "sectionR")    sectionRIdKey
 lamEName        = libFun (fsLit "lamE")        lamEIdKey
+lamCaseEName    = libFun (fsLit "lamCaseE")    lamCaseEIdKey
 tupEName        = libFun (fsLit "tupE")        tupEIdKey
 unboxedTupEName = libFun (fsLit "unboxedTupE") unboxedTupEIdKey
 condEName       = libFun (fsLit "condE")       condEIdKey
+multiIfEName    = libFun (fsLit "multiIfE")    multiIfEIdKey
 letEName        = libFun (fsLit "letE")        letEIdKey
 caseEName       = libFun (fsLit "caseE")       caseEIdKey
 doEName         = libFun (fsLit "doE")         doEIdKey
@@ -2113,29 +2155,31 @@ parSName    = libFun (fsLit "parS")    parSIdKey
 -- data Dec = ...
 funDName, valDName, dataDName, newtypeDName, tySynDName, classDName,
     instanceDName, sigDName, forImpDName, pragInlDName, pragSpecDName,
-    pragSpecInlDName, familyNoKindDName, familyKindDName, dataInstDName,
-    newtypeInstDName, tySynInstDName,
+    pragSpecInlDName, pragSpecInstDName, pragRuleDName, familyNoKindDName,
+    familyKindDName, dataInstDName, newtypeInstDName, tySynInstDName,
     infixLDName, infixRDName, infixNDName :: Name
-funDName         = libFun (fsLit "funD")         funDIdKey
-valDName         = libFun (fsLit "valD")         valDIdKey
-dataDName        = libFun (fsLit "dataD")        dataDIdKey
-newtypeDName     = libFun (fsLit "newtypeD")     newtypeDIdKey
-tySynDName       = libFun (fsLit "tySynD")       tySynDIdKey
-classDName       = libFun (fsLit "classD")       classDIdKey
-instanceDName    = libFun (fsLit "instanceD")    instanceDIdKey
-sigDName         = libFun (fsLit "sigD")         sigDIdKey
-forImpDName      = libFun (fsLit "forImpD")      forImpDIdKey
-pragInlDName     = libFun (fsLit "pragInlD")     pragInlDIdKey
-pragSpecDName    = libFun (fsLit "pragSpecD")    pragSpecDIdKey
-pragSpecInlDName = libFun (fsLit "pragSpecInlD") pragSpecInlDIdKey
-familyNoKindDName= libFun (fsLit "familyNoKindD")familyNoKindDIdKey
-familyKindDName  = libFun (fsLit "familyKindD")  familyKindDIdKey
-dataInstDName    = libFun (fsLit "dataInstD")    dataInstDIdKey
-newtypeInstDName = libFun (fsLit "newtypeInstD") newtypeInstDIdKey
-tySynInstDName   = libFun (fsLit "tySynInstD")   tySynInstDIdKey
-infixLDName      = libFun (fsLit "infixLD")      infixLDIdKey
-infixRDName      = libFun (fsLit "infixRD")      infixRDIdKey
-infixNDName      = libFun (fsLit "infixND")      infixNDIdKey
+funDName          = libFun (fsLit "funD")          funDIdKey
+valDName          = libFun (fsLit "valD")          valDIdKey
+dataDName         = libFun (fsLit "dataD")         dataDIdKey
+newtypeDName      = libFun (fsLit "newtypeD")      newtypeDIdKey
+tySynDName        = libFun (fsLit "tySynD")        tySynDIdKey
+classDName        = libFun (fsLit "classD")        classDIdKey
+instanceDName     = libFun (fsLit "instanceD")     instanceDIdKey
+sigDName          = libFun (fsLit "sigD")          sigDIdKey
+forImpDName       = libFun (fsLit "forImpD")       forImpDIdKey
+pragInlDName      = libFun (fsLit "pragInlD")      pragInlDIdKey
+pragSpecDName     = libFun (fsLit "pragSpecD")     pragSpecDIdKey
+pragSpecInlDName  = libFun (fsLit "pragSpecInlD")  pragSpecInlDIdKey
+pragSpecInstDName = libFun (fsLit "pragSpecInstD") pragSpecInstDIdKey
+pragRuleDName     = libFun (fsLit "pragRuleD")     pragRuleDIdKey
+familyNoKindDName = libFun (fsLit "familyNoKindD") familyNoKindDIdKey
+familyKindDName   = libFun (fsLit "familyKindD")   familyKindDIdKey
+dataInstDName     = libFun (fsLit "dataInstD")     dataInstDIdKey
+newtypeInstDName  = libFun (fsLit "newtypeInstD")  newtypeInstDIdKey
+tySynInstDName    = libFun (fsLit "tySynInstD")    tySynInstDIdKey
+infixLDName       = libFun (fsLit "infixLD")       infixLDIdKey
+infixRDName       = libFun (fsLit "infixRD")       infixRDIdKey
+infixNDName       = libFun (fsLit "infixND")       infixNDIdKey
 
 -- type Ctxt = ...
 cxtName :: Name
@@ -2226,10 +2270,21 @@ noInlineDataConName  = thCon (fsLit "NoInline")  noInlineDataConKey
 inlineDataConName    = thCon (fsLit "Inline")    inlineDataConKey
 inlinableDataConName = thCon (fsLit "Inlinable") inlinableDataConKey
 
--- data InlineSpec = ...
-inlineSpecNoPhaseName, inlineSpecPhaseName :: Name
-inlineSpecNoPhaseName = libFun (fsLit "inlineSpecNoPhase") inlineSpecNoPhaseIdKey
-inlineSpecPhaseName   = libFun (fsLit "inlineSpecPhase")   inlineSpecPhaseIdKey
+-- data RuleMatch = ...
+conLikeDataConName, funLikeDataConName :: Name
+conLikeDataConName = thCon (fsLit "ConLike") conLikeDataConKey
+funLikeDataConName = thCon (fsLit "FunLike") funLikeDataConKey
+
+-- data Phases = ...
+allPhasesDataConName, fromPhaseDataConName, beforePhaseDataConName :: Name
+allPhasesDataConName   = thCon (fsLit "AllPhases")   allPhasesDataConKey
+fromPhaseDataConName   = thCon (fsLit "FromPhase")   fromPhaseDataConKey
+beforePhaseDataConName = thCon (fsLit "BeforePhase") beforePhaseDataConKey
+
+-- data RuleBndr = ...
+ruleVarName, typedRuleVarName :: Name
+ruleVarName      = libFun (fsLit ("ruleVar"))      ruleVarIdKey
+typedRuleVarName = libFun (fsLit ("typedRuleVar")) typedRuleVarIdKey
 
 -- data FunDep = ...
 funDepName :: Name
@@ -2243,12 +2298,13 @@ dataFamName = libFun (fsLit "dataFam") dataFamIdKey
 matchQTyConName, clauseQTyConName, expQTyConName, stmtQTyConName,
     decQTyConName, conQTyConName, strictTypeQTyConName,
     varStrictTypeQTyConName, typeQTyConName, fieldExpQTyConName,
-    patQTyConName, fieldPatQTyConName, predQTyConName, decsQTyConName :: Name
-matchQTyConName         = libTc (fsLit "MatchQ")        matchQTyConKey
-clauseQTyConName        = libTc (fsLit "ClauseQ")       clauseQTyConKey
-expQTyConName           = libTc (fsLit "ExpQ")          expQTyConKey
-stmtQTyConName          = libTc (fsLit "StmtQ")         stmtQTyConKey
-decQTyConName           = libTc (fsLit "DecQ")          decQTyConKey
+    patQTyConName, fieldPatQTyConName, predQTyConName, decsQTyConName,
+    ruleBndrQTyConName :: Name
+matchQTyConName         = libTc (fsLit "MatchQ")         matchQTyConKey
+clauseQTyConName        = libTc (fsLit "ClauseQ")        clauseQTyConKey
+expQTyConName           = libTc (fsLit "ExpQ")           expQTyConKey
+stmtQTyConName          = libTc (fsLit "StmtQ")          stmtQTyConKey
+decQTyConName           = libTc (fsLit "DecQ")           decQTyConKey
 decsQTyConName          = libTc (fsLit "DecsQ")          decsQTyConKey  -- Q [Dec]
 conQTyConName           = libTc (fsLit "ConQ")           conQTyConKey
 strictTypeQTyConName    = libTc (fsLit "StrictTypeQ")    strictTypeQTyConKey
@@ -2258,6 +2314,7 @@ fieldExpQTyConName      = libTc (fsLit "FieldExpQ")      fieldExpQTyConKey
 patQTyConName           = libTc (fsLit "PatQ")           patQTyConKey
 fieldPatQTyConName      = libTc (fsLit "FieldPatQ")      fieldPatQTyConKey
 predQTyConName          = libTc (fsLit "PredQ")          predQTyConKey
+ruleBndrQTyConName      = libTc (fsLit "RuleBndrQ")      ruleBndrQTyConKey
 
 -- quasiquoting
 quoteExpName, quotePatName, quoteDecName, quoteTypeName :: Name
@@ -2275,7 +2332,7 @@ expTyConKey, matchTyConKey, clauseTyConKey, qTyConKey, expQTyConKey,
     decTyConKey, varStrictTypeQTyConKey, strictTypeQTyConKey,
     fieldExpTyConKey, fieldPatTyConKey, nameTyConKey, patQTyConKey,
     fieldPatQTyConKey, fieldExpQTyConKey, funDepTyConKey, predTyConKey,
-    predQTyConKey, decsQTyConKey :: Unique
+    predQTyConKey, decsQTyConKey, ruleBndrQTyConKey :: Unique
 expTyConKey             = mkPreludeTyConUnique 200
 matchTyConKey           = mkPreludeTyConUnique 201
 clauseTyConKey          = mkPreludeTyConUnique 202
@@ -2303,6 +2360,7 @@ predTyConKey            = mkPreludeTyConUnique 223
 predQTyConKey           = mkPreludeTyConUnique 224
 tyVarBndrTyConKey       = mkPreludeTyConUnique 225
 decsQTyConKey           = mkPreludeTyConUnique 226
+ruleBndrQTyConKey       = mkPreludeTyConUnique 227
 
 -- IdUniques available: 200-499
 -- If you want to change this, make sure you check in PrelNames
@@ -2370,8 +2428,8 @@ clauseIdKey         = mkPreludeMiscIdUnique 262
 
 -- data Exp = ...
 varEIdKey, conEIdKey, litEIdKey, appEIdKey, infixEIdKey, infixAppIdKey,
-    sectionLIdKey, sectionRIdKey, lamEIdKey, tupEIdKey, unboxedTupEIdKey,
-    condEIdKey,
+    sectionLIdKey, sectionRIdKey, lamEIdKey, lamCaseEIdKey, tupEIdKey,
+    unboxedTupEIdKey, condEIdKey, multiIfEIdKey,
     letEIdKey, caseEIdKey, doEIdKey, compEIdKey,
     fromEIdKey, fromThenEIdKey, fromToEIdKey, fromThenToEIdKey,
     listEIdKey, sigEIdKey, recConEIdKey, recUpdEIdKey :: Unique
@@ -2384,21 +2442,23 @@ infixAppIdKey     = mkPreludeMiscIdUnique 275
 sectionLIdKey     = mkPreludeMiscIdUnique 276
 sectionRIdKey     = mkPreludeMiscIdUnique 277
 lamEIdKey         = mkPreludeMiscIdUnique 278
-tupEIdKey         = mkPreludeMiscIdUnique 279
-unboxedTupEIdKey  = mkPreludeMiscIdUnique 280
-condEIdKey        = mkPreludeMiscIdUnique 281
-letEIdKey         = mkPreludeMiscIdUnique 282
-caseEIdKey        = mkPreludeMiscIdUnique 283
-doEIdKey          = mkPreludeMiscIdUnique 284
-compEIdKey        = mkPreludeMiscIdUnique 285
-fromEIdKey        = mkPreludeMiscIdUnique 286
-fromThenEIdKey    = mkPreludeMiscIdUnique 287
-fromToEIdKey      = mkPreludeMiscIdUnique 288
-fromThenToEIdKey  = mkPreludeMiscIdUnique 289
-listEIdKey        = mkPreludeMiscIdUnique 290
-sigEIdKey         = mkPreludeMiscIdUnique 291
-recConEIdKey      = mkPreludeMiscIdUnique 292
-recUpdEIdKey      = mkPreludeMiscIdUnique 293
+lamCaseEIdKey     = mkPreludeMiscIdUnique 279
+tupEIdKey         = mkPreludeMiscIdUnique 280
+unboxedTupEIdKey  = mkPreludeMiscIdUnique 281
+condEIdKey        = mkPreludeMiscIdUnique 282
+multiIfEIdKey     = mkPreludeMiscIdUnique 283
+letEIdKey         = mkPreludeMiscIdUnique 284
+caseEIdKey        = mkPreludeMiscIdUnique 285
+doEIdKey          = mkPreludeMiscIdUnique 286
+compEIdKey        = mkPreludeMiscIdUnique 287
+fromEIdKey        = mkPreludeMiscIdUnique 288
+fromThenEIdKey    = mkPreludeMiscIdUnique 289
+fromToEIdKey      = mkPreludeMiscIdUnique 290
+fromThenToEIdKey  = mkPreludeMiscIdUnique 291
+listEIdKey        = mkPreludeMiscIdUnique 292
+sigEIdKey         = mkPreludeMiscIdUnique 293
+recConEIdKey      = mkPreludeMiscIdUnique 294
+recUpdEIdKey      = mkPreludeMiscIdUnique 295
 
 -- type FieldExp = ...
 fieldExpIdKey :: Unique
@@ -2424,7 +2484,8 @@ parSIdKey        = mkPreludeMiscIdUnique 323
 -- data Dec = ...
 funDIdKey, valDIdKey, dataDIdKey, newtypeDIdKey, tySynDIdKey,
     classDIdKey, instanceDIdKey, sigDIdKey, forImpDIdKey, pragInlDIdKey,
-    pragSpecDIdKey, pragSpecInlDIdKey, familyNoKindDIdKey, familyKindDIdKey,
+    pragSpecDIdKey, pragSpecInlDIdKey, pragSpecInstDIdKey, pragRuleDIdKey,
+    familyNoKindDIdKey, familyKindDIdKey,
     dataInstDIdKey, newtypeInstDIdKey, tySynInstDIdKey,
     infixLDIdKey, infixRDIdKey, infixNDIdKey :: Unique
 funDIdKey          = mkPreludeMiscIdUnique 330
@@ -2439,6 +2500,8 @@ forImpDIdKey       = mkPreludeMiscIdUnique 338
 pragInlDIdKey      = mkPreludeMiscIdUnique 339
 pragSpecDIdKey     = mkPreludeMiscIdUnique 340
 pragSpecInlDIdKey  = mkPreludeMiscIdUnique 341
+pragSpecInstDIdKey = mkPreludeMiscIdUnique 412
+pragRuleDIdKey     = mkPreludeMiscIdUnique 413
 familyNoKindDIdKey = mkPreludeMiscIdUnique 342
 familyKindDIdKey   = mkPreludeMiscIdUnique 343
 dataInstDIdKey     = mkPreludeMiscIdUnique 344
@@ -2537,10 +2600,16 @@ noInlineDataConKey  = mkPreludeDataConUnique 40
 inlineDataConKey    = mkPreludeDataConUnique 41
 inlinableDataConKey = mkPreludeDataConUnique 42
 
--- data InlineSpec =
-inlineSpecNoPhaseIdKey, inlineSpecPhaseIdKey :: Unique
-inlineSpecNoPhaseIdKey = mkPreludeMiscIdUnique 412
-inlineSpecPhaseIdKey   = mkPreludeMiscIdUnique 413
+-- data RuleMatch = ...
+conLikeDataConKey, funLikeDataConKey :: Unique
+conLikeDataConKey = mkPreludeDataConUnique 43
+funLikeDataConKey = mkPreludeDataConUnique 44
+
+-- data Phases = ...
+allPhasesDataConKey, fromPhaseDataConKey, beforePhaseDataConKey :: Unique
+allPhasesDataConKey   = mkPreludeDataConUnique 45
+fromPhaseDataConKey   = mkPreludeDataConUnique 46
+beforePhaseDataConKey = mkPreludeDataConUnique 47
 
 -- data FunDep = ...
 funDepIdKey :: Unique
@@ -2557,3 +2626,8 @@ quoteExpKey  = mkPreludeMiscIdUnique 418
 quotePatKey  = mkPreludeMiscIdUnique 419
 quoteDecKey  = mkPreludeMiscIdUnique 420
 quoteTypeKey = mkPreludeMiscIdUnique 421
+
+-- data RuleBndr = ...
+ruleVarIdKey, typedRuleVarIdKey :: Unique
+ruleVarIdKey      = mkPreludeMiscIdUnique 422
+typedRuleVarIdKey = mkPreludeMiscIdUnique 423

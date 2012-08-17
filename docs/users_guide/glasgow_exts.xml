@@ -71,17 +71,18 @@ documentation</ulink> describes all the libraries that come with GHC.
 <para>GHC is built on a raft of primitive data types and operations;
 "primitive" in the sense that they cannot be defined in Haskell itself.
 While you really can use this stuff to write fast code,
-  we generally find it a lot less painful, and more satisfying in the
-  long run, to use higher-level language features and libraries.  With
-  any luck, the code you write will be optimised to the efficient
-  unboxed version in any case.  And if it isn't, we'd like to know
-  about it.</para>
+we generally find it a lot less painful, and more satisfying in the
+long run, to use higher-level language features and libraries.  With
+any luck, the code you write will be optimised to the efficient
+unboxed version in any case.  And if it isn't, we'd like to know
+about it.</para>
 
 <para>All these primitive data types and operations are exported by the
 library <literal>GHC.Prim</literal>, for which there is
 <ulink url="&libraryGhcPrimLocation;/GHC-Prim.html">detailed online documentation</ulink>.
 (This documentation is generated from the file <filename>compiler/prelude/primops.txt.pp</filename>.)
 </para>
+
 <para>
 If you want to mention any of the primitive data types or operations in your
 program, you must first import <literal>GHC.Prim</literal> to bring them
@@ -94,8 +95,7 @@ and <link linkend="unboxed-tuples">unboxed tuples</link>, which
 we briefly summarise here. </para>
 
 <sect2 id="glasgow-unboxed">
-<title>Unboxed types
-</title>
+<title>Unboxed types</title>
 
 <para>
 <indexterm><primary>Unboxed types (Glasgow extension)</primary></indexterm>
@@ -202,8 +202,7 @@ since <literal>b</literal> has type <literal>Int#</literal>.
 </sect2>
 
 <sect2 id="unboxed-tuples">
-<title>Unboxed Tuples
-</title>
+<title>Unboxed tuples</title>
 
 <para>
 Unboxed tuples aren't really exported by <literal>GHC.Exts</literal>;
@@ -238,45 +237,18 @@ tuples to avoid unnecessary allocation during sequences of operations.
 </para>
 
 <para>
-There are some pretty stringent restrictions on the use of unboxed tuples:
+There are some restrictions on the use of unboxed tuples:
 <itemizedlist>
-<listitem>
 
+<listitem>
 <para>
 Values of unboxed tuple types are subject to the same restrictions as
 other unboxed types; i.e. they may not be stored in polymorphic data
 structures or passed to polymorphic functions.
-
 </para>
 </listitem>
+
 <listitem>
-
-<para>
-No variable can have an unboxed tuple type, nor may a constructor or function
-argument have an unboxed tuple type.  The following are all illegal:
-<programlisting>
-  data Foo = Foo (# Int, Int #)
-
-  f :: (# Int, Int #) -&#62; (# Int, Int #)
-  f x = x
-
-  g :: (# Int, Int #) -&#62; Int
-  g (# a,b #) = a
-
-  h x = let y = (# x,x #) in ...
-</programlisting>
-</para>
-</listitem>
-<listitem>
-<para>
-Unboxed tuples may not be nested. So this is illegal:
-<programlisting>
-f :: (# Int, (# Int, Int #), Bool #)
-</programlisting>
-</para>
-</listitem>
-</itemizedlist>
-</para>
 <para>
 The typical use of unboxed tuples is simply to return multiple values,
 binding those multiple results with a <literal>case</literal> expression, thus:
@@ -298,6 +270,10 @@ above example desugars like this:
         in ..body..
 </programlisting>
 Indeed, the bindings can even be recursive.
+</para>
+</listitem>
+</itemizedlist>
+
 </para>
 
 </sect2>
@@ -1667,6 +1643,48 @@ Because there is no unboxed unit tuple, the following expression
 continues to stand for the unboxed singleton tuple data constructor.
 </para>
 
+</sect2>
+
+<sect2 id="lambda-case">
+<title>Lambda-case</title>
+<para>
+The <option>-XLambdaCase</option> flag enables expressions of the form
+<programlisting>
+  \case { p1 -> e1; ...; pN -> eN }
+</programlisting>
+which is equivalent to
+<programlisting>
+  \freshName -> case freshName of { p1 -> e1; ...; pN -> eN }
+</programlisting>
+Note that <literal>\case</literal> starts a layout, so you can write
+<programlisting>
+  \case
+    p1 -> e1
+    ...
+    pN -> eN
+</programlisting>
+</para>
+</sect2>
+
+<sect2 id="multi-way-if">
+<title>Multi-way if-expressions</title>
+<para>
+With <option>-XMultiWayIf</option> flag GHC accepts conditional expressions
+with multiple branches:
+<programlisting>
+  if | guard1 -> expr1
+     | ...
+     | guardN -> exprN
+</programlisting>
+which is roughly equivalent to
+<programlisting>
+  case () of
+    _ | guard1 -> expr1
+    ...
+    _ | guardN -> exprN
+</programlisting>
+except that multi-way if-expressions do not alter the layout.
+</para>
 </sect2>
 
 <sect2 id="disambiguate-fields">
@@ -3339,8 +3357,9 @@ then writing the data type instance by hand.
 </listitem>
 
 <listitem><para> With <option>-XDeriveGeneric</option>, you can derive
-instances of  the class <literal>Generic</literal>, defined in
-<literal>GHC.Generics</literal>. You can use these to define generic functions,
+instances of the classes <literal>Generic</literal> and
+<literal>Generic1</literal>, defined in <literal>GHC.Generics</literal>.
+You can use these to define generic functions,
 as described in <xref linkend="generic-programming"/>.
 </para></listitem>
 
@@ -7022,6 +7041,94 @@ If you supply a type signature, then the flag has no effect.
 </sect1>
 <!-- ==================== End of type system extensions =================  -->
 
+<sect1 id="defer-type-errors">
+<title>Deferring type errors to runtime</title>
+  <para>
+    While developing, sometimes it is desirable to allow compilation to succeed
+    even if there are type errors in the code. Consider the following case:
+<programlisting>
+module Main where
+
+a :: Int
+a = 'a'
+
+main = print "b"
+</programlisting>
+    Even though <literal>a</literal> is ill-typed, it is not used in the end, so if
+    all that we're interested in is <literal>main</literal> it can be useful to be
+    able to ignore the problems in <literal>a</literal>.
+  </para>
+  <para>
+    For more motivation and details please refer to the <ulink
+      url="http://hackage.haskell.org/trac/ghc/wiki/DeferErrorsToRuntime">HaskellWiki</ulink>
+    page or the <ulink
+      url="http://research.microsoft.com/en-us/um/people/simonpj/papers/ext-f/">original
+      paper</ulink>.
+  </para>
+
+<sect2><title>Enabling deferring of type errors</title>
+  <para>
+    The flag <literal>-fdefer-type-errors</literal> controls whether type
+    errors are deferred to runtime. Type errors will still be emitted as
+    warnings, but will not prevent compilation.
+  </para>
+  <para>
+    At runtime, whenever a term containing a type error would need to be
+    evaluated, the error is converted into a runtime exception.
+    Note that type errors are deferred as much as possible during runtime, but
+    invalid coercions are never performed, even when they would ultimately
+    result in a value of the correct type. For example, given the following
+    code:
+<programlisting>
+x :: Int
+x = 0
+
+y :: Char
+y = x
+
+z :: Int
+z = y
+</programlisting>
+    evaluating <literal>x</literal> will result in a runtime type error.
+  </para>
+</sect2>
+<sect2><title>Deferred type errors in GHCi</title>
+  <para>
+    The flag <literal>-fdefer-type-errors</literal> works in GHCi as well, with
+    one exception: for "naked" expressions typed at the prompt, type
+    errors don't get delayed, so for example:
+<programlisting>
+Prelude> fst (True, 1 == 'a')
+
+&lt;interactive&gt;:2:12:
+    No instance for (Num Char) arising from the literal `1'
+    Possible fix: add an instance declaration for (Num Char)
+    In the first argument of `(==)', namely `1'
+    In the expression: 1 == 'a'
+    In the first argument of `fst', namely `(True, 1 == 'a')'
+</programlisting>
+Otherwise, in the common case of a simple type error such as 
+typing <literal>reverse True</literal> at the prompt, you would get a warning and then
+an immediately-following type error when the expression is evaluated.
+  </para>
+  <para>
+    This exception doesn't apply to statements, as the following example demonstrates:
+<programlisting>
+Prelude> let x = (True, 1 == 'a')
+
+&lt;interactive&gt;:3:16: Warning:
+    No instance for (Num Char) arising from the literal `1'
+    Possible fix: add an instance declaration for (Num Char)
+    In the first argument of `(==)', namely `1'
+    In the expression: 1 == 'a'
+    In the expression: (True, 1 == 'a')
+Prelude> fst x
+True
+</programlisting>
+  </para>
+</sect2>
+</sect1>
+
 <!-- ====================== TEMPLATE HASKELL =======================  -->
 
 <sect1 id="template-haskell">
@@ -9884,8 +9991,9 @@ data (:*:) f g p = f p :*: g p
 </para>
 
 <para>
-The <literal>Generic</literal> class mediates between user-defined datatypes
-and their internal representation as a sum-of-products:
+The <literal>Generic</literal> and <literal>Generic1</literal> classes mediate
+between user-defined datatypes and their internal representation as a
+sum-of-products:
 
 <programlisting>
 class Generic a where
@@ -9895,9 +10003,17 @@ class Generic a where
   from  :: a -> (Rep a) x
   -- Convert from the representation to the datatype
   to    :: (Rep a) x -> a
+
+class Generic1 f where
+  type Rep1 f :: * -> *
+
+  from1  :: f a -> Rep1 f a
+  to1    :: Rep1 f a -> f a
 </programlisting>
 
-Instances of this class can be derived by GHC with the
+<literal>Generic1</literal> is used for functions that can only be defined over
+type containers, such as <literal>map</literal>.
+Instances of these classes can be derived by GHC with the
 <option>-XDeriveGeneric</option> (<xref linkend="deriving-typeable"/>), and are
 necessary to be able to define generic instances automatically.
 </para>
@@ -9912,7 +10028,7 @@ instance Generic (UserTree a) where
   type Rep (UserTree a) =
     M1 D D1UserTree (
           M1 C C1_0UserTree (
-                M1 S NoSelector (K1 P a)
+                M1 S NoSelector (K1 R a)
             :*: M1 S NoSelector (K1 R (UserTree a))
             :*: M1 S NoSelector (K1 R (UserTree a)))
       :+: M1 C C1_1UserTree U1)
@@ -10007,17 +10123,20 @@ instance (Serialize a) => Serialize (UserTree a)
 
 The default method for <literal>put</literal> is then used, corresponding to the
 generic implementation of serialization.
+
+For more examples of generic functions please refer to the
+<ulink url="http://hackage.haskell.org/package/generic-deriving">generic-deriving</ulink>
+package on Hackage.
 </para>
 </sect2>
-
 
 <sect2>
 <title>More information</title>
 
 <para>
-For more detail please refer to the
-<ulink url="http://www.haskell.org/haskellwiki/Generics">HaskellWiki page</ulink>
-or the original paper:
+For more details please refer to the
+<ulink url="http://www.haskell.org/haskellwiki/GHC.Generics">HaskellWiki
+page</ulink> or the original paper:
 </para>
 
 <itemizedlist>
@@ -10032,12 +10151,6 @@ Jose Pedro Magalhaes, Atze Dijkstra, Johan Jeuring, and Andres Loeh.
 </listitem>
 </itemizedlist>
 
-<emphasis>Note</emphasis>: the current support for generic programming in GHC
-is preliminary. In particular, we only allow deriving instances for the
-<literal>Generic</literal> class. Support for deriving
-<literal>Generic1</literal> (and thus enabling generic functions of kind
-<literal>* -> *</literal> such as <literal>fmap</literal>) will come at a
-later stage.
 </sect2>
 
 </sect1>

@@ -102,14 +102,14 @@ infixl 4 `mkCoreApp`, `mkCoreApps`
 \begin{code}
 sortQuantVars :: [Var] -> [Var]
 -- Sort the variables (KindVars, TypeVars, and Ids) 
--- into order: Type, then Kind, then Id
+-- into order: Kind, then Type, then Id
 sortQuantVars = sortBy (comparing withCategory)
   where
     withCategory v = (category v, v)
     category :: Var -> Int
     category v
-     | isTyVar   v = 1
-     | isKindVar v = 2
+     | isKindVar v = 1
+     | isTyVar   v = 2
      | otherwise   = 3
 
 -- | Bind a binding group over an expression, using a @let@ or @case@ as
@@ -283,11 +283,11 @@ mkStringExprFS str
 
   | all safeChar chars
   = do unpack_id <- lookupId unpackCStringName
-       return (App (Var unpack_id) (Lit (MachStr str)))
+       return (App (Var unpack_id) (Lit (MachStr (fastStringToFastBytes str))))
 
   | otherwise
   = do unpack_id <- lookupId unpackCStringUtf8Name
-       return (App (Var unpack_id) (Lit (MachStr str)))
+       return (App (Var unpack_id) (Lit (MachStr (fastStringToFastBytes str))))
 
   where
     chars = unpackFS str

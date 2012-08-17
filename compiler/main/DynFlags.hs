@@ -11,6 +11,9 @@
 --
 -------------------------------------------------------------------------------
 
+{-# OPTIONS_GHC -fno-warn-missing-fields #-}
+-- So that tracingSettings works properly
+
 module DynFlags (
         -- * Dynamic flags and associated configuration types
         DynFlag(..),
@@ -43,6 +46,7 @@ module DynFlags (
         DynLibLoader(..),
         fFlags, fWarningFlags, fLangFlags, xFlags,
         wayNames, dynFlagDependencies,
+        tablesNextToCode, mkTablesNextToCode,
 
         printOutputForUser, printInfoForUser,
 
@@ -83,12 +87,18 @@ module DynFlags (
         -- ** Parsing DynFlags
         parseDynamicFlagsCmdLine,
         parseDynamicFilePragma,
+        parseDynamicFlagsFull,
+
+        -- ** Available DynFlags
         allFlags,
+        flagsAll,
+        flagsDynamic,
+        flagsPackage,
 
         supportedLanguagesAndExtensions,
 
         -- ** DynFlag C compiler options
-        picCCOpts,
+        picCCOpts, picPOpts,
 
         -- * Configuration of the stg-to-stg passes
         StgToDo(..),
@@ -158,9 +168,9 @@ data DynFlag
    = Opt_D_dump_cmm
    | Opt_D_dump_raw_cmm
    | Opt_D_dump_cmmz
-   | Opt_D_dump_cmmz_pretty
    -- All of the cmmz subflags (there are a lot!)  Automatically
    -- enabled if you run -ddump-cmmz
+   | Opt_D_dump_cmmz_cfg
    | Opt_D_dump_cmmz_cbe
    | Opt_D_dump_cmmz_proc
    | Opt_D_dump_cmmz_spills
@@ -270,6 +280,8 @@ data DynFlag
    | Opt_LlvmTBAA                       -- Use LLVM TBAA infastructure for improving AA (hidden flag)
    | Opt_RegLiveness                    -- Use the STG Reg liveness information (hidden flag)
    | Opt_IrrefutableTuples
+   | Opt_CmmSink
+   | Opt_CmmElimCommonBlocks
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -311,6 +323,8 @@ data DynFlag
    | Opt_DeferTypeErrors
    | Opt_Parallel
    | Opt_GranMacros
+   | Opt_PIC
+   | Opt_SccProfilingOn
 
    -- output style opts
    | Opt_PprCaseAsLet
@@ -373,6 +387,7 @@ data WarningFlag =
    | Opt_WarnSafe
    | Opt_WarnPointlessPragmas
    | Opt_WarnUnsupportedCallingConventions
+   | Opt_WarnInlineRuleShadowing
    deriving (Eq, Show, Enum)
 
 data Language = Haskell98 | Haskell2010
@@ -479,6 +494,8 @@ data ExtensionFlag
    | Opt_NondecreasingIndentation
    | Opt_RelaxedLayout
    | Opt_TraditionalRecordSyntax
+   | Opt_LambdaCase
+   | Opt_MultiWayIf
    deriving (Eq, Enum, Show)
 
 -- | Contains not only a collection of 'DynFlag's but also a plethora of
@@ -656,6 +673,9 @@ data Settings = Settings {
   sRawSettings           :: [(String, String)],
   sExtraGccViaCFlags     :: [String],
   sSystemPackageConfig   :: FilePath,
+  sLdSupportsCompactUnwind :: Bool,
+  sLdSupportsBuildId       :: Bool,
+  sLdIsGnuLd               :: Bool,
   -- commands for particular phases
   sPgm_L                 :: String,
   sPgm_P                 :: (String,[Option]),
@@ -851,16 +871,28 @@ data PackageFlag
   | DistrustPackage String
   deriving Eq
 
-defaultHscTarget :: HscTarget
+defaultHscTarget :: Platform -> HscTarget
 defaultHscTarget = defaultObjectTarget
 
 -- | The 'HscTarget' value corresponding to the default way to create
 -- object files on the current platform.
-defaultObjectTarget :: HscTarget
-defaultObjectTarget
-  | cGhcUnregisterised    == "YES"      =  HscC
+defaultObjectTarget :: Platform -> HscTarget
+defaultObjectTarget platform
+  | platformUnregisterised platform     =  HscC
   | cGhcWithNativeCodeGen == "YES"      =  HscAsm
   | otherwise                           =  HscLlvm
+
+tablesNextToCode :: DynFlags -> Bool
+tablesNextToCode dflags
+    = mkTablesNextToCode (platformUnregisterised (targetPlatform dflags))
+
+-- Determines whether we will be compiling
+-- info tables that reside just before the entry code, or with an
+-- indirection to the entry code.  See TABLES_NEXT_TO_CODE in
+-- includes/rts/storage/InfoTables.h.
+mkTablesNextToCode :: Bool -> Bool
+mkTablesNextToCode unregisterised
+    = not unregisterised && cGhcEnableTablesNextToCode == "YES"
 
 data DynLibLoader
   = Deployable
@@ -896,7 +928,7 @@ defaultDynFlags mySettings =
      DynFlags {
         ghcMode                 = CompManager,
         ghcLink                 = LinkBinary,
-        hscTarget               = defaultHscTarget,
+        hscTarget               = defaultHscTarget (sTargetPlatform mySettings),
         hscOutName              = "",
         extCoreName             = "",
         verbosity               = 0,
@@ -966,7 +998,7 @@ defaultDynFlags mySettings =
         dirsToClean    = panic "defaultDynFlags: No dirsToClean",
         generatedDumps = panic "defaultDynFlags: No generatedDumps",
         haddockOptions = Nothing,
-        flags = IntSet.fromList (map fromEnum defaultFlags),
+        flags = IntSet.fromList (map fromEnum (defaultFlags (sTargetPlatform mySettings))),
         warningFlags = IntSet.fromList (map fromEnum standardWarnings),
         ghciScripts = [],
         language = Nothing,
@@ -989,6 +1021,7 @@ defaultDynFlags mySettings =
         interactivePrint = Nothing
       }
 
+--------------------------------------------------------------------------
 -- Do not use tracingDynFlags!
 -- tracingDynFlags is a hack, necessary because we need to be able to
 -- show SDocs when tracing, but we don't always have DynFlags available.
@@ -997,7 +1030,16 @@ defaultDynFlags mySettings =
 -- undefined.
 tracingDynFlags :: DynFlags
 tracingDynFlags = defaultDynFlags tracingSettings
-    where tracingSettings = panic "Settings not defined in tracingDynFlags"
+
+tracingSettings :: Settings
+tracingSettings = trace "panic: Settings not defined in tracingDynFlags" $
+                  Settings { sTargetPlatform = tracingPlatform }
+                  -- Missing flags give a nice error
+
+tracingPlatform :: Platform
+tracingPlatform = Platform { platformWordSize = 4, platformOS = OSUnknown }
+                  -- Missing flags give a nice error
+--------------------------------------------------------------------------
 
 type FatalMessager = String -> IO ()
 type LogAction = DynFlags -> Severity -> SrcSpan -> PprStyle -> MsgDoc -> IO ()
@@ -1009,7 +1051,7 @@ defaultLogAction :: LogAction
 defaultLogAction dflags severity srcSpan style msg
     = case severity of
       SevOutput -> printSDoc msg style
-      SevDump   -> hPrintDump dflags stdout msg
+      SevDump   -> printSDoc (msg $$ blankLine) style
       SevInfo   -> printErrs msg style
       SevFatal  -> printErrs msg style
       _         -> do hPutChar stderr '\n'
@@ -1392,31 +1434,39 @@ getStgToDo dflags
 -- -----------------------------------------------------------------------------
 -- Parsing the dynamic flags.
 
+
 -- | Parse dynamic flags from a list of command line arguments.  Returns the
 -- the parsed 'DynFlags', the left-over arguments, and a list of warnings.
 -- Throws a 'UsageError' if errors occurred during parsing (such as unknown
 -- flags or missing arguments).
-parseDynamicFlagsCmdLine :: Monad m =>
-                     DynFlags -> [Located String]
-                  -> m (DynFlags, [Located String], [Located String])
-                     -- ^ Updated 'DynFlags', left-over arguments, and
-                     -- list of warnings.
-parseDynamicFlagsCmdLine dflags args = parseDynamicFlags dflags args True
+parseDynamicFlagsCmdLine :: Monad m => DynFlags -> [Located String]
+                         -> m (DynFlags, [Located String], [Located String])
+                            -- ^ Updated 'DynFlags', left-over arguments, and
+                            -- list of warnings.
+parseDynamicFlagsCmdLine = parseDynamicFlagsFull flagsAll True
+
 
 -- | Like 'parseDynamicFlagsCmdLine' but does not allow the package flags
 -- (-package, -hide-package, -ignore-package, -hide-all-packages, -package-db).
 -- Used to parse flags set in a modules pragma.
-parseDynamicFilePragma :: Monad m =>
-                     DynFlags -> [Located String]
-                  -> m (DynFlags, [Located String], [Located String])
-                     -- ^ Updated 'DynFlags', left-over arguments, and
-                     -- list of warnings.
-parseDynamicFilePragma dflags args = parseDynamicFlags dflags args False
+parseDynamicFilePragma :: Monad m => DynFlags -> [Located String]
+                       -> m (DynFlags, [Located String], [Located String])
+                          -- ^ Updated 'DynFlags', left-over arguments, and
+                          -- list of warnings.
+parseDynamicFilePragma = parseDynamicFlagsFull flagsDynamic False
 
-parseDynamicFlags :: Monad m =>
-                      DynFlags -> [Located String] -> Bool
+
+-- | Parses the dynamically set flags for GHC. This is the most general form of
+-- the dynamic flag parser that the other methods simply wrap. It allows
+-- saying which flags are valid flags and indicating if we are parsing
+-- arguments from the command line or from a file pragma.
+parseDynamicFlagsFull :: Monad m
+                  => [Flag (CmdLineP DynFlags)]    -- ^ valid flags to match against
+                  -> Bool                          -- ^ are the arguments from the command line?
+                  -> DynFlags                      -- ^ current dynamic flags
+                  -> [Located String]              -- ^ arguments to parse
                   -> m (DynFlags, [Located String], [Located String])
-parseDynamicFlags dflags0 args cmdline = do
+parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
   -- XXX Legacy support code
   -- We used to accept things like
   --     optdep-f  -optdepdepend
@@ -1429,12 +1479,8 @@ parseDynamicFlags dflags0 args cmdline = do
       f xs = xs
       args' = f args
 
-      -- Note: -ignore-package (package_flags) must precede -i* (dynamic_flags)
-      flag_spec | cmdline   = package_flags ++ dynamic_flags
-                | otherwise = dynamic_flags
-
   let ((leftover, errs, warns), dflags1)
-          = runCmdLine (processArgs flag_spec args') dflags0
+          = runCmdLine (processArgs activeFlags args') dflags0
   when (not (null errs)) $ ghcError $ errorsToGhcException errs
 
   -- check for disabled flags in safe haskell
@@ -1442,8 +1488,12 @@ parseDynamicFlags dflags0 args cmdline = do
 
   return (dflags2, leftover, sh_warns ++ warns)
 
+
 -- | Check (and potentially disable) any extensions that aren't allowed
 -- in safe mode.
+--
+-- The bool is to indicate if we are parsing command line flags (false means
+-- file pragma). This allows us to generate better warnings.
 safeFlagCheck :: Bool -> DynFlags -> (DynFlags, [Located String])
 safeFlagCheck _  dflags | not (safeLanguageOn dflags || safeInferOn dflags)
                         = (dflags, [])
@@ -1489,6 +1539,8 @@ safeFlagCheck cmdl dflags =
 %*                                                                      *
 %********************************************************************* -}
 
+-- | All dynamic flags option strings. These are the user facing strings for
+-- enabling and disabling options.
 allFlags :: [String]
 allFlags = map ('-':) $
            [ flagName flag | flag <- dynamic_flags ++ package_flags, ok (flagOptKind flag) ] ++
@@ -1501,6 +1553,23 @@ allFlags = map ('-':) $
           fflags0 = [ name | (name, _, _) <- fFlags ]
           fflags1 = [ name | (name, _, _) <- fWarningFlags ]
           fflags2 = [ name | (name, _, _) <- fLangFlags ]
+
+{-
+ - Below we export user facing symbols for GHC dynamic flags for use with the
+ - GHC API.
+ -}
+
+-- All dynamic flags present in GHC.
+flagsAll :: [Flag (CmdLineP DynFlags)]
+flagsAll     = package_flags ++ dynamic_flags
+
+-- All dynamic flags, minus package flags, present in GHC.
+flagsDynamic :: [Flag (CmdLineP DynFlags)]
+flagsDynamic = dynamic_flags
+
+-- ALl package flags present in GHC.
+flagsPackage :: [Flag (CmdLineP DynFlags)]
+flagsPackage = package_flags
 
 --------------- The main flags themselves ------------------
 dynamic_flags :: [Flag (CmdLineP DynFlags)]
@@ -1642,7 +1711,7 @@ dynamic_flags = [
   , Flag "ddump-cmm"               (setDumpFlag Opt_D_dump_cmm)
   , Flag "ddump-raw-cmm"           (setDumpFlag Opt_D_dump_raw_cmm)
   , Flag "ddump-cmmz"              (setDumpFlag Opt_D_dump_cmmz)
-  , Flag "ddump-cmmz-pretty"       (setDumpFlag Opt_D_dump_cmmz_pretty)
+  , Flag "ddump-cmmz-cfg"          (setDumpFlag Opt_D_dump_cmmz_cbe)
   , Flag "ddump-cmmz-cbe"          (setDumpFlag Opt_D_dump_cmmz_cbe)
   , Flag "ddump-cmmz-spills"       (setDumpFlag Opt_D_dump_cmmz_spills)
   , Flag "ddump-cmmz-proc"         (setDumpFlag Opt_D_dump_cmmz_proc)
@@ -1800,13 +1869,15 @@ dynamic_flags = [
   , Flag "fno-code"         (NoArg (do upd $ \d -> d{ ghcLink=NoLink }
                                        setTarget HscNothing))
   , Flag "fbyte-code"       (NoArg (setTarget HscInterpreted))
-  , Flag "fobject-code"     (NoArg (setTarget defaultHscTarget))
+  , Flag "fobject-code"     (NoArg (setTargetWithPlatform defaultHscTarget))
   , Flag "fglasgow-exts"    (NoArg (enableGlasgowExts >> deprecate "Use individual extensions instead"))
   , Flag "fno-glasgow-exts" (NoArg (disableGlasgowExts >> deprecate "Use individual extensions instead"))
 
         ------ Safe Haskell flags -------------------------------------------
   , Flag "fpackage-trust"   (NoArg setPackageTrust)
   , Flag "fno-safe-infer"   (NoArg (setSafeHaskell Sf_None))
+  , Flag "fPIC"             (NoArg setFPIC)
+  , Flag "fno-PIC"          (NoArg unSetFPIC)
  ]
  ++ map (mkFlag turnOn  ""     setDynFlag  ) negatableFlags
  ++ map (mkFlag turnOff "no-"  unSetDynFlag) negatableFlags
@@ -1930,7 +2001,8 @@ fWarningFlags = [
   ( "warn-unsafe",                      Opt_WarnUnsafe, setWarnUnsafe ),
   ( "warn-safe",                        Opt_WarnSafe, setWarnSafe ),
   ( "warn-pointless-pragmas",           Opt_WarnPointlessPragmas, nop ),
-  ( "warn-unsupported-calling-conventions", Opt_WarnUnsupportedCallingConventions, nop ) ]
+  ( "warn-unsupported-calling-conventions", Opt_WarnUnsupportedCallingConventions, nop ),
+  ( "warn-inline-rule-shadowing",       Opt_WarnInlineRuleShadowing, nop ) ]
 
 -- | These @-\<blah\>@ flags can all be reversed with @-no-\<blah\>@
 negatableFlags :: [FlagSpec DynFlag]
@@ -1985,6 +2057,8 @@ fFlags = [
   ( "llvm-tbaa",                        Opt_LlvmTBAA, nop), -- hidden flag
   ( "regs-liveness",                    Opt_RegLiveness, nop), -- hidden flag
   ( "irrefutable-tuples",               Opt_IrrefutableTuples, nop ),
+  ( "cmm-sink",                         Opt_CmmSink, nop ),
+  ( "cmm-elim-common-blocks",           Opt_CmmElimCommonBlocks, nop ),
   ( "gen-manifest",                     Opt_GenManifest, nop ),
   ( "embed-manifest",                   Opt_EmbedManifest, nop ),
   ( "ext-core",                         Opt_EmitExternalCore, nop ),
@@ -1994,6 +2068,7 @@ fFlags = [
   ( "helpful-errors",                   Opt_HelpfulErrors, nop ),
   ( "defer-type-errors",                Opt_DeferTypeErrors, nop ),
   ( "parallel",                         Opt_Parallel, nop ),
+  ( "scc-profiling",                    Opt_SccProfilingOn, nop ),
   ( "gransim",                          Opt_GranMacros, nop ),
   ( "building-cabal-package",           Opt_BuildingCabalPackage, nop ),
   ( "implicit-import-qualified",        Opt_ImplicitImportQualified, nop ),
@@ -2129,6 +2204,8 @@ xFlags = [
   ( "NondecreasingIndentation",         Opt_NondecreasingIndentation, nop ),
   ( "RelaxedLayout",                    Opt_RelaxedLayout, nop ),
   ( "TraditionalRecordSyntax",          Opt_TraditionalRecordSyntax, nop ),
+  ( "LambdaCase",                       Opt_LambdaCase, nop ),
+  ( "MultiWayIf",                       Opt_MultiWayIf, nop ),
   ( "MonoLocalBinds",                   Opt_MonoLocalBinds, nop ),
   ( "RelaxedPolyRec",                   Opt_RelaxedPolyRec,
     \ turn_on -> if not turn_on
@@ -2162,8 +2239,8 @@ xFlags = [
   ( "PackageImports",                   Opt_PackageImports, nop )
   ]
 
-defaultFlags :: [DynFlag]
-defaultFlags
+defaultFlags :: Platform -> [DynFlag]
+defaultFlags platform
   = [ Opt_AutoLinkPackages,
 
       Opt_SharedImplib,
@@ -2183,6 +2260,14 @@ defaultFlags
 
     ++ [f | (ns,f) <- optLevelFlags, 0 `elem` ns]
              -- The default -O0 options
+
+    ++ (case platformOS platform of
+        OSDarwin ->
+            case platformArch platform of
+            ArchX86_64         -> [Opt_PIC]
+            _ | not opt_Static -> [Opt_PIC]
+            _                  -> []
+        _ -> [])
 
 impliedFlags :: [(ExtensionFlag, TurnOnFlag, ExtensionFlag)]
 impliedFlags
@@ -2246,6 +2331,8 @@ optLevelFlags
     , ([2],     Opt_RegsGraph)
     , ([0,1,2], Opt_LlvmTBAA)
     , ([0,1,2], Opt_RegLiveness)
+    , ([1,2],   Opt_CmmSink)
+    , ([1,2],   Opt_CmmElimCommonBlocks)
 
 --     , ([2],     Opt_StaticArgumentTransformation)
 -- Max writes: I think it's probably best not to enable SAT with -O2 for the
@@ -2281,7 +2368,8 @@ standardWarnings
         Opt_WarnWrongDoBind,
         Opt_WarnAlternativeLayoutRuleTransitional,
         Opt_WarnPointlessPragmas,
-        Opt_WarnUnsupportedCallingConventions
+        Opt_WarnUnsupportedCallingConventions,
+        Opt_WarnInlineRuleShadowing
       ]
 
 minusWOpts :: [WarningFlag]
@@ -2552,11 +2640,15 @@ setPackageName p s =  s{ thisPackage = stringToPackageId p }
 -- If we're linking a binary, then only targets that produce object
 -- code are allowed (requests for other target types are ignored).
 setTarget :: HscTarget -> DynP ()
-setTarget l = upd set
+setTarget l = setTargetWithPlatform (const l)
+
+setTargetWithPlatform :: (Platform -> HscTarget) -> DynP ()
+setTargetWithPlatform f = upd set
   where
-   set dfs
-     | ghcLink dfs /= LinkBinary || isObjectTarget l  = dfs{ hscTarget = l }
-     | otherwise = dfs
+   set dfs = let l = f (targetPlatform dfs)
+             in if ghcLink dfs /= LinkBinary || isObjectTarget l
+                then dfs{ hscTarget = l }
+                else dfs
 
 -- Changes the target only if we're compiling object code.  This is
 -- used by -fasm and -fllvm, which switch from one to the other, but
@@ -2569,7 +2661,7 @@ setObjTarget l = updM set
      | isObjectTarget (hscTarget dflags)
        = case l of
          HscC
-          | cGhcUnregisterised /= "YES" ->
+          | platformUnregisterised (targetPlatform dflags) ->
              do addWarn ("Compiler not unregisterised, so ignoring " ++ flag)
                 return dflags
          HscAsm
@@ -2579,7 +2671,7 @@ setObjTarget l = updM set
                 return dflags
          HscLlvm
           | not ((arch == ArchX86_64) && (os == OSLinux || os == OSDarwin)) &&
-            (not opt_Static || opt_PIC)
+            (not opt_Static || dopt Opt_PIC dflags)
             ->
              do addWarn ("Ignoring " ++ flag ++ " as it is incompatible with -fPIC and -dynamic on this platform")
                 return dflags
@@ -2589,6 +2681,37 @@ setObjTarget l = updM set
            arch = platformArch platform
            os   = platformOS   platform
            flag = showHscTargetFlag l
+
+setFPIC :: DynP ()
+setFPIC = updM set
+  where
+   set dflags
+    | cGhcWithNativeCodeGen == "YES" || platformUnregisterised (targetPlatform dflags)
+       = let platform = targetPlatform dflags
+         in case hscTarget dflags of
+            HscLlvm
+             | (platformArch platform == ArchX86_64) &&
+               (platformOS platform `elem` [OSLinux, OSDarwin]) ->
+                do addWarn "Ignoring -fPIC as it is incompatible with LLVM on this platform"
+                   return dflags
+            _ -> return $ dopt_set dflags Opt_PIC
+    | otherwise
+       = ghcError $ CmdLineError "-fPIC is not supported on this platform"
+
+unSetFPIC :: DynP ()
+unSetFPIC = updM set
+  where
+   set dflags
+       = let platform = targetPlatform dflags
+         in case platformOS platform of
+            OSDarwin
+             | platformArch platform == ArchX86_64 ->
+                do addWarn "Ignoring -fno-PIC on this platform"
+                   return dflags
+            _ | not opt_Static ->
+                do addWarn "Ignoring -fno-PIC as -fstatic is off"
+                   return dflags
+            _ -> return $ dopt_unset dflags Opt_PIC
 
 setOptLevel :: Int -> DynFlags -> DynP DynFlags
 setOptLevel n dflags
@@ -2749,19 +2872,24 @@ picCCOpts dflags
           --     Don't generate "common" symbols - these are unwanted
           --     in dynamic libraries.
 
-       | opt_PIC   -> ["-fno-common", "-U __PIC__", "-D__PIC__"]
-       | otherwise -> ["-mdynamic-no-pic"]
+       | dopt Opt_PIC dflags -> ["-fno-common", "-U __PIC__", "-D__PIC__"]
+       | otherwise           -> ["-mdynamic-no-pic"]
       OSMinGW32 -- no -fPIC for Windows
-       | opt_PIC   -> ["-U __PIC__", "-D__PIC__"]
-       | otherwise -> []
+       | dopt Opt_PIC dflags -> ["-U __PIC__", "-D__PIC__"]
+       | otherwise           -> []
       _
       -- we need -fPIC for C files when we are compiling with -dynamic,
       -- otherwise things like stub.c files don't get compiled
       -- correctly.  They need to reference data in the Haskell
       -- objects, but can't without -fPIC.  See
       -- http://hackage.haskell.org/trac/ghc/wiki/Commentary/PositionIndependentCode
-       | opt_PIC || not opt_Static -> ["-fPIC", "-U __PIC__", "-D__PIC__"]
-       | otherwise                 -> []
+       | dopt Opt_PIC dflags || not opt_Static -> ["-fPIC", "-U __PIC__", "-D__PIC__"]
+       | otherwise                             -> []
+
+picPOpts :: DynFlags -> [String]
+picPOpts dflags
+ | dopt Opt_PIC dflags = ["-U __PIC__", "-D__PIC__"]
+ | otherwise           = []
 
 -- -----------------------------------------------------------------------------
 -- Splitting
@@ -2792,14 +2920,11 @@ compilerInfo dflags
        ("Object splitting supported",  cSupportsSplitObjs),
        ("Have native code generator",  cGhcWithNativeCodeGen),
        ("Support SMP",                 cGhcWithSMP),
-       ("Unregisterised",              cGhcUnregisterised),
        ("Tables next to code",         cGhcEnableTablesNextToCode),
        ("RTS ways",                    cGhcRTSWays),
        ("Leading underscore",          cLeadingUnderscore),
        ("Debug on",                    show debugIsOn),
        ("LibDir",                      topDir dflags),
-       ("Global Package DB",           systemPackageConfig dflags),
-       ("Gcc Linker flags",            show cGccLinkerOpts),
-       ("Ld Linker flags",             show cLdLinkerOpts)
+       ("Global Package DB",           systemPackageConfig dflags)
       ]
 

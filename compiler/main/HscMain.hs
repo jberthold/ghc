@@ -119,13 +119,12 @@ import TyCon
 import Name
 import SimplStg         ( stg2stg )
 import CodeGen          ( codeGen )
-import OldCmm as Old    ( CmmGroup )
-import PprCmm           ( pprCmms )
+import qualified OldCmm as Old
+import qualified Cmm as New
 import CmmParse         ( parseCmmFile )
 import CmmBuildInfoTables
 import CmmPipeline
 import CmmInfo
-import OptimizationFuel ( initOptFuelState )
 import CmmCvt
 import CodeOutput
 import NameEnv          ( emptyNameEnv )
@@ -147,6 +146,9 @@ import UniqFM           ( emptyUFM )
 import UniqSupply       ( initUs_ )
 import Bag
 import Exception
+import qualified Stream
+import Stream (Stream)
+
 import Util
 
 import Data.List
@@ -172,7 +174,6 @@ newHscEnv dflags = do
     nc_var  <- newIORef (initNameCache us knownKeyNames)
     fc_var  <- newIORef emptyUFM
     mlc_var <- newIORef emptyModuleEnv
-    optFuel <- initOptFuelState
     return HscEnv {  hsc_dflags       = dflags,
                      hsc_targets      = [],
                      hsc_mod_graph    = [],
@@ -182,7 +183,6 @@ newHscEnv dflags = do
                      hsc_NC           = nc_var,
                      hsc_FC           = fc_var,
                      hsc_MLC          = mlc_var,
-                     hsc_OptFuel      = optFuel,
                      hsc_type_env_var = Nothing }
 
 
@@ -382,7 +382,7 @@ hscParse' mod_summary = do
                 srcs0 = nub $ filter (not . (tmpDir dflags `isPrefixOf`))
                             $ filter (not . (== n_hspp))
                             $ map FilePath.normalise
-                            $ filter (not . (== '<') . head)
+                            $ filter (not . (isPrefixOf "<"))
                             $ map unpackFS
                             $ srcfiles pst
                 srcs1 = case ml_hs_file (ms_location mod_summary) of
@@ -1249,7 +1249,6 @@ hscGenHardCode cgguts mod_summary = do
                     cg_dep_pkgs = dependencies,
                     cg_hpc_info = hpc_info } = cgguts
             dflags = hsc_dflags hsc_env
-            platform = targetPlatform dflags
             location = ms_location mod_summary
             data_tycons = filter isDataTyCon tycons
             -- cg_tycons includes newtypes, for the benefit of External Core,
@@ -1276,19 +1275,26 @@ hscGenHardCode cgguts mod_summary = do
                              cost_centre_info
                              stg_binds hpc_info
                     else {-# SCC "CodeGen" #-}
-                         codeGen dflags this_mod data_tycons
-                             cost_centre_info
-                             stg_binds hpc_info
+                         return (codeGen dflags this_mod data_tycons
+                               cost_centre_info
+                               stg_binds hpc_info)
+
 
         ------------------  Code output -----------------------
-        rawcmms <- {-# SCC "cmmToRawCmm" #-}
-                   cmmToRawCmm platform cmms
-        dumpIfSet_dyn dflags Opt_D_dump_raw_cmm "Raw Cmm" (ppr rawcmms)
+        rawcmms0 <- {-# SCC "cmmToRawCmm" #-}
+                   cmmToRawCmm dflags cmms
+
+        let dump a = do dumpIfSet_dyn dflags Opt_D_dump_raw_cmm "Raw Cmm"
+                           (ppr a)
+                        return a
+            rawcmms1 = Stream.mapM dump rawcmms0
+
         (_stub_h_exists, stub_c_exists)
             <- {-# SCC "codeOutput" #-}
                codeOutput dflags this_mod location foreign_stubs
-               dependencies rawcmms
+               dependencies rawcmms1
         return stub_c_exists
+
 
 hscInteractive :: (ModIface, ModDetails, CgGuts)
                -> ModSummary
@@ -1335,7 +1341,7 @@ hscCompileCmmFile hsc_env filename = runHsc hsc_env $ do
     let dflags = hsc_dflags hsc_env
     cmm <- ioMsgMaybe $ parseCmmFile dflags filename
     liftIO $ do
-        rawCmms <- cmmToRawCmm (targetPlatform dflags) [cmm]
+        rawCmms <- cmmToRawCmm dflags (Stream.yield cmm)
         _ <- codeOutput dflags no_mod no_loc NoStubs [] rawCmms
         return ()
   where
@@ -1350,24 +1356,52 @@ tryNewCodeGen   :: HscEnv -> Module -> [TyCon]
                 -> CollectedCCs
                 -> [(StgBinding,[(Id,[Id])])]
                 -> HpcInfo
-                -> IO [Old.CmmGroup]
+                -> IO (Stream IO Old.CmmGroup ())
+         -- Note we produce a 'Stream' of CmmGroups, so that the
+         -- backend can be run incrementally.  Otherwise it generates all
+         -- the C-- up front, which has a significant space cost.
 tryNewCodeGen hsc_env this_mod data_tycons
               cost_centre_info stg_binds hpc_info = do
     let dflags = hsc_dflags hsc_env
-    prog <- StgCmm.codeGen dflags this_mod data_tycons
+
+    let cmm_stream :: Stream IO New.CmmGroup ()
+        cmm_stream = {-# SCC "StgCmm" #-}
+            StgCmm.codeGen dflags this_mod data_tycons
                            cost_centre_info stg_binds hpc_info
-    dumpIfSet_dyn dflags Opt_D_dump_cmmz "Cmm produced by new codegen"
-                  (pprCmms prog)
+
+        -- codegen consumes a stream of CmmGroup, and produces a new
+        -- stream of CmmGroup (not necessarily synchronised: one
+        -- CmmGroup on input may produce many CmmGroups on output due
+        -- to proc-point splitting).
+
+    let dump1 a = do dumpIfSet_dyn dflags Opt_D_dump_cmmz
+                       "Cmm produced by new codegen" (ppr a)
+                     return a
+
+        ppr_stream1 = Stream.mapM dump1 cmm_stream
 
     -- We are building a single SRT for the entire module, so
     -- we must thread it through all the procedures as we cps-convert them.
     us <- mkSplitUniqSupply 'S'
     let initTopSRT = initUs_ us emptySRT
-    (topSRT, prog) <- foldM (cmmPipeline hsc_env) (initTopSRT, []) prog
 
-    let prog' = map cmmOfZgraph (srtToData topSRT : prog)
-    dumpIfSet_dyn dflags Opt_D_dump_cmmz "Output Cmm" (ppr prog')
-    return prog'
+    let run_pipeline topSRT cmmgroup = do
+           (topSRT, cmmgroup) <- cmmPipeline hsc_env topSRT cmmgroup
+           return (topSRT,cmmOfZgraph cmmgroup)
+
+    let pipeline_stream = {-# SCC "cmmPipeline" #-} do
+          topSRT <- Stream.mapAccumL run_pipeline initTopSRT ppr_stream1
+          Stream.yield (cmmOfZgraph (srtToData topSRT))
+
+    let
+        dump2 a = do dumpIfSet_dyn dflags Opt_D_dump_cmmz "Output Cmm" $ ppr a
+                     return a
+
+        ppr_stream2 = Stream.mapM dump2 pipeline_stream
+
+    return ppr_stream2
+
+
 
 myCoreToStg :: DynFlags -> Module -> CoreProgram
             -> IO ( [(StgBinding,[(Id,[Id])])] -- output program
@@ -1475,6 +1509,8 @@ hscDeclsWithLocation hsc_env0 str source linenumber =
     let finsts = tcg_fam_insts tc_gblenv
         insts  = tcg_insts     tc_gblenv
 
+    let defaults = tcg_default tc_gblenv
+
     {- Desugar it -}
     -- We use a basically null location for iNTERACTIVE
     let iNTERACTIVELoc = ModLocation{ ml_hs_file   = Nothing,
@@ -1526,7 +1562,8 @@ hscDeclsWithLocation hsc_env0 str source linenumber =
 
     let ictxt1 = extendInteractiveContext icontext tythings
         ictxt  = ictxt1 { ic_sys_vars  = sys_vars ++ ic_sys_vars ictxt1,
-                          ic_instances = (insts, finsts) }
+                          ic_instances = (insts, finsts),
+                          ic_default   = defaults }
 
     return (tythings, ictxt)
 

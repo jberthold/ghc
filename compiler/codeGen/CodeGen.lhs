@@ -30,7 +30,7 @@ import CgHpc
 
 import CLabel
 import OldCmm
-import OldPprCmm
+import OldPprCmm ()
 
 import StgSyn
 import PrelNames
@@ -45,7 +45,14 @@ import TyCon
 import Module
 import ErrUtils
 import Panic
+import Outputable
 import Util
+
+import OrdList
+import Stream (Stream, liftIO)
+import qualified Stream
+
+import Data.IORef
 
 codeGen :: DynFlags
         -> Module                     -- Module we are compiling
@@ -53,32 +60,37 @@ codeGen :: DynFlags
         -> CollectedCCs               -- (Local/global) cost-centres needing declaring/registering.
         -> [(StgBinding,[(Id,[Id])])] -- Bindings to convert, with SRTs
         -> HpcInfo                    -- Profiling info
-        -> IO [CmmGroup]
+        -> Stream IO CmmGroup ()
               -- N.B. returning '[Cmm]' and not 'Cmm' here makes it
               -- possible for object splitting to split up the
               -- pieces later.
 
-codeGen dflags this_mod data_tycons cost_centre_info stg_binds hpc_info = do
-    showPass dflags "CodeGen"
-    code_stuff <-
-        initC dflags this_mod $ do
-            cmm_binds  <- mapM (getCmm . cgTopBinding dflags) stg_binds
-            cmm_tycons <- mapM cgTyCon data_tycons
-            cmm_init   <- getCmm (mkModuleInit dflags cost_centre_info this_mod hpc_info)
-            return (cmm_init : cmm_binds ++ cmm_tycons)
-                -- Put datatype_stuff after code_stuff, because the
-                -- datatype closure table (for enumeration types) to
-                -- (say) PrelBase_True_closure, which is defined in
-                -- code_stuff
+codeGen dflags this_mod data_tycons cost_centre_info stg_binds hpc_info
 
-                -- Note [codegen-split-init] the cmm_init block must
-                -- come FIRST.  This is because when -split-objs is on
-                -- we need to combine this block with its
-                -- initialisation routines; see Note
-                -- [pipeline-split-init].
+   = do { liftIO $ showPass dflags "CodeGen"
 
-    dumpIfSet_dyn dflags Opt_D_dump_cmm "Cmm" (pprCmms code_stuff)
-    return code_stuff
+        ; cgref <- liftIO $ newIORef =<< initC
+        ; let cg :: FCode CmmGroup -> Stream IO CmmGroup ()
+              cg fcode = do
+                cmm <- liftIO $ do
+                         st <- readIORef cgref
+                         let (a,st') = runC dflags this_mod st fcode
+
+                         dumpIfSet_dyn dflags Opt_D_dump_cmm "Cmm" $ ppr a
+
+                         -- NB. stub-out cgs_tops and cgs_stmts.  This fixes
+                         -- a big space leak.  DO NOT REMOVE!
+                         writeIORef cgref $! st'{ cgs_tops = nilOL,
+                                                  cgs_stmts = nilOL }
+                         return a
+                Stream.yield cmm
+
+        ; cg (getCmm $ mkModuleInit dflags cost_centre_info this_mod hpc_info)
+
+        ; mapM_ (cg . getCmm . cgTopBinding dflags) stg_binds
+
+        ; mapM_ (cg . cgTyCon) data_tycons
+        }
 
 mkModuleInit
         :: DynFlags
@@ -92,7 +104,7 @@ mkModuleInit dflags cost_centre_info this_mod hpc_info
         ; whenC (opt_Hpc) $
               hpcTable this_mod hpc_info
 
-        ; whenC (opt_SccProfilingOn) $ do
+        ; whenC (dopt Opt_SccProfilingOn dflags) $ do
             initCostCentres cost_centre_info
 
             -- For backwards compatibility: user code may refer to this
@@ -116,11 +128,11 @@ code-generator.)
 initCostCentres :: CollectedCCs -> Code
 -- Emit the declarations, and return code to register them
 initCostCentres (local_CCs, ___extern_CCs, singleton_CCSs)
-  | not opt_SccProfilingOn = nopC
-  | otherwise
-  = do  { mapM_ emitCostCentreDecl       local_CCs
-        ; mapM_ emitCostCentreStackDecl  singleton_CCSs
-        }
+  = do dflags <- getDynFlags
+       if not (dopt Opt_SccProfilingOn dflags)
+           then nopC
+           else do mapM_ emitCostCentreDecl      local_CCs
+                   mapM_ emitCostCentreStackDecl singleton_CCSs
 \end{code}
 
 %************************************************************************

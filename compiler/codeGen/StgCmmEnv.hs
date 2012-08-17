@@ -18,7 +18,7 @@ module StgCmmEnv (
 
 	cgIdInfoId, cgIdInfoLF,
 
-	litIdInfo, lneIdInfo, regIdInfo,
+        litIdInfo, lneIdInfo, rhsIdInfo, mkRhsInit,
 	idInfoToAmode,
 
         NonVoid(..), isVoidId, nonVoidIds,
@@ -27,7 +27,7 @@ module StgCmmEnv (
 
 	bindArgsToRegs, bindToReg, rebindToReg,
 	bindArgToReg, idToReg,
-	getArgAmode, getNonVoidArgAmodes, 
+        getArgAmode, getNonVoidArgAmodes,
 	getCgIdInfo, 
 	maybeLetNoEscape, 
     ) where
@@ -41,17 +41,16 @@ import StgCmmClosure
 
 import CLabel
 
+import MkGraph
 import BlockId
 import CmmExpr
 import CmmUtils
-import MkGraph (CmmAGraph, mkAssign, (<*>))
 import FastString
 import Id
 import VarEnv
 import Control.Monad
 import Name
 import StgSyn
-import DynFlags
 import Outputable
 
 -------------------------------------
@@ -90,27 +89,24 @@ litIdInfo id lf lit
   where
     tag = lfDynTag lf
 
-lneIdInfo :: Id -> [LocalReg] -> CgIdInfo
+lneIdInfo :: Id -> [NonVoid Id] -> CgIdInfo
 lneIdInfo id regs 
   = CgIdInfo { cg_id = id, cg_lf = lf
-             , cg_loc = LneLoc blk_id regs
+             , cg_loc = LneLoc blk_id (map idToReg regs)
 	     , cg_tag = lfDynTag lf }
   where
     lf     = mkLFLetNoEscape
     blk_id = mkBlockId (idUnique id)
 
--- Because the register may be spilled to the stack in untagged form, we
--- modify the initialization code 'init' to immediately tag the
--- register, and store a plain register in the CgIdInfo.  We allocate
--- a new register in order to keep single-assignment and help out the
--- inliner. -- EZY
-regIdInfo :: Id -> LambdaFormInfo -> LocalReg -> CmmAGraph -> FCode (CgIdInfo, CmmAGraph)
-regIdInfo id lf_info reg init 
-  = do { reg' <- newTemp (localRegType reg)
-       ; let init' = init <*> mkAssign (CmmLocal reg') 
-                                       (addDynTag (CmmReg (CmmLocal reg)) 
-                                                  (lfDynTag lf_info))
-       ; return (mkCgIdInfo id lf_info (CmmReg (CmmLocal reg')), init') }
+
+rhsIdInfo :: Id -> LambdaFormInfo -> FCode (CgIdInfo, LocalReg)
+rhsIdInfo id lf_info
+  = do { reg <- newTemp gcWord
+       ; return (mkCgIdInfo id lf_info (CmmReg (CmmLocal reg)), reg) }
+
+mkRhsInit :: LocalReg -> LambdaFormInfo -> CmmExpr -> CmmAGraph
+mkRhsInit reg lf_info expr
+  = mkAssign (CmmLocal reg) (addDynTag expr (lfDynTag lf_info))
 
 idInfoToAmode :: CgIdInfo -> CmmExpr
 -- Returns a CmmExpr for the *tagged* pointer
@@ -182,8 +178,7 @@ getCgIdInfo id
     
 cgLookupPanic :: Id -> FCode a
 cgLookupPanic id
-  = do	dflags <- getDynFlags
-      	static_binds <- getStaticBinds
+  = do	static_binds <- getStaticBinds
 	local_binds <- getBinds
 	srt <- getSRTLabel
 	pprPanic "StgCmmEnv: variable not found"
@@ -192,7 +187,7 @@ cgLookupPanic id
 		vcat [ ppr (cg_id info) | info <- varEnvElts static_binds ],
 		ptext (sLit "local binds for:"),
 		vcat [ ppr (cg_id info) | info <- varEnvElts local_binds ],
-	        ptext (sLit "SRT label") <+> pprCLabel (targetPlatform dflags) srt
+	        ptext (sLit "SRT label") <+> ppr srt
 	      ])
 
 
@@ -211,7 +206,6 @@ getNonVoidArgAmodes (arg:args)
   | otherwise = do { amode  <- getArgAmode (NonVoid arg)
 	 	   ; amodes <- getNonVoidArgAmodes args
 	 	   ; return ( amode : amodes ) }
-
 
 ------------------------------------------------------------------------
 --	Interface functions for binding and re-binding names

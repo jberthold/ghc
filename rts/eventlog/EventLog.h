@@ -32,11 +32,11 @@ void abortEventLogging(void); // #4512 - after fork child needs to abort
 void flushEventLog(void);     // event log inherited from parent
 void moreCapEventBufs (nat from, nat to);
 
-/* 
+/*
  * Post a scheduler event to the capability's event buffer (an event
  * that has an associated thread).
  */
-void postSchedEvent(Capability *cap, EventTypeNum tag, 
+void postSchedEvent(Capability *cap, EventTypeNum tag,
                     StgThreadID id, StgWord info1, StgWord info2);
 
 /*
@@ -44,7 +44,7 @@ void postSchedEvent(Capability *cap, EventTypeNum tag,
  */
 void postEvent(Capability *cap, EventTypeNum tag);
 
-void postEventAtTimestamp (Capability *cap, EventTimestamp ts, 
+void postEventAtTimestamp (Capability *cap, EventTimestamp ts,
                            EventTypeNum tag);
 
 void postMsg(char *msg, va_list ap);
@@ -85,7 +85,7 @@ void postCapsetVecEvent (EventTypeNum tag,
 
 void postWallClockTime (EventCapsetID capset);
 
-/* 
+/*
  * Post a `par` spark event
  */
 void postSparkEvent(Capability *cap, EventTypeNum tag, StgWord info1);
@@ -93,7 +93,7 @@ void postSparkEvent(Capability *cap, EventTypeNum tag, StgWord info1);
 /*
  * Post an event with several counters relating to `par` sparks.
  */
-void postSparkCountersEvent (Capability *cap, 
+void postSparkCountersEvent (Capability *cap,
                              SparkCounters counters,
                              StgWord remaining);
 
@@ -150,6 +150,16 @@ void postSendReceiveLocalMessageEvent(OpCode msgtag, EventProcessID spid, EventT
 
 #endif //PARALLEL_RTS
 
+void postTaskCreateEvent (EventTaskId taskId,
+                          EventCapNo cap,
+                          EventKernelThreadId tid);
+
+void postTaskMigrateEvent (EventTaskId taskId,
+                           EventCapNo capno,
+                           EventCapNo new_capno);
+
+void postTaskDeleteEvent (EventTaskId taskId);
+
 #else /* !TRACING */
 
 INLINE_HEADER void postSchedEvent (Capability *cap  STG_UNUSED,
@@ -163,12 +173,12 @@ INLINE_HEADER void postEvent (Capability *cap  STG_UNUSED,
                               EventTypeNum tag STG_UNUSED)
 { /* nothing */ }
 
-INLINE_HEADER void postMsg (char *msg STG_UNUSED, 
+INLINE_HEADER void postMsg (char *msg STG_UNUSED,
                             va_list ap STG_UNUSED)
 { /* nothing */ }
 
 INLINE_HEADER void postCapMsg (Capability *cap STG_UNUSED,
-                               char *msg STG_UNUSED, 
+                               char *msg STG_UNUSED,
                                va_list ap STG_UNUSED)
 { /* nothing */ }
 

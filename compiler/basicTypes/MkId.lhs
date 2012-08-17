@@ -73,6 +73,8 @@ import DynFlags
 import Outputable
 import FastString
 import ListSetOps
+
+import Data.Maybe       ( maybeToList )
 \end{code}
 
 %************************************************************************
@@ -749,7 +751,7 @@ mkPrimOpId prim_op
     id   = mkGlobalId (PrimOpId prim_op) name ty info
                 
     info = noCafIdInfo
-           `setSpecInfo`          mkSpecInfo (primOpRules prim_op name)
+           `setSpecInfo`          mkSpecInfo (maybeToList $ primOpRules name prim_op)
            `setArityInfo`         arity
            `setStrictnessInfo` Just strict_sig
 
@@ -826,17 +828,29 @@ mkDictFunId :: Name      -- Name to use for the dict fun;
 -- Implements the DFun Superclass Invariant (see TcInstDcls)
 
 mkDictFunId dfun_name tvs theta clas tys
-  = mkExportedLocalVar (DFunId is_nt)
+  = mkExportedLocalVar (DFunId n_silent is_nt)
                        dfun_name
                        dfun_ty
                        vanillaIdInfo
   where
     is_nt = isNewTyCon (classTyCon clas)
-    dfun_ty = mkDictFunTy tvs theta clas tys
+    (n_silent, dfun_ty) = mkDictFunTy tvs theta clas tys
 
-mkDictFunTy :: [TyVar] -> ThetaType -> Class -> [Type] -> Type
+mkDictFunTy :: [TyVar] -> ThetaType -> Class -> [Type] -> (Int, Type)
 mkDictFunTy tvs theta clas tys
-  = mkSigmaTy tvs theta (mkClassPred clas tys)
+  = (length silent_theta, dfun_ty)
+  where
+    dfun_ty = mkSigmaTy tvs (silent_theta ++ theta) (mkClassPred clas tys)
+    silent_theta 
+      | null tvs, null theta 
+      = []
+      | otherwise
+      = filterOut discard $
+        substTheta (zipTopTvSubst (classTyVars clas) tys)
+                   (classSCTheta clas)
+                   -- See Note [Silent Superclass Arguments]
+    discard pred = any (`eqPred` pred) theta
+                 -- See the DFun Superclass Invariant in TcInstDcls
 \end{code}
 
 
