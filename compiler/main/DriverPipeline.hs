@@ -1756,9 +1756,9 @@ mk_wrapper_script ways executable executable_base = unlines $
   "if ($dotrace) {",
   "  print \"Trace post-processing...\\n\";"]
   ++
-  if (WayParPvm `elem` ways) 
+  (if (WayParPvm `elem` ways) 
     then ["  # wait for trace files to be completed", "sleep(2);"]
-    else []
+    else [])
   ++
   ["# trace copying or archive creation ",
   "system(\"if which zip &> /dev/null; then if test -f $trcfile.parevents; then rm $trcfile.parevents; fi; zip -m $trcfile.parevents $executable_base\\#[0123456789]*.eventlog; else mkdir $trcfile\\_parevents; mv $executable_base\\#[0123456789]*.eventlog $trcfile\\_parevents; fi\");",
