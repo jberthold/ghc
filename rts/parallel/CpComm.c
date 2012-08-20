@@ -27,7 +27,6 @@
 
 #if !defined(mingw32_HOST_OS) /* Posix Version */
 
-
 #include <semaphore.h> /* POSIX Semaphores */
 #include <sys/types.h> /* Types for PID, pthreads, ... */
 #if !defined(__APPLE__)
@@ -42,6 +41,7 @@
 #include <stdlib.h>    /* atoi() */
 #include <time.h>
 #include <sys/time.h>  /* gettimeofday() */
+#include <sys/wait.h>  /* wait() */
 
 /*============*
  * IPC Global *
@@ -395,13 +395,13 @@ Needed functionality: */
  */
 rtsBool MP_send(int node, OpCode tag, long *data, int length){
   IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MP_send()\n"));
+	       debugBelch("MP_send(%s)\n", getOpName(tag)));
 
   /* check for errors */
   cpw_shm_check_errors();
 
   /* check length */
-  ASSERT(length <= DATASPACEWORDS);
+  ASSERT(((uint)length) <= DATASPACEWORDS);
   
   /* send */
   switch (cpw_shm_send_msg(node, tag, length, data)) {
@@ -431,7 +431,7 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
  * Returns: 
  *   int: length of data received with message
  */
-int MP_recv(int maxlength, long *destination, // IN
+int MP_recv(STG_UNUSED int maxlength, long *destination, // IN
 	    OpCode *code, nat *sender){       // OUT
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("MP_recv()\n"));
@@ -663,9 +663,9 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
   while (next_slot != NULL) {
     num++;
     debugBelch("- %i (@%p)\n"
-	       "      | (ALGNMT: %li, is aligned: %s)\n"
+	       "      | (ALGNMT: %i, is aligned: %s)\n"
 	       "      +-> points to message @%p\n"
-	       "        |  (ALGNMT: %li, is aligned: %s)\n"
+	       "        |  (ALGNMT: %i, is aligned: %s)\n"
 	       "        +-> points to data @%p\n"
 	       "              (ALGNMT: %i, is aligned: %s)\n", 
 	       num, next_slot,
@@ -1689,7 +1689,7 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
  * Returns: 
  *   int: length of data received with message
  */
-int MP_recv(int maxlength, long *destination, // IN
+int MP_recv(STG_UNUSED int maxlength, long *destination, // IN
 	    OpCode *code, nat *sender){       // OUT
   //printf("MP_recv()\n");
 

@@ -2080,7 +2080,7 @@ stg_duplicatezh
 			 MyCapability() "ptr") [];
 #else
   // system does not support parallel primops, complain and crash the thread
-  foreign "C" debugBelch("Thread %ld: compiled without parallel primitives.",
+  foreign "C" debugBelch("Thread %d: compiled without parallel primitives.",
 			 StgTSO_id(CurrentTSO))[R1];
   foreign "C" throwToSingleThreaded(MyCapability() "ptr",
 				    CurrentTSO "ptr", NULL)[R1];
@@ -2124,7 +2124,7 @@ stg_serializzezh
 #else
   // serialisation in the non-parallel system not supported (for now)
   // complain and crash the thread
-  foreign "C" debugBelch("Thread %ld: serialize# not supported.",
+  foreign "C" debugBelch("Thread %d: serialize# not supported.",
 			 StgTSO_id(CurrentTSO))[R1];
   foreign "C" throwToSingleThreaded(MyCapability() "ptr",
 				    CurrentTSO "ptr", NULL)[R1];
@@ -2149,7 +2149,7 @@ stg_deserializzezh
     UnpackGraphWrapper(buff "ptr", MyCapability() "ptr") [R1];
 #else
   // system does not support packing, complain and crash the thread
-  foreign "C" debugBelch("Thread %ld: deserialize# not supported.",
+  foreign "C" debugBelch("Thread %d: deserialize# not supported.",
 			 StgTSO_id(CurrentTSO))[R1];
   foreign "C" throwToSingleThreaded(MyCapability() "ptr",
 				    CurrentTSO "ptr", NULL)[R1];
@@ -2173,7 +2173,7 @@ stg_expectDatazh
   (id)   = foreign "C" addInport(proc, retBH "ptr") [];
 #else
   // system does not support parallel primops, complain and crash the thread
-  foreign "C" debugBelch("Thread %ld: compiled without parallel primitives.",
+  foreign "C" debugBelch("Thread %d: compiled without parallel primitives.",
 			 StgTSO_id(CurrentTSO))[R1];
   foreign "C" throwToSingleThreaded(MyCapability() "ptr",
 				    CurrentTSO "ptr", NULL)[R1];
@@ -2219,7 +2219,7 @@ stg_sendDatazh
   // ( 0=blocked, -1=send failed, otherwise successfully packed/sent away )
 #else
   // system does not support parallel primops, complain and crash the thread
-  foreign "C" debugBelch("Thread %ld: compiled without parallel primitives.",
+  foreign "C" debugBelch("Thread %d: compiled without parallel primitives.",
 			 StgTSO_id(CurrentTSO))[R1];
   foreign "C" throwToSingleThreaded(MyCapability() "ptr",
 				    CurrentTSO "ptr", NULL)[R1];
