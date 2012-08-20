@@ -2080,7 +2080,7 @@ UnpackArray(StgInfoTable* info, StgWord **bufptrP, Capability* cap) {
     ASSERT(size ==
 	   sizeofW(StgMutArrPtrs) + ((StgMutArrPtrs*) *bufptrP)->size);
     IF_PAR_DEBUG(packet,
-		 debugBelch("Unpacking ptrs array, %ld ptrs, size %d\n",
+		 debugBelch("Unpacking ptrs array, %d ptrs, size %d\n",
 			    (StgWord) *((*bufptrP)+1), size));
     array = (StgMutArrPtrs *) allocate(cap, size);
 

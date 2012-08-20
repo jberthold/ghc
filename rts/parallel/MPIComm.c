@@ -334,7 +334,6 @@ int MP_recv(int maxlength, long *destination,
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("MP_recv for MPI.\n"));
 
-  MPI_Comm useComm;
     // priority for system messages, probed before accepting anything
     // non-blocking probe,
   MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, sysComm, &haveSysMsg, &status);

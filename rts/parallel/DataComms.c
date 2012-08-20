@@ -111,7 +111,7 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
   IF_PAR_DEBUG(ports,
 	       debugBelch("sending message %s (%#0x) to machine %d\n",
 			  getOpName(tag), tag, destinationPE);
-	       debugBelch("Sender: (%d,%ld,%ld), Receiver (%d,%ld,%ld)\n",
+	       debugBelch("Sender: (%d,%d,%d), Receiver (%d,%d,%d)\n",
 			  dataBuffer->sender.machine, 
 			  dataBuffer->sender.process, 
 			  dataBuffer->sender.id,
@@ -335,7 +335,7 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
 
   if (inport == NULL) {
     IF_PAR_DEBUG(ports,
-		 errorBelch("unknown inport: Port (%d,%ld,%ld)\n",
+		 errorBelch("unknown inport: Port (%d,%d,%d)\n",
 			    gumPackBuffer->receiver.machine, 
 			    gumPackBuffer->receiver.process, 
 			    gumPackBuffer->receiver.id));
@@ -345,7 +345,7 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
 
   if (!(equalPorts(inport->sender,gumPackBuffer->sender))) {
     IF_PAR_DEBUG(ports,
-		 debugBelch("Sender (%d,%ld,%ld) not connected yet\n",
+		 debugBelch("Sender (%d,%d,%d) not connected yet\n",
 			    gumPackBuffer->sender.machine, 
 			    gumPackBuffer->sender.process, 
 			    gumPackBuffer->sender.id));
@@ -427,7 +427,7 @@ fakeDataMsg(StgClosure *graph,
 
   if (inport == NULL) {
     IF_PAR_DEBUG(ports,
-		 errorBelch("fakeDataMsg: unknown inport: Port (%d,%ld,%ld)\n",
+		 errorBelch("fakeDataMsg: unknown inport: Port (%d,%d,%d)\n",
 			    receiver.machine, 
 			    receiver.process, 
 			    receiver.id));
@@ -437,7 +437,7 @@ fakeDataMsg(StgClosure *graph,
 
   if (!(equalPorts(inport->sender,sender))) {
     IF_PAR_DEBUG(ports,
-		 debugBelch("fakeDataMsg: Sender (%d,%ld,%ld)" 
+		 debugBelch("fakeDataMsg: Sender (%d,%d,%d)" 
 			    " not connected yet\n",
 			    sender.machine, 
 			    sender.process, 
