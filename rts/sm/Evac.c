@@ -374,6 +374,11 @@ loop:
 
       if (!major_gc) return;
 
+#if defined(PARALLEL_RTS)
+      // consequently ignore the fake TSO which holds the system BQs
+      if (q == (StgClosure*) &stg_system_tso) return;
+#endif
+
       info = get_itbl(q);
       switch (info->type) {
 
