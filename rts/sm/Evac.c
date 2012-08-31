@@ -880,7 +880,7 @@ selector_chain:
 
         // make sure someone else didn't get here first...
         if (IS_FORWARDING_PTR(info_ptr) || 
-            INFO_PTR_TO_STRUCT(info_ptr)->type != THUNK_SELECTOR) {
+            INFO_PTR_TO_STRUCT((StgInfoTable *)info_ptr)->type != THUNK_SELECTOR) {
             // v. tricky now.  The THUNK_SELECTOR has been evacuated
             // by another thread, and is now either a forwarding ptr or IND.
             // We need to extract ourselves from the current situation
@@ -903,7 +903,7 @@ selector_chain:
     SET_INFO(p,&stg_WHITEHOLE_info);
 #endif
 
-    field = INFO_PTR_TO_STRUCT(info_ptr)->layout.selector_offset;
+    field = INFO_PTR_TO_STRUCT((StgInfoTable *)info_ptr)->layout.selector_offset;
 
     // The selectee might be a constructor closure,
     // so we untag the pointer.
@@ -964,7 +964,7 @@ selector_loop:
               info_ptr = (StgWord)UNTAG_CLOSURE(val)->header.info;
               if (!IS_FORWARDING_PTR(info_ptr))
               {
-                  info = INFO_PTR_TO_STRUCT(info_ptr);
+                  info = INFO_PTR_TO_STRUCT((StgInfoTable *)info_ptr);
                   switch (info->type) {
                   case IND:
                   case IND_PERM:

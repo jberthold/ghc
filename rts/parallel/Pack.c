@@ -1210,8 +1210,8 @@ static void PackPAP(StgPAP *pap) {
 
   ASSERT(LOOKS_LIKE_CLOSURE_PTR(pap));
 
-  ASSERT(get_itbl(pap)->type == PAP || 
-	 get_itbl(pap)->type == AP);
+  ASSERT(get_itbl((StgClosure*)pap)->type == PAP || 
+	 get_itbl((StgClosure*)pap)->type == AP);
 
   /* PAP/AP closure layout in GHC-6.x (see Closures.h):
    * +--------------------------------------------------------------+
@@ -1227,7 +1227,7 @@ static void PackPAP(StgPAP *pap) {
    * stack-only objects. 
    */
 
-  switch (get_itbl(pap)->type) {
+  switch (get_itbl((StgClosure*)pap)->type) {
   case PAP: 
     size  = pap_sizeW(pap);
     args  = pap->n_args;
@@ -1240,7 +1240,7 @@ static void PackPAP(StgPAP *pap) {
     break;
   default: 
     barf("PackPAP: strange info pointer, type %d ", 
-	 get_itbl(pap)->type);
+	 get_itbl((StgClosure*)pap)->type);
   }
   IF_PAR_DEBUG(packet,
 	       debugBelch("Packing Closure with stack (%s) @ %p,"

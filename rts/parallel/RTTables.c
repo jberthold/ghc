@@ -361,7 +361,7 @@ void connectInport(StgWord processId, StgWord id, Port sender) {
 void setReceiver(StgTSO* tso, nat pe, StgWord proc, StgWord id) {
   Port* portInHashTable, *oldPort;
   
-  ASSERT(get_itbl(tso)->type == TSO);
+  ASSERT(get_itbl((StgClosure*)tso)->type == TSO);
 
   IF_PAR_DEBUG(ports,
       debugBelch("connect TSO %d to inport (%d,%d,%d)\n",
