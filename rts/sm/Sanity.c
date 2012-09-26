@@ -838,7 +838,7 @@ checkRunQueue(Capability *cap)
 void findSlop(bdescr *bd);
 void findSlop(bdescr *bd)
 {
-    lnat slop;
+    W_ slop;
 
     for (; bd != NULL; bd = bd->link) {
         slop = (bd->blocks * BLOCK_SIZE_W) - (bd->free - bd->start);
@@ -849,7 +849,7 @@ void findSlop(bdescr *bd)
     }
 }
 
-static lnat
+static W_
 genBlocks (generation *gen)
 {
     ASSERT(countBlocks(gen->blocks) == gen->n_blocks);
@@ -862,10 +862,10 @@ void
 memInventory (rtsBool show)
 {
   nat g, i;
-  lnat gen_blocks[RtsFlags.GcFlags.generations];
-  lnat nursery_blocks, retainer_blocks,
+  W_ gen_blocks[RtsFlags.GcFlags.generations];
+  W_ nursery_blocks, retainer_blocks,
        arena_blocks, exec_blocks;
-  lnat live_blocks = 0, free_blocks = 0;
+  W_ live_blocks = 0, free_blocks = 0;
   rtsBool leak;
 
   // count the blocks we current have

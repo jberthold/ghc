@@ -74,7 +74,7 @@ loop:
     {
         StgTSO *tso = ((MessageWakeup *)m)->tso;
         debugTraceCap(DEBUG_sched, cap, "message: try wakeup thread %ld", 
-                      (lnat)tso->id);
+                      (W_)tso->id);
         tryWakeupThread(cap, tso);
     }
     else if (i == &stg_MSG_THROWTO_info)
@@ -90,7 +90,7 @@ loop:
         }
 
         debugTraceCap(DEBUG_sched, cap, "message: throwTo %ld -> %ld", 
-                      (lnat)t->source->id, (lnat)t->target->id);
+                      (W_)t->source->id, (W_)t->target->id);
 
         ASSERT(t->source->why_blocked == BlockedOnMsgThrowTo);
         ASSERT(t->source->block_info.closure == (StgClosure *)m);
@@ -167,7 +167,7 @@ nat messageBlackHole(Capability *cap, MessageBlackHole *msg)
     StgTSO *owner;
 
     debugTraceCap(DEBUG_sched, cap, "message: thread %d blocking on blackhole %p", 
-                  (lnat)msg->tso->id, msg->bh);
+                  (W_)msg->tso->id, msg->bh);
 
     info = bh->header.info;
 
@@ -275,14 +275,14 @@ loop:
 	// nearby, these are macros, so they need "{..}"
 	if (is_system) {
 	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH", 
-			(lnat)msg->tso->id);
+			(W_)msg->tso->id);
 	} else {
 	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d", 
-			(lnat)msg->tso->id, (lnat)owner->id);
+			(W_)msg->tso->id, (W_)owner->id);
 	}
 #else
         debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d", 
-                      (lnat)msg->tso->id, (lnat)owner->id);
+                      (W_)msg->tso->id, (W_)owner->id);
 #endif
         return 1; // blocked
     }
@@ -324,14 +324,14 @@ loop:
 	// nearby, these are macros, so they need "{..}"
 	if (is_system) {
 	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH",
-			(lnat)msg->tso->id);
+			(W_)msg->tso->id);
 	} else {
 	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
-			(lnat)msg->tso->id, (lnat)owner->id);
+			(W_)msg->tso->id, (W_)owner->id);
 	}
 #else
         debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d", 
-                      (lnat)msg->tso->id, (lnat)owner->id);
+                      (W_)msg->tso->id, (W_)owner->id);
 #endif
 
 #ifdef PARALLEL_RTS
