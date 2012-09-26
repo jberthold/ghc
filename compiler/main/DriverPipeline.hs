@@ -39,7 +39,6 @@ import Module
 import UniqFM           ( eltsUFM )
 import ErrUtils
 import DynFlags
-import StaticFlags      ( v_Ld_inputs, opt_Static, WayName(..) )
 import Config
 import Panic
 import Util
@@ -357,7 +356,7 @@ linkingNeeded dflags linkables pkg_deps = do
     Left _  -> return True
     Right t -> do
         -- first check object files and extra_ld_inputs
-        extra_ld_inputs <- readIORef v_Ld_inputs
+        let extra_ld_inputs = ldInputs dflags
         e_extra_times <- mapM (tryIO . getModificationUTCTime) extra_ld_inputs
         let (errs,extra_times) = splitEithers e_extra_times
         let obj_times =  map linkableTime linkables ++ extra_times
@@ -1352,9 +1351,9 @@ runPhase LlvmLlc input_fn dflags
 
     let lc_opts = getOpts dflags opt_lc
         opt_lvl = max 0 (min 2 $ optLevel dflags)
-        rmodel | dopt Opt_PIC dflags = "pic"
-               | not opt_Static = "dynamic-no-pic"
-               | otherwise      = "static"
+        rmodel | dopt Opt_PIC dflags          = "pic"
+               | not (dopt Opt_Static dflags) = "dynamic-no-pic"
+               | otherwise                    = "static"
         tbaa | ver < 29                 = "" -- no tbaa in 2.8 and earlier
              | dopt Opt_LlvmTBAA dflags = "--enable-tbaa=true"
              | otherwise                = "--enable-tbaa=false"
@@ -1460,9 +1459,8 @@ runPhase_MoveBinary dflags input_fn
         user <- getEnv "USER"
 #endif  
   -- mingw32
-        let ways = wayNames dflags
-            executable_base = user ++ '=':input_fn
-        copypath <- if WayParPvm `elem` ways -- is for PVM
+        let executable_base = user ++ '=':input_fn
+        copypath <- if WayParPvm `elem` (ways dflags)-- is for PVM
                         then return $ cPVM_Root ++ "/bin/" ++ cPVM_Arch
                         else getCurrentDirectory
 #if defined(mingw32_HOST_OS)
@@ -1486,15 +1484,15 @@ runPhase_MoveBinary dflags input_fn
 	-- generate a wrapper script for running a parallel prg.
 	Exception.catchIO (do ps <- getPermissions executable
                               writeFile script_name (mk_wrapper_script 
-					       ways executable executable_base)
+					       (ways dflags) executable executable_base)
                               setPermissions script_name ps)
            (\e -> ghcError (InstallationError 
                             ("Cannot generate start script " 
                              ++ input_fn ++ ": " ++ show e)))
     | otherwise = return ()
-  where isParallel = WayParPvm `elem` (wayNames dflags)
-                     || WayParMPI `elem` (wayNames dflags)
-                     || WayParCp `elem` (wayNames dflags)
+  where isParallel = WayParPvm `elem` (ways dflags)
+                     || WayParMPI `elem` (ways dflags)
+                     || WayParCp `elem` (ways dflags)
 
 mkExtraObj :: DynFlags -> Suffix -> String -> IO FilePath
 mkExtraObj dflags extn xs
@@ -1587,7 +1585,7 @@ getLinkInfo dflags dep_packages = do
    pkg_frameworks <- case platformOS (targetPlatform dflags) of
                      OSDarwin -> getPackageFrameworks dflags dep_packages
                      _        -> return []
-   extra_ld_inputs <- readIORef v_Ld_inputs
+   let extra_ld_inputs = ldInputs dflags
    let
       link_info = (package_link_opts,
                    pkg_frameworks,
@@ -1601,7 +1599,7 @@ getLinkInfo dflags dep_packages = do
 
 -- generates a Perl skript starting a parallel prg under PVM, or a
 --  script calling mpirun for open-MPI
-mk_wrapper_script :: [WayName] -> String -> String -> String
+mk_wrapper_script :: [Way] -> String -> String -> String
 mk_wrapper_script ways executable executable_base = unlines $
  [
 #if defined(mingw32_HOST_OS)
@@ -1765,12 +1763,12 @@ mk_wrapper_script ways executable executable_base = unlines $
 #endif  
   -- mingw32
  ]
-    where runCmd | WayParPvm `elem` ways = 
+    where runCmd | WayParPvm `elem` ways  = 
 		     "$executable $debug$nprocessors @nonPVM_args"
-		 | WayParMPI `elem` ways = 
+		 | WayParMPI `elem` ways  = 
 		 -- currently not very extensive. Assuming shared directory!
 		     "mpirun $npstring $machinefile $executable $nprocessors @nonPVM_args"
-                 | WayParCp `elem` ways =
+                 | WayParCp `elem` ways  =
                    "$executable $nprocessors @nonPVM_args"
 		 | otherwise = panic "Something wrong with compiler ways"
 
@@ -1817,7 +1815,7 @@ linkBinary dflags o_files dep_packages = do
         get_pkg_lib_path_opts l
          | osElfTarget (platformOS platform) &&
            dynLibLoader dflags == SystemDependent &&
-           not opt_Static
+           not (dopt Opt_Static dflags)
             = ["-L" ++ l, "-Wl,-rpath", "-Wl," ++ l]
          | otherwise = ["-L" ++ l]
 
@@ -1864,43 +1862,41 @@ linkBinary dflags o_files dep_packages = do
             return []
 
         -- probably _stub.o files
-    extra_ld_inputs <- readIORef v_Ld_inputs
+    let extra_ld_inputs = ldInputs dflags
 
         -- opts from -optl-<blah> (including -l<blah> options)
     let extra_ld_opts = getOpts dflags opt_l
-
-    let ways = wayNames dflags
 
     -- Here are some libs that need to be linked at the *end* of
     -- the command line, because they contain symbols that are referred to
     -- by the RTS.  We can't therefore use the ordinary way opts for these.
     let
-        debug_opts | WayDebug `elem` ways = [
+        debug_opts | WayDebug `elem` ways dflags = [
 #if defined(HAVE_LIBBFD)
                         "-lbfd", "-liberty"
 #endif
                          ]
                    | otherwise            = []
 
-    let
-        thread_opts | WayThreaded `elem` ways = [
-#if !defined(mingw32_TARGET_OS) && !defined(freebsd_TARGET_OS) && !defined(openbsd_TARGET_OS) && !defined(netbsd_TARGET_OS) && !defined(haiku_TARGET_OS)
-                        "-lpthread"
-#endif
-#if defined(osf3_TARGET_OS)
-                        , "-lexc"
-#endif
-                        ]
-                    | otherwise               = []
+    let thread_opts
+         | WayThreaded `elem` ways dflags =
+            let os = platformOS (targetPlatform dflags)
+            in if os == OSOsf3 then ["-lpthread", "-lexc"]
+               else if os `elem` [OSMinGW32, OSFreeBSD, OSOpenBSD,
+                                  OSNetBSD, OSHaiku]
+               then []
+               else ["-lpthread"]
+         | otherwise               = []
 
 --  include message-passing libraries by the back door:
 --  TODO clean way would be to have (dummy) packages for that...
 --  step 1: define PVM_ROOT, PVM_ARCH, MPI_Opts in Config.hs
-    let mp_opts | (WayParPvm `elem` ways && WayParMPI `elem` ways)
+-- #error FIX LINKER FLAGS!
+    let mp_opts | (WayParPvm `elem` ways dflags && WayParMPI `elem` ways dflags)
                     = panic "PVM/MPI combination not supported"
-                | WayParPvm `elem` ways 
+                | WayParPvm `elem` ways dflags
 	            = ["-L"++ cPVM_Root ++ "/lib/"++ cPVM_Arch, "-lpvm3"]
-	        | WayParMPI `elem` ways = words cMPI_Opts
+	        | WayParMPI `elem` ways dflags = words cMPI_Opts
                 | otherwise = []-- not parallel at all
 -- end of "backdoor"
 
@@ -2065,7 +2061,7 @@ linkDynLib dflags o_files dep_packages
         get_pkg_lib_path_opts l
          | osElfTarget (platformOS (targetPlatform dflags)) &&
            dynLibLoader dflags == SystemDependent &&
-           not opt_Static
+           not (dopt Opt_Static dflags)
             = ["-L" ++ l, "-Wl,-rpath", "-Wl," ++ l]
          | otherwise = ["-L" ++ l]
 
@@ -2079,7 +2075,9 @@ linkDynLib dflags o_files dep_packages
     -- not allow undefined symbols.
     -- The RTS library path is still added to the library search path
     -- above in case the RTS is being explicitly linked in (see #3807).
-    let pkgs_no_rts = case platformOS (targetPlatform dflags) of
+    let platform = targetPlatform dflags
+        os = platformOS platform
+        pkgs_no_rts = case os of
                       OSMinGW32 ->
                           pkgs
                       _ ->
@@ -2087,127 +2085,135 @@ linkDynLib dflags o_files dep_packages
     let pkg_link_opts = collectLinkOpts dflags pkgs_no_rts
 
         -- probably _stub.o files
-    extra_ld_inputs <- readIORef v_Ld_inputs
+    let extra_ld_inputs = ldInputs dflags
 
     let extra_ld_opts = getOpts dflags opt_l
 
-#if defined(mingw32_HOST_OS)
-    -----------------------------------------------------------------------------
-    -- Making a DLL
-    -----------------------------------------------------------------------------
-    let output_fn = case o_file of { Just s -> s; Nothing -> "HSdll.dll"; }
+    case os of
+        OSMinGW32 -> do
+            -------------------------------------------------------------
+            -- Making a DLL
+            -------------------------------------------------------------
+            let output_fn = case o_file of
+                            Just s -> s
+                            Nothing -> "HSdll.dll"
 
-    SysTools.runLink dflags (
-            map SysTools.Option verbFlags
-         ++ [ SysTools.Option "-o"
-            , SysTools.FileOption "" output_fn
-            , SysTools.Option "-shared"
-            ] ++
-            [ SysTools.FileOption "-Wl,--out-implib=" (output_fn ++ ".a")
-            | dopt Opt_SharedImplib dflags
-            ]
-         ++ map (SysTools.FileOption "") o_files
-         ++ map SysTools.Option (
+            SysTools.runLink dflags (
+                    map SysTools.Option verbFlags
+                 ++ [ SysTools.Option "-o"
+                    , SysTools.FileOption "" output_fn
+                    , SysTools.Option "-shared"
+                    ] ++
+                    [ SysTools.FileOption "-Wl,--out-implib=" (output_fn ++ ".a")
+                    | dopt Opt_SharedImplib dflags
+                    ]
+                 ++ map (SysTools.FileOption "") o_files
+                 ++ map SysTools.Option (
 
-         -- Permit the linker to auto link _symbol to _imp_symbol
-         -- This lets us link against DLLs without needing an "import library"
-            ["-Wl,--enable-auto-import"]
+                 -- Permit the linker to auto link _symbol to _imp_symbol
+                 -- This lets us link against DLLs without needing an "import library"
+                    ["-Wl,--enable-auto-import"]
 
-         ++ extra_ld_inputs
-         ++ lib_path_opts
-         ++ extra_ld_opts
-         ++ pkg_lib_path_opts
-         ++ pkg_link_opts
-        ))
-#elif defined(darwin_TARGET_OS)
-    -----------------------------------------------------------------------------
-    -- Making a darwin dylib
-    -----------------------------------------------------------------------------
-    -- About the options used for Darwin:
-    -- -dynamiclib
-    --   Apple's way of saying -shared
-    -- -undefined dynamic_lookup:
-    --   Without these options, we'd have to specify the correct dependencies
-    --   for each of the dylibs. Note that we could (and should) do without this
-    --   for all libraries except the RTS; all we need to do is to pass the
-    --   correct HSfoo_dyn.dylib files to the link command.
-    --   This feature requires Mac OS X 10.3 or later; there is a similar feature,
-    --   -flat_namespace -undefined suppress, which works on earlier versions,
-    --   but it has other disadvantages.
-    -- -single_module
-    --   Build the dynamic library as a single "module", i.e. no dynamic binding
-    --   nonsense when referring to symbols from within the library. The NCG
-    --   assumes that this option is specified (on i386, at least).
-    -- -install_name
-    --   Mac OS/X stores the path where a dynamic library is (to be) installed
-    --   in the library itself.  It's called the "install name" of the library.
-    --   Then any library or executable that links against it before it's
-    --   installed will search for it in its ultimate install location.  By
-    --   default we set the install name to the absolute path at build time, but
-    --   it can be overridden by the -dylib-install-name option passed to ghc.
-    --   Cabal does this.
-    -----------------------------------------------------------------------------
+                 ++ extra_ld_inputs
+                 ++ lib_path_opts
+                 ++ extra_ld_opts
+                 ++ pkg_lib_path_opts
+                 ++ pkg_link_opts
+                ))
+        OSDarwin -> do
+            -------------------------------------------------------------------
+            -- Making a darwin dylib
+            -------------------------------------------------------------------
+            -- About the options used for Darwin:
+            -- -dynamiclib
+            --   Apple's way of saying -shared
+            -- -undefined dynamic_lookup:
+            --   Without these options, we'd have to specify the correct
+            --   dependencies for each of the dylibs. Note that we could
+            --   (and should) do without this for all libraries except
+            --   the RTS; all we need to do is to pass the correct
+            --   HSfoo_dyn.dylib files to the link command.
+            --   This feature requires Mac OS X 10.3 or later; there is
+            --   a similar feature, -flat_namespace -undefined suppress,
+            --   which works on earlier versions, but it has other
+            --   disadvantages.
+            -- -single_module
+            --   Build the dynamic library as a single "module", i.e. no
+            --   dynamic binding nonsense when referring to symbols from
+            --   within the library. The NCG assumes that this option is
+            --   specified (on i386, at least).
+            -- -install_name
+            --   Mac OS/X stores the path where a dynamic library is (to
+            --   be) installed in the library itself.  It's called the
+            --   "install name" of the library. Then any library or
+            --   executable that links against it before it's installed
+            --   will search for it in its ultimate install location.
+            --   By default we set the install name to the absolute path
+            --   at build time, but it can be overridden by the
+            --   -dylib-install-name option passed to ghc. Cabal does
+            --   this.
+            -------------------------------------------------------------------
 
-    let output_fn = case o_file of { Just s -> s; Nothing -> "a.out"; }
+            let output_fn = case o_file of { Just s -> s; Nothing -> "a.out"; }
 
-    instName <- case dylibInstallName dflags of
-        Just n -> return n
-        Nothing -> do
-            pwd <- getCurrentDirectory
-            return $ pwd `combine` output_fn
-    SysTools.runLink dflags (
-            map SysTools.Option verbFlags
-         ++ [ SysTools.Option "-dynamiclib"
-            , SysTools.Option "-o"
-            , SysTools.FileOption "" output_fn
-            ]
-         ++ map SysTools.Option (
-            o_files
-         ++ [ "-undefined", "dynamic_lookup", "-single_module",
-#if !defined(x86_64_TARGET_ARCH)
-              "-Wl,-read_only_relocs,suppress",
-#endif
-              "-install_name", instName ]
-         ++ extra_ld_inputs
-         ++ lib_path_opts
-         ++ extra_ld_opts
-         ++ pkg_lib_path_opts
-         ++ pkg_link_opts
-        ))
-#else
-    -----------------------------------------------------------------------------
-    -- Making a DSO
-    -----------------------------------------------------------------------------
+            instName <- case dylibInstallName dflags of
+                Just n -> return n
+                Nothing -> do
+                    pwd <- getCurrentDirectory
+                    return $ pwd `combine` output_fn
+            SysTools.runLink dflags (
+                    map SysTools.Option verbFlags
+                 ++ [ SysTools.Option "-dynamiclib"
+                    , SysTools.Option "-o"
+                    , SysTools.FileOption "" output_fn
+                    ]
+                 ++ map SysTools.Option (
+                    o_files
+                 ++ [ "-undefined", "dynamic_lookup", "-single_module" ]
+                 ++ (if platformArch platform == ArchX86_64
+                     then [ ]
+                     else [ "-Wl,-read_only_relocs,suppress" ])
+                 ++ [ "-install_name", instName ]
+                 ++ extra_ld_inputs
+                 ++ lib_path_opts
+                 ++ extra_ld_opts
+                 ++ pkg_lib_path_opts
+                 ++ pkg_link_opts
+                ))
+        _ -> do
+            -------------------------------------------------------------------
+            -- Making a DSO
+            -------------------------------------------------------------------
 
-    let output_fn = case o_file of { Just s -> s; Nothing -> "a.out"; }
-    let buildingRts = thisPackage dflags == rtsPackageId
-    let bsymbolicFlag = if buildingRts
-                        then -- -Bsymbolic breaks the way we implement
-                             -- hooks in the RTS
-                             []
-                        else -- we need symbolic linking to resolve
-                             -- non-PIC intra-package-relocations
-                             ["-Wl,-Bsymbolic"]
+            let output_fn = case o_file of { Just s -> s; Nothing -> "a.out"; }
+            let buildingRts = thisPackage dflags == rtsPackageId
+            let bsymbolicFlag = if buildingRts
+                                then -- -Bsymbolic breaks the way we implement
+                                     -- hooks in the RTS
+                                     []
+                                else -- we need symbolic linking to resolve
+                                     -- non-PIC intra-package-relocations
+                                     ["-Wl,-Bsymbolic"]
 
-    SysTools.runLink dflags (
-            map SysTools.Option verbFlags
-         ++ [ SysTools.Option "-o"
-            , SysTools.FileOption "" output_fn
-            ]
-         ++ map SysTools.Option (
-            o_files
-         ++ [ "-shared" ]
-         ++ bsymbolicFlag
-            -- Set the library soname. We use -h rather than -soname as
-            -- Solaris 10 doesn't support the latter:
-         ++ [ "-Wl,-h," ++ takeFileName output_fn ]
-         ++ extra_ld_inputs
-         ++ lib_path_opts
-         ++ extra_ld_opts
-         ++ pkg_lib_path_opts
-         ++ pkg_link_opts
-        ))
-#endif
+            SysTools.runLink dflags (
+                    map SysTools.Option verbFlags
+                 ++ [ SysTools.Option "-o"
+                    , SysTools.FileOption "" output_fn
+                    ]
+                 ++ map SysTools.Option (
+                    o_files
+                 ++ [ "-shared" ]
+                 ++ bsymbolicFlag
+                    -- Set the library soname. We use -h rather than -soname as
+                    -- Solaris 10 doesn't support the latter:
+                 ++ [ "-Wl,-h," ++ takeFileName output_fn ]
+                 ++ extra_ld_inputs
+                 ++ lib_path_opts
+                 ++ extra_ld_opts
+                 ++ pkg_lib_path_opts
+                 ++ pkg_link_opts
+                ))
+
 -- -----------------------------------------------------------------------------
 -- Running CPP
 

@@ -3,7 +3,7 @@ module CmmSink (
      cmmSink
   ) where
 
-import StgCmmUtils (callerSaves)
+import CodeGen.Platform (callerSaves)
 
 import Cmm
 import BlockId
@@ -155,7 +155,7 @@ cmmSink dflags graph = ofBlockList (g_entry graph) $ sink mapEmpty $ blocks
       drop_if a@(r,rhs,_) live_sets = (should_drop, live_sets')
           where
             should_drop =  conflicts dflags a final_last
-                        || {- not (isTiny rhs) && -} live_in_multi live_sets r
+                        || {- not (isSmall rhs) && -} live_in_multi live_sets r
                         || r `Set.member` live_in_joins
 
             live_sets' | should_drop = live_sets
@@ -172,12 +172,21 @@ cmmSink dflags graph = ofBlockList (g_entry graph) $ sink mapEmpty $ blocks
                  mapFromList [ (l, filterAssignments dflags (getLive l) assigs'')
                              | l <- succs ]
 
-{-
--- tiny: an expression we don't mind duplicating
-isTiny :: CmmExpr -> Bool
-isTiny (CmmReg _) = True
-isTiny (CmmLit _) = True
-isTiny _other     = False
+{- TODO: enable this later, when we have some good tests in place to
+   measure the effect and tune it.
+
+-- small: an expression we don't mind duplicating
+isSmall :: CmmExpr -> Bool
+isSmall (CmmReg (CmmLocal _)) = True  -- not globals, we want to coalesce them instead
+isSmall (CmmLit _) = True
+isSmall (CmmMachOp (MO_Add _) [x,y]) = isTrivial x && isTrivial y
+isSmall (CmmRegOff (CmmLocal _) _) = True
+isSmall _ = False
+
+isTrivial :: CmmExpr -> Bool
+isTrivial (CmmReg (CmmLocal _)) = True
+isTrivial (CmmLit _) = True
+isTrivial _ = False
 -}
 
 --
@@ -237,8 +246,8 @@ walk dflags nodes assigs = go nodes emptyBlock assigs
    go []               block as = (block, as)
    go ((live,node):ns) block as
     | shouldDiscard node live    = go ns block as
-    | Just a <- shouldSink node1 = go ns block (a : as1)
-    | otherwise                  = go ns block' as'
+    | Just a <- shouldSink dflags node1 = go ns block (a : as1)
+    | otherwise                         = go ns block' as'
     where
       (node1, as1) = tryToInline dflags live node as
 
@@ -251,10 +260,10 @@ walk dflags nodes assigs = go nodes emptyBlock assigs
 -- be profitable to sink assignments to global regs too, but the
 -- liveness analysis doesn't track those (yet) so we can't.
 --
-shouldSink :: CmmNode e x -> Maybe Assignment
-shouldSink (CmmAssign (CmmLocal r) e) | no_local_regs = Just (r, e, exprMem e)
+shouldSink :: DynFlags -> CmmNode e x -> Maybe Assignment
+shouldSink dflags (CmmAssign (CmmLocal r) e) | no_local_regs = Just (r, e, exprMem dflags e)
   where no_local_regs = True -- foldRegsUsed (\_ _ -> False) True e
-shouldSink _other = Nothing
+shouldSink _ _other = Nothing
 
 --
 -- discard dead assignments.  This doesn't do as good a job as
@@ -342,7 +351,7 @@ tryToInline dflags live node assigs = go usages node [] assigs
         node' = mapExpDeep inline node
            where inline (CmmReg    (CmmLocal l'))     | l == l' = rhs
                  inline (CmmRegOff (CmmLocal l') off) | l == l'
-                    = cmmOffset rhs off
+                    = cmmOffset dflags rhs off
                  inline other = other
 
   go usages node skipped (assig@(l,rhs,_) : rest)
@@ -407,7 +416,7 @@ conflicts dflags (r, rhs, addr) node
   | foldRegsUsed (\b r' -> r == r' || b) False node               = True
 
   -- (2) a store to an address conflicts with a read of the same memory
-  | CmmStore addr' e <- node, memConflicts addr (loadAddr addr' (cmmExprWidth e)) = True
+  | CmmStore addr' e <- node, memConflicts addr (loadAddr dflags addr' (cmmExprWidth dflags e)) = True
 
   -- (3) an assignment to Hp/Sp conflicts with a heap/stack read respectively
   | HeapMem    <- addr, CmmAssign (CmmGlobal Hp) _ <- node        = True
@@ -480,21 +489,21 @@ memConflicts (SpMem o1 w1) (SpMem o2 w2)
   | otherwise = o2 + w2 > o1
 memConflicts _         _         = True
 
-exprMem :: CmmExpr -> AbsMem
-exprMem (CmmLoad addr w)  = bothMems (loadAddr addr (typeWidth w)) (exprMem addr)
-exprMem (CmmMachOp _ es)  = foldr bothMems NoMem (map exprMem es)
-exprMem _                 = NoMem
+exprMem :: DynFlags -> CmmExpr -> AbsMem
+exprMem dflags (CmmLoad addr w)  = bothMems (loadAddr dflags addr (typeWidth w)) (exprMem dflags addr)
+exprMem dflags (CmmMachOp _ es)  = foldr bothMems NoMem (map (exprMem dflags) es)
+exprMem _      _                 = NoMem
 
-loadAddr :: CmmExpr -> Width -> AbsMem
-loadAddr e w =
+loadAddr :: DynFlags -> CmmExpr -> Width -> AbsMem
+loadAddr dflags e w =
   case e of
-   CmmReg r       -> regAddr r 0 w
-   CmmRegOff r i  -> regAddr r i w
+   CmmReg r       -> regAddr dflags r 0 w
+   CmmRegOff r i  -> regAddr dflags r i w
    _other | CmmGlobal Sp `regUsedIn` e -> StackMem
           | otherwise -> AnyMem
 
-regAddr :: CmmReg -> Int -> Width -> AbsMem
-regAddr (CmmGlobal Sp) i w = SpMem i (widthInBytes w)
-regAddr (CmmGlobal Hp) _ _ = HeapMem
-regAddr r _ _ | isGcPtrType (cmmRegType r) = HeapMem -- yay! GCPtr pays for itself
-regAddr _ _ _ = AnyMem
+regAddr :: DynFlags -> CmmReg -> Int -> Width -> AbsMem
+regAddr _      (CmmGlobal Sp) i w = SpMem i (widthInBytes w)
+regAddr _      (CmmGlobal Hp) _ _ = HeapMem
+regAddr dflags r _ _ | isGcPtrType (cmmRegType dflags r) = HeapMem -- yay! GCPtr pays for itself
+regAddr _      _ _ _ = AnyMem
