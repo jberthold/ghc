@@ -1349,7 +1349,11 @@ hscCompileCmmFile hsc_env filename = runHsc hsc_env $ do
     let dflags = hsc_dflags hsc_env
     cmm <- ioMsgMaybe $ parseCmmFile dflags filename
     liftIO $ do
-        rawCmms <- cmmToRawCmm dflags (Stream.yield cmm)
+        us <- mkSplitUniqSupply 'S'
+        let initTopSRT = initUs_ us emptySRT
+        dumpIfSet_dyn dflags Opt_D_dump_cmmz "Parsed Cmm" (ppr cmm)
+        (_, cmmgroup) <- cmmPipeline hsc_env initTopSRT cmm
+        rawCmms <- cmmToRawCmm dflags (Stream.yield (cmmOfZgraph cmmgroup))
         _ <- codeOutput dflags no_mod no_loc NoStubs [] rawCmms
         return ()
   where
@@ -1611,7 +1615,7 @@ hscTcExpr hsc_env0 expr = runInteractiveHsc hsc_env0 $ do
     hsc_env <- getHscEnv
     maybe_stmt <- hscParseStmt expr
     case maybe_stmt of
-        Just (L _ (ExprStmt expr _ _ _)) ->
+        Just (L _ (BodyStmt expr _ _ _)) ->
             ioMsgMaybe $ tcRnExpr hsc_env (hsc_IC hsc_env) expr
         _ ->
             throwErrors $ unitBag $ mkPlainErrMsg (hsc_dflags hsc_env) noSrcSpan
@@ -1628,11 +1632,11 @@ hscKcType hsc_env0 normalise str = runInteractiveHsc hsc_env0 $ do
     ty <- hscParseType str
     ioMsgMaybe $ tcRnType hsc_env (hsc_IC hsc_env) normalise ty
 
-hscParseStmt :: String -> Hsc (Maybe (LStmt RdrName))
+hscParseStmt :: String -> Hsc (Maybe (GhciLStmt RdrName))
 hscParseStmt = hscParseThing parseStmt
 
 hscParseStmtWithLocation :: String -> Int -> String
-                         -> Hsc (Maybe (LStmt RdrName))
+                         -> Hsc (Maybe (GhciLStmt RdrName))
 hscParseStmtWithLocation source linenumber stmt =
     hscParseThingWithLocation source linenumber parseStmt stmt
 

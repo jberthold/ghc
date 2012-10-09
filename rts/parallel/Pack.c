@@ -959,7 +959,6 @@ static void PackClosure(StgClosure* closure) {
   case RET_BCO:
   case RET_SMALL:
   case RET_BIG:
-  case RET_DYN:
   case RET_FUN:
     barf("{Pack}Daq Qagh: found return vector %p (%s) when packing", 
 	 closure, info_type_by_ip(info));
@@ -2318,7 +2317,7 @@ StgClosure* UnpackGraphWrapper(StgArrWords* packBufferArray,
 static char* fingerPrintChar = 
   "0ccccccccfffffffttttttt" /* INVALID CONSTRs FUNs THUNKs */
   "TBAPP___"     /* SELECTOR BCO AP PAP AP_STACK INDs */
-  "RRRRRFFFF*@MM"/* RETs FRAMEs BQ BLACKHOLE MVARs */
+  "RRRRFFFF*@MM" /* RETs FRAMEs BQ BLACKHOLE MVARs */
   "aAAAAmmwppXS" /* ARRAYs MUT_VARs WEAK PRIM MUT_PRIM TSO STACK */
   "&FFFW"        /* TREC (STM-)FRAMEs WHITEHOLE*/
   ;
@@ -2557,7 +2556,6 @@ static void GraphFingerPrint_(StgClosure *p) {
   case RET_BCO:
   case RET_SMALL:
   case RET_BIG:
-  case RET_DYN:
   case RET_FUN:
   case UPDATE_FRAME:
   case CATCH_FRAME:

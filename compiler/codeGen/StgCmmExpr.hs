@@ -163,9 +163,7 @@ cgLetNoEscapeClosure bndr cc_slot _unused_cc args body
    code = forkProc $ do
                   { restoreCurrentCostCentre cc_slot
                   ; arg_regs <- bindArgsToRegs args
-                  ; void $ altHeapCheck arg_regs (cgExpr body) }
-                        -- Using altHeapCheck just reduces
-                        -- instructions to save on stack
+                  ; void $ noEscapeHeapCheck arg_regs (cgExpr body) }
 
 
 ------------------------------------------------------------------------
@@ -719,12 +717,12 @@ emitEnter fun = do
       --
       AssignTo res_regs _ -> do
        { lret <- newLabelC
-       ; let (off, copyin) = copyInOflow dflags NativeReturn (Young lret) res_regs
+       ; let (off, copyin) = copyInOflow dflags NativeReturn (Young lret) res_regs []
        ; lcall <- newLabelC
        ; updfr_off <- getUpdFrameOff
        ; let area = Young lret
        ; let (outArgs, regs, copyout) = copyOutOflow dflags NativeNodeCall Call area
-                                          [fun] updfr_off (0,[])
+                                          [fun] updfr_off []
          -- refer to fun via nodeReg after the copyout, to avoid having
          -- both live simultaneously; this sometimes enables fun to be
          -- inlined in the RHS of the R1 assignment.
