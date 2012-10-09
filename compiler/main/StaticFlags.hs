@@ -20,6 +20,8 @@
 -----------------------------------------------------------------------------
 
 module StaticFlags (
+        unsafeGlobalDynFlags, setUnsafeGlobalDynFlags,
+
 	staticFlags,
         initStaticOpts,
 
@@ -50,17 +52,6 @@ module StaticFlags (
 	opt_MaxWorkerArgs,
         opt_NoFlatCache,
 
-	-- Unfolding control
-	opt_UF_CreationThreshold,
-	opt_UF_UseThreshold,
-	opt_UF_FunAppDiscount,
-	opt_UF_DictDiscount,
-	opt_UF_KeenessFactor,
-	opt_UF_DearOp,
-
-	-- misc opts
-	opt_ErrorSpans,
-
     -- For the parser
     addOpt, removeOpt, v_opt_C_ready,
 
@@ -69,6 +60,8 @@ module StaticFlags (
   ) where
 
 #include "HsVersions.h"
+
+import {-# SOURCE #-} DynFlags (DynFlags)
 
 import FastString
 import Util
@@ -79,6 +72,23 @@ import Control.Monad
 import Data.IORef
 import System.IO.Unsafe	( unsafePerformIO )
 import Data.List
+
+--------------------------------------------------------------------------
+-- Do not use unsafeGlobalDynFlags!
+--
+-- unsafeGlobalDynFlags is a hack, necessary because we need to be able
+-- to show SDocs when tracing, but we don't always have DynFlags
+-- available.
+--
+-- Do not use it if you can help it. You may get the wrong value!
+
+GLOBAL_VAR(v_unsafeGlobalDynFlags, panic "v_unsafeGlobalDynFlags: not initialised", DynFlags)
+
+unsafeGlobalDynFlags :: DynFlags
+unsafeGlobalDynFlags = unsafePerformIO $ readIORef v_unsafeGlobalDynFlags
+
+setUnsafeGlobalDynFlags :: DynFlags -> IO ()
+setUnsafeGlobalDynFlags = writeIORef v_unsafeGlobalDynFlags
 
 -----------------------------------------------------------------------------
 -- Static flags
@@ -96,7 +106,6 @@ removeOpt f = do
 
 lookUp	       	 :: FastString -> Bool
 lookup_def_int   :: String -> Int -> Int
-lookup_def_float :: String -> Float -> Float
 lookup_str       :: String -> Maybe String
 
 -- holds the static opts while they're being collected, before
@@ -128,10 +137,12 @@ lookup_def_int sw def = case (lookup_str sw) of
 			    Nothing -> def		-- Use default
 		  	    Just xx -> try_read sw xx
 
+{-
+lookup_def_float :: String -> Float -> Float
 lookup_def_float sw def = case (lookup_str sw) of
 			    Nothing -> def		-- Use default
 		  	    Just xx -> try_read sw xx
-
+-}
 
 try_read :: Read a => String -> String -> a
 -- (try_read sw str) tries to read s; if it fails, it
@@ -246,34 +257,6 @@ opt_NoOptCoercion    	        = lookUp  (fsLit "-fno-opt-coercion")
 
 opt_NoFlatCache :: Bool
 opt_NoFlatCache    	        = lookUp  (fsLit "-fno-flat-cache")
-
--- Unfolding control
--- See Note [Discounts and thresholds] in CoreUnfold
-
-opt_UF_CreationThreshold, opt_UF_UseThreshold :: Int
-opt_UF_DearOp, opt_UF_FunAppDiscount, opt_UF_DictDiscount :: Int
-opt_UF_KeenessFactor :: Float
-
-opt_UF_CreationThreshold = lookup_def_int "-funfolding-creation-threshold" (750::Int)
-  -- This threshold must be reasonably high to take 
-  -- account of possible discounts.  
-  -- E.g. 450 is not enough in 'fulsom' for Interval.sqr to inline into Csg.calc
-  --      (The unfolding for sqr never makes it into the interface file.)
-
-opt_UF_UseThreshold      = lookup_def_int "-funfolding-use-threshold"      (60::Int)
-opt_UF_FunAppDiscount    = lookup_def_int "-funfolding-fun-discount"       (60::Int)
-
-opt_UF_DictDiscount      = lookup_def_int "-funfolding-dict-discount"      (30::Int)
-   -- Be fairly keen to inline a fuction if that means
-   -- we'll be able to pick the right method from a dictionary
-
-opt_UF_KeenessFactor	 = lookup_def_float "-funfolding-keeness-factor"   (1.5::Float)
-opt_UF_DearOp            = ( 40 :: Int)
-
-
--- Include full span info in error messages, instead of just the start position.
-opt_ErrorSpans :: Bool
-opt_ErrorSpans			= lookUp (fsLit "-ferror-spans")
 
 -----------------------------------------------------------------------------
 -- Tunneling our global variables into a new instance of the GHC library

@@ -11,9 +11,6 @@
 --
 -------------------------------------------------------------------------------
 
-{-# OPTIONS_GHC -fno-warn-missing-fields #-}
--- So that tracingSettings works properly
-
 module DynFlags (
         -- * Dynamic flags and associated configuration types
         DynFlag(..),
@@ -114,8 +111,6 @@ module DynFlags (
 -- exposes the appropriate runtime boolean
         rtsIsProfiled,
 #endif
-        -- ** Only for use in the tracing functions in Outputable
-        tracingDynFlags,
 
 #include "../includes/dist-derivedconstants/header/GHCConstantsHaskellExports.hs"
         bLOCK_SIZE_W,
@@ -137,8 +132,10 @@ import Config
 import CmdLineParser
 import Constants
 import Panic
+import StaticFlags
 import Util
 import Maybes           ( orElse )
+import MonadUtils
 import qualified Pretty
 import SrcLoc
 import FastString
@@ -344,6 +341,8 @@ data DynFlag
    | Opt_Hpc
 
    -- output style opts
+   | Opt_ErrorSpans -- Include full span info in error messages,
+                    -- instead of just the start position.
    | Opt_PprCaseAsLet
 
    -- temporary flags
@@ -646,6 +645,15 @@ data DynFlags = DynFlags {
   -- extensionFlags should always be equal to
   --     flattenExtensionFlags language extensions
   extensionFlags        :: IntSet,
+
+  -- Unfolding control
+  -- See Note [Discounts and thresholds] in CoreUnfold
+  ufCreationThreshold   :: Int,
+  ufUseThreshold        :: Int,
+  ufFunAppDiscount      :: Int,
+  ufDictDiscount        :: Int,
+  ufKeenessFactor       :: Float,
+  ufDearOp              :: Int,
 
   -- | MsgDoc output action: use "ErrUtils" instead of this if you can
   log_action            :: LogAction,
@@ -1204,6 +1212,21 @@ defaultDynFlags mySettings =
         warnUnsafeOnLoc = noSrcSpan,
         extensions = [],
         extensionFlags = flattenExtensionFlags Nothing [],
+
+        -- The ufCreationThreshold threshold must be reasonably high to
+        -- take account of possible discounts.
+        -- E.g. 450 is not enough in 'fulsom' for Interval.sqr to inline
+        -- into Csg.calc (The unfolding for sqr never makes it into the
+        -- interface file.)
+        ufCreationThreshold = 750,
+        ufUseThreshold      = 60,
+        ufFunAppDiscount    = 60,
+        -- Be fairly keen to inline a fuction if that means
+        -- we'll be able to pick the right method from a dictionary
+        ufDictDiscount      = 30,
+        ufKeenessFactor     = 1.5,
+        ufDearOp            = 40,
+
         log_action = defaultLogAction,
         flushOut = defaultFlushOut,
         flushErr = defaultFlushErr,
@@ -1215,24 +1238,6 @@ defaultDynFlags mySettings =
         interactivePrint = Nothing
       }
 
---------------------------------------------------------------------------
--- Do not use tracingDynFlags!
--- tracingDynFlags is a hack, necessary because we need to be able to
--- show SDocs when tracing, but we don't always have DynFlags available.
--- Do not use it if you can help it. It will not reflect options set
--- by the commandline flags, and all fields may be either wrong or
--- undefined.
-tracingDynFlags :: DynFlags
-tracingDynFlags = defaultDynFlags tracingSettings
-
-tracingSettings :: Settings
-tracingSettings = trace "panic: Settings not defined in tracingDynFlags" $
-                  Settings { sTargetPlatform = tracingPlatform }
-                  -- Missing flags give a nice error
-
-tracingPlatform :: Platform
-tracingPlatform = Platform { platformWordSize = 4, platformOS = OSUnknown }
-                  -- Missing flags give a nice error
 --------------------------------------------------------------------------
 
 type FatalMessager = String -> IO ()
@@ -1634,7 +1639,7 @@ getStgToDo dflags
 -- the parsed 'DynFlags', the left-over arguments, and a list of warnings.
 -- Throws a 'UsageError' if errors occurred during parsing (such as unknown
 -- flags or missing arguments).
-parseDynamicFlagsCmdLine :: Monad m => DynFlags -> [Located String]
+parseDynamicFlagsCmdLine :: MonadIO m => DynFlags -> [Located String]
                          -> m (DynFlags, [Located String], [Located String])
                             -- ^ Updated 'DynFlags', left-over arguments, and
                             -- list of warnings.
@@ -1644,7 +1649,7 @@ parseDynamicFlagsCmdLine = parseDynamicFlagsFull flagsAll True
 -- | Like 'parseDynamicFlagsCmdLine' but does not allow the package flags
 -- (-package, -hide-package, -ignore-package, -hide-all-packages, -package-db).
 -- Used to parse flags set in a modules pragma.
-parseDynamicFilePragma :: Monad m => DynFlags -> [Located String]
+parseDynamicFilePragma :: MonadIO m => DynFlags -> [Located String]
                        -> m (DynFlags, [Located String], [Located String])
                           -- ^ Updated 'DynFlags', left-over arguments, and
                           -- list of warnings.
@@ -1655,7 +1660,7 @@ parseDynamicFilePragma = parseDynamicFlagsFull flagsDynamic False
 -- the dynamic flag parser that the other methods simply wrap. It allows
 -- saying which flags are valid flags and indicating if we are parsing
 -- arguments from the command line or from a file pragma.
-parseDynamicFlagsFull :: Monad m
+parseDynamicFlagsFull :: MonadIO m
                   => [Flag (CmdLineP DynFlags)]    -- ^ valid flags to match against
                   -> Bool                          -- ^ are the arguments from the command line?
                   -> DynFlags                      -- ^ current dynamic flags
@@ -1694,6 +1699,8 @@ parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
                               intercalate "/" (map wayDesc theWays)))
 
   let (dflags4, consistency_warnings) = makeDynFlagsConsistent dflags3
+
+  liftIO $ setUnsafeGlobalDynFlags dflags4
 
   return (dflags4, leftover, consistency_warnings ++ sh_warns ++ warns)
 
@@ -2078,6 +2085,12 @@ dynamic_flags = [
   , Flag "ffloat-all-lams"             (noArg (\d -> d{ floatLamArgs = Nothing }))
   , Flag "fhistory-size"               (intSuffix (\n d -> d{ historySize = n }))
 
+  , Flag "funfolding-creation-threshold" (intSuffix   (\n d -> d {ufCreationThreshold = n}))
+  , Flag "funfolding-use-threshold"      (intSuffix   (\n d -> d {ufUseThreshold = n}))
+  , Flag "funfolding-fun-discount"       (intSuffix   (\n d -> d {ufFunAppDiscount = n}))
+  , Flag "funfolding-dict-discount"      (intSuffix   (\n d -> d {ufDictDiscount = n}))
+  , Flag "funfolding-keeness-factor"     (floatSuffix (\n d -> d {ufKeenessFactor = n}))
+
         ------ Profiling ----------------------------------------------------
 
         -- OLD profiling flags
@@ -2255,6 +2268,7 @@ dFlags = [
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@
 fFlags :: [FlagSpec DynFlag]
 fFlags = [
+  ( "error-spans",                      Opt_ErrorSpans, nop ),
   ( "print-explicit-foralls",           Opt_PrintExplicitForalls, nop ),
   ( "strictness",                       Opt_Strictness, nop ),
   ( "specialise",                       Opt_Specialise, nop ),
@@ -2761,6 +2775,9 @@ sepArg fn = SepArg (upd . fn)
 
 intSuffix :: (Int -> DynFlags -> DynFlags) -> OptKind (CmdLineP DynFlags)
 intSuffix fn = IntSuffix (\n -> upd (fn n))
+
+floatSuffix :: (Float -> DynFlags -> DynFlags) -> OptKind (CmdLineP DynFlags)
+floatSuffix fn = FloatSuffix (\n -> upd (fn n))
 
 optIntSuffixM :: (Maybe Int -> DynFlags -> DynP DynFlags)
               -> OptKind (CmdLineP DynFlags)
