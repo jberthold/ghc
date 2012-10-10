@@ -125,7 +125,7 @@ module DynFlags (
 import Platform
 import Module
 import PackageConfig
-import PrelNames        ( mAIN )
+import {-# SOURCE #-} PrelNames ( mAIN )
 import {-# SOURCE #-} Packages (PackageState)
 import DriverPhases     ( Phase(..), phaseInputExt )
 import Config
@@ -291,6 +291,7 @@ data DynFlag
    | Opt_CmmSink
    | Opt_CmmElimCommonBlocks
    | Opt_OmitYields
+   | Opt_SimpleListLiterals
 
    -- Interface files
    | Opt_IgnoreInterfacePragmas
@@ -340,10 +341,31 @@ data DynFlag
    | Opt_RelativeDynlibPaths
    | Opt_Hpc
 
+   -- PreInlining is on by default. The option is there just to see how
+   -- bad things get if you turn it off!
+   | Opt_SimplPreInlining
+
    -- output style opts
    | Opt_ErrorSpans -- Include full span info in error messages,
                     -- instead of just the start position.
    | Opt_PprCaseAsLet
+
+   -- Suppress all coercions, them replacing with '...'
+   | Opt_SuppressCoercions
+   | Opt_SuppressVarKinds
+   -- Suppress module id prefixes on variables.
+   | Opt_SuppressModulePrefixes
+   -- Suppress type applications.
+   | Opt_SuppressTypeApplications
+   -- Suppress info such as arity and unfoldings on identifiers.
+   | Opt_SuppressIdInfo
+   -- Suppress separate type signatures in core, but leave types on
+   -- lambda bound vars
+   | Opt_SuppressTypeSignatures
+   -- Suppress unique ids on variables.
+   -- Except for uniques, as some simplifier phases introduce new
+   -- variables that have otherwise identical names.
+   | Opt_SuppressUniques
 
    -- temporary flags
    | Opt_RunCPS
@@ -654,6 +676,8 @@ data DynFlags = DynFlags {
   ufDictDiscount        :: Int,
   ufKeenessFactor       :: Float,
   ufDearOp              :: Int,
+
+  maxWorkerArgs         :: Int,
 
   -- | MsgDoc output action: use "ErrUtils" instead of this if you can
   log_action            :: LogAction,
@@ -1226,6 +1250,8 @@ defaultDynFlags mySettings =
         ufDictDiscount      = 30,
         ufKeenessFactor     = 1.5,
         ufDearOp            = 40,
+
+        maxWorkerArgs = 10,
 
         log_action = defaultLogAction,
         flushOut = defaultFlushOut,
@@ -1948,6 +1974,15 @@ dynamic_flags = [
   , Flag "dppr-user-length" (intSuffix (\n d -> d{ pprUserLength = n }))
   , Flag "dppr-cols"        (intSuffix (\n d -> d{ pprCols = n }))
   , Flag "dtrace-level"     (intSuffix (\n d -> d{ traceLevel = n }))
+  -- Suppress all that is suppressable in core dumps.
+  -- Except for uniques, as some simplifier phases introduce new varibles that
+  -- have otherwise identical names.
+  , Flag "dsuppress-all"    (NoArg $ do setDynFlag Opt_SuppressCoercions
+                                        setDynFlag Opt_SuppressVarKinds
+                                        setDynFlag Opt_SuppressModulePrefixes
+                                        setDynFlag Opt_SuppressTypeApplications
+                                        setDynFlag Opt_SuppressIdInfo
+                                        setDynFlag Opt_SuppressTypeSignatures)
 
         ------ Debugging ----------------------------------------------------
   , Flag "dstg-stats"     (NoArg (setDynFlag Opt_StgStats))
@@ -2090,6 +2125,8 @@ dynamic_flags = [
   , Flag "funfolding-fun-discount"       (intSuffix   (\n d -> d {ufFunAppDiscount = n}))
   , Flag "funfolding-dict-discount"      (intSuffix   (\n d -> d {ufDictDiscount = n}))
   , Flag "funfolding-keeness-factor"     (floatSuffix (\n d -> d {ufKeenessFactor = n}))
+
+  , Flag "fmax-worker-args" (intSuffix (\n d -> d {maxWorkerArgs = n}))
 
         ------ Profiling ----------------------------------------------------
 
@@ -2263,7 +2300,14 @@ negatableFlags = [
 -- | These @-d\<blah\>@ flags can all be reversed with @-dno-\<blah\>@
 dFlags :: [FlagSpec DynFlag]
 dFlags = [
-  ( "ppr-case-as-let",                  Opt_PprCaseAsLet, nop ) ]
+  ( "suppress-coercions",               Opt_SuppressCoercions,          nop),
+  ( "suppress-var-kinds",               Opt_SuppressVarKinds,           nop),
+  ( "suppress-module-prefixes",         Opt_SuppressModulePrefixes,     nop),
+  ( "suppress-type-applications",       Opt_SuppressTypeApplications,   nop),
+  ( "suppress-idinfo",                  Opt_SuppressIdInfo,             nop),
+  ( "suppress-type-signatures",         Opt_SuppressTypeSignatures,     nop),
+  ( "suppress-uniques",                 Opt_SuppressUniques,            nop),
+  ( "ppr-case-as-let",                  Opt_PprCaseAsLet,               nop)]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@
 fFlags :: [FlagSpec DynFlag]
@@ -2311,6 +2355,7 @@ fFlags = [
   ( "cmm-sink",                         Opt_CmmSink, nop ),
   ( "cmm-elim-common-blocks",           Opt_CmmElimCommonBlocks, nop ),
   ( "omit-yields",                      Opt_OmitYields, nop ),
+  ( "simple-list-literals",             Opt_SimpleListLiterals, nop ),
   ( "gen-manifest",                     Opt_GenManifest, nop ),
   ( "embed-manifest",                   Opt_EmbedManifest, nop ),
   ( "ext-core",                         Opt_EmitExternalCore, nop ),
@@ -2324,6 +2369,7 @@ fFlags = [
   ( "prof-count-entries",               Opt_ProfCountEntries, nop ),
   ( "prof-cafs",                        Opt_AutoSccsOnIndividualCafs, nop ),
   ( "hpc",                              Opt_Hpc, nop ),
+  ( "pre-inlining",                     Opt_SimplPreInlining, nop ),
   ( "use-rpaths",                       Opt_RPath, nop )
   ]
 
@@ -2505,6 +2551,7 @@ defaultFlags settings
       Opt_GhciHistory,
       Opt_HelpfulErrors,
       Opt_ProfCountEntries,
+      Opt_SimplPreInlining,
       Opt_RPath
     ]
 
