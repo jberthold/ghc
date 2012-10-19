@@ -1487,7 +1487,8 @@ runPhase_MoveBinary dflags input_fn
         os = platformOS (targetPlatform dflags)
         (uservar, pathsep, script_name) 
             = case os of
-                OSMinGW32 -> ("USERNAME",'\\', drop 4 input_fn ++ ".vbs")
+                OSMinGW32 -> ("USERNAME",'\\', 
+                              ((init . init . init . init) input_fn)++".vbs")
                 _         -> ("USER", '/', input_fn) -- Unix-like systems
 
 mkExtraObj :: DynFlags -> Suffix -> String -> IO FilePath
