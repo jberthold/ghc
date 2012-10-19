@@ -1485,14 +1485,10 @@ runPhase_MoveBinary dflags input_fn
                      || WayParMPI `elem` (ways dflags)
                      || WayParCp `elem` (ways dflags)
         os = platformOS (targetPlatform dflags)
-        (uservar, pathsep) 
+        (uservar, pathsep, script_name) 
             = case os of
-                OSMinGW32 -> ("USER",'\\')
-                _         -> ("USERNAME", '/') -- Unix-like systems
-        script_name = case os of
-                        OSMinGW32 -> ((init . init . init . init) input_fn) 
-                                     ++ ".vbs"
-                        _         -> input_fn
+                OSMinGW32 -> ("USERNAME",'\\', drop 4 input_fn ++ ".vbs")
+                _         -> ("USER", '/', input_fn) -- Unix-like systems
 
 mkExtraObj :: DynFlags -> Suffix -> String -> IO FilePath
 mkExtraObj dflags extn xs
