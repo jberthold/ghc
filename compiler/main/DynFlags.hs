@@ -66,6 +66,7 @@ module DynFlags (
 
         -- ** Manipulating DynFlags
         defaultDynFlags,                -- Settings -> DynFlags
+        defaultWays,
         initDynFlags,                   -- DynFlags -> IO DynFlags
         defaultFatalMessager,
         defaultLogAction,
@@ -276,7 +277,6 @@ data GeneralFlag
    | Opt_RegsIterative                  -- do iterative coalescing graph coloring register allocation
    | Opt_PedanticBottoms                -- Be picky about how we treat bottom
    | Opt_LlvmTBAA                       -- Use LLVM TBAA infastructure for improving AA (hidden flag)
-   | Opt_RegLiveness                    -- Use the STG Reg liveness information (hidden flag)
    | Opt_IrrefutableTuples
    | Opt_CmmSink
    | Opt_CmmElimCommonBlocks
@@ -494,7 +494,6 @@ data ExtensionFlag
    | Opt_MultiParamTypeClasses
    | Opt_FunctionalDependencies
    | Opt_UnicodeSyntax
-   | Opt_PolymorphicComponents
    | Opt_ExistentialQuantification
    | Opt_MagicHash
    | Opt_EmptyDataDecls
@@ -508,7 +507,6 @@ data ExtensionFlag
    | Opt_TupleSections
    | Opt_PatternGuards
    | Opt_LiberalTypeSynonyms
-   | Opt_Rank2Types
    | Opt_RankNTypes
    | Opt_ImpredicativeTypes
    | Opt_TypeOperators
@@ -672,6 +670,8 @@ data DynFlags = DynFlags {
 
   maxWorkerArgs         :: Int,
 
+  ghciHistSize          :: Int,
+
   -- | MsgDoc output action: use "ErrUtils" instead of this if you can
   log_action            :: LogAction,
   flushOut              :: FlushOut,
@@ -690,7 +690,9 @@ data DynFlags = DynFlags {
 
   interactivePrint      :: Maybe String,
 
-  llvmVersion           :: IORef (Int)
+  llvmVersion           :: IORef (Int),
+
+  nextWrapperNum        :: IORef Int
  }
 
 class HasDynFlags m where
@@ -1041,7 +1043,10 @@ wayGeneralFlags platform WayDyn =
             -- different from the current one.
             OSMinGW32 -> [Opt_PIC]
             OSDarwin  -> [Opt_PIC]
-            OSLinux   -> [Opt_PIC]
+            OSLinux   -> [Opt_PIC] -- This needs to be here for GHCi to work:
+                                   -- GHCi links objects into a .so before
+                                   -- loading the .so using the system linker.
+                                   -- Only PIC objects can be linked into a .so.
             _         -> []
 wayGeneralFlags _ WayProf     = [Opt_SccProfilingOn]
 wayGeneralFlags _ WayEventLog = []
@@ -1141,12 +1146,14 @@ initDynFlags dflags = do
  refFilesToNotIntermediateClean <- newIORef []
  refGeneratedDumps <- newIORef Set.empty
  refLlvmVersion <- newIORef 28
+ wrapperNum <- newIORef 0
  return dflags{
         filesToClean   = refFilesToClean,
         dirsToClean    = refDirsToClean,
         filesToNotIntermediateClean = refFilesToNotIntermediateClean,
         generatedDumps = refGeneratedDumps,
-        llvmVersion    = refLlvmVersion
+        llvmVersion    = refLlvmVersion,
+        nextWrapperNum = wrapperNum
         }
 
 -- | The normal 'DynFlags'. Note that they is not suitable for use in this form
@@ -1213,9 +1220,9 @@ defaultDynFlags mySettings =
         packageFlags            = [],
         pkgDatabase             = Nothing,
         pkgState                = panic "no package state yet: call GHC.setSessionDynFlags",
-        ways                    = [],
-        buildTag                = mkBuildTag [],
-        rtsBuildTag             = mkBuildTag [],
+        ways                    = defaultWays mySettings,
+        buildTag                = mkBuildTag (defaultWays mySettings),
+        rtsBuildTag             = mkBuildTag (defaultWays mySettings),
         splitInfo               = Nothing,
         settings                = mySettings,
         -- ghc -M values
@@ -1259,6 +1266,8 @@ defaultDynFlags mySettings =
 
         maxWorkerArgs = 10,
 
+        ghciHistSize = 50, -- keep a log of length 50 by default
+
         log_action = defaultLogAction,
         flushOut = defaultFlushOut,
         flushErr = defaultFlushErr,
@@ -1267,8 +1276,14 @@ defaultDynFlags mySettings =
         traceLevel = 1,
         profAuto = NoProfAuto,
         llvmVersion = panic "defaultDynFlags: No llvmVersion",
-        interactivePrint = Nothing
+        interactivePrint = Nothing,
+        nextWrapperNum = panic "defaultDynFlags: No nextWrapperNum"
       }
+
+defaultWays :: Settings -> [Way]
+defaultWays settings = if pc_dYNAMIC_BY_DEFAULT (sPlatformConstants settings)
+                       then [WayDyn]
+                       else []
 
 --------------------------------------------------------------------------
 
@@ -2157,6 +2172,8 @@ dynamic_flags = [
 
   , Flag "fmax-worker-args" (intSuffix (\n d -> d {maxWorkerArgs = n}))
 
+  , Flag "fghci-hist-size" (intSuffix (\n d -> d {ghciHistSize = n}))
+
         ------ Profiling ----------------------------------------------------
 
         -- OLD profiling flags
@@ -2379,7 +2396,6 @@ fFlags = [
   ( "regs-graph",                       Opt_RegsGraph, nop ),
   ( "regs-iterative",                   Opt_RegsIterative, nop ),
   ( "llvm-tbaa",                        Opt_LlvmTBAA, nop), -- hidden flag
-  ( "regs-liveness",                    Opt_RegLiveness, nop), -- hidden flag
   ( "irrefutable-tuples",               Opt_IrrefutableTuples, nop ),
   ( "cmm-sink",                         Opt_CmmSink, nop ),
   ( "cmm-elim-common-blocks",           Opt_CmmElimCommonBlocks, nop ),
@@ -2406,7 +2422,8 @@ fFlags = [
 fLangFlags :: [FlagSpec ExtensionFlag]
 fLangFlags = [
   ( "th",                               Opt_TemplateHaskell,
-    deprecatedForExtension "TemplateHaskell" >> checkTemplateHaskellOk ),
+    \on -> deprecatedForExtension "TemplateHaskell" on 
+        >> checkTemplateHaskellOk on ),
   ( "fi",                               Opt_ForeignFunctionInterface,
     deprecatedForExtension "ForeignFunctionInterface" ),
   ( "ffi",                              Opt_ForeignFunctionInterface,
@@ -2475,7 +2492,6 @@ xFlags = [
   ( "PatternGuards",                    Opt_PatternGuards, nop ),
   ( "UnicodeSyntax",                    Opt_UnicodeSyntax, nop ),
   ( "MagicHash",                        Opt_MagicHash, nop ),
-  ( "PolymorphicComponents",            Opt_PolymorphicComponents, nop ),
   ( "ExistentialQuantification",        Opt_ExistentialQuantification, nop ),
   ( "KindSignatures",                   Opt_KindSignatures, nop ),
   ( "EmptyDataDecls",                   Opt_EmptyDataDecls, nop ),
@@ -2488,8 +2504,11 @@ xFlags = [
   ( "CApiFFI",                          Opt_CApiFFI, nop ),
   ( "GHCForeignImportPrim",             Opt_GHCForeignImportPrim, nop ),
   ( "LiberalTypeSynonyms",              Opt_LiberalTypeSynonyms, nop ),
-  ( "Rank2Types",                       Opt_Rank2Types, nop ),
+
+  ( "PolymorphicComponents",            Opt_RankNTypes, nop),
+  ( "Rank2Types",                       Opt_RankNTypes, nop),
   ( "RankNTypes",                       Opt_RankNTypes, nop ),
+
   ( "ImpredicativeTypes",               Opt_ImpredicativeTypes, nop),
   ( "TypeOperators",                    Opt_TypeOperators, nop ),
   ( "ExplicitNamespaces",               Opt_ExplicitNamespaces, nop ),
@@ -2587,12 +2606,7 @@ defaultFlags settings
     ++ [f | (ns,f) <- optLevelFlags, 0 `elem` ns]
              -- The default -O0 options
 
-    ++ (case platformOS platform of
-        OSDarwin ->
-            case platformArch platform of
-            ArchX86_64         -> [Opt_PIC]
-            _                  -> []
-        _ -> [])
+    ++ default_PIC platform
 
     ++ (if pc_dYNAMIC_BY_DEFAULT (sPlatformConstants settings)
         then wayGeneralFlags platform WayDyn
@@ -2600,14 +2614,18 @@ defaultFlags settings
 
     where platform = sTargetPlatform settings
 
+default_PIC :: Platform -> [GeneralFlag]
+default_PIC platform =
+  case (platformOS platform, platformArch platform) of
+    (OSDarwin, ArchX86_64) -> [Opt_PIC]
+    _                      -> []
+
 impliedFlags :: [(ExtensionFlag, TurnOnFlag, ExtensionFlag)]
 impliedFlags
   = [ (Opt_RankNTypes,                turnOn, Opt_ExplicitForAll)
-    , (Opt_Rank2Types,                turnOn, Opt_ExplicitForAll)
     , (Opt_ScopedTypeVariables,       turnOn, Opt_ExplicitForAll)
     , (Opt_LiberalTypeSynonyms,       turnOn, Opt_ExplicitForAll)
     , (Opt_ExistentialQuantification, turnOn, Opt_ExplicitForAll)
-    , (Opt_PolymorphicComponents,     turnOn, Opt_ExplicitForAll)
     , (Opt_FlexibleInstances,         turnOn, Opt_TypeSynonymInstances)
     , (Opt_FunctionalDependencies,    turnOn, Opt_MultiParamTypeClasses)
 
@@ -2662,7 +2680,6 @@ optLevelFlags
 -- XXX disabled, see #7192
 --    , ([2],     Opt_RegsGraph)
     , ([0,1,2], Opt_LlvmTBAA)
-    , ([0,1,2], Opt_RegLiveness)
     , ([1,2],   Opt_CmmSink)
     , ([1,2],   Opt_CmmElimCommonBlocks)
 
@@ -2756,7 +2773,6 @@ glasgowExtsFlags = [
            , Opt_MultiParamTypeClasses
            , Opt_FunctionalDependencies
            , Opt_MagicHash
-           , Opt_PolymorphicComponents
            , Opt_ExistentialQuantification
            , Opt_UnicodeSyntax
            , Opt_PostfixOperators
@@ -2794,11 +2810,11 @@ setPackageTrust = do
     l <- getCurLoc
     upd $ \d -> d { pkgTrustOnLoc = l }
 
-setGenDeriving :: Bool -> DynP ()
+setGenDeriving :: TurnOnFlag -> DynP ()
 setGenDeriving True  = getCurLoc >>= \l -> upd (\d -> d { newDerivOnLoc = l })
 setGenDeriving False = return ()
 
-checkTemplateHaskellOk :: Bool -> DynP ()
+checkTemplateHaskellOk :: TurnOnFlag -> DynP ()
 #ifdef GHCI
 checkTemplateHaskellOk turn_on
   | turn_on && rtsIsProfiled
@@ -2871,7 +2887,14 @@ addWay w = do upd (\dfs -> dfs { ways = w : ways dfs })
               mapM_ setGeneralFlag $ wayGeneralFlags platform w
 
 removeWay :: Way -> DynP ()
-removeWay w = upd (\dfs -> dfs { ways = filter (w /=) (ways dfs) })
+removeWay w = do
+  upd (\dfs -> dfs { ways = filter (w /=) (ways dfs) })
+  dfs <- liftEwM getCmdLineState
+  let platform = targetPlatform dfs
+  -- XXX: wayExtras?
+  mapM_ unSetGeneralFlag $ wayGeneralFlags platform w
+  -- turn Opt_PIC back on if necessary for this platform:
+  mapM_ setGeneralFlag $ default_PIC platform
 
 --------------------------
 setGeneralFlag, unSetGeneralFlag :: GeneralFlag -> DynP ()

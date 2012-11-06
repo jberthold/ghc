@@ -18,6 +18,7 @@ import Cmm
 import PprCmm ()
 import CmmUtils
 import CmmInfo
+import CmmLive (cmmGlobalLiveness)
 import Data.List (sortBy)
 import Maybes
 import Control.Monad
@@ -210,7 +211,7 @@ splitAtProcPoints :: DynFlags -> CLabel -> ProcPointSet-> ProcPointSet -> BlockE
                      CmmDecl -> UniqSM [CmmDecl]
 splitAtProcPoints dflags entry_label callPPs procPoints procMap
                   (CmmProc (TopInfo {info_tbls = info_tbls})
-                           top_l g@(CmmGraph {g_entry=entry})) =
+                           top_l _ g@(CmmGraph {g_entry=entry})) =
   do -- Build a map from procpoints to the blocks they reach
      let addBlock b graphEnv =
            case mapLookup bid procMap of
@@ -226,6 +227,11 @@ splitAtProcPoints dflags entry_label callPPs procPoints procMap
                where graph  = mapLookup procId graphEnv `orElse` mapEmpty
                      graph' = mapInsert bid b graph
 
+     let liveness = cmmGlobalLiveness dflags g
+     let ppLiveness pp = filter isArgReg $
+                         regSetToList $
+                         expectJust "ppLiveness" $ mapLookup pp liveness
+
      graphEnv <- return $ foldGraphBlocks addBlock emptyBlockMap g
 
      -- Build a map from proc point BlockId to pairs of:
@@ -234,9 +240,10 @@ splitAtProcPoints dflags entry_label callPPs procPoints procMap
      --    the proc point is a callPP)
      -- Due to common blockification, we may overestimate the set of procpoints.
      let add_label map pp = mapInsert pp lbls map
-           where lbls | pp == entry = (entry_label, Just (toInfoLbl entry_label))
-                      | otherwise   = (blockLbl pp, guard (setMember pp callPPs) >> 
-                                                    Just (infoTblLbl pp))
+           where lbls | pp == entry = (entry_label, fmap cit_lbl (mapLookup entry info_tbls))
+                      | otherwise   = (block_lbl, guard (setMember pp callPPs) >>
+                                                    Just (toInfoLbl block_lbl))
+                      where block_lbl = blockLbl pp
 
          procLabels :: LabelMap (CLabel, Maybe CLabel)
          procLabels = foldl add_label mapEmpty
@@ -247,8 +254,8 @@ splitAtProcPoints dflags entry_label callPPs procPoints procMap
      let add_jump_block (env, bs) (pp, l) =
            do bid <- liftM mkBlockId getUniqueM
               let b = blockJoin (CmmEntry bid) emptyBlock jump
-                  jump = CmmCall (CmmLit (CmmLabel l)) Nothing [{-XXX-}] 0 0 0
-                  -- XXX: No regs are live at the call
+                  live = ppLiveness pp
+                  jump = CmmCall (CmmLit (CmmLabel l)) Nothing live 0 0 0
               return (mapInsert pp bid env, b : bs)
 
          add_jumps newGraphEnv (ppId, blockEnv) =
@@ -288,23 +295,27 @@ splitAtProcPoints dflags entry_label callPPs procPoints procMap
 
      graphEnv <- foldM add_jumps emptyBlockMap $ mapToList graphEnv
 
-     let to_proc (bid, g) = case expectJust "pp label" $ mapLookup bid procLabels of
-             (lbl, Just info_lbl)
-               | bid == entry
-               -> CmmProc (TopInfo {info_tbls  = info_tbls,
-                                    stack_info = stack_info})
-                          top_l (replacePPIds g)
-               | otherwise
-               -> CmmProc (TopInfo {info_tbls = mapSingleton (g_entry g) (mkEmptyContInfoTable info_lbl), stack_info=stack_info})
-                          lbl (replacePPIds g)
-             (lbl, Nothing)
-               -> CmmProc (TopInfo {info_tbls = mapEmpty, stack_info=stack_info})
-                          lbl (replacePPIds g)
-            where
-             stack_info = StackInfo { arg_space = 0
-                                    , updfr_space =  Nothing
-                                    , do_layout = True }
-                          -- cannot use panic, this is printed by -ddump-cmmz
+     let to_proc (bid, g)
+             | bid == entry
+             =  CmmProc (TopInfo {info_tbls  = info_tbls,
+                                  stack_info = stack_info})
+                        top_l live g'
+             | otherwise
+             = case expectJust "pp label" $ mapLookup bid procLabels of
+                 (lbl, Just info_lbl)
+                    -> CmmProc (TopInfo { info_tbls = mapSingleton (g_entry g) (mkEmptyContInfoTable info_lbl)
+                                        , stack_info=stack_info})
+                               lbl live g'
+                 (lbl, Nothing)
+                    -> CmmProc (TopInfo {info_tbls = mapEmpty, stack_info=stack_info})
+                               lbl live g'
+                where
+                 g' = replacePPIds g
+                 live = ppLiveness (g_entry g')
+                 stack_info = StackInfo { arg_space = 0
+                                        , updfr_space =  Nothing
+                                        , do_layout = True }
+                               -- cannot use panic, this is printed by -ddump-cmmz
 
          -- References to procpoint IDs can now be replaced with the
          -- infotable's label
@@ -330,7 +341,6 @@ splitAtProcPoints dflags entry_label callPPs procPoints procMap
             procs
 splitAtProcPoints _ _ _ _ _ t@(CmmData _ _) = return [t]
 
-
 -- Only called from CmmProcPoint.splitAtProcPoints. NB. does a
 -- recursive lookup, see comment below.
 replaceBranches :: BlockEnv BlockId -> CmmGraph -> CmmGraph
@@ -355,8 +365,8 @@ replaceBranches env cmmg
 -- Not splitting proc points: add info tables for continuations
 
 attachContInfoTables :: ProcPointSet -> CmmDecl -> CmmDecl
-attachContInfoTables call_proc_points (CmmProc top_info top_l g)
- = CmmProc top_info{info_tbls = info_tbls'} top_l g
+attachContInfoTables call_proc_points (CmmProc top_info top_l live g)
+ = CmmProc top_info{info_tbls = info_tbls'} top_l live g
  where
    info_tbls' = mapUnion (info_tbls top_info) $
                 mapFromList [ (l, mkEmptyContInfoTable (infoTblLbl l))

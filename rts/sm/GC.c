@@ -423,7 +423,7 @@ GarbageCollect (nat collect_gen,
       break;
   }
 
-  if (n_gc_threads != 1) {
+  if (!DEBUG_IS_ON && n_gc_threads != 1) {
       gct->allocated = clearNursery(cap);
   }
 
@@ -664,7 +664,7 @@ GarbageCollect (nat collect_gen,
   }
 
   // Reset the nursery: make the blocks empty
-  if (n_gc_threads == 1) {
+  if (DEBUG_IS_ON || n_gc_threads == 1) {
       for (n = 0; n < n_capabilities; n++) {
           allocated += clearNursery(&capabilities[n]);
       }
@@ -1100,7 +1100,9 @@ gcWorkerThread (Capability *cap)
 
     scavenge_until_all_done();
     
-    gct->allocated = clearNursery(cap);
+    if (!DEBUG_IS_ON) {
+        gct->allocated = clearNursery(cap);
+    }
 
 #ifdef THREADED_RTS
     // Now that the whole heap is marked, we discard any sparks that

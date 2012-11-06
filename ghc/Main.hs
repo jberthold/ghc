@@ -110,7 +110,6 @@ main = do
                    ShowSupportedExtensions -> showSupportedExtensions
                    ShowVersion             -> showVersion
                    ShowNumVersion          -> putStrLn cProjectVersion
-                   Print str               -> putStrLn str
         Right postStartupMode ->
             -- start our GHC session
             GHC.runGhc mbMinusB $ do
@@ -292,7 +291,7 @@ checkOptions mode dflags srcs objs = do
         hPutStrLn stderr ("Warning: -debug, -threaded and -ticky are ignored by GHCi")
 
         -- -prof and --interactive are not a good combination
-   when (notNull (filter (not . wayRTSOnly) (ways dflags))
+   when ((filter (not . wayRTSOnly) (ways dflags) /= defaultWays (settings dflags))
          && isInterpretiveMode mode) $
       do ghcError (UsageError
                    "--interactive can't be used with -prof or -unreg.")
@@ -361,7 +360,6 @@ data PreStartupMode
   = ShowVersion             -- ghc -V/--version
   | ShowNumVersion          -- ghc --numeric-version
   | ShowSupportedExtensions -- ghc --supported-extensions
-  | Print String            -- ghc --print-foo
 
 showVersionMode, showNumVersionMode, showSupportedExtensionsMode :: Mode
 showVersionMode             = mkPreStartupMode ShowVersion
