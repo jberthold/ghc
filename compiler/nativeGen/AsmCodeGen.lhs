@@ -7,6 +7,7 @@
 -- -----------------------------------------------------------------------------
 
 \begin{code}
+{-# LANGUAGE GADTs #-}
 module AsmCodeGen ( nativeCodeGen ) where
 
 #include "HsVersions.h"
@@ -50,9 +51,11 @@ import NCGMonad
 
 import BlockId
 import CgUtils          ( fixStgRegisters )
-import OldCmm
+import Cmm
+import CmmUtils
+import Hoopl
 import CmmOpt           ( cmmMachOpFold )
-import OldPprCmm
+import PprCmm
 import CLabel
 
 import UniqFM
@@ -148,10 +151,11 @@ data NcgImpl statics instr jumpDest = NcgImpl {
     }
 
 --------------------
-nativeCodeGen :: DynFlags -> Handle -> UniqSupply -> Stream IO RawCmmGroup () -> IO ()
+nativeCodeGen :: DynFlags -> Handle -> UniqSupply -> Stream IO RawCmmGroup ()
+              -> IO UniqSupply
 nativeCodeGen dflags h us cmms
  = let platform = targetPlatform dflags
-       nCG' :: (Outputable statics, Outputable instr, Instruction instr) => NcgImpl statics instr jumpDest -> IO ()
+       nCG' :: (Outputable statics, Outputable instr, Instruction instr) => NcgImpl statics instr jumpDest -> IO UniqSupply
        nCG' ncgImpl = nativeCodeGen' dflags ncgImpl h us cmms
        x86NcgImpl = NcgImpl {
                          cmmTopCodeGen             = X86.CodeGen.cmmTopCodeGen
@@ -207,6 +211,12 @@ nativeCodeGen dflags h us cmms
                      panic "nativeCodeGen: No NCG for ARM"
                  ArchPPC_64 ->
                      panic "nativeCodeGen: No NCG for PPC 64"
+                 ArchAlpha ->
+                     panic "nativeCodeGen: No NCG for Alpha"
+                 ArchMipseb ->
+                     panic "nativeCodeGen: No NCG for mipseb"
+                 ArchMipsel ->
+                     panic "nativeCodeGen: No NCG for mipsel"
                  ArchUnknown ->
                      panic "nativeCodeGen: No NCG for unknown arch"
 
@@ -230,7 +240,7 @@ noAllocMoreStack amount _
 nativeCodeGen' :: (Outputable statics, Outputable instr, Instruction instr)
                => DynFlags
                -> NcgImpl statics instr jumpDest
-               -> Handle -> UniqSupply -> Stream IO RawCmmGroup () -> IO ()
+               -> Handle -> UniqSupply -> Stream IO RawCmmGroup () -> IO UniqSupply
 nativeCodeGen' dflags ncgImpl h us cmms
  = do
         let platform = targetPlatform dflags
@@ -239,7 +249,7 @@ nativeCodeGen' dflags ncgImpl h us cmms
         -- Pretty if it weren't for the fact that we do lots of little
         -- printDocs here (in order to do codegen in constant space).
         bufh <- newBufHandle h
-        (imports, prof) <- cmmNativeGenStream dflags ncgImpl bufh us split_cmms [] [] 0
+        (imports, prof, us') <- cmmNativeGenStream dflags ncgImpl bufh us split_cmms [] [] 0
         bFlush bufh
 
         let (native, colorStats, linearStats)
@@ -284,14 +294,14 @@ nativeCodeGen' dflags ncgImpl h us cmms
                 $ withPprStyleDoc dflags (mkCodeStyle AsmStyle)
                 $ makeImportsDoc dflags (concat imports)
 
-        return  ()
+        return us'
 
  where  add_split tops
                 | gopt Opt_SplitObjs dflags = split_marker : tops
                 | otherwise                 = tops
 
-        split_marker = CmmProc mapEmpty mkSplitMarkerLabel [] (ListGraph [])
-
+        split_marker = CmmProc mapEmpty mkSplitMarkerLabel []
+                               (ofBlockList (panic "split_marker_entry") [])
 
 cmmNativeGenStream :: (Outputable statics, Outputable instr, Instruction instr)
               => DynFlags
@@ -307,13 +317,14 @@ cmmNativeGenStream :: (Outputable statics, Outputable instr, Instruction instr)
               -> IO ( [[CLabel]],
                       [([NatCmmDecl statics instr],
                       Maybe [Color.RegAllocStats statics instr],
-                      Maybe [Linear.RegAllocStats])] )
+                      Maybe [Linear.RegAllocStats])],
+                      UniqSupply )
 
 cmmNativeGenStream dflags ncgImpl h us cmm_stream impAcc profAcc count
  = do
         r <- Stream.runStream cmm_stream
         case r of
-          Left () -> return (reverse impAcc, reverse profAcc)
+          Left () -> return (reverse impAcc, reverse profAcc, us)
           Right (cmms, cmm_stream') -> do
             (impAcc,profAcc,us') <- cmmNativeGens dflags ncgImpl h us cmms
                                               impAcc profAcc count
@@ -878,9 +889,9 @@ Ideas for other things we could do (put these in Hoopl please!):
 
 cmmToCmm :: DynFlags -> RawCmmDecl -> (RawCmmDecl, [CLabel])
 cmmToCmm _ top@(CmmData _ _) = (top, [])
-cmmToCmm dflags (CmmProc info lbl live (ListGraph blocks)) = runCmmOpt dflags $ do
-  blocks' <- mapM cmmBlockConFold blocks
-  return $ CmmProc info lbl live (ListGraph blocks')
+cmmToCmm dflags (CmmProc info lbl live graph) = runCmmOpt dflags $ do
+  blocks' <- mapM cmmBlockConFold (toBlockList graph)
+  return $ CmmProc info lbl live (ofBlockList (g_entry graph) blocks')
 
 newtype CmmOptM a = CmmOptM (([CLabel], DynFlags) -> (# a, [CLabel] #))
 
@@ -903,10 +914,13 @@ runCmmOpt :: DynFlags -> CmmOptM a -> (a, [CLabel])
 runCmmOpt dflags (CmmOptM f) = case f ([], dflags) of
                         (# result, imports #) -> (result, imports)
 
-cmmBlockConFold :: CmmBasicBlock -> CmmOptM CmmBasicBlock
-cmmBlockConFold (BasicBlock id stmts) = do
+cmmBlockConFold :: CmmBlock -> CmmOptM CmmBlock
+cmmBlockConFold block = do
+  let (entry, middle, last) = blockSplit block
+      stmts = blockToList middle
   stmts' <- mapM cmmStmtConFold stmts
-  return $ BasicBlock id stmts'
+  last' <- cmmStmtConFold last
+  return $ blockJoin entry (blockFromList stmts') last'
 
 -- This does three optimizations, but they're very quick to check, so we don't
 -- bother turning them off even when the Hoopl code is active.  Since
@@ -917,13 +931,13 @@ cmmBlockConFold (BasicBlock id stmts) = do
 -- We might be tempted to skip this step entirely of not Opt_PIC, but
 -- there is some PowerPC code for the non-PIC case, which would also
 -- have to be separated.
-cmmStmtConFold :: CmmStmt -> CmmOptM CmmStmt
+cmmStmtConFold :: CmmNode e x -> CmmOptM (CmmNode e x)
 cmmStmtConFold stmt
    = case stmt of
         CmmAssign reg src
            -> do src' <- cmmExprConFold DataReference src
                  return $ case src' of
-                   CmmReg reg' | reg == reg' -> CmmNop
+                   CmmReg reg' | reg == reg' -> CmmComment (fsLit "nop")
                    new_src -> CmmAssign reg new_src
 
         CmmStore addr src
@@ -931,35 +945,26 @@ cmmStmtConFold stmt
                  src'  <- cmmExprConFold DataReference src
                  return $ CmmStore addr' src'
 
-        CmmJump addr live
+        CmmCall { cml_target = addr }
            -> do addr' <- cmmExprConFold JumpReference addr
-                 return $ CmmJump addr' live
+                 return $ stmt { cml_target = addr' }
 
-        CmmCall target regs args returns
+        CmmUnsafeForeignCall target regs args
            -> do target' <- case target of
-                              CmmCallee e conv -> do
+                              ForeignTarget e conv -> do
                                 e' <- cmmExprConFold CallReference e
-                                return $ CmmCallee e' conv
-                              op@(CmmPrim _ Nothing) ->
-                                return op
-                              CmmPrim op (Just stmts) ->
-                                do stmts' <- mapM cmmStmtConFold stmts
-                                   return $ CmmPrim op (Just stmts')
-                 args' <- mapM (\(CmmHinted arg hint) -> do
-                                  arg' <- cmmExprConFold DataReference arg
-                                  return (CmmHinted arg' hint)) args
-                 return $ CmmCall target' regs args' returns
+                                return $ ForeignTarget e' conv
+                              PrimTarget _ ->
+                                return target
+                 args' <- mapM (cmmExprConFold DataReference) args
+                 return $ CmmUnsafeForeignCall target' regs args'
 
-        CmmCondBranch test dest
+        CmmCondBranch test true false
            -> do test' <- cmmExprConFold DataReference test
-                 dflags <- getDynFlags
                  return $ case test' of
-                   CmmLit (CmmInt 0 _) ->
-                     CmmComment (mkFastString ("deleted: " ++
-                                        showSDoc dflags (pprStmt stmt)))
-
-                   CmmLit (CmmInt _ _) -> CmmBranch dest
-                   _other -> CmmCondBranch test' dest
+                   CmmLit (CmmInt 0 _) -> CmmBranch false
+                   CmmLit (CmmInt _ _) -> CmmBranch true
+                   _other -> CmmCondBranch test' true false
 
         CmmSwitch expr ids
            -> do expr' <- cmmExprConFold DataReference expr

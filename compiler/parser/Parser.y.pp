@@ -882,6 +882,7 @@ activation :: { Maybe Activation }
 explicit_activation :: { Activation }  -- In brackets
         : '[' INTEGER ']'               { ActiveAfter  (fromInteger (getINTEGER $2)) }
         | '[' '~' INTEGER ']'           { ActiveBefore (fromInteger (getINTEGER $3)) }
+        | '[' '~' ']'                   { NeverActive }
 
 rule_forall :: { [RuleBndr RdrName] }
         : 'forall' rule_var_list '.'            { $2 }
@@ -1887,6 +1888,7 @@ tyconsym :: { Located RdrName }
         : CONSYM                        { L1 $! mkUnqual tcClsName (getCONSYM $1) }
         | VARSYM                        { L1 $! mkUnqual tcClsName (getVARSYM $1) }
         | '*'                           { L1 $! mkUnqual tcClsName (fsLit "*")    }
+        | '-'                           { L1 $! mkUnqual tcClsName (fsLit "-")    }
 
 
 -----------------------------------------------------------------------------

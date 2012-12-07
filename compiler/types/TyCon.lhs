@@ -53,6 +53,7 @@ module TyCon(
         isTyConAssoc, tyConAssoc_maybe,
         isRecursiveTyCon,
         isImplicitTyCon,
+        isEmptyDataTyCon,
 
         -- ** Extracting information out of TyCons
         tyConName,
@@ -72,6 +73,7 @@ module TyCon(
         algTyConRhs,
         newTyConRhs, newTyConEtadRhs, unwrapNewTyCon_maybe,
         tupleTyConBoxity, tupleTyConSort, tupleTyConArity,
+        tyConSingleFieldDataCon_maybe,
 
         -- ** Manipulating TyCons
         tcExpandTyCon_maybe, coreExpandTyCon_maybe,
@@ -88,7 +90,7 @@ module TyCon(
 #include "HsVersions.h"
 
 import {-# SOURCE #-} TypeRep ( Kind, Type, PredType )
-import {-# SOURCE #-} DataCon ( DataCon, isVanillaDataCon )
+import {-# SOURCE #-} DataCon ( DataCon, dataConRepArgTys, isVanillaDataCon )
 
 import Var
 import Class
@@ -282,6 +284,9 @@ This is important. In an instance declaration we expect
 --
 -- This data type also encodes a number of primitive, built in type constructors such as those
 -- for function and tuple types.
+
+-- If you edit this type, you may need to update the GHC formalism
+-- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
 data TyCon
   = -- | The function type constructor, @(->)@
     FunTyCon {
@@ -593,8 +598,10 @@ Note [Promoted data constructors]
 A data constructor can be promoted to become a type constructor,
 via the PromotedTyCon alternative in TyCon.
 
-* Only "vanilla" data constructors are promoted; ones with no GADT
-  stuff, no existentials, etc.  We might generalise this later.
+* Only data constructors with  
+     (a) no kind polymorphism
+     (b) no constraints in its type (eg GADTs)
+  are promoted.  Existentials are ok; see Trac #7347.
 
 * The TyCon promoted from a DataCon has the *same* Name and Unique as
   the DataCon.  Eg. If the data constructor Data.Maybe.Just(unique 78,
@@ -708,6 +715,9 @@ so the coercion tycon CoT must have
 
 \begin{code}
 -- | A 'CoAxiom' is a \"coercion constructor\", i.e. a named equality axiom.
+
+-- If you edit this type, you may need to update the GHC formalism
+-- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
 data CoAxiom
   = CoAxiom                   -- Type equality axiom.
     { co_ax_unique   :: Unique      -- unique identifier
@@ -755,19 +765,61 @@ See also Note [Implicit TyThings] in HscTypes
 %*                                                                      *
 %************************************************************************
 
-A PrimRep is somewhat similar to a CgRep (see codeGen/SMRep) and a
-MachRep (see cmm/CmmExpr), although each of these types has a distinct
-and clearly defined purpose:
+Note [rep swamp]
 
-  - A PrimRep is a CgRep + information about signedness + information
-    about primitive pointers (AddrRep).  Signedness and primitive
-    pointers are required when passing a primitive type to a foreign
-    function, but aren't needed for call/return conventions of Haskell
-    functions.
+GHC has a rich selection of types that represent "primitive types" of
+one kind or another.  Each of them makes a different set of
+distinctions, and mostly the differences are for good reasons,
+although it's probably true that we could merge some of these.
 
-  - A MachRep is a basic machine type (non-void, doesn't contain
-    information on pointerhood or signedness, but contains some
-    reps that don't have corresponding Haskell types).
+Roughly in order of "includes more information":
+
+ - A Width (cmm/CmmType) is simply a binary value with the specified
+   number of bits.  It may represent a signed or unsigned integer, a
+   floating-point value, or an address.
+
+    data Width = W8 | W16 | W32 | W64 | W80 | W128
+
+ - Size, which is used in the native code generator, is Width +
+   floating point information.
+
+   data Size = II8 | II16 | II32 | II64 | FF32 | FF64 | FF80
+
+   it is necessary because e.g. the instruction to move a 64-bit float
+   on x86 (movsd) is different from the instruction to move a 64-bit
+   integer (movq), so the mov instruction is parameterised by Size.
+
+ - CmmType wraps Width with more information: GC ptr, float, or
+   other value.
+
+    data CmmType = CmmType CmmCat Width
+    
+    data CmmCat     -- "Category" (not exported)
+       = GcPtrCat   -- GC pointer
+       | BitsCat    -- Non-pointer
+       | FloatCat   -- Float
+
+   It is important to have GcPtr information in Cmm, since we generate
+   info tables containing pointerhood for the GC from this.  As for
+   why we have float (and not signed/unsigned) here, see Note [Signed
+   vs unsigned].
+
+ - ArgRep makes only the distinctions necessary for the call and
+   return conventions of the STG machine.  It is essentially CmmType
+   + void.
+
+ - PrimRep makes a few more distinctions than ArgRep: it divides
+   non-GC-pointers into signed/unsigned and addresses, information
+   that is necessary for passing these values to foreign functions.
+
+There's another tension here: whether the type encodes its size in
+bytes, or whether its size depends on the machine word size.  Width
+and CmmType have the size built-in, whereas ArgRep and PrimRep do not.
+
+This means to turn an ArgRep/PrimRep into a CmmType requires DynFlags.
+
+On the other hand, CmmType includes some "nonsense" values, such as
+CmmType GcPtrCat W32 on a 64-bit machine.
 
 \begin{code}
 -- | A 'PrimRep' is an abstraction of a type.  It contains information that
@@ -1024,6 +1076,18 @@ isDataTyCon (AlgTyCon {algTcRhs = rhs})
 isDataTyCon (TupleTyCon {tyConTupleSort = sort}) = isBoxed (tupleSortBoxity sort)
 isDataTyCon _ = False
 
+isEmptyDataTyCon :: TyCon -> Bool
+isEmptyDataTyCon (AlgTyCon {algTcRhs = DataTyCon { data_cons = [data_con] } })
+    = isEmptyDataCon data_con
+isEmptyDataTyCon (TupleTyCon {dataCon = data_con })
+    = isEmptyDataCon data_con
+isEmptyDataTyCon _ = False
+
+isEmptyDataCon :: DataCon -> Bool
+isEmptyDataCon data_con = case dataConRepArgTys data_con of
+    [] -> True
+    _  -> False
+
 -- | 'isDistinctTyCon' is true of 'TyCon's that are equal only to
 -- themselves, even via coercions (except for unsafeCoerce).
 -- This excludes newtypes, type functions, type synonyms.
@@ -1077,6 +1141,27 @@ isProductTyCon tc@(AlgTyCon {}) = case algTcRhs tc of
                                     _           -> False
 isProductTyCon (TupleTyCon {})  = True
 isProductTyCon _                = False
+
+-- | If the given 'TyCon' has a /single/ data constructor with a /single/ field,
+-- i.e. it is a @data@ type with one alternative and one field, or a @newtype@
+-- then the type of that field is returned. If the 'TyCon' has a single
+-- constructor with more than one field, more than one constructor, or
+-- represents a primitive or function type constructor then @Nothing@ is
+-- returned. In any other case, the function panics
+tyConSingleFieldDataCon_maybe :: TyCon -> Maybe Type
+tyConSingleFieldDataCon_maybe tc@(AlgTyCon {}) = case algTcRhs tc of
+    DataTyCon{ data_cons = [data_con] }
+        | isVanillaDataCon data_con -> case dataConRepArgTys data_con of
+            [ty] -> Just ty
+            _    -> Nothing
+        | otherwise -> Nothing
+    NewTyCon { data_con = data_con }
+        ->  case dataConRepArgTys data_con of
+            [ty] -> Just ty
+            _    -> pprPanic "tyConSingleFieldDataCon_maybe"
+                    (ppr $ dataConRepArgTys data_con)
+    _           -> Nothing
+tyConSingleFieldDataCon_maybe _                = Nothing
 
 -- | Is this a 'TyCon' representing a type synonym (@type@)?
 isSynTyCon :: TyCon -> Bool

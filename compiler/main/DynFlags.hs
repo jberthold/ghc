@@ -269,6 +269,7 @@ data GeneralFlag
    | Opt_DoEtaReduction
    | Opt_CaseMerge
    | Opt_UnboxStrictFields
+   | Opt_UnboxStrictPrimitiveFields
    | Opt_DictsCheap
    | Opt_EnableRewriteRules             -- Apply rewrite rules during simplification
    | Opt_Vectorise
@@ -370,6 +371,8 @@ data GeneralFlag
    | Opt_KeepTmpFiles
    | Opt_KeepRawTokenStream
    | Opt_KeepLlvmFiles
+
+   | Opt_BuildDynamicToo
 
    -- safe haskell flags
    | Opt_DistrustAllPackages
@@ -575,6 +578,10 @@ data DynFlags = DynFlags {
   objectSuf             :: String,
   hcSuf                 :: String,
   hiSuf                 :: String,
+
+  canGenerateDynamicToo :: IORef Bool,
+  dynObjectSuf          :: String,
+  dynHiSuf              :: String,
 
   outputFile            :: Maybe String,
   outputHi              :: Maybe String,
@@ -1077,7 +1084,7 @@ wayOptc platform WayThreaded = case platformOS platform of
                                OSNetBSD  -> ["-pthread"]
                                _         -> []
 wayOptc _ WayDebug      = ["-O0", "-g"]
-wayOptc _ WayDyn        = ["-DDYNAMIC"]
+wayOptc _ WayDyn        = []
 wayOptc _ WayProf       = ["-DPROFILING"]
 wayOptc _ WayEventLog   = ["-DTRACING"]
 wayOptc _ WayParPvm     = ["-DPARALLEL_RTS", "-DUSE_PVM"]
@@ -1126,7 +1133,7 @@ wayOptl _ WayNDP        = []
 wayOptP :: Platform -> Way -> [String]
 wayOptP _ WayThreaded = []
 wayOptP _ WayDebug    = []
-wayOptP _ WayDyn      = ["-DDYNAMIC"]
+wayOptP _ WayDyn      = []
 wayOptP _ WayProf     = ["-DPROFILING"]
 wayOptP _ WayEventLog = ["-DTRACING"]
 wayOptP _ WayParPvm   = ["-D__PARALLEL_HASKELL__"]
@@ -1141,6 +1148,7 @@ wayOptP _ WayNDP      = []
 -- | Used by 'GHC.newSession' to partially initialize a new 'DynFlags' value
 initDynFlags :: DynFlags -> IO DynFlags
 initDynFlags dflags = do
+ refCanGenerateDynamicToo <- newIORef False
  refFilesToClean <- newIORef []
  refDirsToClean <- newIORef Map.empty
  refFilesToNotIntermediateClean <- newIORef []
@@ -1148,6 +1156,7 @@ initDynFlags dflags = do
  refLlvmVersion <- newIORef 28
  wrapperNum <- newIORef 0
  return dflags{
+        canGenerateDynamicToo = refCanGenerateDynamicToo,
         filesToClean   = refFilesToClean,
         dirsToClean    = refDirsToClean,
         filesToNotIntermediateClean = refFilesToNotIntermediateClean,
@@ -1197,6 +1206,10 @@ defaultDynFlags mySettings =
         objectSuf               = phaseInputExt StopLn,
         hcSuf                   = phaseInputExt HCc,
         hiSuf                   = "hi",
+
+        canGenerateDynamicToo   = panic "defaultDynFlags: No canGenerateDynamicToo",
+        dynObjectSuf            = "dyn_" ++ phaseInputExt StopLn,
+        dynHiSuf                = "dyn_hi",
 
         pluginModNames          = [],
         pluginModNameOpts       = [],
@@ -1281,7 +1294,7 @@ defaultDynFlags mySettings =
       }
 
 defaultWays :: Settings -> [Way]
-defaultWays settings = if pc_dYNAMIC_BY_DEFAULT (sPlatformConstants settings)
+defaultWays settings = if pc_DYNAMIC_BY_DEFAULT (sPlatformConstants settings)
                        then [WayDyn]
                        else []
 
@@ -1566,6 +1579,7 @@ getVerbFlags dflags
   | otherwise             = []
 
 setObjectDir, setHiDir, setStubDir, setDumpDir, setOutputDir,
+         setDynObjectSuf, setDynHiSuf,
          setDylibInstallName,
          setObjectSuf, setHiSuf, setHcSuf, parseDynLibLoaderMode,
          setPgmP, addOptl, addOptc, addOptP,
@@ -1585,9 +1599,11 @@ setDumpDir    f d = d{ dumpDir    = Just f}
 setOutputDir  f = setObjectDir f . setHiDir f . setStubDir f . setDumpDir f
 setDylibInstallName  f d = d{ dylibInstallName = Just f}
 
-setObjectSuf  f d = d{ objectSuf  = f}
-setHiSuf      f d = d{ hiSuf      = f}
-setHcSuf      f d = d{ hcSuf      = f}
+setObjectSuf    f d = d{ objectSuf    = f}
+setDynObjectSuf f d = d{ dynObjectSuf = f}
+setHiSuf        f d = d{ hiSuf        = f}
+setDynHiSuf     f d = d{ dynHiSuf     = f}
+setHcSuf        f d = d{ hcSuf        = f}
 
 setOutputFile f d = d{ outputFile = f}
 setOutputHi   f d = d{ outputHi   = f}
@@ -1606,7 +1622,7 @@ parseDynLibLoaderMode f d =
  case splitAt 8 f of
    ("deploy", "")       -> d{ dynLibLoader = Deployable }
    ("sysdep", "")       -> d{ dynLibLoader = SystemDependent }
-   _                    -> ghcError (CmdLineError ("Unknown dynlib loader: " ++ f))
+   _                    -> throwGhcException (CmdLineError ("Unknown dynlib loader: " ++ f))
 
 setDumpPrefixForce f d = d { dumpPrefixForce = f}
 
@@ -1761,7 +1777,7 @@ parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
 
   let ((leftover, errs, warns), dflags1)
           = runCmdLine (processArgs activeFlags args') dflags0
-  when (not (null errs)) $ ghcError $ errorsToGhcException errs
+  when (not (null errs)) $ throwGhcException $ errorsToGhcException errs
 
   -- check for disabled flags in safe haskell
   let (dflags2, sh_warns) = safeFlagCheck cmdline dflags1
@@ -1775,7 +1791,7 @@ parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
                 }
 
   unless (allowed_combination theWays) $
-      ghcError (CmdLineError ("combination not supported: "  ++
+      throwGhcException (CmdLineError ("combination not supported: "  ++
                               intercalate "/" (map wayDesc theWays)))
 
   let (dflags4, consistency_warnings) = makeDynFlagsConsistent dflags3
@@ -1971,14 +1987,18 @@ dynamic_flags = [
   , Flag "o"                 (sepArg (setOutputFile . Just))
   , Flag "ohi"               (hasArg (setOutputHi . Just ))
   , Flag "osuf"              (hasArg setObjectSuf)
+  , Flag "dynosuf"           (hasArg setDynObjectSuf)
   , Flag "hcsuf"             (hasArg setHcSuf)
   , Flag "hisuf"             (hasArg setHiSuf)
+  , Flag "dynhisuf"          (hasArg setDynHiSuf)
   , Flag "hidir"             (hasArg setHiDir)
   , Flag "tmpdir"            (hasArg setTmpDir)
   , Flag "stubdir"           (hasArg setStubDir)
   , Flag "dumpdir"           (hasArg setDumpDir)
   , Flag "outputdir"         (hasArg setOutputDir)
   , Flag "ddump-file-prefix" (hasArg (setDumpPrefixForce . Just))
+
+  , Flag "dynamic-too"       (NoArg (setGeneralFlag Opt_BuildDynamicToo))
 
         ------- Keeping temporary files -------------------------------------
      -- These can be singular (think ghc -c) or plural (think ghc --make)
@@ -2377,6 +2397,7 @@ fFlags = [
   ( "do-eta-reduction",                 Opt_DoEtaReduction, nop ),
   ( "case-merge",                       Opt_CaseMerge, nop ),
   ( "unbox-strict-fields",              Opt_UnboxStrictFields, nop ),
+  ( "unbox-strict-primitive-fields",    Opt_UnboxStrictPrimitiveFields, nop ),
   ( "dicts-cheap",                      Opt_DictsCheap, nop ),
   ( "excess-precision",                 Opt_ExcessPrecision, nop ),
   ( "eager-blackholing",                Opt_EagerBlackHoling, nop ),
@@ -2608,7 +2629,7 @@ defaultFlags settings
 
     ++ default_PIC platform
 
-    ++ (if pc_dYNAMIC_BY_DEFAULT (sPlatformConstants settings)
+    ++ (if pc_DYNAMIC_BY_DEFAULT (sPlatformConstants settings)
         then wayGeneralFlags platform WayDyn
         else [Opt_Static])
 
@@ -3310,7 +3331,7 @@ makeDynFlagsConsistent dflags
       then let dflags' = dflags { hscTarget = HscAsm }
                warn = "Using native code generator rather than LLVM, as LLVM is incompatible with -fPIC and -dynamic on this platform"
            in loop dflags' warn
-      else ghcError $ CmdLineError "Can't use -fPIC or -dynamic on this platform"
+      else throwGhcException $ CmdLineError "Can't use -fPIC or -dynamic on this platform"
  | os == OSDarwin &&
    arch == ArchX86_64 &&
    not (gopt Opt_PIC dflags)

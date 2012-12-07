@@ -282,6 +282,7 @@ checkClosure( StgClosure* p )
     case MUT_PRIM:
     case MUT_VAR_CLEAN:
     case MUT_VAR_DIRTY:
+    case TVAR:
     case CONSTR_STATIC:
     case CONSTR_NOCAF_STATIC:
     case THUNK_STATIC:
@@ -504,6 +505,9 @@ checkSTACK (StgStack *stack)
 void
 checkTSO(StgTSO *tso)
 {
+    StgTSO *next;
+    const StgInfoTable *info;
+
     if (tso->what_next == ThreadKilled) {
       /* The garbage collector doesn't bother following any pointers
        * from dead threads, so don't check sanity here.  
@@ -511,12 +515,13 @@ checkTSO(StgTSO *tso)
       return;
     }
 
-    // make sure we do not run into a loop (checking direct loop only)
-    ASSERT(tso != tso->_link);
+    next = tso->_link;
+    info = (const StgInfoTable*) tso->_link->header.info;
 
-    ASSERT(tso->_link == END_TSO_QUEUE || 
-           tso->_link->header.info == &stg_MVAR_TSO_QUEUE_info ||
-           tso->_link->header.info == &stg_TSO_info);
+    ASSERT(next == END_TSO_QUEUE ||
+           info == &stg_MVAR_TSO_QUEUE_info ||
+           info == &stg_TSO_info ||
+           info == &stg_WHITEHOLE_info); // happens due to STM doing lockTSO()
 
     if (   tso->why_blocked == BlockedOnMVar
 	|| tso->why_blocked == BlockedOnBlackHole

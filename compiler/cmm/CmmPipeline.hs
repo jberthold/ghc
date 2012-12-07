@@ -134,6 +134,8 @@ cpsTop hsc_env proc =
                   return $ if optLevel dflags >= 1
                              then map (cmmCfgOptsProc splitting_proc_points) gs
                              else gs
+            gs <- return (map removeUnreachableBlocksProc gs)
+                -- Note [unreachable blocks]
             dumps Opt_D_dump_cmmz_cfg "Post control-flow optimsations" gs
 
             return (cafEnv, gs)
@@ -152,6 +154,8 @@ cpsTop hsc_env proc =
                  return $ if optLevel dflags >= 1
                              then cmmCfgOptsProc splitting_proc_points g
                              else g
+            g <- return (removeUnreachableBlocksProc g)
+                -- Note [unreachable blocks]
             dump' Opt_D_dump_cmmz_cfg "Post control-flow optimsations" g
 
             return (cafEnv, [g])
@@ -179,12 +183,15 @@ cpsTop hsc_env proc =
         -- the entry point.
         splitting_proc_points = hscTarget dflags /= HscAsm
                              || not (tablesNextToCode dflags)
-                             || usingDarwinX86Pic -- Note [darwin-x86-pic]
-        usingDarwinX86Pic = platformArch platform == ArchX86
-                         && platformOS platform == OSDarwin
-                         && gopt Opt_PIC dflags
+                             || -- Note [inconsistent-pic-reg]
+                                usingInconsistentPicReg
+        usingInconsistentPicReg = ( platformArch platform == ArchX86 ||
+                                    platformArch platform == ArchPPC
+                                  )
+                               && platformOS platform == OSDarwin
+                               && gopt Opt_PIC dflags
 
-{- Note [darwin-x86-pic]
+{- Note [inconsistent-pic-reg]
 
 On x86/Darwin, PIC is implemented by inserting a sequence like
 
@@ -201,6 +208,12 @@ points, then at the join point we don't have a consistent value for
 Hence, on x86/Darwin, we have to split proc points, and then each proc
 point will get its own PIC initialisation sequence.
 
+The situation is the same for ppc/Darwin. We use essentially the same
+sequence to load the program counter onto reg:
+
+    bcl  20,31,1f
+ 1: mflr reg
+
 This isn't an issue on x86/ELF, where the sequence is
 
     call 1f
@@ -212,7 +225,15 @@ _GLOBAL_OFFSET_TABLE_, regardless of which entry point we arrived via.
 
 -}
 
+{- Note [unreachable blocks]
 
+The control-flow optimiser sometimes leaves unreachable blocks behind
+containing junk code.  If these blocks make it into the native code
+generator then they trigger a register allocator panic because they
+refer to undefined LocalRegs, so we must eliminate any unreachable
+blocks before passing the code onwards.
+
+-}
 
 runUniqSM :: UniqSM a -> IO a
 runUniqSM m = do
