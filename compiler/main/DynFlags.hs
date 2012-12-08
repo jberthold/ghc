@@ -1083,7 +1083,7 @@ wayOptc platform WayThreaded = case platformOS platform of
                                OSOpenBSD -> ["-pthread"]
                                OSNetBSD  -> ["-pthread"]
                                _         -> []
-wayOptc _ WayDebug      = ["-O0", "-g"]
+wayOptc _ WayDebug      = []
 wayOptc _ WayDyn        = []
 wayOptc _ WayProf       = ["-DPROFILING"]
 wayOptc _ WayEventLog   = ["-DTRACING"]
@@ -1148,7 +1148,7 @@ wayOptP _ WayNDP      = []
 -- | Used by 'GHC.newSession' to partially initialize a new 'DynFlags' value
 initDynFlags :: DynFlags -> IO DynFlags
 initDynFlags dflags = do
- refCanGenerateDynamicToo <- newIORef False
+ refCanGenerateDynamicToo <- newIORef True
  refFilesToClean <- newIORef []
  refDirsToClean <- newIORef Map.empty
  refFilesToNotIntermediateClean <- newIORef []
