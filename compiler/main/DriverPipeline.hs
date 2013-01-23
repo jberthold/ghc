@@ -2269,7 +2269,8 @@ hsSourceCppOpts =
 
 joinObjectFiles :: DynFlags -> [FilePath] -> FilePath -> IO ()
 joinObjectFiles dflags o_files output_fn = do
-  let ld_r args = SysTools.runLink dflags ([
+  let ldIsGnuLd = cLdIsGNULd == "YES"
+      ld_r args = SysTools.runLink dflags ([
                             SysTools.Option "-nostdlib",
                             SysTools.Option "-nodefaultlibs",
                             SysTools.Option "-Wl,-r"
@@ -2278,6 +2279,7 @@ joinObjectFiles dflags o_files output_fn = do
                             -- -r and --relax are incompatible for ld, so
                             -- disable --relax explicitly.
                          ++ (if platformArch (targetPlatform dflags) == ArchSPARC
+                             && ldIsGnuLd
                                 then [SysTools.Option "-Wl,-no-relax"]
                                 else [])
                          ++ [
@@ -2301,7 +2303,7 @@ joinObjectFiles dflags o_files output_fn = do
       ld_build_id | cLdHasBuildId == "YES"  = "-Wl,--build-id=none"
                   | otherwise               = ""
 
-  if cLdIsGNULd == "YES"
+  if ldIsGnuLd
      then do
           script <- newTempName dflags "ldscript"
           writeFile script $ "INPUT(" ++ unwords o_files ++ ")"
