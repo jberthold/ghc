@@ -69,7 +69,7 @@ import CoreFVs
 import Class
 import Kind
 import TyCon
-import Coercion         ( coAxiomSplitLHS )
+import CoAxiom
 import DataCon
 import Type
 import TcType
@@ -387,11 +387,10 @@ mkIface_ hsc_env maybe_old_fingerprint
        } 
 
 -----------------------------
-writeIfaceFile :: DynFlags -> ModLocation -> ModIface -> IO ()
-writeIfaceFile dflags location new_iface
+writeIfaceFile :: DynFlags -> FilePath -> ModIface -> IO ()
+writeIfaceFile dflags hi_file_path new_iface
     = do createDirectoryIfMissing True (takeDirectory hi_file_path)
          writeBinIface dflags hi_file_path new_iface
-    where hi_file_path = ml_hi_file location
 
 
 -- -----------------------------------------------------------------------------
@@ -1439,17 +1438,24 @@ idToIfaceDecl id
 
 
 --------------------------
-coAxiomToIfaceDecl :: CoAxiom -> IfaceDecl
+coAxiomToIfaceDecl :: CoAxiom br -> IfaceDecl
 -- We *do* tidy Axioms, because they are not (and cannot 
 -- conveniently be) built in tidy form
-coAxiomToIfaceDecl ax
- = IfaceAxiom { ifName = name
-              , ifTyVars = toIfaceTvBndrs tv_bndrs
-              , ifLHS    = tidyToIfaceType env (coAxiomLHS ax)
-              , ifRHS    = tidyToIfaceType env (coAxiomRHS ax) }
+coAxiomToIfaceDecl ax@(CoAxiom { co_ax_tc = tycon, co_ax_branches = branches })
+ = IfaceAxiom { ifName       = name
+              , ifTyCon      = toIfaceTyCon tycon
+              , ifAxBranches = brListMap coAxBranchToIfaceBranch branches }
  where
    name = getOccName ax
-   (env, tv_bndrs) = tidyTyVarBndrs emptyTidyEnv (coAxiomTyVars ax)
+
+
+coAxBranchToIfaceBranch :: CoAxBranch -> IfaceAxBranch
+coAxBranchToIfaceBranch (CoAxBranch { cab_tvs = tvs, cab_lhs = lhs, cab_rhs = rhs })
+  = IfaceAxBranch { ifaxbTyVars = toIfaceTvBndrs tv_bndrs
+                  , ifaxbLHS    = map (tidyToIfaceType env) lhs
+                  , ifaxbRHS    = tidyToIfaceType env rhs }
+  where
+    (env, tv_bndrs) = tidyTyVarBndrs emptyTidyEnv tvs
 
 -----------------
 tyConToIfaceDecl :: TidyEnv -> TyCon -> IfaceDecl
@@ -1506,7 +1512,7 @@ tyConToIfaceDecl env tycon
                     ifConArgTys  = map (tidyToIfaceType env2) arg_tys,
                     ifConFields  = map getOccName 
                                        (dataConFieldLabels data_con),
-                    ifConStricts = dataConStrictMarks data_con }
+                    ifConStricts = map (toIfaceBang env2) (dataConRepBangs data_con) }
         where
           (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _) = dataConFullSig data_con
 
@@ -1517,6 +1523,12 @@ tyConToIfaceDecl env tycon
           to_eq_spec spec = [ (getOccName (tidyTyVar env2 tv), tidyToIfaceType env2 ty) 
                             | (tv,ty) <- spec]
 
+toIfaceBang :: TidyEnv -> HsBang -> IfaceBang
+toIfaceBang _    HsNoBang            = IfNoBang
+toIfaceBang _   (HsUnpack Nothing)   = IfUnpack
+toIfaceBang env (HsUnpack (Just co)) = IfUnpackCo (coToIfaceType (tidyCo env co))
+toIfaceBang _   HsStrict             = IfStrict
+toIfaceBang _   (HsUserBang {})      = panic "toIfaceBang"
 
 classToIfaceDecl :: TidyEnv -> Class -> IfaceDecl
 classToIfaceDecl env clas
@@ -1592,8 +1604,9 @@ getFS x = occNameFS (getOccName x)
 
 --------------------------
 instanceToIfaceInst :: ClsInst -> IfaceClsInst
-instanceToIfaceInst (ClsInst { is_dfun = dfun_id, is_flag = oflag,
-                                is_cls = cls_name, is_tcs = mb_tcs })
+instanceToIfaceInst (ClsInst { is_dfun = dfun_id, is_flag = oflag
+                             , is_cls_nm = cls_name, is_cls = cls
+                             , is_tys = tys, is_tcs = mb_tcs })
   = ASSERT( cls_name == className cls )
     IfaceClsInst { ifDFun    = dfun_name,
                 ifOFlag   = oflag,
@@ -1609,8 +1622,6 @@ instanceToIfaceInst (ClsInst { is_dfun = dfun_id, is_flag = oflag,
     is_local name = nameIsLocalOrFrom mod name
 
         -- Compute orphanhood.  See Note [Orphans] in IfaceSyn
-    (_, _, cls, tys) = tcSplitDFunTy (idType dfun_id)
-                -- Slightly awkward: we need the Class to get the fundeps
     (tvs, fds) = classTvsFds cls
     arg_names = [filterNameSet is_local (orphNamesOfType ty) | ty <- tys]
 
@@ -1632,24 +1643,28 @@ instanceToIfaceInst (ClsInst { is_dfun = dfun_id, is_flag = oflag,
                         (n : _) -> Just (nameOccName n)
 
 --------------------------
-famInstToIfaceFamInst :: FamInst -> IfaceFamInst
-famInstToIfaceFamInst (FamInst { fi_axiom  = axiom,
-                                 fi_fam    = fam,
-                                 fi_tcs    = mb_tcs })
+famInstToIfaceFamInst :: FamInst br -> IfaceFamInst
+famInstToIfaceFamInst (FamInst { fi_axiom    = axiom,
+                                 fi_group    = group,
+                                 fi_fam      = fam,
+                                 fi_branches = branches })
   = IfaceFamInst { ifFamInstAxiom = coAxiomName axiom
                  , ifFamInstFam   = fam
-                 , ifFamInstTys   = map do_rough mb_tcs
+                 , ifFamInstGroup = group
+                 , ifFamInstTys   = map (map do_rough) roughs
                  , ifFamInstOrph  = orph }
   where
+    roughs = brListMap famInstBranchRoughMatch branches
+
     do_rough Nothing  = Nothing
     do_rough (Just n) = Just (toIfaceTyCon_name n)
 
-    fam_decl = tyConName . fst $ coAxiomSplitLHS axiom
+    fam_decl = tyConName $ coAxiomTyCon axiom
     mod = ASSERT( isExternalName (coAxiomName axiom) )
           nameModule (coAxiomName axiom)
     is_local name = nameIsLocalOrFrom mod name
 
-    lhs_names = filterNameSet is_local (orphNamesOfType (coAxiomLHS axiom))
+    lhs_names = filterNameSet is_local (orphNamesOfCoCon axiom)
 
     orph | is_local fam_decl
          = Just (nameOccName fam_decl)
@@ -1680,7 +1695,7 @@ toIfaceIdDetails other                          = pprTrace "toIfaceIdDetails" (p
 
 toIfaceIdInfo :: IdInfo -> IfaceIdInfo
 toIfaceIdInfo id_info
-  = case catMaybes [arity_hsinfo, caf_hsinfo, strict_hsinfo, 
+  = case catMaybes [arity_hsinfo, caf_hsinfo, strict_hsinfo,
                     inline_hsinfo,  unfold_hsinfo] of
        []    -> NoInfo
        infos -> HasInfo infos
@@ -1700,9 +1715,9 @@ toIfaceIdInfo id_info
 
     ------------  Strictness  --------------
         -- No point in explicitly exporting TopSig
-    strict_hsinfo = case strictnessInfo id_info of
-                        Just sig | not (isTopSig sig) -> Just (HsStrictness sig)
-                        _other                        -> Nothing
+    sig_info = strictnessInfo id_info
+    strict_hsinfo | not (isTopSig sig_info) = Just (HsStrictness sig_info)
+                  | otherwise               = Nothing
 
     ------------  Unfolding  --------------
     unfold_hsinfo = toIfUnfolding loop_breaker (unfoldingInfo id_info) 

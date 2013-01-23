@@ -181,6 +181,8 @@ data Env gbl lcl
 
 instance ContainsDynFlags (Env gbl lcl) where
     extractDynFlags env = hsc_dflags (env_top env)
+    replaceDynFlags env dflags
+        = env {env_top = replaceDynFlags (env_top env) dflags}
 
 instance ContainsModule gbl => ContainsModule (Env gbl lcl) where
     extractModule env = extractModule (env_gbl env)
@@ -296,7 +298,7 @@ data TcGblEnv
         tcg_anns      :: [Annotation],      -- ...Annotations
         tcg_tcs       :: [TyCon],           -- ...TyCons and Classes
         tcg_insts     :: [ClsInst],         -- ...Instances
-        tcg_fam_insts :: [FamInst],         -- ...Family instances
+        tcg_fam_insts :: [FamInst Branched],-- ...Family instances
         tcg_rules     :: [LRuleDecl Id],    -- ...Rules
         tcg_fords     :: [LForeignDecl Id], -- ...Foreign import & exports
         tcg_vects     :: [LVectDecl Id],    -- ...Vectorisation declarations
@@ -1521,7 +1523,7 @@ data CtOrigin
   | PArrSeqOrigin  (ArithSeqInfo Name) -- [:x..y:] and [:x,y..z:]
   | SectionOrigin
   | TupleOrigin                        -- (..,..)
-  | AmbigOrigin Name    -- f :: ty
+  | AmbigOrigin UserTypeCtxt    -- Will be FunSigCtxt, InstDeclCtxt, or SpecInstCtxt
   | ExprSigOrigin       -- e :: ty
   | PatSigOrigin        -- p :: ty
   | PatOrigin           -- Instantiating a polytyped pattern at a constructor
@@ -1547,7 +1549,11 @@ pprO AppOrigin             = ptext (sLit "an application")
 pprO (SpecPragOrigin name) = hsep [ptext (sLit "a specialisation pragma for"), quotes (ppr name)]
 pprO (IPOccOrigin name)    = hsep [ptext (sLit "a use of implicit parameter"), quotes (ppr name)]
 pprO RecordUpdOrigin       = ptext (sLit "a record update")
-pprO (AmbigOrigin name)    = ptext (sLit "the ambiguity check for") <+> quotes (ppr name)
+pprO (AmbigOrigin ctxt)    = ptext (sLit "the ambiguity check for") 
+                             <+> case ctxt of 
+                                    FunSigCtxt name -> quotes (ppr name)
+                                    InfSigCtxt name -> quotes (ppr name)
+                                    _               -> pprUserTypeCtxt ctxt
 pprO ExprSigOrigin         = ptext (sLit "an expression type signature")
 pprO PatSigOrigin          = ptext (sLit "a pattern type signature")
 pprO PatOrigin             = ptext (sLit "a pattern")

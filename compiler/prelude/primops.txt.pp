@@ -45,9 +45,8 @@ defaults
    can_fail         = False   -- See Note Note [PrimOp can_fail and has_side_effects] in PrimOp
    commutable       = False
    code_size        = { primOpCodeSizeDefault }
-   strictness       = { \ arity -> mkStrictSig (mkTopDmdType (replicate arity lazyDmd) TopRes) }
+   strictness       = { \ arity -> mkStrictSig (mkTopDmdType (replicate arity topDmd) topRes) }
    fixity           = Nothing
-
 
 -- Currently, documentation is produced using latex, so contents of
 -- description fields should be legal latex. Descriptions can contain
@@ -258,6 +257,9 @@ primop   Int2WordOp "int2Word#" GenPrimOp Int# -> Word#
 
 primop   Int2FloatOp   "int2Float#"      GenPrimOp  Int# -> Float#
 primop   Int2DoubleOp   "int2Double#"          GenPrimOp  Int# -> Double#
+
+primop   Word2FloatOp   "word2Float#"      GenPrimOp  Word# -> Float#
+primop   Word2DoubleOp   "word2Double#"          GenPrimOp  Word# -> Double#
 
 primop   ISllOp   "uncheckedIShiftL#" GenPrimOp  Int# -> Int# -> Int#
 	 {Shift left.  Result undefined if shift amount is not
@@ -1527,7 +1529,7 @@ primop  CatchOp "catch#" GenPrimOp
 primop  RaiseOp "raise#" GenPrimOp
    a -> b
    with
-   strictness  = { \ _arity -> mkStrictSig (mkTopDmdType [lazyDmd] BotRes) }
+   strictness  = { \ _arity -> mkStrictSig (mkTopDmdType [topDmd] botRes) }
       -- NB: result is bottom
    out_of_line = True
 
@@ -1544,7 +1546,7 @@ primop  RaiseOp "raise#" GenPrimOp
 primop  RaiseIOOp "raiseIO#" GenPrimOp
    a -> State# RealWorld -> (# State# RealWorld, b #)
    with
-   strictness  = { \ _arity -> mkStrictSig (mkTopDmdType [lazyDmd,lazyDmd] BotRes) }
+   strictness  = { \ _arity -> mkStrictSig (mkTopDmdType [topDmd, topDmd] botRes) }
    out_of_line = True
    has_side_effects = True
 
@@ -2110,7 +2112,8 @@ section "Tag to enum stuff"
 primop  DataToTagOp "dataToTag#" GenPrimOp
    a -> Int#
    with
-   strictness  = { \ _arity -> mkStrictSig (mkTopDmdType [seqDmd] TopRes) }
+   strictness  = { \ _arity -> mkStrictSig (mkTopDmdType [evalDmd] topRes) }
+
 	-- dataToTag# must have an evaluated argument
 
 primop  TagToEnumOp "tagToEnum#" GenPrimOp     

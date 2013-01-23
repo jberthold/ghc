@@ -43,6 +43,7 @@ import Kind
 import Type
 import TypeRep
 import TyCon
+import CoAxiom
 import BasicTypes
 import StaticFlags
 import ListSetOps
@@ -50,6 +51,7 @@ import PrelNames
 import Outputable
 import FastString
 import Util
+import OptCoercion ( checkAxInstCo )
 import Control.Monad
 import MonadUtils
 import Data.Maybe
@@ -221,16 +223,15 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
 
       -- Check whether arity and demand type are consistent (only if demand analysis
       -- already happened)
-       ; checkL (case maybeDmdTy of
-                  Just (StrictSig dmd_ty) -> idArity binder >= dmdTypeDepth dmd_ty || exprIsTrivial rhs
-                  Nothing -> True)
+       ; checkL (case dmdTy of
+                  StrictSig dmd_ty -> idArity binder >= dmdTypeDepth dmd_ty || exprIsTrivial rhs)
            (mkArityMsg binder) }
 	  
 	-- We should check the unfolding, if any, but this is tricky because
  	-- the unfolding is a SimplifiableCoreExpr. Give up for now.
    where
     binder_ty                  = idType binder
-    maybeDmdTy                 = idStrictness_maybe binder
+    dmdTy                      = idStrictness binder
     bndr_vars                  = varSetElems (idFreeVars binder)
 
     -- If you edit this function, you may need to update the GHC formalism
@@ -409,7 +410,6 @@ instantiations between kind coercions and type coercions. We lint the
 kind coercions and produce the following substitution which is to be
 applied in the type variables:
   k_ag   ~~>   * -> *
-
 
 %************************************************************************
 %*									*
@@ -877,8 +877,8 @@ lintCoercion the_co@(NthCo n co)
              , n < length tys_s
              -> return (ks, ts, tt)
              where
-               ts = tys_s !! n
-               tt = tys_t !! n
+               ts = getNth tys_s n
+               tt = getNth tys_t n
                ks = typeKind ts
 
            _ -> failWithL (hang (ptext (sLit "Bad getNth:"))
@@ -909,20 +909,25 @@ lintCoercion (InstCo co arg_ty)
             -> failWithL (ptext (sLit "Kind mis-match in inst coercion"))
 	  _ -> failWithL (ptext (sLit "Bad argument of inst")) }
 
-lintCoercion co@(AxiomInstCo (CoAxiom { co_ax_tvs = ktvs
-                                      , co_ax_lhs = lhs
-                                      , co_ax_rhs = rhs })
-                             cos)
-  = do {  -- See Note [Kind instantiation in coercions]
-         unless (equalLength ktvs cos) (bad_ax (ptext (sLit "lengths")))
+lintCoercion co@(AxiomInstCo con ind cos)
+  = do { unless (0 <= ind && ind < brListLength (coAxiomBranches con))
+                (bad_ax (ptext (sLit "index out of range")))
+         -- See Note [Kind instantiation in coercions]
+       ; let CoAxBranch { cab_tvs = ktvs
+                        , cab_lhs = lhs
+                        , cab_rhs = rhs } = coAxiomNthBranch con ind
+       ; unless (equalLength ktvs cos) (bad_ax (ptext (sLit "lengths")))
        ; in_scope <- getInScope
        ; let empty_subst = mkTvSubst in_scope emptyTvSubstEnv
        ; (subst_l, subst_r) <- foldlM check_ki 
                                       (empty_subst, empty_subst) 
                                       (ktvs `zip` cos)
-       ; let lhs' = Type.substTy subst_l lhs
+       ; let lhs' = Type.substTys subst_l lhs
              rhs' = Type.substTy subst_r rhs
-       ; return (typeKind lhs', lhs', rhs') }
+       ; case checkAxInstCo co of
+           Just bad_index -> bad_ax $ ptext (sLit "inconsistent with") <+> (ppr bad_index)
+           Nothing -> return ()
+       ; return (typeKind rhs', mkTyConApp (coAxiomTyCon con) lhs', rhs') }
   where
     bad_ax what = addErrL (hang (ptext (sLit "Bad axiom application") <+> parens what)
                         2 (ppr co))

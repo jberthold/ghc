@@ -229,10 +229,6 @@ ifneq "$(CLEANING)" "YES"
 include rules/hs-suffix-rules-srcdir.mk
 include rules/hs-suffix-rules.mk
 include rules/hi-rule.mk
-
-$(foreach way,$(ALL_WAYS),\
-  $(eval $(call hi-rule,$(way))))
-
 include rules/c-suffix-rules.mk
 include rules/cmm-suffix-rules.mk
 
@@ -330,7 +326,7 @@ endif
 # They do not say "this package will be built"; see $(PACKAGES_xx) for that
 
 # Packages that are built but not installed
-PKGS_THAT_ARE_INTREE_ONLY := haskeline transformers terminfo xhtml
+PKGS_THAT_ARE_INTREE_ONLY := haskeline terminfo xhtml
 
 PKGS_THAT_ARE_DPH := \
     dph/dph-base \
@@ -355,7 +351,7 @@ PKGS_THAT_USE_TH := $(PKGS_THAT_ARE_DPH)
 #
 # We assume that the stage0 compiler has a suitable bytestring package,
 # so we don't have to include it below.
-PKGS_THAT_BUILD_WITH_STAGE0 = Cabal/Cabal hpc binary bin-package-db hoopl
+PKGS_THAT_BUILD_WITH_STAGE0 = Cabal/Cabal hpc binary bin-package-db hoopl transformers
 
 # $(EXTRA_PACKAGES)  is another classification, of packages built but
 #                    not installed
@@ -401,7 +397,7 @@ endef
 define addPackage # args: $1 = package, $2 = condition
 ifneq "$(filter $1,$(PKGS_THAT_USE_TH)) $(GhcProfiled)" "$1 YES"
 ifeq "$(filter $1,$(PKGS_THAT_BUILD_WITH_STAGE2))" "$1"
-ifneq "$(BuildingCrossCompiler)" "YES"
+ifneq "$(Stage1Only)" "YES"
 $(call addPackageGeneral,PACKAGES_STAGE2,$1,$2)
 endif
 else
@@ -612,7 +608,7 @@ BUILD_DIRS += \
    $(GHC_GENPRIMOP_DIR)
 endif
 
-ifeq "$(BuildingCrossCompiler)-$(phase)" "YES-final"
+ifeq "$(Stage1Only)-$(phase)" "YES-final"
 MAYBE_GHCI=
 else
 MAYBE_GHCI=driver/ghci
@@ -644,7 +640,7 @@ else ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
 BUILD_DIRS += libraries/integer-gmp/gmp
 endif
 
-ifeq "$(BuildingCrossCompiler)-$(phase)" "YES-final"
+ifeq "$(Stage1Only)-$(phase)" "YES-final"
 MAYBE_COMPILER=
 MAYBE_GHCTAGS=
 MAYBE_HPC=
@@ -672,7 +668,7 @@ BUILD_DIRS += \
    ghc
 
 ifneq "$(BINDIST)" "YES"
-ifneq "$(BuildingCrossCompiler)-$(phase)" "YES-final"
+ifneq "$(Stage1Only)-$(phase)" "YES-final"
 BUILD_DIRS += \
    utils/mkUserGuidePart
 endif
@@ -915,7 +911,7 @@ INSTALLED_GHC_PKG_REAL=$(DESTDIR)$(bindir)/ghc-pkg.exe
 endif
 
 INSTALLED_PKG_DIRS := $(addprefix libraries/,$(PACKAGES_STAGE1))
-ifeq "$(BuildingCrossCompiler)" "NO"
+ifeq "$(Stage1Only)" "NO"
 INSTALLED_PKG_DIRS := $(INSTALLED_PKG_DIRS) compiler
 endif
 INSTALLED_PKG_DIRS := $(INSTALLED_PKG_DIRS) $(addprefix libraries/,$(PACKAGES_STAGE2))
@@ -1337,17 +1333,17 @@ BINDIST_LIBRARY_FLAGS = --enable-library-vanilla --disable-shared
 endif
 BINDIST_LIBRARY_FLAGS += --disable-library-prof
 
-.PHONY: validate_build_transformers
-validate_build_transformers:
-	cd libraries/transformers && "$(BINDIST_PREFIX)/bin/ghc" --make Setup
-	cd libraries/transformers && ./Setup configure --with-ghc="$(BINDIST_PREFIX)/bin/ghc" $(BINDIST_HADDOCK_FLAG) $(BINDIST_LIBRARY_FLAGS) --global --builddir=dist-bindist --prefix="$(BINDIST_PREFIX)"
-	cd libraries/transformers && ./Setup build   --builddir=dist-bindist
+.PHONY: validate_build_xhtml
+validate_build_xhtml:
+	cd libraries/xhtml && "$(BINDIST_PREFIX)/bin/ghc" --make Setup
+	cd libraries/xhtml && ./Setup configure --with-ghc="$(BINDIST_PREFIX)/bin/ghc" $(BINDIST_HADDOCK_FLAG) $(BINDIST_LIBRARY_FLAGS) --global --builddir=dist-bindist --prefix="$(BINDIST_PREFIX)"
+	cd libraries/xhtml && ./Setup build   --builddir=dist-bindist
 ifeq "$(HADDOCK_DOCS)" "YES"
-	cd libraries/transformers && ./Setup haddock --builddir=dist-bindist
+	cd libraries/xhtml && ./Setup haddock --builddir=dist-bindist
 endif
-	cd libraries/transformers && ./Setup install --builddir=dist-bindist
-	cd libraries/transformers && ./Setup clean   --builddir=dist-bindist
-	cd libraries/transformers && rm -f Setup Setup.exe Setup.hi Setup.o
+	cd libraries/xhtml && ./Setup install --builddir=dist-bindist
+	cd libraries/xhtml && ./Setup clean   --builddir=dist-bindist
+	cd libraries/xhtml && rm -f Setup Setup.exe Setup.hi Setup.o
 
 # -----------------------------------------------------------------------------
 # Numbered phase targets

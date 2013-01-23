@@ -259,8 +259,7 @@ loop:
         // the current thread, since in that case it will not be on
         // the run queue.
         if (owner->why_blocked == NotBlocked && owner->id != msg->tso->id) {
-            removeFromRunQueue(cap, owner);
-            pushOnRunQueue(cap,owner);
+            promoteInRunQueue(cap, owner);
         }
 #ifdef PARALLEL_RTS
         } // end of "else" for "if (is_system)"
@@ -340,8 +339,7 @@ loop:
 #endif
         // See above, #3838
         if (owner->why_blocked == NotBlocked && owner->id != msg->tso->id) {
-            removeFromRunQueue(cap, owner);
-            pushOnRunQueue(cap,owner);
+            promoteInRunQueue(cap, owner);
         }
 
         return 1; // blocked
