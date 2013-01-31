@@ -430,7 +430,7 @@ compileFile :: HscEnv -> Phase -> (FilePath, Maybe Phase) -> IO FilePath
 compileFile hsc_env stop_phase (src, mb_phase) = do
    exists <- doesFileExist src
    when (not exists) $
-        throwGhcException (CmdLineError ("does not exist: " ++ src))
+        throwGhcExceptionIO (CmdLineError ("does not exist: " ++ src))
 
    let
         dflags = hsc_dflags hsc_env
@@ -542,7 +542,7 @@ runPipeline stop_phase hsc_env0 (input_fn, mb_phase)
 
          let happensBefore' = happensBefore dflags
          when (not (start_phase `happensBefore'` stop_phase)) $
-               throwGhcException (UsageError
+               throwGhcExceptionIO (UsageError
                            ("cannot compile this file to desired target: "
                               ++ input_fn))
 
@@ -1542,7 +1542,7 @@ runPhase_MoveBinary dflags input_fn
                copy dflags "copying parallel executable" input_fn executable
                setPermissions executable ps
                removeFile input_fn)
-           (\e -> throwGhcException (InstallationError 
+           (\e -> liftIO $ throwGhcExceptionIO (InstallationError 
                             ("Cannot move parallel executable " 
                              ++ executable_base ++ ": " ++ show e)))
 	-- generate a wrapper script for running a parallel prg.
@@ -1551,7 +1551,7 @@ runPhase_MoveBinary dflags input_fn
                                   (mkWrapperScript os (ways dflags) 
                                             executable executable_base)
                               setPermissions script_name ps)
-           (\e -> throwGhcException (InstallationError 
+           (\e -> liftIO $ throwGhcExceptionIO (InstallationError 
                             ("Cannot generate start script " 
                              ++ input_fn ++ ": " ++ show e)))
     | otherwise = return ()
