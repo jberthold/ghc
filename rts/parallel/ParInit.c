@@ -15,8 +15,6 @@
 
 #include "Rts.h"
 #include "RtsUtils.h"
-#include "LLC.h"
-#include "HLC.h"
 
 #include "MPSystem.h" /* wraps middleware usage */
 

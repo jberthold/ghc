@@ -141,10 +141,10 @@
 // warnings like
 //    error: function might be possible candidate for attribute ‘noreturn’
 // from gcc:
-#ifdef DYNAMIC_BY_DEFAULT
-int dynamicByDefault = 1;
+#ifdef DYNAMIC_GHC_PROGRAMS
+int dynamicGhcPrograms = 1;
 #else
-int dynamicByDefault = 0;
+int dynamicGhcPrograms = 0;
 #endif
 
 /* Hash table mapping symbol names to Symbol */
@@ -1101,6 +1101,8 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(getOrSetGHCConcWindowsProddingStore)                \
       SymI_HasProto(getOrSetSystemEventThreadEventManagerStore)         \
       SymI_HasProto(getOrSetSystemEventThreadIOManagerThreadStore)      \
+      SymI_HasProto(getOrSetSystemTimerThreadEventManagerStore)         \
+      SymI_HasProto(getOrSetSystemTimerThreadIOManagerThreadStore)      \
       SymI_HasProto(getGCStats)                                         \
       SymI_HasProto(getGCStatsEnabled)                                  \
       SymI_HasProto(genSymZh)                                           \
@@ -1113,7 +1115,10 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(hs_set_argv)                                        \
       SymI_HasProto(hs_add_root)                                        \
       SymI_HasProto(hs_perform_gc)                                      \
+      SymI_HasProto(hs_lock_stable_tables)                              \
+      SymI_HasProto(hs_unlock_stable_tables)                            \
       SymI_HasProto(hs_free_stable_ptr)                                 \
+      SymI_HasProto(hs_free_stable_ptr_unsafe)                          \
       SymI_HasProto(hs_free_fun_ptr)                                    \
       SymI_HasProto(hs_hpc_rootModule)                                  \
       SymI_HasProto(hs_hpc_module)                                      \
@@ -1214,6 +1219,7 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(startupHaskell)                                     \
       SymI_HasProto(shutdownHaskell)                                    \
       SymI_HasProto(shutdownHaskellAndExit)                             \
+      SymI_HasProto(stable_name_table)                                  \
       SymI_HasProto(stable_ptr_table)                                   \
       SymI_HasProto(stackOverflow)                                      \
       SymI_HasProto(stg_CAF_BLACKHOLE_info)                             \
@@ -2123,8 +2129,8 @@ loadArchive( pathchar *path )
     IF_DEBUG(linker, debugBelch("loadArchive: start\n"));
     IF_DEBUG(linker, debugBelch("loadArchive: Loading archive `%" PATH_FMT" '\n", path));
 
-    if (dynamicByDefault) {
-        barf("loadArchive called, but using dynlibs by default (%s)", path);
+    if (dynamicGhcPrograms) {
+        barf("loadArchive called, but using dynamic GHC (%s)", path);
     }
 
     gnuFileIndex = NULL;
@@ -2518,8 +2524,8 @@ loadObj( pathchar *path )
 #endif
    IF_DEBUG(linker, debugBelch("loadObj %" PATH_FMT "\n", path));
 
-   if (dynamicByDefault) {
-       barf("loadObj called, but using dynlibs by default (%s)", path);
+   if (dynamicGhcPrograms) {
+       barf("loadObj called, but using dynamic GHC (%s)", path);
    }
 
    initLinker();
@@ -4124,7 +4130,7 @@ ocResolve_PEi386 ( ObjectCode* oc )
 #    define R_X86_64_PC64 24
 #  endif
 
-/* 
+/*
  * Workaround for libc implementations (e.g. eglibc) with incomplete
  * relocation lists
  */
@@ -5003,7 +5009,7 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
                   | (offset & 0x01fe);
             break;
          }
-         
+
          case R_ARM_THM_JUMP11:
          {
             StgWord16 *word = (StgWord16 *)P;

@@ -619,8 +619,8 @@ checkAPat msg loc e0 = do
                                _ -> patFail msg loc e0
 
    HsPar e            -> checkLPat msg e >>= (return . ParPat)
-   ExplicitList _ es  -> do ps <- mapM (checkLPat msg) es
-                            return (ListPat ps placeHolderType)
+   ExplicitList _ _ es  -> do ps <- mapM (checkLPat msg) es
+                              return (ListPat ps placeHolderType Nothing)
    ExplicitPArr _ es  -> do ps <- mapM (checkLPat msg) es
                             return (PArrPat ps placeHolderType)
 
@@ -872,8 +872,8 @@ checkCmd _ (OpApp eLeft op fixity eRight) = do
     -- OpApp becomes a HsCmdArrForm with a (Just fixity) in it
     c1 <- checkCommand eLeft
     c2 <- checkCommand eRight
-    let arg1 = L (getLoc c1) $ HsCmdTop c1 [] placeHolderType []
-        arg2 = L (getLoc c2) $ HsCmdTop c2 [] placeHolderType []
+    let arg1 = L (getLoc c1) $ HsCmdTop c1 placeHolderType placeHolderType []
+        arg2 = L (getLoc c2) $ HsCmdTop c2 placeHolderType placeHolderType []
     return $ HsCmdArrForm op (Just fixity) [arg1, arg2]
 
 checkCmd l e = cmdFail l e

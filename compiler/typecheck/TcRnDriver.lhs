@@ -25,7 +25,6 @@ module TcRnDriver (
 import {-# SOURCE #-} TcSplice ( tcSpliceDecls )
 #endif
 
-import TypeRep
 import DynFlags
 import StaticFlags
 import HsSyn
@@ -77,7 +76,6 @@ import DataCon
 import Type
 import Class
 import CoAxiom  ( CoAxBranch(..) )
-import TcType   ( orphNamesOfDFunHead )
 import Inst     ( tcGetInstEnvs )
 import Data.List ( sortBy )
 import Data.IORef ( readIORef )
@@ -1476,7 +1474,7 @@ tcGhciStmts stmts
                 -- get their *polymorphic* values.  (And we'd get ambiguity errs
                 -- if they were overloaded, since they aren't applied to anything.)
             ret_expr = nlHsApp (nlHsTyApp ret_id [ret_ty])
-                       (noLoc $ ExplicitList unitTy (map mk_item ids)) ;
+                       (noLoc $ ExplicitList unitTy Nothing (map mk_item ids)) ;
             mk_item id = nlHsApp (nlHsTyApp unsafeCoerceId [idType id, unitTy])
                                  (nlHsVar id) ;
             stmts = tc_stmts ++ [noLoc (mkLastStmt ret_expr)]
@@ -1514,7 +1512,7 @@ isGHCiMonad hsc_env ictxt ty
                 let name = gre_name n
                 ghciClass <- tcLookupClass ghciIoClassName 
                 userTyCon <- tcLookupTyCon name
-                let userTy = TyConApp userTyCon []
+                let userTy = mkTyConApp userTyCon []
                 _ <- tcLookupInstance ghciClass [userTy]
                 return name
 
@@ -1576,26 +1574,41 @@ tcRnType :: HscEnv
          -> IO (Messages, Maybe (Type, Kind))
 tcRnType hsc_env ictxt normalise rdr_type
   = initTcPrintErrors hsc_env iNTERACTIVE $
-    setInteractiveContext hsc_env ictxt $ do {
-
-    (rn_type, _fvs) <- rnLHsType GHCiCtx rdr_type ;
-    failIfErrsM ;
+    setInteractiveContext hsc_env ictxt $ 
+    setXOptM Opt_PolyKinds $   -- See Note [Kind-generalise in tcRnType]
+    do { (rn_type, _fvs) <- rnLHsType GHCiCtx rdr_type
+       ; failIfErrsM
 
         -- Now kind-check the type
         -- It can have any rank or kind
-    ty <- tcHsSigType GhciCtxt rn_type ;
+       ; ty <- tcHsSigType GhciCtxt rn_type ;
 
-    ty' <- if normalise
-           then do { fam_envs <- tcGetFamInstEnvs
-                   ; return (snd (normaliseType fam_envs ty)) }
-                   -- normaliseType returns a coercion
-                   -- which we discard
-           else return ty ;
+       ; ty' <- if normalise
+                then do { fam_envs <- tcGetFamInstEnvs
+                        ; return (snd (normaliseType fam_envs ty)) }
+                        -- normaliseType returns a coercion
+                        -- which we discard
+                else return ty ;
 
-    return (ty', typeKind ty)
-    }
-
+       ; return (ty', typeKind ty) }
 \end{code}
+
+Note [Kind-generalise in tcRnType]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We switch on PolyKinds when kind-checking a user type, so that we will
+kind-generalise the type.  This gives the right default behaviour at
+the GHCi prompt, where if you say ":k T", and T has a polymorphic
+kind, you'd like to see that polymorphism. Of course.  If T isn't
+kind-polymorphic you won't get anything unexpected, but the apparent
+*loss* of polymorphism, for types that you know are polymorphic, is
+quite surprising.  See Trac #7688 for a discussion.
+
+
+%************************************************************************
+%*                                                                      *
+                 tcRnDeclsi
+%*                                                                      *
+%************************************************************************
 
 tcRnDeclsi exists to allow class, data, and other declarations in GHCi.
 
@@ -1721,7 +1734,7 @@ tcRnLookupName' name = do
 
 tcRnGetInfo :: HscEnv
             -> Name
-            -> IO (Messages, Maybe (TyThing, Fixity, [ClsInst]))
+            -> IO (Messages, Maybe (TyThing, Fixity, [ClsInst], [FamInst Branched]))
 
 -- Used to implement :info in GHCi
 --
@@ -1743,29 +1756,41 @@ tcRnGetInfo hsc_env name
 
     thing  <- tcRnLookupName' name
     fixity <- lookupFixityRn name
-    ispecs <- lookupInsts thing
-    return (thing, fixity, ispecs)
+    (cls_insts, fam_insts) <- lookupInsts thing
+    return (thing, fixity, cls_insts, fam_insts)
 
-lookupInsts :: TyThing -> TcM [ClsInst]
+lookupInsts :: TyThing -> TcM ([ClsInst],[FamInst Branched])
 lookupInsts (ATyCon tc)
   | Just cls <- tyConClass_maybe tc
   = do  { inst_envs <- tcGetInstEnvs
-        ; return (classInstances inst_envs cls) }
+        ; return (classInstances inst_envs cls, []) }
+
+  | isFamilyTyCon tc || isTyConAssoc tc
+  = do  { inst_envs <- tcGetFamInstEnvs
+        ; return ([], familyInstances inst_envs tc) }
 
   | otherwise
   = do  { (pkg_ie, home_ie) <- tcGetInstEnvs
+        ; (pkg_fie, home_fie) <- tcGetFamInstEnvs
                 -- Load all instances for all classes that are
                 -- in the type environment (which are all the ones
                 -- we've seen in any interface file so far)
-        ; return [ ispec        -- Search all
+
+          -- Return only the instances relevant to the given thing, i.e.
+          -- the instances whose head contains the thing's name.
+        ; let cls_insts =
+                 [ ispec        -- Search all
                  | ispec <- instEnvElts home_ie ++ instEnvElts pkg_ie
-                 , let dfun = instanceDFunId ispec
-                 , relevant dfun ] }
+                 , tc_name `elemNameSet` orphNamesOfClsInst ispec ]
+        ; let fam_insts =
+                 [ fispec
+                 | fispec <- famInstEnvElts home_fie ++ famInstEnvElts pkg_fie
+                 , tc_name `elemNameSet` orphNamesOfFamInst fispec ]
+        ; return (cls_insts, fam_insts) }
   where
-    relevant df = tc_name `elemNameSet` orphNamesOfDFunHead (idType df)
     tc_name     = tyConName tc
 
-lookupInsts _ = return []
+lookupInsts _ = return ([],[])
 
 loadUnqualIfaces :: HscEnv -> InteractiveContext -> TcM ()
 -- Load the interface for everything that is in scope unqualified

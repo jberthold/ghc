@@ -22,7 +22,7 @@ module FamInstEnv (
         FamInstEnv, FamInstEnvs,
         emptyFamInstEnvs, emptyFamInstEnv, famInstEnvElts, familyInstances,
         extendFamInstEnvList, extendFamInstEnv, deleteFromFamInstEnv,
-        identicalFamInst,
+        identicalFamInst, orphNamesOfFamInst,
 
         FamInstMatch(..),
         lookupFamInstEnv, lookupFamInstEnvConflicts, lookupFamInstEnvConflicts',
@@ -35,6 +35,7 @@ module FamInstEnv (
 
 #include "HsVersions.h"
 
+import TcType ( orphNamesOfTypes )
 import InstEnv
 import Unify
 import Type
@@ -366,6 +367,17 @@ familyInstances (pkg_fie, home_fie) fam
     get env = case lookupUFM env fam of
                 Just (FamIE insts) -> insts
                 Nothing            -> []
+
+-- | Collects the names of the concrete types and type constructors that
+-- make up the LHS of a type family instance. For instance,
+-- given `type family Foo a b`:
+--
+-- `type instance Foo (F (G (H a))) b = ...` would yield [F,G,H]
+--
+-- Used in the implementation of ":info" in GHCi.
+orphNamesOfFamInst :: FamInst Branched -> NameSet
+orphNamesOfFamInst
+    = orphNamesOfTypes . concat . brListMap cab_lhs . coAxiomBranches . fi_axiom
 
 extendFamInstEnvList :: FamInstEnv -> [FamInst br] -> FamInstEnv
 extendFamInstEnvList inst_env fis = foldl extendFamInstEnv inst_env fis
@@ -759,10 +771,11 @@ The "extra" type argument [Char] just stays on the end.
 -- It is currently (Oct 2012) used only for generating errors for
 -- inaccessible branches. If these errors go unreported, no harm done.
 -- This is defined here to avoid a dependency from CoAxiom to Unify
-isDominatedBy :: [Type] -> [CoAxBranch] -> Bool
-isDominatedBy lhs branches
+isDominatedBy :: CoAxBranch -> [CoAxBranch] -> Bool
+isDominatedBy branch branches
   = or $ map match branches
     where
+      lhs = coAxBranchLHS branch
       match (CoAxBranch { cab_tvs = tvs, cab_lhs = tys })
         = isJust $ tcMatchTys (mkVarSet tvs) tys lhs
 \end{code}

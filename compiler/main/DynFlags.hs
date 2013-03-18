@@ -11,6 +11,9 @@
 --
 -------------------------------------------------------------------------------
 
+{-# OPTIONS -fno-cse #-}
+-- -fno-cse is needed for GLOBAL_VAR's to behave properly
+
 module DynFlags (
         -- * Dynamic flags and associated configuration types
         DumpFlag(..),
@@ -22,7 +25,7 @@ module DynFlags (
         FatalMessager, LogAction, FlushOut(..), FlushErr(..),
         ProfAuto(..),
         glasgowExtsFlags,
-        dopt,
+        dopt, dopt_set, dopt_unset,
         gopt, gopt_set, gopt_unset,
         wopt, wopt_set, wopt_unset,
         xopt, xopt_set, xopt_unset,
@@ -47,7 +50,8 @@ module DynFlags (
 
         printOutputForUser, printInfoForUser,
 
-        Way(..), mkBuildTag, wayRTSOnly,
+        Way(..), mkBuildTag, wayRTSOnly, updateWays,
+        wayGeneralFlags, wayUnsetGeneralFlags,
 
         -- ** Safe Haskell
         SafeHaskellMode(..),
@@ -70,6 +74,7 @@ module DynFlags (
         -- ** Manipulating DynFlags
         defaultDynFlags,                -- Settings -> DynFlags
         defaultWays,
+        interpWays,
         initDynFlags,                   -- DynFlags -> IO DynFlags
         defaultFatalMessager,
         defaultLogAction,
@@ -129,6 +134,7 @@ module DynFlags (
 #include "HsVersions.h"
 
 import Platform
+import PlatformConstants
 import Module
 import PackageConfig
 import {-# SOURCE #-} PrelNames ( mAIN )
@@ -160,14 +166,18 @@ import Data.Int
 import Data.List
 import Data.Map (Map)
 import qualified Data.Map as Map
+import Data.Maybe
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word
 import System.FilePath
 import System.IO
+import System.IO.Error
 
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
+
+import GHC.Foreign (withCString, peekCString)
 
 -- -----------------------------------------------------------------------------
 -- DynFlags
@@ -424,6 +434,7 @@ data WarningFlag =
    | Opt_WarnUnsupportedCallingConventions
    | Opt_WarnUnsupportedLlvmVersion
    | Opt_WarnInlineRuleShadowing
+   | Opt_WarnTypeableInstances
    deriving (Eq, Show, Enum)
 
 data Language = Haskell98 | Haskell2010
@@ -475,6 +486,7 @@ data ExtensionFlag
    | Opt_BangPatterns
    | Opt_TypeFamilies
    | Opt_OverloadedStrings
+   | Opt_OverloadedLists
    | Opt_DisambiguateRecordFields
    | Opt_RecordWildCards
    | Opt_RecordPuns
@@ -491,6 +503,7 @@ data ExtensionFlag
  
    | Opt_StandaloneDeriving
    | Opt_DeriveDataTypeable
+   | Opt_AutoDeriveTypeable       -- Automatic derivation of Typeable
    | Opt_DeriveFunctor
    | Opt_DeriveTraversable
    | Opt_DeriveFoldable
@@ -502,6 +515,7 @@ data ExtensionFlag
    | Opt_FlexibleInstances
    | Opt_ConstrainedClassMethods
    | Opt_MultiParamTypeClasses
+   | Opt_NullaryTypeClasses
    | Opt_FunctionalDependencies
    | Opt_UnicodeSyntax
    | Opt_ExistentialQuantification
@@ -700,6 +714,8 @@ data DynFlags = DynFlags {
   pprUserLength         :: Int,
   pprCols               :: Int,
   traceLevel            :: Int, -- Standard level is 1. Less verbose is 0.
+
+  useUnicodeQuotes      :: Bool,
 
   -- | what kind of {-# SCC #-} to add automatically
   profAuto              :: ProfAuto,
@@ -1054,20 +1070,8 @@ wayDesc WayNDP      = "Nested data parallelism"
 
 wayGeneralFlags :: Platform -> Way -> [GeneralFlag]
 wayGeneralFlags _ WayThreaded = []
-wayGeneralFlags _ WayDebug = []
-wayGeneralFlags platform WayDyn =
-        case platformOS platform of
-            -- On Windows, code that is to be linked into a dynamic
-            -- library must be compiled with -fPIC. Labels not in
-            -- the current package are assumed to be in a DLL
-            -- different from the current one.
-            OSMinGW32 -> [Opt_PIC]
-            OSDarwin  -> [Opt_PIC]
-            OSLinux   -> [Opt_PIC] -- This needs to be here for GHCi to work:
-                                   -- GHCi links objects into a .so before
-                                   -- loading the .so using the system linker.
-                                   -- Only PIC objects can be linked into a .so.
-            _         -> []
+wayGeneralFlags _ WayDebug    = []
+wayGeneralFlags _ WayDyn      = [Opt_PIC]
 wayGeneralFlags _ WayProf     = [Opt_SccProfilingOn]
 wayGeneralFlags _ WayEventLog = []
 wayGeneralFlags _ WayParPvm   = []
@@ -1076,6 +1080,19 @@ wayGeneralFlags _ WayParCp    = []
 wayGeneralFlags _ WayPar      = [Opt_Parallel]
 wayGeneralFlags _ WayGran     = [Opt_GranMacros]
 wayGeneralFlags _ WayNDP      = []
+
+wayUnsetGeneralFlags :: Platform -> Way -> [GeneralFlag]
+wayUnsetGeneralFlags _ WayThreaded = []
+wayUnsetGeneralFlags _ WayDebug    = []
+wayUnsetGeneralFlags _ WayDyn      = [Opt_Static]
+wayUnsetGeneralFlags _ WayProf     = []
+wayUnsetGeneralFlags _ WayEventLog = []
+wayUnsetGeneralFlags _ WayParPvm   = []
+wayUnsetGeneralFlags _ WayParMPI   = []
+wayUnsetGeneralFlags _ WayParCp    = []
+wayUnsetGeneralFlags _ WayPar      = []
+wayUnsetGeneralFlags _ WayGran     = []
+wayUnsetGeneralFlags _ WayNDP      = []
 
 wayExtras :: Platform -> Way -> DynFlags -> DynFlags
 wayExtras _ WayThreaded dflags = dflags
@@ -1119,16 +1136,8 @@ wayOptl platform WayThreaded =
         OSOpenBSD  -> ["-pthread"]
         OSNetBSD   -> ["-pthread"]
         _          -> []
-wayOptl _ WayDebug = []
-wayOptl platform WayDyn =
-        case platformOS platform of
-        OSOpenBSD -> -- Without this, linking the shared libHSffi fails
-                     -- because it uses pthread mutexes.
-                     ["-optl-pthread"]
-        OSNetBSD -> -- Without this, linking the shared libHSffi fails
-                    -- because it uses pthread mutexes.
-                    ["-optl-pthread"]
-        _ -> []
+wayOptl _ WayDebug      = []
+wayOptl _ WayDyn        = []
 wayOptl _ WayProf       = []
 wayOptl _ WayEventLog   = []
 -- TODO these linker flags do not work as desired, as respective symbols are
@@ -1180,15 +1189,14 @@ generateDynamicTooConditional dflags canGen cannotGen notTryingToGen
       else notTryingToGen
 
 doDynamicToo :: DynFlags -> DynFlags
-doDynamicToo dflags0 = let dflags1 = unSetGeneralFlag' Opt_Static dflags0
-                           dflags2 = addWay' WayDyn dflags1
-                           dflags3 = dflags2 {
-                                         outputFile = dynOutputFile dflags2,
-                                         hiSuf = dynHiSuf dflags2,
-                                         objectSuf = dynObjectSuf dflags2
+doDynamicToo dflags0 = let dflags1 = addWay' WayDyn dflags0
+                           dflags2 = dflags1 {
+                                         outputFile = dynOutputFile dflags1,
+                                         hiSuf = dynHiSuf dflags1,
+                                         objectSuf = dynObjectSuf dflags1
                                      }
-                           dflags4 = updateWays dflags3
-                       in dflags4
+                           dflags3 = updateWays dflags2
+                       in dflags3
 
 -----------------------------------------------------------------------------
 
@@ -1202,6 +1210,12 @@ initDynFlags dflags = do
  refGeneratedDumps <- newIORef Set.empty
  refLlvmVersion <- newIORef 28
  wrapperNum <- newIORef 0
+ canUseUnicodeQuotes <- do let enc = localeEncoding
+                               str = "‛’"
+                           (withCString enc str $ \cstr ->
+                                do str' <- peekCString enc cstr
+                                   return (str == str'))
+                               `catchIOError` \_ -> return False
  return dflags{
         canGenerateDynamicToo = refCanGenerateDynamicToo,
         filesToClean   = refFilesToClean,
@@ -1209,7 +1223,8 @@ initDynFlags dflags = do
         filesToNotIntermediateClean = refFilesToNotIntermediateClean,
         generatedDumps = refGeneratedDumps,
         llvmVersion    = refLlvmVersion,
-        nextWrapperNum = wrapperNum
+        nextWrapperNum = wrapperNum,
+        useUnicodeQuotes = canUseUnicodeQuotes
         }
 
 -- | The normal 'DynFlags'. Note that they is not suitable for use in this form
@@ -1334,6 +1349,7 @@ defaultDynFlags mySettings =
         flushErr = defaultFlushErr,
         pprUserLength = 5,
         pprCols = 100,
+        useUnicodeQuotes = False,
         traceLevel = 1,
         profAuto = NoProfAuto,
         llvmVersion = panic "defaultDynFlags: No llvmVersion",
@@ -1346,6 +1362,11 @@ defaultWays :: Settings -> [Way]
 defaultWays settings = if pc_DYNAMIC_BY_DEFAULT (sPlatformConstants settings)
                        then [WayDyn]
                        else []
+
+interpWays :: [Way]
+interpWays = if cDYNAMIC_GHC_PROGRAMS
+             then [WayDyn]
+             else []
 
 --------------------------------------------------------------------------
 
@@ -1489,6 +1510,10 @@ dopt f dflags = (fromEnum f `IntSet.member` dumpFlags dflags)
 -- | Set a 'DumpFlag'
 dopt_set :: DynFlags -> DumpFlag -> DynFlags
 dopt_set dfs f = dfs{ dumpFlags = IntSet.insert (fromEnum f) (dumpFlags dfs) }
+
+-- | Unset a 'DumpFlag'
+dopt_unset :: DynFlags -> DumpFlag -> DynFlags
+dopt_unset dfs f = dfs{ dumpFlags = IntSet.delete (fromEnum f) (dumpFlags dfs) }
 
 -- | Test whether a 'GeneralFlag' is set
 gopt :: GeneralFlag -> DynFlags -> Bool
@@ -1840,40 +1865,24 @@ parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
       throwGhcExceptionIO (CmdLineError ("combination not supported: " ++
                                intercalate "/" (map wayDesc theWays)))
 
-  -- TODO: This is an ugly hack. Do something better.
-  -- -fPIC affects the CMM code we generate, so if
-  -- we are in -dynamic-too mode we need -fPIC to be on during the
-  -- shared part of the compilation.
-  let doingDynamicToo = gopt Opt_BuildDynamicToo dflags3
-      platform = targetPlatform dflags3
-      dflags4 = if doingDynamicToo
-                then foldr setGeneralFlag' dflags3
-                           (wayGeneralFlags platform WayDyn)
-                else dflags3
-
-  {-
-  TODO: This test doesn't quite work: We don't want to give an error
-  when e.g. compiling a C file, only when compiling Haskell files.
-  when doingDynamicToo $
-      unless (isJust (outputFile dflags4) == isJust (dynOutputFile dflags4)) $
+  whenGeneratingDynamicToo dflags3 $
+      unless (isJust (outputFile dflags3) == isJust (dynOutputFile dflags3)) $
           liftIO $ throwGhcExceptionIO $ CmdLineError
               "With -dynamic-too, must give -dyno iff giving -o"
-  -}
 
-  let (dflags5, consistency_warnings) = makeDynFlagsConsistent dflags4
+  let (dflags4, consistency_warnings) = makeDynFlagsConsistent dflags3
 
-  liftIO $ setUnsafeGlobalDynFlags dflags5
+  liftIO $ setUnsafeGlobalDynFlags dflags4
 
-  return (dflags5, leftover, consistency_warnings ++ sh_warns ++ warns)
+  return (dflags4, leftover, consistency_warnings ++ sh_warns ++ warns)
 
 updateWays :: DynFlags -> DynFlags
 updateWays dflags
     = let theWays = sort $ nub $ ways dflags
-          theBuildTag = mkBuildTag (filter (not . wayRTSOnly) theWays)
       in dflags {
              ways        = theWays,
-             buildTag    = theBuildTag,
-             rtsBuildTag = mkBuildTag theWays
+             buildTag    = mkBuildTag (filter (not . wayRTSOnly) theWays),
+             rtsBuildTag = mkBuildTag                            theWays
          }
 
 -- | Check (and potentially disable) any extensions that aren't allowed
@@ -1989,10 +1998,8 @@ dynamic_flags = [
   , Flag "parcp"          (NoArg (addWay WayParCp) )
 
         ----- Linker --------------------------------------------------------
-  , Flag "static"         (NoArg (do setGeneralFlag Opt_Static
-                                     removeWay WayDyn))
-  , Flag "dynamic"        (NoArg (do unSetGeneralFlag Opt_Static
-                                     addWay WayDyn))
+  , Flag "static"         (NoArg (removeWay WayDyn))
+  , Flag "dynamic"        (NoArg (addWay WayDyn))
     -- ignored for compat w/ gcc:
   , Flag "rdynamic"       (NoArg (return ()))
   , Flag "relative-dynlib-paths"  (NoArg (setGeneralFlag Opt_RelativeDynlibPaths))
@@ -2433,7 +2440,8 @@ fWarningFlags = [
   ( "warn-pointless-pragmas",           Opt_WarnPointlessPragmas, nop ),
   ( "warn-unsupported-calling-conventions", Opt_WarnUnsupportedCallingConventions, nop ),
   ( "warn-inline-rule-shadowing",       Opt_WarnInlineRuleShadowing, nop ),
-  ( "warn-unsupported-llvm-version",    Opt_WarnUnsupportedLlvmVersion, nop ) ]
+  ( "warn-unsupported-llvm-version",    Opt_WarnUnsupportedLlvmVersion, nop ),
+  ( "warn-typeable-instances",          Opt_WarnTypeableInstances, nop ) ]
 
 -- | These @-\<blah\>@ flags can all be reversed with @-no-\<blah\>@
 negatableFlags :: [FlagSpec GeneralFlag]
@@ -2624,6 +2632,7 @@ xFlags = [
     deprecatedForExtension "NamedFieldPuns" ),
   ( "DisambiguateRecordFields",         Opt_DisambiguateRecordFields, nop ),
   ( "OverloadedStrings",                Opt_OverloadedStrings, nop ),
+  ( "OverloadedLists",                  Opt_OverloadedLists, nop),
   ( "GADTs",                            Opt_GADTs, nop ),
   ( "GADTSyntax",                       Opt_GADTSyntax, nop ),
   ( "ViewPatterns",                     Opt_ViewPatterns, nop ),
@@ -2664,6 +2673,7 @@ xFlags = [
   ( "UnboxedTuples",                    Opt_UnboxedTuples, nop ),
   ( "StandaloneDeriving",               Opt_StandaloneDeriving, nop ),
   ( "DeriveDataTypeable",               Opt_DeriveDataTypeable, nop ),
+  ( "AutoDeriveTypeable",               Opt_AutoDeriveTypeable, nop ),
   ( "DeriveFunctor",                    Opt_DeriveFunctor, nop ),
   ( "DeriveTraversable",                Opt_DeriveTraversable, nop ),
   ( "DeriveFoldable",                   Opt_DeriveFoldable, nop ),
@@ -2674,6 +2684,7 @@ xFlags = [
   ( "FlexibleInstances",                Opt_FlexibleInstances, nop ),
   ( "ConstrainedClassMethods",          Opt_ConstrainedClassMethods, nop ),
   ( "MultiParamTypeClasses",            Opt_MultiParamTypeClasses, nop ),
+  ( "NullaryTypeClasses",               Opt_NullaryTypeClasses, nop ),
   ( "FunctionalDependencies",           Opt_FunctionalDependencies, nop ),
   ( "GeneralizedNewtypeDeriving",       Opt_GeneralizedNewtypeDeriving, setGenDeriving ),
   ( "OverlappingInstances",             Opt_OverlappingInstances, nop ),
@@ -2737,6 +2748,9 @@ impliedFlags
 
     , (Opt_TypeFamilies,     turnOn, Opt_KindSignatures)  -- Type families use kind signatures
     , (Opt_PolyKinds,        turnOn, Opt_KindSignatures)  -- Ditto polymorphic kinds
+
+    -- AutoDeriveTypeable is not very useful without DeriveDataTypeable
+    , (Opt_AutoDeriveTypeable, turnOn, Opt_DeriveDataTypeable)
 
     -- We turn this on so that we can export associated type
     -- type synonyms in subordinates (e.g. MyClass(type AssocType))
@@ -2821,7 +2835,9 @@ standardWarnings
         Opt_WarnUnsupportedCallingConventions,
         Opt_WarnUnsupportedLlvmVersion,
         Opt_WarnInlineRuleShadowing,
-        Opt_WarnDuplicateConstraints
+        Opt_WarnDuplicateConstraints,
+        Opt_WarnInlineRuleShadowing,
+        Opt_WarnTypeableInstances
       ]
 
 minusWOpts :: [WarningFlag]
@@ -2992,8 +3008,11 @@ addWay' :: Way -> DynFlags -> DynFlags
 addWay' w dflags0 = let platform = targetPlatform dflags0
                         dflags1 = dflags0 { ways = w : ways dflags0 }
                         dflags2 = wayExtras platform w dflags1
-                        dflags3 = foldr setGeneralFlag' dflags2 (wayGeneralFlags platform w)
-                    in dflags3
+                        dflags3 = foldr setGeneralFlag' dflags2
+                                        (wayGeneralFlags platform w)
+                        dflags4 = foldr unSetGeneralFlag' dflags3
+                                        (wayUnsetGeneralFlags platform w)
+                    in dflags4
 
 removeWay :: Way -> DynP ()
 removeWay w = do
@@ -3002,6 +3021,7 @@ removeWay w = do
   let platform = targetPlatform dfs
   -- XXX: wayExtras?
   mapM_ unSetGeneralFlag $ wayGeneralFlags platform w
+  mapM_ setGeneralFlag $ wayUnsetGeneralFlags platform w
   -- turn Opt_PIC back on if necessary for this platform:
   mapM_ setGeneralFlag $ default_PIC platform
 
@@ -3361,13 +3381,14 @@ compilerInfo dflags
        ("RTS ways",                    cGhcRTSWays),
        ("Dynamic by default",          if dYNAMIC_BY_DEFAULT dflags
                                        then "YES" else "NO"),
+       ("GHC Dynamic",                 if cDYNAMIC_GHC_PROGRAMS
+                                       then "YES" else "NO"),
        ("Leading underscore",          cLeadingUnderscore),
        ("Debug on",                    show debugIsOn),
        ("LibDir",                      topDir dflags),
        ("Global Package DB",           systemPackageConfig dflags)
       ]
 
-#include "../includes/dist-derivedconstants/header/GHCConstantsHaskellType.hs"
 #include "../includes/dist-derivedconstants/header/GHCConstantsHaskellWrappers.hs"
 
 bLOCK_SIZE_W :: DynFlags -> Int

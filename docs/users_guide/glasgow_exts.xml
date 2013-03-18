@@ -225,6 +225,14 @@ the same.
 </para>
 
 <para>
+Note that when unboxed tuples are enabled,
+<literal>(#</literal> is a single lexeme, so for example when using
+operators like <literal>#</literal> and <literal>#-</literal> you need
+to write <literal>( # )</literal> and <literal>( #- )</literal> rather than
+<literal>(#)</literal> and <literal>(#-)</literal>.
+</para>
+
+<para>
 Unboxed tuples are used for functions that need to return multiple
 values, but they avoid the heap allocation normally associated with
 using fully-fledged tuples.  When an unboxed tuple is returned, the
@@ -3379,19 +3387,17 @@ GHC extends this list with several more classes that may be automatically derive
 <literal>Typeable</literal>, and <literal>Data</literal>, defined in the library
 modules <literal>Data.Typeable</literal> and <literal>Data.Generics</literal> respectively.
 </para>
-<para>An instance of <literal>Typeable</literal> can only be derived if the
-data type has seven or fewer type parameters, all of kind <literal>*</literal>.
-The reason for this is that the <literal>Typeable</literal> class is derived using the scheme
-described in
-<ulink url="http://research.microsoft.com/%7Esimonpj/papers/hmap/gmap2.ps">
-Scrap More Boilerplate: Reflection, Zips, and Generalised Casts
-</ulink>.
-(Section 7.4 of the paper describes the multiple <literal>Typeable</literal> classes that
-are used, and only <literal>Typeable1</literal> up to
-<literal>Typeable7</literal> are provided in the library.)
-In other cases, there is nothing to stop the programmer writing a <literal>TypeableX</literal>
-class, whose kind suits that of the data type constructor, and
-then writing the data type instance by hand.
+<para>Since GHC 7.8.1, <literal>Typeable</literal> is kind-polymorphic (see
+<xref linkend="kind-polymorphism"/>) and can be derived for any datatype and
+type class. Instances for datatypes can be derived by attaching a 
+<literal>deriving Typeable</literal> clause to the datatype declaration, or by
+using standalone deriving (see <xref linkend="stand-alone-deriving"/>).
+Instances for type classes can only be derived using standalone deriving.
+See also <xref linkend="auto-derive-typeable"/>.
+</para>
+<para>
+Also since GHC 7.8.1, handwritten (ie. not derived) instances of
+<literal>Typeable</literal> are forbidden, and will be ignored with a warning.
 </para>
 </listitem>
 
@@ -3420,6 +3426,18 @@ defined in <literal>Data.Traversable</literal>.
 In each case the appropriate class must be in scope before it
 can be mentioned in the <literal>deriving</literal> clause.
 </para>
+</sect2>
+
+<sect2 id="auto-derive-typeable">
+<title>Automatically deriving <literal>Typeable</literal> instances</title>
+
+<para>
+The flag <option>-XAutoDeriveTypeable</option> triggers the generation
+of derived <literal>Typeable</literal> instances for every datatype and type
+class declaration in the module it is used. This flag implies
+<option>-XDeriveDataTypeable</option> (<xref linkend="deriving-typeable"/>).
+</para>
+
 </sect2>
 
 <sect2 id="newtype-deriving">
@@ -3775,6 +3793,35 @@ We use default signatures to simplify generic programming in GHC
 (<xref linkend="generic-programming"/>).
 </para>
 
+
+</sect3>
+
+<sect3 id="nullary-type-classes">
+<title>Nullary type classes</title>
+Nullary (no parameter) type classes are enabled with <option>-XNullaryTypeClasses</option>.
+Since there are no available parameters, there can be at most one instance
+of a nullary class. A nullary type class might be used to document some assumption
+in a type signature (such as reliance on the Riemann hypothesis) or add some
+globally configurable settings in a program. For example,
+
+<programlisting>
+  class RiemannHypothesis where
+    assumeRH :: a -> a
+
+  -- Deterministic version of the Miller test
+  -- correctness depends on the generalized Riemann hypothesis 
+  isPrime :: RiemannHypothesis => Integer -> Bool
+  isPrime n = assumeRH (...)
+</programlisting>
+
+The type signature of <literal>isPrime</literal> informs users that its correctness
+depends on an unproven conjecture. If the function is used, the user has
+to acknowledge the dependence with:
+
+<programlisting>
+  instance RiemannHypothesis where
+    assumeRH = id
+</programlisting>
 
 </sect3>
 </sect2>
@@ -4645,6 +4692,189 @@ main = do
 Note that deriving <literal>Eq</literal> is necessary for the pattern matching
 to work since it gets translated into an equality comparison.
 </para>
+</sect2>
+
+<sect2 id="overloaded-lists">
+<title>Overloaded lists</title>
+
+<para> GHC supports <emphasis>overloading of the list notation</emphasis>.
+Let us recap the notation for
+constructing lists. In Haskell, the list notation can be be used in the
+following seven ways:
+
+<programlisting>
+[]          -- Empty list 
+[x]         -- x : []
+[x,y,z]     -- x : y : z : []
+[x .. ]     -- enumFrom x
+[x,y ..]    -- enumFromThen x y
+[x .. y]    -- enumFromTo x y
+[x,y .. z]  -- enumFromThenTo x y z
+</programlisting>
+
+When the <option>OverloadedLists</option> extension is turned on, the
+aforementioned seven notations are desugared as follows: </para>
+
+<programlisting>
+[]          -- fromListN 0 []
+[x]         -- fromListN 1 (x : [])
+[x,y,z]     -- fromListN 3 (x : y : z : [])
+[x .. ]     -- fromList (enumFrom x)
+[x,y ..]    -- fromList (enumFromThen x y)
+[x .. y]    -- fromList (enumFromTo x y)
+[x,y .. z]  -- fromList (enumFromThenTo x y z)
+</programlisting>
+
+<para> This extension allows programmers to use the list notation for
+construction of structures like: <literal>Set</literal>,
+<literal>Map</literal>, <literal>IntMap</literal>, <literal>Vector</literal>,
+<literal>Text</literal> and <literal>Array</literal>. The following code
+listing gives a few examples:</para>
+
+<programlisting>
+['0' .. '9']             :: Set Char
+[1 .. 10]                :: Vector Int
+[("default",0), (k1,v1)] :: Map String Int
+['a' .. 'z']             :: Text
+</programlisting>
+<para>
+List patterns are also overloaded. When the <option>OverloadedLists</option> 
+extension is turned on, these definitions are desugared as follows
+<programlisting>
+f [] = ...          -- f (toList -> []) = ...
+g [x,y,z] = ...     -- g (toList -> [x,y,z]) = ...
+</programlisting>
+(Here we are using view-pattern syntax for the translation, see <xref linkend="view-patterns"/>.)
+</para>
+
+<sect3>
+<title>The <literal>IsList</literal> class</title>
+
+<para>In the above desugarings, the functions <literal>toList</literal>,
+<literal>fromList</literal> and <literal>fromListN</literal> are all
+methods of 
+the <literal>IsList</literal> class, which is itself exported from
+the <literal>GHC.Exts</literal> module.
+The type class is defined as follows:</para>
+
+<programlisting>
+class IsList l where
+  type Item l
+
+  fromList :: [Item l] -> l
+  toList   :: l -> [Item l]
+
+  fromListN :: Int -> [Item l] -> l
+  fromListN _ = fromList
+</programlisting>
+
+<para>The <literal>FromList</literal> class and its methods are intended to be
+used in conjunction with the <option>OverloadedLists</option> extension. 
+<itemizedlist>
+<listitem> <para> The type function
+<literal>Item</literal> returns the type of items of the
+structure <literal>l</literal>.
+</para></listitem>
+<listitem><para> 
+The function <literal>fromList</literal> 
+constructs the structure <literal>l</literal> from the given list of
+<literal>Item l</literal>. 
+</para></listitem>
+<listitem><para> 
+The function <literal>fromListN</literal> takes the
+input list's length as a hint. Its behaviour should be equivalent to
+<literal>fromList</literal>. The hint can be used for more efficient
+construction of the structure <literal>l</literal> compared to
+<literal>fromList</literal>. If the given hint is not equal to the input
+list's length the behaviour of <literal>fromListN</literal> is not
+specified.
+</para></listitem>
+<listitem><para> 
+The function <literal>toList</literal> should be 
+the inverse of <literal>fromList</literal>.
+</para></listitem>
+</itemizedlist>
+</para>
+<para>It is perfectly fine to declare new instances
+of <literal>IsList</literal>, so that list notation becomes
+useful for completely new data types.
+Here are several example instances:
+<programlisting>
+instance FromList [a] where
+  type Item [a] = a
+  fromList = id
+  toList = id
+
+instance (Ord a) => FromList (Set a) where
+  type Item (Set a) = a
+  fromList = Set.fromList
+  toList = Set.toList
+
+instance (Ord k) => FromList (Map k v) where
+  type Item (Map k v) = (k,v)
+  fromList = Map.fromList 
+  toList = Map.toList
+
+instance FromList (IntMap v) where
+  type Item (IntMap v) = (Int,v)
+  fromList = IntMap.fromList 
+  toList = IntMap.toList
+
+instance FromList Text where
+  type Item Text = Char
+  fromList = Text.pack
+  toList = Text.unpack
+
+instance FromList (Vector a) where
+  type Item (Vector a) = a
+  fromList  = Vector.fromList
+  fromListN = Vector.fromListN
+  toList = Vector.toList
+</programlisting>
+</para>
+</sect3>
+
+<sect3>
+<title>Rebindable syntax</title>
+
+<para> When desugaring list notation with <option>-XOverloadedLists</option>
+GHC uses the <literal>fromList</literal> (etc) methods from module <literal>GHC.Exts</literal>.
+You do not need to import <literal>GHC.Exts</literal> for this to happen.
+</para>
+<para> However if you use <option>-XRebindableSyntax</option>, then 
+GHC instead uses whatever is in
+scope with the names of <literal>toList</literal>, <literal>fromList</literal> and
+<literal>fromListN</literal>. That is, these functions are rebindable;
+c.f. <xref linkend="rebindable-syntax"/>. </para>
+</sect3>
+
+<sect3>
+<title>Defaulting</title>
+
+<para>Currently, the <literal>IsList</literal> class is not accompanied with
+defaulting rules. Although feasible, not much thought has gone into how to
+specify the meaning of the default declarations like:</para>
+
+<programlisting>
+default ([a])
+</programlisting>
+</sect3>
+
+<sect3>
+<title>Speculation about the future</title>
+
+
+<para>The current implementation of the <option>OverloadedLists</option>
+extension can be improved by handling the lists that are only populated with
+literals in a special way. More specifically, the compiler could allocate such
+lists statically using a compact representation and allow
+<literal>IsList</literal> instances to take advantage of the compact
+representation. Equipped with this capability the
+<option>OverloadedLists</option> extension will be in a good position to
+subsume the <option>OverloadedStrings</option> extension (currently, as a
+special case, string literals benefit from statically allocated compact
+representation).</para>
+</sect3>
 </sect2>
 
 </sect1>
@@ -8026,7 +8256,7 @@ Thus combinators that produce arrows from arrows
 may also be used to build commands from commands.
 For example, the <literal>ArrowPlus</literal> class includes a combinator
 <programlisting>
-ArrowPlus a => (&lt;+>) :: a e c -> a e c -> a e c
+ArrowPlus a => (&lt;+>) :: a b c -> a b c -> a b c
 </programlisting>
 so we can use it to build commands:
 <programlisting>
@@ -8056,18 +8286,24 @@ expr' = (proc x -> returnA -&lt; x)
                 y &lt;- term -&lt; ()
                 expr' -&lt; x - y)
 </programlisting>
+We are actually using <literal>&lt;+></literal> here with the more specific type
+<programlisting>
+ArrowPlus a => (&lt;+>) :: a (e,()) c -> a (e,()) c -> a (e,()) c
+</programlisting>
 It is essential that this operator be polymorphic in <literal>e</literal>
 (representing the environment input to the command
 and thence to its subcommands)
 and satisfy the corresponding naturality property
 <screen>
-arr k >>> (f &lt;+> g) = (arr k >>> f) &lt;+> (arr k >>> g)
+arr (first k) >>> (f &lt;+> g) = (arr (first k) >>> f) &lt;+> (arr (first k) >>> g)
 </screen>
 at least for strict <literal>k</literal>.
 (This should be automatic if you're not using <function>seq</function>.)
 This ensures that environments seen by the subcommands are environments
 of the whole command,
 and also allows the translation to safely trim these environments.
+(The second component of the input pairs can contain unnamed input values,
+as described in the next section.)
 The operator must also not use any variable defined within the current
 arrow abstraction.
 </para>
@@ -8075,7 +8311,7 @@ arrow abstraction.
 <para>
 We could define our own operator
 <programlisting>
-untilA :: ArrowChoice a => a e () -> a e Bool -> a e ()
+untilA :: ArrowChoice a => a (e,s) () -> a (e,s) Bool -> a (e,s) ()
 untilA body cond = proc x ->
         b &lt;- cond -&lt; x
         if b then returnA -&lt; ()
@@ -8105,7 +8341,7 @@ the operator that attaches an exception handler will wish to pass the
 exception that occurred to the handler.
 Such an operator might have a type
 <screen>
-handleA :: ... => a e c -> a (e,Ex) c -> a e c
+handleA :: ... => a (e,s) c -> a (e,(Ex,s)) c -> a (e,s) c
 </screen>
 where <literal>Ex</literal> is the type of exceptions handled.
 You could then use this with arrow notation by writing a command
@@ -8120,22 +8356,24 @@ Though the syntax here looks like a functional lambda,
 we are talking about commands, and something different is going on.
 The input to the arrow represented by a command consists of values for
 the free local variables in the command, plus a stack of anonymous values.
-In all the prior examples, this stack was empty.
+In all the prior examples, we made no assumptions about this stack.
 In the second argument to <function>handleA</function>,
-this stack consists of one value, the value of the exception.
+the value of the exception has been added to the stack input to the handler.
 The command form of lambda merely gives this value a name.
 </para>
 
 <para>
 More concretely,
-the values on the stack are paired to the right of the environment.
+the input to a command consists of a pair of an environment and a stack.
+Each value on the stack is paired with the remainder of the stack,
+with an empty stack being <literal>()</literal>.
 So operators like <function>handleA</function> that pass
 extra inputs to their subcommands can be designed for use with the notation
-by pairing the values with the environment in this way.
+by placing the values on the stack paired with the environment in this way.
 More precisely, the type of each argument of the operator (and its result)
 should have the form
 <screen>
-a (...(e,t1), ... tn) t
+a (e, (t1, ... (tn, ())...)) t
 </screen>
 where <replaceable>e</replaceable> is a polymorphic variable
 (representing the environment)
@@ -8147,9 +8385,9 @@ The polymorphic variable <replaceable>e</replaceable> must not occur in
 However the arrows involved need not be the same.
 Here are some more examples of suitable operators:
 <screen>
-bracketA :: ... => a e b -> a (e,b) c -> a (e,c) d -> a e d
-runReader :: ... => a e c -> a' (e,State) c
-runState :: ... => a e c -> a' (e,State) (c,State)
+bracketA :: ... => a (e,s) b -> a (e,(b,s)) c -> a (e,(c,s)) d -> a (e,s) d
+runReader :: ... => a (e,s) c -> a' (e,(State,s)) c
+runState :: ... => a (e,s) c -> a' (e,(State,s)) (c,State)
 </screen>
 We can supply the extra input required by commands built with the last two
 by applying them to ordinary expressions, as in
@@ -8171,16 +8409,16 @@ are the core of the notation; everything else can be built using them,
 though the results would be somewhat clumsy.
 For example, we could simulate <literal>do</literal>-notation by defining
 <programlisting>
-bind :: Arrow a => a e b -> a (e,b) c -> a e c
+bind :: Arrow a => a (e,s) b -> a (e,(b,s)) c -> a (e,s) c
 u `bind` f = returnA &amp;&amp;&amp; u >>> f
 
-bind_ :: Arrow a => a e b -> a e c -> a e c
+bind_ :: Arrow a => a (e,s) b -> a (e,s) c -> a (e,s) c
 u `bind_` f = u `bind` (arr fst >>> f)
 </programlisting>
 We could simulate <literal>if</literal> by defining
 <programlisting>
-cond :: ArrowChoice a => a e b -> a e b -> a (e,Bool) b
-cond f g = arr (\ (e,b) -> if b then Left e else Right e) >>> f ||| g
+cond :: ArrowChoice a => a (e,s) b -> a (e,s) b -> a (e,(Bool,s)) b
+cond f g = arr (\ (e,(b,s)) -> if b then Left (e,s) else Right (e,s)) >>> f ||| g
 </programlisting>
 </para>
 
@@ -8202,6 +8440,14 @@ and <quote><literal>-&lt;&lt;</literal></quote> (higher-order).
 <listitem>
 <para>User-defined operators are flagged with banana brackets instead of
 a new <literal>form</literal> keyword.
+</para>
+</listitem>
+
+<listitem>
+<para>In the paper and the previous implementation,
+values on the stack were paired to the right of the environment
+in a single argument,
+but now the environment and stack are separate arguments.
 </para>
 </listitem>
 

@@ -675,7 +675,7 @@ callishPrimOpSupported dflags op
       WordMul2Op     | ncg && x86ish  -> Left (MO_U_Mul2     (wordWidth dflags))
                      | otherwise      -> Right genericWordMul2Op
 
-      _ -> panic "emitPrimOp: can't translate PrimOp" (ppr op)
+      _ -> pprPanic "emitPrimOp: can't translate PrimOp " (ppr op)
  where
   ncg = case hscTarget dflags of
            HscAsm -> True
@@ -880,6 +880,10 @@ translateOp dflags IntLeOp        = Just (mo_wordSLe dflags)
 translateOp dflags IntGtOp        = Just (mo_wordSGt dflags)
 translateOp dflags IntLtOp        = Just (mo_wordSLt dflags)
 
+translateOp dflags AndIOp         = Just (mo_wordAnd dflags)
+translateOp dflags OrIOp          = Just (mo_wordOr dflags)
+translateOp dflags XorIOp         = Just (mo_wordXor dflags)
+translateOp dflags NotIOp         = Just (mo_wordNot dflags)
 translateOp dflags ISllOp         = Just (mo_wordShl dflags)
 translateOp dflags ISraOp         = Just (mo_wordSShr dflags)
 translateOp dflags ISrlOp         = Just (mo_wordUShr dflags)
