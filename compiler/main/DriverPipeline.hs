@@ -1585,11 +1585,13 @@ runPhase_MoveBinary dflags input_fn
 --  MPI: rename program, generate start script (using mpirun)
     | isParallel =   do
         user <- getEnv uservar
-        let executable_base = user ++ '=':input_fn
-        copypath <- if WayParPvm `elem` (ways dflags)-- is for PVM
-                        then return $ cPVM_Root ++ "/bin/" ++ cPVM_Arch
-                        else getCurrentDirectory
-        let executable = copypath ++ pathsep:executable_base
+	current <- getCurrentDirectory
+        let (subdir,basename) = splitFileName input_fn
+	    executable_base = user ++ '=':basename
+	    copypath = if WayParPvm `elem` (ways dflags)-- is for PVM
+                          then cPVM_Root ++ "/bin/" ++ cPVM_Arch
+                          else joinPath [current, subdir]
+        let executable = joinPath [copypath, executable_base]
 	Exception.catchIO (do 
                -- move the newly created binary into PVM land
                -- look out, SysTools:copy does not preserve permissions
@@ -1614,11 +1616,10 @@ runPhase_MoveBinary dflags input_fn
                      || WayParMPI `elem` (ways dflags)
                      || WayParCp `elem` (ways dflags)
         os = platformOS (targetPlatform dflags)
-        (uservar, pathsep, script_name) 
+        (uservar, script_name) 
             = case os of
-                OSMinGW32 -> ("USERNAME",'\\', 
-                              ((init . init . init . init) input_fn)++".vbs")
-                _         -> ("USER", '/', input_fn) -- Unix-like systems
+                OSMinGW32 -> ("USERNAME" , replaceExtension input_fn ".vbs")
+                _         -> ("USER" ,     input_fn) -- Unix-like systems
 
 mkExtraObj :: DynFlags -> Suffix -> String -> IO FilePath
 mkExtraObj dflags extn xs
@@ -1725,8 +1726,9 @@ getLinkInfo dflags dep_packages = do
 
 -- generates a Perl skript starting a parallel prg under PVM, or a
 --  script calling mpirun for open-MPI
+-- additionally processes RTS flags, handles PE-count and tracing
 mkWrapperScript :: OS -> [Way] -> String -> String -> String
-mkWrapperScript OSMinGW32 ways executable _
+mkWrapperScript OSMinGW32 ways executable _ -- executable_base unused
     = let trace_processing | not (WayEventLog `elem` ways) = []
                            | otherwise =
                ["If dotrace Then",
