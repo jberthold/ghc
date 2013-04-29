@@ -30,6 +30,11 @@ rtsBool	IAmMainThread = rtsFalse;	// Set for the main thread
 nat nPEs = 0; // number of PEs in system
 nat thisPE=0; // node's own ID
 
+/* counter for finish messages. Invariant: each process with rank >1 sends one
+   PP_FINISH to rank 1, and receives an answer. Therefore, counter should be 1
+   for non-main, and mpiWorldSize-1 for main PE when exiting */
+int finishRecvd=0;
+
 /* overall variables for MPI (for internal use only) */
 // group size, own ID, Buffers 
 int mpiWorldSize;
@@ -171,27 +176,58 @@ rtsBool MP_sync(void) {
 rtsBool MP_quit(int isError) {
   long data[2];
   MPI_Request sysRequest2;
+
+  data[0] = PP_FINISH;
+  data[1] = isError;
+
   if (IAmMainThread) {
     int i;
 
     IF_PAR_DEBUG(mpcomm,
 	       debugBelch("Main PE stopping MPI system (exit code: %d)\n",
 			  isError));
-    // bcast FINISH to other PEs
-    data[0] = PP_FINISH;
-    data[1] = isError;
 
+    // bcast FINISH to other PEs
     for (i=2; i<=(int)nPEs; i++){
       // synchronous send operation in order 2..nPEs ... might slow down. 
       MPI_Isend(&pingMessage, 1, MPI_INT, i-1, PP_FINISH, sysComm, &sysRequest2);  
       MPI_Send(data,2,MPI_LONG,i-1, PP_FINISH, MPI_COMM_WORLD);
       MPI_Wait(&sysRequest2, MPI_STATUS_IGNORE);
     }
+
+    // receive answers from all children (just counting)
+    while (finishRecvd < mpiWorldSize-1) {
+      MPI_Recv(data, 2, MPI_LONG, MPI_ANY_SOURCE, PP_FINISH, 
+               MPI_COMM_WORLD, &status);
+      ASSERT(status.MPI_TAG == PP_FINISH);
+      // and receive corresponding sysComm ping:
+      MPI_Recv(&pingMessage, 1, MPI_INT, status.MPI_SOURCE, PP_FINISH, 
+               sysComm, MPI_STATUS_IGNORE);
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("Received FINISH reply from %d\n",
+                              status.MPI_SOURCE));
+      finishRecvd++;
+    }
+
+  } else {
+
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("Non-main PE stopping MPI system (exit code: %d)\n",
+                            isError));
+    // send FINISH to rank 0
+    MPI_Isend(&pingMessage, 1, MPI_INT, 0, PP_FINISH, sysComm, &sysRequest2);
+    MPI_Send(data, 2, MPI_LONG, 0, PP_FINISH, MPI_COMM_WORLD);
+    // can omit: MPI_Wait(&sysRequest2, MPI_STATUS_IGNORE);
+
+    // if non-main PE terminates first, await answer
+    if (finishRecvd < 1) {
+      MPI_Recv(data, 2, MPI_LONG, 0, PP_FINISH, 
+               MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+      MPI_Recv(&pingMessage, 1, MPI_INT, 0, PP_FINISH, 
+               sysComm, MPI_STATUS_IGNORE);
+      finishRecvd++;
+    }
   }
-  
-  IF_PAR_DEBUG(mpcomm,
-	       debugBelch("shutting down MPI now (exit code: %d)\n",
-			  isError));
 
   // TODO: receive or cancel all pending messages...
   /* ------------------------------------------------
@@ -246,6 +282,9 @@ rtsBool MP_quit(int isError) {
 	       debugBelch("Goodbye\n"));
   MPI_Finalize();
 
+  /* indicate that quit has been executed */
+  nPEs = 0;
+	
   return rtsTrue;
 }
 
@@ -371,6 +410,8 @@ int MP_recv(int maxlength, long *destination,
   // don't use haveSysMsg for the decission, use ISSYSCODE(code) instead.
   if (ISSYSCODE(code)){
     MPI_Recv(&pingMessage2, 1, MPI_INT, source, code, sysComm, &status);
+
+    if (code == PP_FINISH) { finishRecvd++; }
   }
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("MPI Message from PE %d with code %d.\n",

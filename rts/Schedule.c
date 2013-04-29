@@ -758,6 +758,7 @@ static void processMessages(Capability *cap) {
 	   *  inform the other children and go on, but the system is
 	   *  unstable in case of global memory. We abort execution.
 	   */
+          errorBelch("Error on child node [%d], aborting execution.\n", pe);
 	} else { // not IAmMainThread
 	  ASSERT(pe == 1); // only the main PE (with logical No.1) may
 	                   // send a FINISH to children.

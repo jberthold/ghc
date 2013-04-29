@@ -76,6 +76,12 @@ const RtsConfig defaultRtsConfig  = {
     .rts_opts = NULL
 };
 
+#ifdef PARALLEL_RTS
+// remember exit code in hs_exit, avoid loop on multiple failures
+int err=0;
+rtsBool exit_started=rtsFalse;
+#endif
+
 /* -----------------------------------------------------------------------------
    Initialise floating point unit on x86 (currently disabled; See Note
    [x86 Floating point precision] in compiler/nativeGen/X86/Instr.hs)
@@ -437,10 +443,10 @@ hs_exit_(rtsBool wait_foreign)
 #endif
 
 #if defined(PARALLEL_RTS)
-    IF_PAR_DEBUG(verbose, 
-				 debugBelch("==-- hs_exit on [%d]...", thisPE));
     /* exit parallel system at the last possible place */
-    shutdownParallelSystem(0);
+    IF_PAR_DEBUG(verbose, 
+                 debugBelch("==-- hs_exit(%d) on [%d]...", err, thisPE));
+    shutdownParallelSystem(err); // use stored error code
 #endif
 
 #ifdef TRACING
@@ -494,6 +500,10 @@ shutdownHaskellAndExit(int n)
     // and exit immediately (see #5402)
     hs_init_count = 1;
 
+#ifdef PARALLEL_RTS
+    err = n; // set exit value for parallel shutdown routine
+#endif
+
     // we're about to exit(), no need to wait for foreign calls to return.
     hs_exit_(rtsFalse);
 
@@ -518,7 +528,24 @@ void (*exitFn)(int) = 0;
 void  
 stg_exit(int n)
 { 
+
+#ifdef PARALLEL_RTS
+  // if exiting due to an error (n != 0), shut down all PEs, conclude tracing.
+  // shutdownParallelSystem calls MP_quit which sets nPEs to 0 on exit,
+  // therefore we avoid calling it again if nPEs is already 0.
+  // exit_started avoids loop if stg_exit called again by functions called here
+  if ( n != EXIT_SUCCESS && nPEs != 0 && !exit_started ) {
+    exit_started = rtsTrue;    // do not reenter here
+    shutdownParallelSystem(n); // shutdown other PEs (see ParInit/MPSystem)
+#ifdef TRACING
+    endTracing();
+    freeTracing();
+#endif
+  }
+#endif
+
   if (exitFn)
     (*exitFn)(n);
+
   exit(n);
 }
