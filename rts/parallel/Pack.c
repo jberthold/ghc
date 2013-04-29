@@ -545,10 +545,11 @@ RoomToPack(nat size) {
 		   debugBelch("Pack buffer full (size %d). " 
 			      "Sending partially to receiver.", 
 			      pack_locn));
-      barf("   sendWhilePacking() unimplemented.\n" 
+      errorBelch("Runtime system pack buffer full.\n"
 	   "Current buffer size is %lu bytes, "
 	   "try bigger pack buffer with +RTS -qQ<size>",
 	   RTS_PACK_BUFFER_SIZE);
+      stg_exit(EXIT_FAILURE);
       ClearPackBuffer();
       IF_PAR_DEBUG(pack,
 		   debugBelch("Sent partially, now continue packing."));

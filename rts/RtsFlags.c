@@ -231,7 +231,7 @@ void initRtsFlagsDefaults(void)
 
 #ifdef PARALLEL_RTS
     // common parallelism options:
-    RtsFlags.ParFlags.packBufferSize	= 1048576; // 1MB, we set it...;
+    RtsFlags.ParFlags.packBufferSize	= 10485760; // 10MB, avoid trouble
     RtsFlags.ParFlags.sendBufferSize	= 20; // MD this default should be tested;
     RtsFlags.ParFlags.placement         = 0; /* default: RR placement,
 						including local PE*/
