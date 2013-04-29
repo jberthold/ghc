@@ -29,10 +29,9 @@ send data format is always PvmDataRaw, containing longs
                                   if ((c)<0) {        \
                                     pvm_perror(s);    \
                                     Failure = rtsTrue;\
-                                    exit(-1);     \
+                                    stg_exit(-1);     \
                                 }} while(0)
-// JB 2007: stg_exit in this macro does not work, leads to failure
-// shutdown loop, not to be stopped by ^C! TODO
+// Note that stg_exit calls back into this module; code must avoid a loop!
 
 // PVM-specific receive parameters:
 #define ANY_TASK (-1)
@@ -46,6 +45,12 @@ rtsBool Failure = rtsFalse; // Set this in case of error shutdown
 // nPEs, thisPE
 nat nPEs = 0; // number of PEs in system
 nat thisPE=0;
+
+// counter to check finish messages. Invariant on shutdown: each non-main
+// machine should send and receive PP_FINISH to the main machine; i.e. this
+// counter is nPEs-1 on the main machine and 1 on other machines on shutdown.
+// This counter is updated by MP_recv and inside MP_quit (for main machine).
+int finishRecvd=0;
 
 // these were in SysMan in the good old days
 // GlobalTaskId  mytid; 
@@ -117,7 +122,7 @@ static void MPMsgHandle(OpCode code, int buffer) {
     // error). RACE CONDITION on multiple failures!
     errorBelch("remote PE failure, aborting execution.\n");
     Failure = rtsTrue;
-    shutdownHaskellAndExit(-2);
+    stg_exit(EXIT_FAILURE);
     break;
   case PP_READY:
     //  new PE is ready to receive work.
@@ -387,11 +392,20 @@ rtsBool MP_quit(int isError) {
   pvm_pklong(&errval,1,1);
 
   if (!IAmMainThread) {
-    //inform / reply to our parent (if any)
-      checkComms(pvm_send(pvmParent, PP_FINISH),
-		 "PVM: Error sending finish (error condition).");
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("Node sends PP_FINISH (code %d)\n", isError));
+    //inform / reply to parent
+    checkComms(pvm_send(pvmParent, PP_FINISH),
+               "PVM: Error sending finish (error condition).");
+
+    if (finishRecvd == 0) {
+      // await "PP_FINISH" reply from parent
+      checkComms(pvm_recv(pvmParent, PP_FINISH),
+                 "PVM error receiving FINISH response (error condition).");
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("Reply received, exiting MP_quit\n"));
+    }
   } else {
-    int finishRecvd=1; // main node is finishing, so 1 node known already...
 
     // unregister failure notice
     if ( nPEs > 1 && !Failure ) 
@@ -418,6 +432,8 @@ rtsBool MP_quit(int isError) {
 	  // if allPEs[j] then send finish to it... (build a new array)
 	  mcastArr[k++] = allPEs[j];
 	else 
+          IF_PAR_DEBUG(mpcomm,
+                       debugBelch("Node %d failed previously.\n", j));
 	  finishRecvd++; // otherwise, PE already terminated (with error)
       }
       checkComms(pvm_mcast(mcastArr,k,PP_FINISH),
@@ -425,7 +441,7 @@ rtsBool MP_quit(int isError) {
     }
 
     // main node should wait for all others to terminate
-    while (finishRecvd < (int) nPEs){
+    while (finishRecvd < (int) nPEs-1){
       long errorcode;
       int buffer, task, tag, bytes;
 
@@ -437,10 +453,6 @@ rtsBool MP_quit(int isError) {
       IF_PAR_DEBUG(mpcomm,
 		   debugBelch("Received msg from task %x: Code %ld\n",
 			      task, errorcode));
-      if (errorcode) {
-	debugBelch("Main node: Task %x signals error %ld (H%lx).\n\n", 
-		   task, errorcode, errorcode);
-      }
       finishRecvd++;
     }
 
@@ -452,6 +464,9 @@ rtsBool MP_quit(int isError) {
   checkComms(pvm_exit(),
 	     "PVM: Failed to shut down pvm.");
 
+  /* indicate that quit has been executed */
+  nPEs = 0;
+	
   return rtsTrue;
 }
 
@@ -532,7 +547,7 @@ int MP_recv(int maxlength, long *destination,
   // could happen that we pick up an MPCODE message here :-(
   if (ISMPCODE(*retcode)) {
     IF_PAR_DEBUG(mpcomm,
-		 debugBelch("Urk: accidentally picked up an internal message!\n"));
+		 debugBelch("picked up an internal message!\n"));
     // handle message and make a recursive call to get another message
     MPMsgHandle(*retcode, buffer);
     return MP_recv(maxlength, destination, retcode, sender);
@@ -551,7 +566,7 @@ int MP_recv(int maxlength, long *destination,
     errorBelch("MPSystem(PVM): unable to find ID of PE # %x, aborting.",
 	       sendPE);
 #ifdef DEBUG
-    exit(EXIT_FAILURE);
+    stg_exit(EXIT_FAILURE);
 #else
     // ignore error, discard message and make a recursive 
     // call to get another message
@@ -566,6 +581,8 @@ int MP_recv(int maxlength, long *destination,
     barf("MPSystem(PVM): not enough space for packet (needed %d, have %d)!",
 	 bytes, maxlength);
   pvm_upklong(destination, bytes, 1);
+
+  if (*retcode == PP_FINISH) finishRecvd++; 
 
   return bytes; // data and all variables set, ready 
 }

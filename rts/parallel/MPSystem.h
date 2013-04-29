@@ -62,6 +62,8 @@ rtsBool MP_start(int* argc, char** argv);
 rtsBool MP_sync(void);
 
 /* MP_quit disconnects current node from MP-System:
+ * Main PE will shut down the parallel system, others just inform main PE.
+ * Sets nPEs to 0 on exit, can be checked to avoid duplicate calls. 
  * Parameters:
  *     IN isError - error number, 0 if normal exit
  * Returns: Bool: success (1) or failure (0)

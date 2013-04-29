@@ -325,16 +325,8 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
   fflush(stderr);
   
   // The sequential system uses abort(); but we would like to shut down the
-  // entire system cleanly. shutdownHaskellAndExit does not return, though.
-  if (IAmMainThread) {
-    shutdownHaskellAndExit(EXIT_INTERNAL_ERROR);
-  } else {
-    // non-main PEs just crash, making the main PE shut down the rest
-#ifdef TRACING
-    if (RtsFlags.TraceFlags.tracing == TRACE_EVENTLOG) endEventLogging();
-#endif
-    stg_exit(EXIT_INTERNAL_ERROR);
-  }
+  // entire system cleanly, using stg_exit.
+  stg_exit(EXIT_INTERNAL_ERROR);
 }
 
 void
