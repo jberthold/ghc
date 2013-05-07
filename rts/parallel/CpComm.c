@@ -315,9 +315,10 @@ rtsBool MP_quit(int isError){
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch(" MP_quit()\n"));
 
+  long data[1] = {isError};
+
   if (IAmMainThread) {
     /* send FINISH to other PEs */
-    long data[1] = {isError};
     int i;
     for (i=2; i<=(int)nPEs; i++) {
       while (cpw_shm_send_msg(i, PP_FINISH, 1, data) != CPW_NOERROR);
@@ -333,7 +334,26 @@ rtsBool MP_quit(int isError){
     }
     IF_PAR_DEBUG(mpcomm,
 		 debugBelch("All kids are safe home.\n"));
+  } else {
+    /* send PP_FINISH to parent, including error code received */
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("child finishing (code %d),"
+                            "sending FINISH", isError));
+    while (cpw_shm_send_msg(1,PP_FINISH, 1, data) != CPW_NOERROR)
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("sending FINISH failed, retry"));
+    /* child must stay alive until answer arrives if error shutdown */
+    if (isError != 0) {
+      int sender, length;
+      OpCode* code;
+      *code = PP_READY; // something != FINISH
+      while (*code != PP_FINISH)
+        cpw_shm_recv_msg(&sender, &code, &length, data);
+      IF_PAR_DEBUG(mpcomm,
+            debugBelch("child received reply, shutting down (error case)"));
+    }
   }
+
 
   /* free unreceived messages */
   if (cpw_shm_probe()) {
@@ -457,7 +477,6 @@ int MP_recv(STG_UNUSED int maxlength, long *destination, // IN
     cpw_shm_probe_sys();
     cpw_shm_recv_msg(sender, code, &length, destination);
   }
-  
   return length;
 }       
 
@@ -1453,6 +1472,8 @@ nat nPEs = 0;
 nat thisPE = 0;
 rtsBool IAmMainThread = rtsFalse;
 
+int finishRecvd = 0; /* master counts finish messages from children */
+
 int num_msgs = 0; /* How many messages can be stored in buffer */
 
 cpw_shm_slot_t *stored_msgs = NULL; /* Linked List used to free buffer */
@@ -1582,19 +1603,51 @@ rtsBool MP_sync(void){
 rtsBool MP_quit(int isError){
   //printf(" MP_quit()\n");
 
+    long data[1] = {isError};
+    int sender, length;
+    OpCode* code;
   if (IAmMainThread) {
     /* send FINISH to other PEs */
-    long data[1] = {isError};
     int i;
     for (i=2; i<=(int)nPEs; i++) {
       while (cpw_shm_send_msg(i, PP_FINISH, 1, data) != CPW_NOERROR);
     }
 
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("awaiting FINISH replies from children (have %d)",
+                            finishRecvd));
+    while (finishRecvd != nPEs-1) {
+        cpw_shm_recv_msg(&sender, &code, &length, data);
+        if (*code == PP_FINISH) {
+          IF_PAR_DEBUG(mpcomm,
+                       debugBelch("received reply, now %d" finishRecvd));
+        }
+    }
     /* wait for children to return */
     //printf("Waiting for children to return.\n");
     /* TODO */
     //printf("All kids are safe home.\n");
+
+  } else {
+    /* send PP_FINISH to parent, including error code received */
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("child finishing (code %d),"
+                            "sending FINISH", isError));
+    while (cpw_shm_send_msg(1,PP_FINISH, 1, data) != CPW_NOERROR)
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("sending FINISH failed, retry"));
+    /* child must stay alive until answer arrives if error shutdown */
+    if (isError != 0) {
+      int sender, length;
+      OpCode* code;
+      *code = PP_READY; // something != FINISH
+      while (*code != PP_FINISH)
+        cpw_shm_recv_msg(&sender, &code, &length, data);
+      IF_PAR_DEBUG(mpcomm,
+            debugBelch("child received reply, shutting down (error case)"));
+    }
   }
+
 
   /* free unreceived messages */
   if (cpw_shm_probe()) {
@@ -1715,6 +1768,8 @@ int MP_recv(STG_UNUSED int maxlength, long *destination, // IN
     cpw_shm_recv_msg(sender, code, &length, destination);
   }
   
+  if (*code == PP_FINISH) finishRecvd++; // hack for shutdown sync. 
+
   return length;
 }       
 
