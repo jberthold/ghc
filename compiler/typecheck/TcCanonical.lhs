@@ -649,7 +649,7 @@ flattenTyVar loc f ctxt tv
 flattenFinalTyVar loc f ctxt tv
   = -- Done, but make sure the kind is zonked
     do { let knd = tyVarKind tv
-       ; (new_knd,_kind_co) <- flatten loc f ctxt knd
+       ; (new_knd, _kind_co) <- flatten loc f ctxt knd
        ; let ty = mkTyVarTy (setVarType tv new_knd)
        ; return (ty, mkTcReflCo ty) }
 \end{code}
@@ -1015,8 +1015,9 @@ reOrient (FunCls {}) _      = False             -- Fun/Other on rhs
 reOrient (VarCls {})   (FunCls {})           = True 
 reOrient (VarCls {})   (OtherCls {})         = False
 reOrient (VarCls tv1)  (VarCls tv2)  
-  | isMetaTyVar tv2 && not (isMetaTyVar tv1) = True 
-  | otherwise                                = False 
+  | isMetaTyVar     tv2 && not (isMetaTyVar tv1)      = True 
+  | isFlatSkolTyVar tv2 && not (isFlatSkolTyVar tv1)  = True  -- Note [Eliminate flat-skols]
+  | otherwise                                         = False 
   -- Just for efficiency, see CTyEqCan invariants 
 
 ------------------
@@ -1035,29 +1036,6 @@ canEqLeaf :: CtLoc -> CtEvidence
 
 -- NB: at this point we do NOT know that the kinds of s1 and s2 are
 --     compatible.  See Note [Equalities with incompatible kinds]
-
--- Test for incompatible kinds
--- If so, emit an "irreducible" constraint CIrredEvCan (NOT CTyEqCan or CFunEqCan)
--- for the type equality; and continue with the kind equality constraint.
--- When the latter is solved, it'll kick out the irreducible equality for 
--- a second attempt at solving
-canEqLeaf loc ev s1 s2 
-  | not (k1 `compatKind` k2)   -- See Note [Equalities with incompatible kinds]
-  = ASSERT( isKind k1 && isKind k2 )
-    do { updWorkListTcS $ extendWorkListNonEq $ 
-         CIrredEvCan { cc_ev = ev, cc_loc = loc }
-       ; mw <- newDerived (mkEqPred k1 k2) 
-       ; case mw of
-           Nothing  -> return Stop
-           Just kev -> canEqNC kind_co_loc kev k1 k2 }
-  where
-    k1 = typeKind s1
-    k2 = typeKind s2
-
-         -- Always create a Wanted kind equality even if 
-         -- you are decomposing a given constraint.
-         -- NB: DV finds this reasonable for now. Maybe we have to revisit.
-    kind_co_loc = setCtLocOrigin loc (KindEqOrigin s1 s2 (ctLocOrigin loc))
 
 canEqLeaf loc ev s1 s2 
   | cls1 `reOrient` cls2
@@ -1108,12 +1086,9 @@ canEqLeafFunEq loc ev fn tys1 ty2  -- ev :: F tys1 ~ ty2
              xco = mkHdEqPred ty2 (mkTcTyConAppCo fn cos1) co2
              -- xco :: (F xis1 ~ xi2) ~ (F tys1 ~ ty2)
              
-       ; mb <- rewriteCtFlavor ev (mkTcEqPred fam_head xi2) xco
-       ; case mb of {
-           Nothing -> return Stop ;
-           Just new_ev -> continueWith (CFunEqCan { cc_ev = new_ev, cc_loc = loc
-                                                  , cc_fun = fn, cc_tyargs = xis1, cc_rhs = xi2 }) } } 
-
+       ; checkKind loc ev fam_head xi2 xco $ \new_ev -> 
+         continueWith (CFunEqCan { cc_ev = new_ev, cc_loc = loc
+                                 , cc_fun = fn, cc_tyargs = xis1, cc_rhs = xi2 }) }
 
 canEqLeafTyVarEq :: CtLoc -> CtEvidence
                    -> TcTyVar -> TcType -> TcS StopOrContinue
@@ -1127,7 +1102,7 @@ canEqLeafTyVarEq loc ev tv s2              -- ev :: tv ~ s2
        ; let co = mkHdEqPred s2 co1 co2
              -- co :: (xi1 ~ xi2) ~ (tv ~ s2)
        
-       ; traceTcS "canEqLeafTyVarEq2" $ empty 
+       ; traceTcS "canEqLeafTyVarEq2" $ vcat [ppr xi1, ppr xi1]
        ; case (getTyVar_maybe xi1, getTyVar_maybe xi2) of {
            (Nothing,  _) -> -- Rewriting the LHS did not yield a type variable
                             -- so go around again to canEq
@@ -1136,32 +1111,71 @@ canEqLeafTyVarEq loc ev tv s2              -- ev :: tv ~ s2
                                    Nothing     -> return Stop
                                    Just new_ev -> canEqNC loc new_ev xi1 xi2 } ;
 
-           (Just tv1', Just tv2') | tv1' == tv2' 
+           (Just tv1, Just tv2) | tv1 == tv2
               -> do { when (isWanted ev) $
                       setEvBind (ctev_evar ev) (mkEvCast (EvCoercion (mkTcReflCo xi1)) co)
                     ; return Stop } ;
 
-           (Just tv1', _) -> do
+           (Just tv1, _) ->
 
          -- LHS rewrote to a type variable, RHS to something else
-       { dflags <- getDynFlags
-       ; case occurCheckExpand dflags tv1' xi2 of
+    do { dflags <- getDynFlags
+       ; case occurCheckExpand dflags tv1 xi2 of
            OC_OK xi2' -> -- No occurs check, so we can continue; but make sure
-                        -- that the new goal has enough type synonyms expanded by 
-                        -- by the occurCheckExpand
-                        do { mb <- rewriteCtFlavor ev (mkTcEqPred xi1 xi2') co
-                           ; case mb of
-                               Nothing     -> return Stop
-                               Just new_ev -> continueWith $
-                                              CTyEqCan { cc_ev = new_ev, cc_loc = loc
-                                                       , cc_tyvar  = tv1', cc_rhs = xi2' } }
+                         -- that the new goal has enough type synonyms expanded by 
+                         -- by the occurCheckExpand
+                         checkKind loc ev xi1 xi2' co $ \new_ev -> 
+                         continueWith (CTyEqCan { cc_ev = new_ev, cc_loc = loc
+                                                , cc_tyvar  = tv1, cc_rhs = xi2' })
+
            _bad ->  -- Occurs check error
-                       do { mb <- rewriteCtFlavor ev (mkTcEqPred xi1 xi2) co
-                          ; case mb of
+                    do { mb <- rewriteCtFlavor ev (mkTcEqPred xi1 xi2) co
+                       ; case mb of
                               Nothing     -> return Stop
                               Just new_ev -> canEqFailure loc new_ev xi1 xi2 }
-
     } } }
+
+checkKind :: CtLoc 
+          -> CtEvidence          -- t1~t2
+          -> TcType -> TcType    -- s1~s2, flattened and zonked
+          -> TcCoercion          -- (s1~s2) ~ (t2~t2)
+          -> (CtEvidence -> TcS StopOrContinue)  -- Do this if kinds are OK
+          -> TcS StopOrContinue
+-- Do the rewrite, test for incompatible kinds, and continue
+-- 
+-- See Note [Equalities with incompatible kinds]
+-- If there are incompatible kinds, emit an "irreducible" constraint 
+--       CIrredEvCan (NOT CTyEqCan or CFunEqCan)
+-- for the type equality; and continue with the kind equality constraint.
+-- When the latter is solved, it'll kick out the irreducible equality for 
+-- a second attempt at solving
+
+checkKind loc ev s1 s2 co normal_kont
+  = do { mb <- rewriteCtFlavor ev (mkTcEqPred s1 s2) co
+       ; case mb of {
+            Nothing                          -> return Stop ;
+            Just new_ev | k1 `compatKind` k2 -> normal_kont new_ev
+                        | otherwise          ->
+
+    ASSERT( isKind k1 && isKind k2 )
+    do {  -- See Note [Equalities with incompatible kinds]
+         traceTcS "canEqLeaf: incompatible kinds" (vcat [ppr s1 <+> dcolon <+> ppr k1,
+                                                         ppr s2 <+> dcolon <+> ppr k2])
+       ; updWorkListTcS $ extendWorkListNonEq $ 
+         CIrredEvCan { cc_ev = new_ev, cc_loc = loc }
+       ; mw <- newDerived (mkEqPred k1 k2) 
+       ; case mw of
+           Nothing  -> return Stop
+           Just kev -> canEqNC kind_co_loc kev k1 k2 } } }
+  where
+    k1 = typeKind s1
+    k2 = typeKind s2
+
+         -- Always create a Wanted kind equality even if 
+         -- you are decomposing a given constraint.
+         -- NB: DV finds this reasonable for now. Maybe we have to revisit.
+    kind_co_loc = setCtLocOrigin loc (KindEqOrigin s1 s2 (ctLocOrigin loc))
+
 
 mkHdEqPred :: Type -> TcCoercion -> TcCoercion -> TcCoercion
 -- Make a higher-dimensional equality
@@ -1170,6 +1184,24 @@ mkHdEqPred :: Type -> TcCoercion -> TcCoercion -> TcCoercion
 mkHdEqPred t2 co1 co2 = mkTcTyConAppCo eqTyCon [mkTcReflCo (defaultKind (typeKind t2)), co1, co2]
    -- Why defaultKind? Same reason as the comment on TcType/mkTcEqPred. I truly hate this (DV)
 \end{code}
+
+Note [Eliminate flat-skols]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have  [G] Num (F [a])
+then we flatten to
+     [G] Num fsk
+     [G] F [a] ~ fsk
+where fsk is a flatten-skolem (FlatSkol). Suppose we have
+      type instance F [a] = a
+then we'll reduce the second constraint to
+     [G] a ~ fsk
+and then replace all uses of 'a' with fsk.  That's bad because
+in error messages intead of saying 'a' we'll say (F [a]).  In all
+places, including those where the programmer wrote 'a' in the first
+place.  Very confusing!  See Trac #7862.
+
+Solution: re-orient a~fsk to fsk~a, so that we preferentially eliminate
+the fsk.
 
 Note [Equalities with incompatible kinds]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1188,6 +1220,12 @@ So instead for these ill-kinded equalities we generate a CIrredCan,
 which keeps it out of the way until a subsequent substitution (on kind 
 variables, say) re-activates it.
 
+NB: it is important that the types s1,s2 are flattened and zonked
+    so that their kinds k1, k2 are inert wrt the substitution.  That
+    means that they can only become the same if we change the inert
+    set, which in turn will kick out the irreducible equality
+    E.g. it is WRONG to make an irred (a:k1)~(b:k2)
+         if we already have a substitution k1:=k2
 
 Note [Type synonyms and canonicalization]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

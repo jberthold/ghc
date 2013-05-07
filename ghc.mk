@@ -428,7 +428,7 @@ endef
 $(eval $(call foreachLibrary,addExtraPackage))
 endif
 
-# If we want to just install evreything, then we want all the packages
+# If we want to just install everything, then we want all the packages
 SUPERSIZE_INSTALL_PACKAGES := $(addprefix libraries/,$(PACKAGES_STAGE1))
 ifeq "$(Stage1Only)" "NO"
 SUPERSIZE_INSTALL_PACKAGES += compiler
@@ -485,6 +485,7 @@ utils/ghc-pwd/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/ghc-cabal/dist-install/package-data.mk: compiler/stage2/package-data.mk
 
 utils/ghctags/dist-install/package-data.mk: compiler/stage2/package-data.mk
+utils/dll-split/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/hpc/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/ghc-pkg/dist-install/package-data.mk: compiler/stage2/package-data.mk
 utils/hsc2hs/dist-install/package-data.mk: compiler/stage2/package-data.mk
@@ -499,6 +500,11 @@ endif
 # --------------------------------
 # Misc package-related settings
 
+# Run Haddock for the packages that will be installed. We need to handle
+# compiler specially due to the different dist directory name.
+$(foreach p,$(INSTALL_PACKAGES),$(eval $p_dist-install_DO_HADDOCK = YES))
+compiler_stage2_DO_HADDOCK = YES
+
 BOOT_PKG_CONSTRAINTS := \
     $(foreach d,$(PACKAGES_STAGE0),\
         $(foreach p,$(basename $(notdir $(wildcard libraries/$d/*.cabal))),\
@@ -510,24 +516,6 @@ ifeq "$(BuildSharedLibs)" "YES"
 ALL_STAGE1_LIBS += $(foreach lib,$(PACKAGES_STAGE1),$(libraries/$(lib)_dist-install_dyn_LIB))
 endif
 BOOT_LIBS = $(foreach lib,$(PACKAGES_STAGE0),$(libraries/$(lib)_dist-boot_v_LIB))
-
-# -----------------------------------------------
-# Haddock-related bits
-
-# Run Haddock for the packages that will be installed. We need to handle
-# compiler specially due to the different dist directory name.
-$(foreach p,$(INSTALL_PACKAGES),$(eval $p_dist-install_DO_HADDOCK = YES))
-compiler_stage2_DO_HADDOCK = YES
-
-# Build the Haddock contents and index
-ifeq "$(HADDOCK_DOCS)" "YES"
-libraries/dist-haddock/index.html: inplace/bin/haddock$(exeext) $(ALL_HADDOCK_FILES)
-	cd libraries && sh gen_contents_index --intree
-ifeq "$(phase)" "final"
-$(eval $(call all-target,library_doc_index,libraries/dist-haddock/index.html))
-endif
-INSTALL_LIBRARY_DOCS += libraries/dist-haddock/*
-endif
 
 # ----------------------------------------
 # Special magic for the ghc-prim package
@@ -591,8 +579,6 @@ ifeq "$(Windows_Host)" "YES"
 BUILD_DIRS += utils/touchy
 endif
 
-BUILD_DIRS += docs/users_guide
-BUILD_DIRS += docs/man
 BUILD_DIRS += utils/unlit
 BUILD_DIRS += utils/hp2ps
 
@@ -609,6 +595,7 @@ BUILD_DIRS += driver/ghci
 BUILD_DIRS += driver/ghc
 BUILD_DIRS += driver/haddock
 BUILD_DIRS += libffi
+BUILD_DIRS += utils/deriveConstants
 BUILD_DIRS += includes
 BUILD_DIRS += rts
 
@@ -632,18 +619,10 @@ endif
 
 ifeq "$(INTEGER_LIBRARY)" "integer-gmp"
 BUILD_DIRS += libraries/integer-gmp/gmp
+BUILD_DIRS += libraries/integer-gmp/mkGmpDerivedConstants
 else ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
 BUILD_DIRS += libraries/integer-gmp/gmp
-endif
-
-ifeq "$(CrossCompiling)-$(phase)" "YES-final"
-MAYBE_GHCTAGS=
-MAYBE_HPC=
-MAYBE_RUNGHC=
-else
-MAYBE_GHCTAGS=utils/ghctags
-MAYBE_HPC=utils/hpc
-MAYBE_RUNGHC=utils/runghc
+BUILD_DIRS += libraries/integer-gmp/mkGmpDerivedConstants
 endif
 
 BUILD_DIRS += utils/haddock
@@ -651,13 +630,13 @@ BUILD_DIRS += utils/haddock/doc
 BUILD_DIRS += compiler
 BUILD_DIRS += utils/hsc2hs
 BUILD_DIRS += utils/ghc-pkg
-BUILD_DIRS += utils/deriveConstants
 BUILD_DIRS += utils/testremove
-BUILD_DIRS += $(MAYBE_GHCTAGS)
+BUILD_DIRS += utils/ghctags
+BUILD_DIRS += utils/dll-split
 BUILD_DIRS += utils/ghc-pwd
 BUILD_DIRS += utils/ghc-cabal
-BUILD_DIRS += $(MAYBE_HPC)
-BUILD_DIRS += $(MAYBE_RUNGHC)
+BUILD_DIRS += utils/hpc
+BUILD_DIRS += utils/runghc
 BUILD_DIRS += ghc
 
 ifneq "$(BINDIST)" "YES"
@@ -666,6 +645,8 @@ BUILD_DIRS += utils/mkUserGuidePart
 endif
 endif
 
+BUILD_DIRS += docs/users_guide
+BUILD_DIRS += docs/man
 BUILD_DIRS += utils/count_lines
 BUILD_DIRS += utils/compare_sizes
 
@@ -722,7 +703,7 @@ endif
 ifneq "$(BINDIST)" "YES"
 # Make sure we have all the GHCi libs by the time we've built
 # ghc-stage2.  DPH includes a bit of Template Haskell which needs the
-# GHCI libs, and we don't have a better way to express that dependency.
+# GHCi libs, and we don't have a better way to express that dependency.
 #
 GHCI_LIBS = $(foreach lib,$(PACKAGES_STAGE1),$(libraries/$(lib)_dist-install_GHCI_LIB)) \
 	    $(compiler_stage2_GHCI_LIB)
@@ -742,6 +723,19 @@ $(foreach way, $(GhcLibWays),$(eval \
 libraries/vector/dist-install/build/Data/Vector/Fusion/Stream/Monadic.$($(way)_osuf): \
     $(libraries/primitive_dist-install_$(GHCI_lib_way)_LIB) \
   ))
+endif
+
+# -----------------------------------------------
+# Haddock-related bits
+
+# Build the Haddock contents and index
+ifeq "$(HADDOCK_DOCS)" "YES"
+libraries/dist-haddock/index.html: $(haddock_INPLACE) $(ALL_HADDOCK_FILES)
+	cd libraries && sh gen_contents_index --intree
+ifeq "$(phase)" "final"
+$(eval $(call all-target,library_doc_index,libraries/dist-haddock/index.html))
+endif
+INSTALL_LIBRARY_DOCS += libraries/dist-haddock/*
 endif
 
 # -----------------------------------------------------------------------------
@@ -886,7 +880,7 @@ install_packages: rts/package.conf.install
 	$(call INSTALL_DIR,"$(DESTDIR)$(topdir)/rts-1.0")
 	$(call installLibsTo, $(RTS_INSTALL_LIBS), "$(DESTDIR)$(topdir)/rts-1.0")
 	$(foreach p, $(INSTALL_DYNLIBS), \
-	    $(call installLibsTo, $(wildcard libraries/$p/dist-install/build/*.so libraries/$p/dist-install/build/*.dll libraries/$p/dist-install/build/*.dylib), "$(DESTDIR)$(topdir)/$p-$(libraries/$p_dist-install_VERSION)"))
+	    $(call installLibsTo, $(wildcard $p/dist-install/build/*.so $p/dist-install/build/*.dll $p/dist-install/build/*.dylib), "$(DESTDIR)$(topdir)/$($p_PACKAGE)-$($p_dist-install_VERSION)"))
 	$(foreach p, $(INSTALL_PACKAGES),                             \
 	    $(call make-command,                                      \
 	           "$(ghc-cabal_INPLACE)" copy                        \
@@ -997,13 +991,6 @@ windows-binary-dist-prep:
 	$(MAKE) prefix=$(TOP)/$(BIN_DIST_PREP_DIR) install
 	cd bindistprep && "$(TAR_CMD)" cf - $(BIN_DIST_NAME) | bzip2 -c > ../$(BIN_DIST_PREP_TAR_BZ2)
 
-windows-installer:
-ifeq "$(ISCC_CMD)" ""
-	@echo No ISCC_CMD, so not making installer
-else
-	"$(ISCC_CMD)" /O. /Fbindistprep/$(WINDOWS_INSTALLER_BASE) - < distrib/ghc.iss
-endif
-
 # tryTimes tries to run its third argument multiple times, until it
 # succeeds. Don't call it directly; call try10Times instead.
 # The first and second argument to tryTimes are lists of values.
@@ -1021,9 +1008,6 @@ try10Times = $(call tryTimes,,x x x x x x x x x x,$1) { echo Failed; false; }
 .PHONY: publish-binary-dist
 publish-binary-dist:
 	$(call try10Times,$(PublishCp) $(BIN_DIST_TAR_BZ2) $(PublishLocation)/dist)
-ifeq "$(mingw32_TARGET_OS)" "1"
-	$(call try10Times,$(PublishCp) $(WINDOWS_INSTALLER) $(PublishLocation)/dist)
-endif
 
 ifeq "$(mingw32_TARGET_OS)" "1"
 DOCDIR_TO_PUBLISH = $(BIN_DIST_INST_DIR)/doc
@@ -1045,7 +1029,7 @@ publish-docs:
 #
 
 # A source dist is built from a complete build tree, because we
-# require some extra files not contained in a darcs checkout: the
+# require some extra files not contained in a git checkout: the
 # output from Happy and Alex, for example.
 #
 # The steps performed by 'make dist' are as follows:
@@ -1079,7 +1063,7 @@ SRC_DIST_GHC_FILES += \
     configure.ac config.guess config.sub configure \
     aclocal.m4 README ANNOUNCE HACKING LICENSE Makefile install-sh \
     ghc.spec.in ghc.spec settings.in VERSION \
-    boot boot-pkgs packages ghc.mk
+    boot packages ghc.mk
 
 VERSION :
 	echo $(ProjectVersion) >VERSION
@@ -1282,13 +1266,26 @@ endif
 # -----------------------------------------------------------------------------
 # Numbered phase targets
 
+# In phase 1, we'll be building dependency files for most things
+# built by the bootstrapping compiler while make is 'include'ing
+# makefiles. But in order to build dependency files, we'll need to
+# build any automatically generated .hs files, which means that
+# we'll need to be able to build any tools that generate .hs files
+# etc. But in order to do that, we need to already know the
+# dependencies for those tools, so we build their dependency files
+# here.
 .PHONY: phase_0_builds
-phase_0_builds: $(utils/ghc-pkg_dist_depfile_haskell)
-phase_0_builds: $(utils/ghc-pkg_dist_depfile_c_asm)
+# hsc2hs is needed, e.g. to make the .hs files for hpc.
 phase_0_builds: $(utils/hsc2hs_dist_depfile_haskell)
 phase_0_builds: $(utils/hsc2hs_dist_depfile_c_asm)
+# genprimopcode is needed to make the .hs-incl files that are in the
+# ghc package.
 phase_0_builds: $(utils/genprimopcode_dist_depfile_haskell)
 phase_0_builds: $(utils/genprimopcode_dist_depfile_c_asm)
+# deriveConstants is used to create header files included in the
+# ghc package.
+phase_0_builds: $(utils/deriveConstants_dist_depfile_haskell)
+phase_0_builds: $(utils/deriveConstants_dist_depfile_c_asm)
 
 .PHONY: phase_1_builds
 phase_1_builds: $(PACKAGE_DATA_MKS)

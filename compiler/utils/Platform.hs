@@ -10,8 +10,10 @@ module Platform (
         ArmABI(..),
 
         target32Bit,
+        isARM,
         osElfTarget,
         platformUsesFrameworks,
+        platformBinariesAreStaticLibs,
 )
 
 where
@@ -54,6 +56,9 @@ data Arch
         | ArchMipsel
         deriving (Read, Show, Eq)
 
+isARM :: Arch -> Bool
+isARM (ArchARM {}) = True
+isARM _ = False
 
 -- | Operating systems that the native code generator knows about.
 --      Having OSUnknown should produce a sensible default, but no promises.
@@ -130,4 +135,11 @@ osUsesFrameworks _        = False
 
 platformUsesFrameworks :: Platform -> Bool
 platformUsesFrameworks = osUsesFrameworks . platformOS
+
+osBinariesAreStaticLibs :: OS -> Bool
+osBinariesAreStaticLibs OSiOS = True
+osBinariesAreStaticLibs _     = False
+
+platformBinariesAreStaticLibs :: Platform -> Bool
+platformBinariesAreStaticLibs = osBinariesAreStaticLibs . platformOS
 

@@ -31,6 +31,7 @@ import DataCon
 import Coercion         hiding( substTy, substCo )
 import Rules
 import Type             hiding ( substTy )
+import TyCon            ( isRecursiveTyCon )
 import Id
 import MkCore           ( mkImpossibleExpr )
 import Var
@@ -457,6 +458,8 @@ sc_force to True when calling specLoop. This flag does three things:
         (see specialise)
   * Specialise even for arguments that are not scrutinised in the loop
         (see argToPat; Trac #4488)
+  * Only specialise on recursive types a finite number of times
+        (see is_too_recursive; Trac #5550)
 
 This flag is inherited for nested non-recursive bindings (which are likely to
 be join points and hence should be fully specialised) but reset for nested
@@ -618,24 +621,74 @@ specConstrProgram guts
 %*                                                                      *
 %************************************************************************
 
+Note [Work-free values only in environment]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The sc_vals field keeps track of in-scope value bindings, so 
+that if we come across (case x of Just y ->...) we can reduce the
+case from knowing that x is bound to a pair.
+
+But only *work-free* values are ok here. For example if the envt had
+    x -> Just (expensive v)
+then we do NOT want to expand to
+     let y = expensive v in ...
+because the x-binding still exists and we've now duplicated (expensive v).
+
+This seldom happens because let-bound constructor applications are 
+ANF-ised, but it can happen as a result of on-the-fly transformations in
+SpecConstr itself.  Here is Trac #7865:
+
+        let {
+          a'_shr =
+            case xs_af8 of _ {
+              [] -> acc_af6;
+              : ds_dgt [Dmd=<L,A>] ds_dgu [Dmd=<L,A>] ->
+                (expensive x_af7, x_af7
+            } } in
+        let {
+          ds_sht =
+            case a'_shr of _ { (p'_afd, q'_afe) ->
+            TSpecConstr_DoubleInline.recursive
+              (GHC.Types.: @ GHC.Types.Int x_af7 wild_X6) (q'_afe, p'_afd)
+            } } in
+
+When processed knowing that xs_af8 was bound to a cons, we simplify to 
+   a'_shr = (expensive x_af7, x_af7)
+and we do NOT want to inline that at the occurrence of a'_shr in ds_sht.
+(There are other occurrences of a'_shr.)  No no no.
+
+It would be possible to do some on-the-fly ANF-ising, so that a'_shr turned
+into a work-free value again, thus
+   a1 = expensive x_af7
+   a'_shr = (a1, x_af7)
+but that's more work, so until its shown to be important I'm going to 
+leave it for now.
+
 \begin{code}
-data ScEnv = SCE { sc_dflags :: DynFlags,
-                   sc_size  :: Maybe Int,       -- Size threshold
-                   sc_count :: Maybe Int,       -- Max # of specialisations for any one fn
+data ScEnv = SCE { sc_dflags    :: DynFlags,
+                   sc_size      :: Maybe Int,   -- Size threshold
+                   sc_count     :: Maybe Int,   -- Max # of specialisations for any one fn
                                                 -- See Note [Avoiding exponential blowup]
-                   sc_force :: Bool,            -- Force specialisation?
+
+                   sc_recursive :: Int,         -- Max # of specialisations over recursive type.
+                                                -- Stops ForceSpecConstr from diverging.
+
+                   sc_force     :: Bool,        -- Force specialisation?
                                                 -- See Note [Forcing specialisation]
 
-                   sc_subst :: Subst,           -- Current substitution
+                   sc_subst     :: Subst,       -- Current substitution
                                                 -- Maps InIds to OutExprs
 
                    sc_how_bound :: HowBoundEnv,
                         -- Binds interesting non-top-level variables
                         -- Domain is OutVars (*after* applying the substitution)
 
-                   sc_vals  :: ValueEnv,
+                   sc_vals      :: ValueEnv,
                         -- Domain is OutIds (*after* applying the substitution)
                         -- Used even for top-level bindings (but not imported ones)
+                        -- The range of the ValueEnv is *work-free* values
+                        -- such as (\x. blah), or (Just v)
+                        -- but NOT (Just (expensive v))
+                        -- See Note [Work-free values only in environment]
 
                    sc_annotations :: UniqFM SpecConstrAnnotation
              }
@@ -665,13 +718,14 @@ instance Outputable Value where
 ---------------------
 initScEnv :: DynFlags -> UniqFM SpecConstrAnnotation -> ScEnv
 initScEnv dflags anns
-  = SCE { sc_dflags = dflags,
-          sc_size = specConstrThreshold dflags,
-          sc_count = specConstrCount dflags,
-          sc_force = False,
-          sc_subst = emptySubst,
-          sc_how_bound = emptyVarEnv,
-          sc_vals = emptyVarEnv,
+  = SCE { sc_dflags      = dflags,
+          sc_size        = specConstrThreshold dflags,
+          sc_count       = specConstrCount     dflags,
+          sc_recursive   = specConstrRecursive dflags,
+          sc_force       = False,
+          sc_subst       = emptySubst,
+          sc_how_bound   = emptyVarEnv,
+          sc_vals        = emptyVarEnv,
           sc_annotations = anns }
 
 data HowBound = RecFun  -- These are the recursive functions for which
@@ -745,7 +799,10 @@ extendBndr  env bndr  = (env { sc_subst = subst' }, bndr')
 
 extendValEnv :: ScEnv -> Id -> Maybe Value -> ScEnv
 extendValEnv env _  Nothing   = env
-extendValEnv env id (Just cv) = env { sc_vals = extendVarEnv (sc_vals env) id cv }
+extendValEnv env id (Just cv) 
+ | valueIsWorkFree cv      -- Don't duplicate work!!  Trac #7865
+ = env { sc_vals = extendVarEnv (sc_vals env) id cv }
+extendValEnv env _ _ = env
 
 extendCaseBndrs :: ScEnv -> OutExpr -> OutId -> AltCon -> [Var] -> (ScEnv, [Var])
 -- When we encounter
@@ -1401,7 +1458,7 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
                              `setIdArity` count isId spec_lam_args
               spec_str   = calcSpecStrictness fn spec_lam_args pats
                 -- Conditionally use result of new worker-wrapper transform
-              (spec_lam_args, spec_call_args) = mkWorkerArgs qvars False body_ty
+              (spec_lam_args, spec_call_args) = mkWorkerArgs (sc_dflags env) qvars False body_ty
                 -- Usual w/w hack to avoid generating 
                 -- a spec_rhs of unlifted type and no args
 
@@ -1518,15 +1575,35 @@ callsToPats :: ScEnv -> [OneSpec] -> [ArgOcc] -> [Call] -> UniqSM (Bool, [CallPa
 callsToPats env done_specs bndr_occs calls
   = do  { mb_pats <- mapM (callToPats env bndr_occs) calls
 
-        ; let good_pats :: [CallPat]
+        ; let good_pats :: [(CallPat, ValueEnv)]
               good_pats = catMaybes mb_pats
               done_pats = [p | OS p _ _ _ <- done_specs]
               is_done p = any (samePat p) done_pats
+              no_recursive = map fst (filterOut (is_too_recursive env) good_pats)
 
         ; return (any isNothing mb_pats,
-                  filterOut is_done (nubBy samePat good_pats)) }
+                  filterOut is_done (nubBy samePat no_recursive)) }
 
-callToPats :: ScEnv -> [ArgOcc] -> Call -> UniqSM (Maybe CallPat)
+is_too_recursive :: ScEnv -> (CallPat, ValueEnv) -> Bool
+    -- Count the number of recursive constructors in a call pattern,
+    -- filter out if there are more than the maximum.
+    -- This is only necessary if ForceSpecConstr is in effect:
+    -- otherwise specConstrCount will cause specialisation to terminate.
+is_too_recursive env ((_,exprs), val_env)
+ = sc_force env && maximum (map go exprs) > sc_recursive env
+ where
+  go e
+   | Just (ConVal (DataAlt dc) args) <- isValue val_env e
+   , isRecursiveTyCon (dataConTyCon dc)
+   = 1 + sum (map go args)
+
+   |App f a                          <- e
+   = go f + go a
+
+   | otherwise
+   = 0
+
+callToPats :: ScEnv -> [ArgOcc] -> Call -> UniqSM (Maybe (CallPat, ValueEnv))
         -- The [Var] is the variables to quantify over in the rule
         --      Type variables come first, since they may scope
         --      over the following term variables
@@ -1553,9 +1630,9 @@ callToPats env bndr_occs (con_env, args)
               sanitise id   = id `setIdType` expandTypeSynonyms (idType id)
                 -- See Note [Free type variables of the qvar types]
 
-        ; -- pprTrace "callToPats"  (ppr args $$ ppr prs $$ ppr bndr_occs) $
+        ; -- pprTrace "callToPats"  (ppr args $$ ppr bndr_occs) $
           if interesting
-          then return (Just (qvars', pats))
+          then return (Just ((qvars', pats), con_env))
           else return Nothing }
 
     -- argToPat takes an actual argument, and returns an abstracted
@@ -1719,10 +1796,10 @@ isValue _env (Lit lit)
   | otherwise       = Just (ConVal (LitAlt lit) [])
 
 isValue env (Var v)
-  | Just stuff <- lookupVarEnv env v
-  = Just stuff  -- You might think we could look in the idUnfolding here
-                -- but that doesn't take account of which branch of a
-                -- case we are in, which is the whole point
+  | Just cval <- lookupVarEnv env v
+  = Just cval  -- You might think we could look in the idUnfolding here
+               -- but that doesn't take account of which branch of a
+               -- case we are in, which is the whole point
 
   | not (isLocalId v) && isCheapUnfolding unf
   = isValue env (unfoldingTemplate unf)
@@ -1753,6 +1830,10 @@ isValue _env expr       -- Maybe it's a constructor application
         _other -> Nothing
 
 isValue _env _expr = Nothing
+
+valueIsWorkFree :: Value -> Bool
+valueIsWorkFree LambdaVal       = True
+valueIsWorkFree (ConVal _ args) = all exprIsWorkFree args
 
 samePat :: CallPat -> CallPat -> Bool
 samePat (vs1, as1) (vs2, as2)

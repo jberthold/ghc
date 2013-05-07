@@ -42,6 +42,7 @@ import Cmm
 import CmmUtils
 import CostCentre
 import IdInfo( CafInfo(..), mayHaveCafRefs )
+import Id ( Id )
 import Module
 import DynFlags
 import FastString( mkFastString, fsLit )
@@ -54,7 +55,8 @@ import Data.Maybe (isJust)
 -----------------------------------------------------------
 
 allocDynClosure
-        :: CmmInfoTable
+        :: Maybe Id
+        -> CmmInfoTable
         -> LambdaFormInfo
         -> CmmExpr              -- Cost Centre to stick in the object
         -> CmmExpr              -- Cost Centre to blame for this alloc
@@ -66,7 +68,7 @@ allocDynClosure
         -> FCode CmmExpr -- returns Hp+n
 
 allocDynClosureCmm
-        :: CmmInfoTable -> LambdaFormInfo -> CmmExpr -> CmmExpr
+        :: Maybe Id -> CmmInfoTable -> LambdaFormInfo -> CmmExpr -> CmmExpr
         -> [(CmmExpr, VirtualHpOffset)]
         -> FCode CmmExpr -- returns Hp+n
 
@@ -88,19 +90,19 @@ allocDynClosureCmm
 -- significant - see test T4801.
 
 
-allocDynClosure info_tbl lf_info use_cc _blame_cc args_w_offsets
+allocDynClosure mb_id info_tbl lf_info use_cc _blame_cc args_w_offsets
   = do  { let (args, offsets) = unzip args_w_offsets
         ; cmm_args <- mapM getArgAmode args     -- No void args
-        ; allocDynClosureCmm info_tbl lf_info
+        ; allocDynClosureCmm mb_id info_tbl lf_info
                              use_cc _blame_cc (zip cmm_args offsets)
         }
 
-allocDynClosureCmm info_tbl lf_info use_cc _blame_cc amodes_w_offsets
+allocDynClosureCmm mb_id info_tbl lf_info use_cc _blame_cc amodes_w_offsets
   = do  { virt_hp <- getVirtHp
 
         -- SAY WHAT WE ARE ABOUT TO DO
         ; let rep = cit_rep info_tbl
-        ; tickyDynAlloc rep lf_info
+        ; tickyDynAlloc mb_id rep lf_info
         ; profDynAlloc rep use_cc
 
         -- FIND THE OFFSET OF THE INFO-PTR WORD
@@ -215,7 +217,6 @@ mkStaticClosure dflags info_lbl ccs payload padding static_link_field saved_info
         =  staticGranHdr
         ++ staticParHdr
         ++ staticProfHdr dflags ccs
-        ++ staticTickyHdr
 
 -- JD: Simon had ellided this padding, but without it the C back end asserts
 -- failure. Maybe it's a bad assertion, and this padding is indeed unnecessary?
@@ -527,7 +528,7 @@ heapCheck checkStack checkYield do_gc code
               stk_hwm | checkStack = Just (CmmLit CmmHighStackMark)
                       | otherwise  = Nothing
         ; codeOnly $ do_checks stk_hwm checkYield mb_alloc_bytes do_gc
-        ; tickyAllocHeap hpHw
+        ; tickyAllocHeap True hpHw
         ; doGranAllocate hpHw
         ; setRealHp hpHw
         ; code }
@@ -571,10 +572,11 @@ do_checks mb_stk_hwm checkYield mb_alloc_lit do_gc = do
 
   case mb_stk_hwm of
     Nothing -> return ()
-    Just stk_hwm -> emit =<< mkCmmIfGoto (sp_oflo stk_hwm) gc_id
+    Just stk_hwm -> tickyStackCheck >> (emit =<< mkCmmIfGoto (sp_oflo stk_hwm) gc_id)
 
   if (isJust mb_alloc_lit)
     then do
+     tickyHeapCheck
      emitAssign hpReg bump_hp
      emit =<< mkCmmIfThen hp_oflo (alloc_n <*> mkBranch gc_id)
     else do

@@ -31,11 +31,11 @@ ifneq "$$(NO_GENERATED_MAKEFILE_RULES)" "YES"
 # indirectly) include the generated includes files.
 $$($1_$2_depfile_haskell) : $$(includes_H_CONFIG) $$(includes_H_PLATFORM)
 
-$$($1_$2_depfile_haskell) : $$($1_$2_HS_SRCS) $$($1_$2_HS_BOOT_SRCS) $$($1_$2_HC_MK_DEPEND_DEP) | $$$$(dir $$$$@)/.
+$$($1_$2_depfile_haskell) : $$($1_$2_HS_SRCS) $$($1_$2_HS_BOOT_SRCS) $$$$($1_$2_HC_MK_DEPEND_DEP) | $$$$(dir $$$$@)/.
 	$$(call removeFiles,$$@.tmp)
 ifneq "$$($1_$2_HS_SRCS)" ""
 	"$$($1_$2_HC_MK_DEPEND)" -M \
-	    $$(filter-out -split-objs, $$($1_$2_$$(firstword $$($1_$2_WAYS))_ALL_HC_OPTS)) \
+	    $$($1_$2_$$(firstword $$($1_$2_WAYS))_MOST_DIR_HC_OPTS) \
 	    $$($1_$2_MKDEPENDHS_FLAGS) \
 	    $$($1_$2_HS_SRCS)
 endif
