@@ -344,10 +344,10 @@ rtsBool MP_quit(int isError){
                    debugBelch("sending FINISH failed, retry"));
     /* child must stay alive until answer arrives if error shutdown */
     if (isError != 0) {
-      int sender, length;
-      OpCode* code;
-      *code = PP_READY; // something != FINISH
-      while (*code != PP_FINISH)
+      nat sender;
+      int length;
+      OpCode code = PP_READY; // something != FINISH
+      while (code != PP_FINISH)
         cpw_shm_recv_msg(&sender, &code, &length, data);
       IF_PAR_DEBUG(mpcomm,
             debugBelch("child received reply, shutting down (error case)"));
@@ -1607,8 +1607,9 @@ rtsBool MP_quit(int isError){
   //printf(" MP_quit()\n");
 
     long data[1] = {isError};
-    int sender, length;
-    OpCode* code;
+    nat sender;
+    int length;
+    OpCode code;
   if (IAmMainThread) {
     /* send FINISH to other PEs */
     int i;
@@ -1621,7 +1622,7 @@ rtsBool MP_quit(int isError){
                             finishRecvd));
     while (finishRecvd != nPEs-1) {
         cpw_shm_recv_msg(&sender, &code, &length, data);
-        if (*code == PP_FINISH) {
+        if (code == PP_FINISH) {
           IF_PAR_DEBUG(mpcomm,
                        debugBelch("received reply, now %d" finishRecvd));
         }
@@ -1641,10 +1642,8 @@ rtsBool MP_quit(int isError){
                    debugBelch("sending FINISH failed, retry"));
     /* child must stay alive until answer arrives if error shutdown */
     if (isError != 0) {
-      int sender, length;
-      OpCode* code;
-      *code = PP_READY; // something != FINISH
-      while (*code != PP_FINISH)
+      code = PP_READY; // something != FINISH
+      while (code != PP_FINISH)
         cpw_shm_recv_msg(&sender, &code, &length, data);
       IF_PAR_DEBUG(mpcomm,
             debugBelch("child received reply, shutting down (error case)"));
