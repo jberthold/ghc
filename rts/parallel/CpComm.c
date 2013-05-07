@@ -384,6 +384,9 @@ rtsBool MP_quit(int isError){
 	
   /* close shared memory*/
   cpw_shm_close(&shared_memory);
+
+  /* indicate that quit has been executed */
+  nPEs = 0;
 	
   return rtsTrue;
 }
@@ -2716,6 +2719,9 @@ static char* cpw_mk_argv_string(int argc, char ** argv) {
     strcat(result, argv[i]);
     strcat(result, "\" ");
   }
+
+  /* indicate that quit has been executed */
+  nPEs = 0;
 	
   return result;
 }
