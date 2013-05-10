@@ -1621,8 +1621,9 @@ rtsBool MP_quit(int isError){
     while (finishRecvd != nPEs-1) {
         cpw_shm_recv_msg(&sender, &code, &length, data);
         if (code == PP_FINISH) {
+          finishRecvd++;
           IF_PAR_DEBUG(mpcomm,
-                       debugBelch("received reply, now %d" finishRecvd));
+                       debugBelch("received reply, now %d", finishRecvd));
         }
     }
     /* wait for children to return */
