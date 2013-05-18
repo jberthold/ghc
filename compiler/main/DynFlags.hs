@@ -50,7 +50,7 @@ module DynFlags (
 
         printOutputForUser, printInfoForUser,
 
-        Way(..), mkBuildTag, wayRTSOnly, updateWays,
+        Way(..), mkBuildTag, wayRTSOnly, addWay', updateWays,
         wayGeneralFlags, wayUnsetGeneralFlags,
 
         -- ** Safe Haskell
@@ -349,6 +349,7 @@ data GeneralFlag
    | Opt_RPath
    | Opt_RelativeDynlibPaths
    | Opt_Hpc
+   | Opt_FlatCache
 
    -- PreInlining is on by default. The option is there just to see how
    -- bad things get if you turn it off!
@@ -608,6 +609,14 @@ data DynFlags = DynFlags {
   canGenerateDynamicToo :: IORef Bool,
   dynObjectSuf          :: String,
   dynHiSuf              :: String,
+
+  -- Packages.isDllName needs to know whether a call is within a
+  -- single DLL or not. Normally it does this by seeing if the call
+  -- is to the same package, but for the ghc package, we split the
+  -- package between 2 DLLs. The dllSplit tells us which sets of
+  -- modules are in which package.
+  dllSplitFile          :: Maybe FilePath,
+  dllSplit              :: Maybe [Set String],
 
   outputFile            :: Maybe String,
   dynOutputFile         :: Maybe String,
@@ -1284,6 +1293,9 @@ defaultDynFlags mySettings =
         dynObjectSuf            = "dyn_" ++ phaseInputExt StopLn,
         dynHiSuf                = "dyn_hi",
 
+        dllSplitFile            = Nothing,
+        dllSplit                = Nothing,
+
         pluginModNames          = [],
         pluginModNameOpts       = [],
 
@@ -1883,9 +1895,23 @@ parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
 
   let (dflags4, consistency_warnings) = makeDynFlagsConsistent dflags3
 
-  liftIO $ setUnsafeGlobalDynFlags dflags4
+  dflags5 <- case dllSplitFile dflags4 of
+             Nothing -> return (dflags4 { dllSplit = Nothing })
+             Just f ->
+                 case dllSplit dflags4 of
+                 Just _ ->
+                     -- If dllSplit is out of date then it would have
+                     -- been set to Nothing. As it's a Just, it must be
+                     -- up-to-date.
+                     return dflags4
+                 Nothing ->
+                     do xs <- liftIO $ readFile f
+                        let ss = map (Set.fromList . words) (lines xs)
+                        return $ dflags4 { dllSplit = Just ss }
 
-  return (dflags4, leftover, consistency_warnings ++ sh_warns ++ warns)
+  liftIO $ setUnsafeGlobalDynFlags dflags5
+
+  return (dflags5, leftover, consistency_warnings ++ sh_warns ++ warns)
 
 updateWays :: DynFlags -> DynFlags
 updateWays dflags
@@ -2068,6 +2094,8 @@ dynamic_flags = [
   , Flag "shared"             (noArg (\d -> d{ ghcLink=LinkDynLib }))
   , Flag "dynload"            (hasArg parseDynLibLoaderMode)
   , Flag "dylib-install-name" (hasArg setDylibInstallName)
+    -- -dll-split is an internal flag, used only during the GHC build
+  , Flag "dll-split"          (hasArg (\f d -> d{ dllSplitFile = Just f, dllSplit = Nothing }))
 
         ------- Libraries ---------------------------------------------------
   , Flag "L"   (Prefix addLibraryPath)
@@ -2540,6 +2568,7 @@ fFlags = [
   ( "prof-cafs",                        Opt_AutoSccsOnIndividualCafs, nop ),
   ( "hpc",                              Opt_Hpc, nop ),
   ( "pre-inlining",                     Opt_SimplPreInlining, nop ),
+  ( "flat-cache",                       Opt_FlatCache, nop ),
   ( "use-rpaths",                       Opt_RPath, nop )
   ]
 
@@ -2730,6 +2759,7 @@ defaultFlags settings
       Opt_HelpfulErrors,
       Opt_ProfCountEntries,
       Opt_SimplPreInlining,
+      Opt_FlatCache,
       Opt_RPath
     ]
 

@@ -167,7 +167,7 @@ include rules/clean-target.mk
 # -----------------------------------------------------------------------------
 # The inplace tree
 
-$(eval $(call clean-target,inplace,,inplace/bin inplace/lib))
+$(eval $(call clean-target,root,inplace,inplace/bin inplace/lib))
 
 # -----------------------------------------------------------------------------
 # Whether to build dependencies or not
@@ -203,6 +203,15 @@ else
 GHCI_WAY = v
 HADDOCK_WAY = v
 endif
+
+WINDOWS_DYN_PROG_RTS := rts
+ifeq "$(GhcThreaded)" "YES"
+WINDOWS_DYN_PROG_RTS := $(WINDOWS_DYN_PROG_RTS)_thr
+endif
+ifeq "$(GhcDebugged)" "YES"
+WINDOWS_DYN_PROG_RTS := $(WINDOWS_DYN_PROG_RTS)_debug
+endif
+WINDOWS_DYN_PROG_RTS := $(WINDOWS_DYN_PROG_RTS)_dyn_LIB_NAME
 
 # -----------------------------------------------------------------------------
 # Compilation Flags
@@ -556,18 +565,6 @@ $(error Unknown integer library: $(INTEGER_LIBRARY))
 endif
 endif
 
-# ----------------------------------------
-# Workarounds for problems building DLLs on Windows
-
-ifeq "$(TargetOS_CPP)" "mingw32"
-# We don't build the GHC package the dyn way on Windows, so
-# we can't build these packages the dyn way either. See trac #5987
-libraries/dph/dph-lifted-base_dist-install_EXCLUDED_WAYS := dyn
-libraries/dph/dph-lifted-boxed_dist-install_EXCLUDED_WAYS := dyn
-libraries/dph/dph-lifted-copy_dist-install_EXCLUDED_WAYS := dyn
-libraries/dph/dph-lifted-vseg_dist-install_EXCLUDED_WAYS := dyn
-endif
-
 # -----------------------------------------------------------------------------
 # Include build instructions from all subdirs
 
@@ -689,7 +686,7 @@ $(shell echo "[]" >$(BOOTSTRAPPING_CONF))
 endif
 endif
 
-$(eval $(call clean-target,$(BOOTSTRAPPING_CONF),,$(BOOTSTRAPPING_CONF)))
+$(eval $(call clean-target,root,bootstrapping_conf,$(BOOTSTRAPPING_CONF)))
 
 # register the boot packages in strict sequence, because running
 # multiple ghc-pkgs in parallel doesn't work (registrations may get
@@ -884,8 +881,8 @@ install_packages: rts/package.conf.install
 	$(foreach p, $(INSTALL_PACKAGES),                             \
 	    $(call make-command,                                      \
 	           "$(ghc-cabal_INPLACE)" copy                        \
-	                                  "$(STRIP_CMD)"              \
 	                                  $p $(INSTALL_DISTDIR_$p)    \
+	                                  "$(STRIP_CMD)"              \
 	                                  '$(DESTDIR)'                \
 	                                  '$(prefix)'                 \
 	                                  '$(ghclibdir)'              \
@@ -894,10 +891,10 @@ install_packages: rts/package.conf.install
 	$(foreach p, $(INSTALL_PACKAGES),                             \
 	    $(call make-command,                                      \
 	           "$(ghc-cabal_INPLACE)" register                    \
+	                                  $p $(INSTALL_DISTDIR_$p)    \
 	                                  "$(INSTALLED_GHC_REAL)"     \
 	                                  "$(INSTALLED_GHC_PKG_REAL)" \
 	                                  "$(DESTDIR)$(topdir)"       \
-	                                  $p $(INSTALL_DISTDIR_$p)    \
 	                                  '$(DESTDIR)'                \
 	                                  '$(prefix)'                 \
 	                                  '$(ghclibdir)'              \
