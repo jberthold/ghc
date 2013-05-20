@@ -1035,10 +1035,10 @@ static void PackClosure(StgClosure* closure) {
 
   case MVAR_CLEAN:
   case MVAR_DIRTY:
+  case TVAR:
     barf("Pack: packing type %s (%p) not implemented", 
 	 info_type_by_ip(info), closure);
     
-
   case ARR_WORDS:
     PackArray(closure);
     return;
@@ -2315,13 +2315,20 @@ StgClosure* UnpackGraphWrapper(StgArrWords* packBufferArray,
 */
 
 /* this array has to be kept in sync with includes/ClosureTypes.h */
+#if !(N_CLOSURE_TYPES == 61 )
+#error Wrong closure type count in fingerprint array. Check code.
+#endif
 static char* fingerPrintChar = 
-  "0ccccccccfffffffttttttt" /* INVALID CONSTRs FUNs THUNKs */
-  "TBAPP___"     /* SELECTOR BCO AP PAP AP_STACK INDs */
-  "RRRRFFFF*@MM" /* RETs FRAMEs BQ BLACKHOLE MVARs */
-  "aAAAAmmwppXS" /* ARRAYs MUT_VARs WEAK PRIM MUT_PRIM TSO STACK */
-  "&FFFW"        /* TREC (STM-)FRAMEs WHITEHOLE*/
+  "0ccccccCC"    /* INVALID CONSTRs (0-8) */
+  "fffffff"      /* FUNs (9-15) */
+  "ttttttt"      /* THUNKs (16-23) */
+  "TBAPP___"     /* SELECTOR BCO AP PAP AP_STACK INDs (24-31) */
+  "RRRRFFFF"     /* RETs FRAMEs (32-39) */
+  "*@MMT"        /* BQ BLACKHOLE MVARs TVAR (40-43) */
+  "aAAAAmmwppXS" /* ARRAYs MUT_VARs WEAK PRIM MUT_PRIM TSO STACK (44-55) */
+  "&FFFW"        /* TREC (STM-)FRAMEs WHITEHOLE (56-60) */
   ;
+
 
 // recursive worker function:
 static void GraphFingerPrint_(StgClosure *p);
