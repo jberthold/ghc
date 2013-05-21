@@ -548,7 +548,7 @@ RoomToPack(nat size) {
       errorBelch("Runtime system pack buffer full.\n"
 	   "Current buffer size is %lu bytes, "
 	   "try bigger pack buffer with +RTS -qQ<size>",
-	   RTS_PACK_BUFFER_SIZE);
+           (long unsigned int) RTS_PACK_BUFFER_SIZE);
       stg_exit(EXIT_FAILURE);
       ClearPackBuffer();
       IF_PAR_DEBUG(pack,
@@ -790,8 +790,10 @@ rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso,
   QueueClosure(closure);
   do {
     PackClosure(DeQueueClosure());
-    if (packing_aborted) 
+    if (packing_aborted) {
+      DonePacking();
       return ((rtsPackBuffer *)NULL);
+    }
   } while (!QueueEmpty());
   
 
@@ -1662,9 +1664,8 @@ UnpackGraph(rtsPackBuffer *packBuffer,
     } // while
   */
   } else { 
-    // PARENT == NULL: whole graph has arrived, drop offset table
-    freeHashTable(offsetTable, NULL);
-    offsetTable = NULL;
+    // PARENT == NULL: whole graph has arrived, drop offset table and release lock
+    DonePacking();
   }
 
   IF_PAR_DEBUG(pack,
@@ -2590,6 +2591,14 @@ static void GraphFingerPrint_(StgClosure *p) {
   case MVAR_DIRTY:
     if (((StgMVar *)p)->value != &stg_END_TSO_QUEUE_closure)
       GraphFingerPrint_(((StgMVar *)p)->value);
+    break;
+
+  case TVAR:
+    // The TVAR type subsumes both the var itself and a watch queue; the
+    // latter holds a TSO or an "Atomic Invariant" where the former
+    // (clean/dirty) holds the current value as its first payload. Anyways,
+    // while useful for GC, the double meaning of the first payload is not
+    // useful for fingerprinting. We do not descend into TVars.
     break;
 
   case ARR_WORDS:
