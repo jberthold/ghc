@@ -1985,7 +1985,7 @@ stg_duplicatezh(gcptr original)
   gcptr copy;
 
   // assign something to keep cmm reg.allocator happy
-  copy = stg_END_TSO_QUEUE_closure;
+  copy = original;
 
 #if defined(PARALLEL_RTS)
   ("ptr" copy) = ccall DuplicateNearbyGraph(original "ptr", CurrentTSO "ptr",
@@ -1993,8 +1993,7 @@ stg_duplicatezh(gcptr original)
 #else
   // system does not support parallel primops, complain and crash the thread
   ccall debugBelch(no_parallel_primops, StgTSO_id(CurrentTSO));
-  ccall throwToSingleThreaded(MyCapability() "ptr",
-				    CurrentTSO "ptr", NULL);
+  R1 = CurrentTSO; R2=NULL; jump stg_killMyself [R1,R2];
 #endif
   return(copy);
 }
@@ -2008,7 +2007,7 @@ stg_serializzezh (gcptr original)
   MAYBE_GC_P(stg_serializzezh, original);
 
   // assign something to keep cmm reg.allocator happy
-  buff = stg_END_TSO_QUEUE_closure;
+  buff = ghczmprim_GHCziTypes_False_closure;
 
 #ifdef PARALLEL_RTS
   // call packing function
@@ -2035,8 +2034,7 @@ stg_serializzezh (gcptr original)
   // serialisation in the non-parallel system not supported (for now)
   // complain and crash the thread
   ccall debugBelch(no_parallel_primops, StgTSO_id(CurrentTSO));
-  ccall throwToSingleThreaded(MyCapability() "ptr",
-                              CurrentTSO "ptr", NULL);
+  R1 = CurrentTSO; R2=NULL; jump stg_killMyself [R1,R2];
 #endif
 
   return (buff);
@@ -2049,7 +2047,7 @@ stg_deserializzezh (gcptr buff)
   W_ new;
 
   // assign something to keep cmm reg.allocator happy
-  new = stg_END_TSO_QUEUE_closure;
+  new = ghczmprim_GHCziTypes_False_closure;
 
   MAYBE_GC_P(stg_deserializzezh, buff);
 
@@ -2059,8 +2057,7 @@ stg_deserializzezh (gcptr buff)
 #else
   // system does not support packing, complain and crash the thread
   ccall debugBelch(no_parallel_primops, StgTSO_id(CurrentTSO));
-  ccall throwToSingleThreaded(MyCapability() "ptr",
-                              CurrentTSO "ptr", NULL);
+  R1 = CurrentTSO; R2=NULL; jump stg_killMyself [R1,R2];
 #endif
 
   return (new);
@@ -2077,7 +2074,7 @@ stg_expectDatazh ()
   W_ id, proc;
 
   // assign something to keep cmm reg.allocator happy
-  retBH = NULL;
+  retBH = ghczmprim_GHCziTypes_False_closure;
   id = 0;
   proc = 0;
 
@@ -2088,8 +2085,7 @@ stg_expectDatazh ()
 #else
   // system does not support parallel primops, complain and crash the thread
   ccall debugBelch(no_parallel_primops, StgTSO_id(CurrentTSO));
-  ccall throwToSingleThreaded(MyCapability() "ptr",
-                              CurrentTSO "ptr", NULL);
+  R1 = CurrentTSO; R2=NULL; jump stg_killMyself [R1,R2];
 #endif
   return (id, proc, retBH); 
 }
@@ -2126,8 +2122,7 @@ stg_sendDatazh(W_ mode, gcptr graphroot)
 #else
   // system does not support parallel primops, complain and crash the thread
   ccall debugBelch(no_parallel_primops, StgTSO_id(CurrentTSO));
-  ccall throwToSingleThreaded(MyCapability() "ptr",
-                              CurrentTSO "ptr", NULL);
+    R1 = CurrentTSO; R2=NULL; jump stg_killMyself [R1,R2];
   success = 1;
 #endif
 
@@ -2161,13 +2156,15 @@ stg_sendDatazh(W_ mode, gcptr graphroot)
   return ();
 }
 
+STRING(label_process_string, "Labelling process with %s")
+
 stg_labelProcesszh (W_ label)
 {
   /* args: address of label string */
 #if defined(PARALLEL_RTS) && \
   (defined(DEBUG) || defined(TRACING) || defined(DTRACE))
   /* later: call a tracing function to emit an event */
-  ccall debugBelch(label);
+  ccall debugBelch(label_process_string, label);
 #endif
   return ();
 }
