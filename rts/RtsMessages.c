@@ -308,6 +308,23 @@ rtsDebugMsgFn(const char *s, va_list ap)
 void GNU_ATTRIBUTE(__noreturn__)
 edenFatalInternalErrorFn(const char *s, va_list ap)
 {
+#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+  if (isGUIApp())
+  {
+     char title[BUFSIZE], message[BUFSIZE];
+
+     snprintf(title,   BUFSIZE, "%s: internal error", prog_name);
+     vsnprintf(message, BUFSIZE, s, ap);
+
+     MessageBox(NULL /* hWnd */,
+	        message,
+	        title,
+	        MB_OK | MB_ICONERROR | MB_TASKMODAL
+	       );
+  }
+  else
+#endif
+    {
   /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
   if (prog_argv != NULL && prog_name != NULL) {
     fprintf(stderr, "%s: internal error: ", prog_name);
@@ -327,6 +344,7 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
   // The sequential system uses abort(); but we would like to shut down the
   // entire system cleanly, using stg_exit.
   stg_exit(EXIT_INTERNAL_ERROR);
+    }
 }
 
 void
