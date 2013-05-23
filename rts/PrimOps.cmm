@@ -2064,6 +2064,7 @@ stg_noDuplicatezh
 /* -----------------------------------------------------------------------------
    Parallel Haskell Primops
    -------------------------------------------------------------------------- */
+STRING(no_parallel_primops, "Compiled without parallelism support (thread %d)")
 
 /* for testing: duplicate a heap graph by packing/unpacking it */
 stg_duplicatezh
@@ -2073,6 +2074,8 @@ stg_duplicatezh
   W_ copy;
 
   original = R1;
+  // assign something to keep cmm reg.allocator happy
+  copy = original;
 
 #if defined(PARALLEL_RTS)
   ("ptr" copy) = foreign "C" 
@@ -2080,10 +2083,9 @@ stg_duplicatezh
 			 MyCapability() "ptr") [];
 #else
   // system does not support parallel primops, complain and crash the thread
-  foreign "C" debugBelch("Thread %d: compiled without parallel primitives.",
+  foreign "C" debugBelch(no_parallel_primops,
 			 StgTSO_id(CurrentTSO))[R1];
-  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
-				    CurrentTSO "ptr", NULL)[R1];
+  R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
 #endif
   RET_P(copy);
 }
@@ -2097,6 +2099,9 @@ stg_serializzezh
 
   MAYBE_GC(R1_PTR,stg_serializzezh);
   original = R1;
+
+  // assign something to keep cmm reg.allocator happy
+  buff = ghczmprim_GHCziTypes_False_closure;
 
 #ifdef PARALLEL_RTS
   // call packing function
@@ -2124,10 +2129,9 @@ stg_serializzezh
 #else
   // serialisation in the non-parallel system not supported (for now)
   // complain and crash the thread
-  foreign "C" debugBelch("Thread %d: serialize# not supported.",
+  foreign "C" debugBelch(no_parallel_primops,
 			 StgTSO_id(CurrentTSO))[R1];
-  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
-				    CurrentTSO "ptr", NULL)[R1];
+  R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
 #endif
 
   RET_P(buff);
@@ -2143,16 +2147,18 @@ stg_deserializzezh
   MAYBE_GC(R1_PTR,stg_deserializzezh);
   buff = R1;
 
+  // assign something to keep cmm reg.allocator happy
+  new = ghczmprim_GHCziTypes_False_closure;
+
 #ifdef PARALLEL_RTS
   // call packing function
   ("ptr" new) = foreign "C"
     UnpackGraphWrapper(buff "ptr", MyCapability() "ptr") [R1];
 #else
   // system does not support packing, complain and crash the thread
-  foreign "C" debugBelch("Thread %d: deserialize# not supported.",
+  foreign "C" debugBelch(no_parallel_primops,
 			 StgTSO_id(CurrentTSO))[R1];
-  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
-				    CurrentTSO "ptr", NULL)[R1];
+  R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
 #endif
 
   RET_P(new);
@@ -2167,16 +2173,20 @@ stg_expectDatazh
   /* args: None */
   W_ retBH;
   W_ id, proc;
+
+  // assign something to keep cmm reg.allocator happy
+  retBH = ghczmprim_GHCziTypes_False_closure;
+  id = 0;
+  proc = 0;
+
 #if defined(PARALLEL_RTS)
   ("ptr" retBH) = foreign "C" createBH(MyCapability() "ptr") [];
   (proc) = foreign "C" MyProcess(CurrentTSO "ptr") [];
   (id)   = foreign "C" addInport(proc, retBH "ptr") [];
 #else
   // system does not support parallel primops, complain and crash the thread
-  foreign "C" debugBelch("Thread %d: compiled without parallel primitives.",
-			 StgTSO_id(CurrentTSO))[R1];
-  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
-				    CurrentTSO "ptr", NULL)[R1];
+  foreign "C" debugBelch(no_parallel_primops, StgTSO_id(CurrentTSO)) [];
+  R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
 #endif
   RET_NNP(id, proc, retBH); 
 }
@@ -2219,10 +2229,9 @@ stg_sendDatazh
   // ( 0=blocked, -1=send failed, otherwise successfully packed/sent away )
 #else
   // system does not support parallel primops, complain and crash the thread
-  foreign "C" debugBelch("Thread %d: compiled without parallel primitives.",
-			 StgTSO_id(CurrentTSO))[R1];
-  foreign "C" throwToSingleThreaded(MyCapability() "ptr",
-				    CurrentTSO "ptr", NULL)[R1];
+  foreign "C" debugBelch(no_parallel_primops, StgTSO_id(CurrentTSO)) [R1,R2];
+  R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
+  success = 1;
 #endif
 
   if (success == 0) {
@@ -2259,12 +2268,19 @@ stg_sendDatazh
   jump %ENTRY_CODE(Sp(0));
 }
 
+STRING(label_process_string, "Labelling process with %s")
+
 stg_labelProcesszh
 {
-  /* args: ... */
-  foreign "C" debugBelch("labelProcesszh_fast") [];
+  /* args: label string ptr  */
+  W_ label;
+  label = R1;
+
   /* later: call a tracing function to emit an event */
-  jump %ENTRY_CODE(Sp(0)); /* no return.. TODO check */
+  foreign "C" debugBelch(label_process_string, label);
+
+  jump %ENTRY_CODE(Sp(0)); /* no return */
+
 }
 
 stg_myProcesszh
