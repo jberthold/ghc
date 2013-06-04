@@ -111,7 +111,8 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
   IF_PAR_DEBUG(ports,
 	       debugBelch("sending message %s (%#0x) to machine %d\n",
 			  getOpName(tag), tag, destinationPE);
-	       debugBelch("Sender: (%d,%d,%d), Receiver (%d,%d,%d)\n",
+	       debugBelch("Sender: (%d,%" FMT_Word ",%" FMT_Word
+                          "), Receiver (%d,%" FMT_Word ",%" FMT_Word ")\n",
 			  dataBuffer->sender.machine, 
 			  dataBuffer->sender.process, 
 			  dataBuffer->sender.id,
@@ -335,7 +336,8 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
 
   if (inport == NULL) {
     IF_PAR_DEBUG(ports,
-		 errorBelch("unknown inport: Port (%d,%d,%d)\n",
+		 errorBelch("unknown inport: Port (%d,%" 
+                            FMT_Word ",%" FMT_Word ")\n",
 			    gumPackBuffer->receiver.machine, 
 			    gumPackBuffer->receiver.process, 
 			    gumPackBuffer->receiver.id));
@@ -345,7 +347,8 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
 
   if (!(equalPorts(inport->sender,gumPackBuffer->sender))) {
     IF_PAR_DEBUG(ports,
-		 debugBelch("Sender (%d,%d,%d) not connected yet\n",
+		 debugBelch("Sender (%d,%" 
+                            FMT_Word ",%" FMT_Word ") not connected yet\n",
 			    gumPackBuffer->sender.machine, 
 			    gumPackBuffer->sender.process, 
 			    gumPackBuffer->sender.id));
@@ -427,7 +430,8 @@ fakeDataMsg(StgClosure *graph,
 
   if (inport == NULL) {
     IF_PAR_DEBUG(ports,
-		 errorBelch("fakeDataMsg: unknown inport: Port (%d,%d,%d)\n",
+		 errorBelch("fakeDataMsg: unknown inport: Port (%d,%"
+                            FMT_Word ",%" FMT_Word ")\n",
 			    receiver.machine, 
 			    receiver.process, 
 			    receiver.id));
@@ -437,8 +441,8 @@ fakeDataMsg(StgClosure *graph,
 
   if (!(equalPorts(inport->sender,sender))) {
     IF_PAR_DEBUG(ports,
-		 debugBelch("fakeDataMsg: Sender (%d,%d,%d)" 
-			    " not connected yet\n",
+		 debugBelch("fakeDataMsg: Sender (%d,%"
+                            FMT_Word ",%" FMT_Word ") not connected yet\n",
 			    sender.machine, 
 			    sender.process, 
 			    sender.id));
