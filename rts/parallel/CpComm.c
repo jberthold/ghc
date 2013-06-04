@@ -685,9 +685,9 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
   while (next_slot != NULL) {
     num++;
     debugBelch("- %i (@%p)\n"
-	       "      | (ALGNMT: %u, is aligned: %s)\n"
+	       "      | (ALGNMT: %" FMT_Word ", is aligned: %s)\n"
 	       "      +-> points to message @%p\n"
-	       "        |  (ALGNMT: %u, is aligned: %s)\n"
+	       "        |  (ALGNMT: %" FMT_Word ", is aligned: %s)\n"
 	       "        +-> points to data @%p\n"
 	       "              (ALGNMT: %i, is aligned: %s)\n", 
 	       num, next_slot,
