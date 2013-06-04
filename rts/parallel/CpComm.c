@@ -344,7 +344,8 @@ rtsBool MP_quit(int isError){
                    debugBelch("sending FINISH failed, retry"));
     /* child must stay alive until answer arrives if error shutdown */
     if (isError != 0) {
-      int sender, length;
+      nat sender;
+      int length;
       OpCode code = PP_READY; // something != FINISH
       while (code != PP_FINISH)
         cpw_shm_recv_msg(&sender, &code, &length, data);
@@ -684,9 +685,9 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
   while (next_slot != NULL) {
     num++;
     debugBelch("- %i (@%p)\n"
-	       "      | (ALGNMT: %i, is aligned: %s)\n"
+	       "      | (ALGNMT: %lu, is aligned: %s)\n"
 	       "      +-> points to message @%p\n"
-	       "        |  (ALGNMT: %i, is aligned: %s)\n"
+	       "        |  (ALGNMT: %lu, is aligned: %s)\n"
 	       "        +-> points to data @%p\n"
 	       "              (ALGNMT: %i, is aligned: %s)\n", 
 	       num, next_slot,
@@ -1606,7 +1607,8 @@ rtsBool MP_quit(int isError){
   //printf(" MP_quit()\n");
 
     long data[1] = {isError};
-    int sender, length;
+    nat sender;
+    int length;
     OpCode code;
   if (IAmMainThread) {
     /* send FINISH to other PEs */

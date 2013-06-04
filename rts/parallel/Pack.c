@@ -548,7 +548,7 @@ RoomToPack(nat size) {
       errorBelch("Runtime system pack buffer full.\n"
 	   "Current buffer size is %lu bytes, "
 	   "try bigger pack buffer with +RTS -qQ<size>",
-	   RTS_PACK_BUFFER_SIZE);
+           (long unsigned int) RTS_PACK_BUFFER_SIZE);
       stg_exit(EXIT_FAILURE);
       ClearPackBuffer();
       IF_PAR_DEBUG(pack,
@@ -2081,7 +2081,8 @@ UnpackArray(StgInfoTable* info, StgWord **bufptrP, Capability* cap) {
     ASSERT(size ==
 	   sizeofW(StgMutArrPtrs) + ((StgMutArrPtrs*) *bufptrP)->size);
     IF_PAR_DEBUG(packet,
-		 debugBelch("Unpacking ptrs array, %d ptrs, size %d\n",
+		 debugBelch("Unpacking ptrs array, %" FMT_Word 
+                            " ptrs, size %d\n",
 			    (StgWord) *((*bufptrP)+1), size));
     array = (StgMutArrPtrs *) allocate(cap, size);
 
@@ -2524,6 +2525,7 @@ static void GraphFingerPrint_(StgClosure *p) {
 	  /* these two use a large bitmap. We do not follow...*/
 	case ARG_GEN_BIG:
 	case ARG_BCO:
+          bitmap = (StgWord) (~0); // all ones
 	  break;
 	case ARG_GEN:
 	  bitmap = funInfo->f.b.bitmap;
