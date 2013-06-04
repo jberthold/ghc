@@ -631,7 +631,7 @@ data DynFlags = DynFlags {
   --    Set by @-ddump-file-prefix@
   dumpPrefixForce       :: Maybe FilePath,
 
-  ldInputs              :: [String],
+  ldInputs              :: [Option],
 
   includePaths          :: [String],
   libraryPaths          :: [String],
@@ -1224,7 +1224,12 @@ doDynamicToo dflags0 = let dflags1 = addWay' WayDyn dflags0
 -- | Used by 'GHC.newSession' to partially initialize a new 'DynFlags' value
 initDynFlags :: DynFlags -> IO DynFlags
 initDynFlags dflags = do
- refCanGenerateDynamicToo <- newIORef True
+ let -- We can't build with dynamic-too on Windows, as labels before
+     -- the fork point are different depending on whether we are
+     -- building dynamically or not.
+     platformCanGenerateDynamicToo
+         = platformOS (targetPlatform dflags) /= OSMinGW32
+ refCanGenerateDynamicToo <- newIORef platformCanGenerateDynamicToo
  refFilesToClean <- newIORef []
  refDirsToClean <- newIORef Map.empty
  refFilesToNotIntermediateClean <- newIORef []
@@ -2099,7 +2104,7 @@ dynamic_flags = [
 
         ------- Libraries ---------------------------------------------------
   , Flag "L"   (Prefix addLibraryPath)
-  , Flag "l"   (hasArg (addOptl . ("-l" ++)))
+  , Flag "l"   (hasArg (addLdInputs . Option . ("-l" ++)))
 
         ------- Frameworks --------------------------------------------------
         -- -framework-path should really be -F ...
@@ -3245,6 +3250,9 @@ setMainIs arg
   = upd $ \d -> d{ mainFunIs = Just arg }
   where
     (main_mod, main_fn) = splitLongestPrefix arg (== '.')
+
+addLdInputs :: Option -> DynFlags -> DynFlags
+addLdInputs p dflags = dflags{ldInputs = ldInputs dflags ++ [p]}
 
 -----------------------------------------------------------------------------
 -- Paths & Libraries
