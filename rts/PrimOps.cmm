@@ -2064,7 +2064,11 @@ stg_noDuplicatezh
 /* -----------------------------------------------------------------------------
    Parallel Haskell Primops
    -------------------------------------------------------------------------- */
-STRING(no_parallel_primops, "Compiled without parallelism support (thread %d)")
+
+// This is printed (to console) if the RTS does not support parallel primops.
+// NB: We need to use a (machine-word-sized) dummy argument to avoid llvm
+// trouble when compiling the debug version (see use of debugBelch above)
+STRING(no_parallel_primops, "Program compiled without parallelism support")
 
 /* for testing: duplicate a heap graph by packing/unpacking it */
 stg_duplicatezh
@@ -2083,8 +2087,7 @@ stg_duplicatezh
 			 MyCapability() "ptr") [];
 #else
   // system does not support parallel primops, complain and crash the thread
-  foreign "C" debugBelch(no_parallel_primops,
-			 StgTSO_id(CurrentTSO))[R1];
+  foreign "C" debugBelch(no_parallel_primops, original) [R1];
   R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
 #endif
   RET_P(copy);
@@ -2129,8 +2132,7 @@ stg_serializzezh
 #else
   // serialisation in the non-parallel system not supported (for now)
   // complain and crash the thread
-  foreign "C" debugBelch(no_parallel_primops,
-			 StgTSO_id(CurrentTSO))[R1];
+  foreign "C" debugBelch(no_parallel_primops, original)[R1];
   R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
 #endif
 
@@ -2156,8 +2158,7 @@ stg_deserializzezh
     UnpackGraphWrapper(buff "ptr", MyCapability() "ptr") [R1];
 #else
   // system does not support packing, complain and crash the thread
-  foreign "C" debugBelch(no_parallel_primops,
-			 StgTSO_id(CurrentTSO))[R1];
+  foreign "C" debugBelch(no_parallel_primops, buff) [R1];
   R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
 #endif
 
@@ -2185,7 +2186,7 @@ stg_expectDatazh
   (id)   = foreign "C" addInport(proc, retBH "ptr") [];
 #else
   // system does not support parallel primops, complain and crash the thread
-  foreign "C" debugBelch(no_parallel_primops, StgTSO_id(CurrentTSO)) [];
+  foreign "C" debugBelch(no_parallel_primops, retBH) [];
   R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
 #endif
   RET_NNP(id, proc, retBH); 
@@ -2229,7 +2230,7 @@ stg_sendDatazh
   // ( 0=blocked, -1=send failed, otherwise successfully packed/sent away )
 #else
   // system does not support parallel primops, complain and crash the thread
-  foreign "C" debugBelch(no_parallel_primops, StgTSO_id(CurrentTSO)) [R1,R2];
+  foreign "C" debugBelch(no_parallel_primops, graphroot) [R1,R2];
   R1 = CurrentTSO; R2=NULL; jump stg_killThreadzh [R1,R2];
   success = 1;
 #endif
@@ -2277,7 +2278,6 @@ stg_labelProcesszh
   label = R1;
 
   /* later: call a tracing function to emit an event */
-  foreign "C" debugBelch(label_process_string, label);
 
   jump %ENTRY_CODE(Sp(0)); /* no return */
 
