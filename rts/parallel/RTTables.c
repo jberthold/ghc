@@ -487,21 +487,24 @@ StgTSO* findTSO(StgWord processId, StgWord id) {
 
   if (p == NULL ) {
     IF_PAR_DEBUG(procs,
-		 debugBelch("findTSO %d: Unknown process %d.\n", 
+		 debugBelch("findTSO %" FMT_Word 
+                            ": Unknown process %" FMT_Word ".\n", 
 			    id, processId));
     return NULL;
   }
 
   IF_PAR_DEBUG(procs, 
-      debugBelch("Searching thread %d in process %d (%d threads).\n", 
+      debugBelch("Searching thread %" FMT_Word 
+                 " in process %" FMT_Word " (%d threads).\n", 
 		 id, processId, p->tsos);
       printAllThreads());
 
   proc = (StgWord) lookupHashTable(threadproctable, id);
   if (processId != proc) {
     IF_PAR_DEBUG(procs,
-		 debugBelch("findTSO: wrong process ID %d. "
-			    "Thread %d claims it belongs to process %d.\n",
+		 debugBelch("findTSO: wrong process ID %" FMT_Word ". Thread %"
+                            FMT_Word " claims it belongs to process %" 
+                            FMT_Word ".\n",
 			    processId, id, proc));
     return NULL;
   }
@@ -661,7 +664,8 @@ void updateInports(ProcessData *p) {
  
       if (!isNoPort(temp->sender)) { // known sender?
 	IF_PAR_DEBUG(ports,
-		     debugBelch("sending terminate to sender (%d,%d,%d)\n",
+		     debugBelch("sending terminate to sender (%d,%"
+                                FMT_Word ", %" FMT_Word ")\n",
 				temp->sender.machine, 
 				temp->sender.process,
 				temp->sender.id));
