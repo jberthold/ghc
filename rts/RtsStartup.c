@@ -324,6 +324,8 @@ hs_add_root(void (*init_root)(void) STG_UNUSED)
 static void
 hs_exit_(rtsBool wait_foreign)
 {
+    nat g;
+
     if (hs_init_count <= 0) {
 	errorBelch("warning: too many hs_exit()s");
 	return;
@@ -354,7 +356,9 @@ hs_exit_(rtsBool wait_foreign)
     exitScheduler(wait_foreign);
 
     /* run C finalizers for all active weak pointers */
-    runAllCFinalizers(weak_ptr_list);
+    for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
+        runAllCFinalizers(generations[g].weak_ptr_list);
+    }
 
 #if defined(RTS_USER_SIGNALS)
     if (RtsFlags.MiscFlags.install_signal_handlers) {
