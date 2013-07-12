@@ -169,7 +169,7 @@ compileOne' m_tc_result mHscMessage
    case e of
        Left iface ->
            do details <- genModDetails hsc_env iface
-              MASSERT (isJust maybe_old_linkable)
+              MASSERT(isJust maybe_old_linkable)
               return (HomeModInfo{ hm_details  = details,
                                    hm_iface    = iface,
                                    hm_linkable = maybe_old_linkable })
@@ -1140,10 +1140,10 @@ runPhase (RealPhase cc_phase) input_fn dflags
                 -- very weakly typed, being derived from C--.
                 ["-fno-strict-aliasing"]
 
-        let gcc_lang_opt | cc_phase `eqPhase` Ccpp  = "c++"
-                         | cc_phase `eqPhase` Cobjc = "objective-c"
+        let gcc_lang_opt | cc_phase `eqPhase` Ccpp    = "c++"
+                         | cc_phase `eqPhase` Cobjc   = "objective-c"
                          | cc_phase `eqPhase` Cobjcpp = "objective-c++"
-                         | otherwise                = "c"
+                         | otherwise                  = "c"
         liftIO $ SysTools.runCc dflags (
                 -- force the C compiler to interpret this file as C when
                 -- compiling .hc files, by adding the -x c option.
@@ -1378,7 +1378,7 @@ runPhase (RealPhase LlvmOpt) input_fn dflags
         -- passes only, so if the user is passing us extra options we assume
         -- they know what they are doing and don't get in the way.
         optFlag  = if null (getOpts dflags opt_lo)
-                       then [SysTools.Option (llvmOpts !! opt_lvl)]
+                       then map SysTools.Option $ words (llvmOpts !! opt_lvl)
                        else []
         tbaa | ver < 29                 = "" -- no tbaa in 2.8 and earlier
              | gopt Opt_LlvmTBAA dflags = "--enable-tbaa=true"
@@ -1398,7 +1398,7 @@ runPhase (RealPhase LlvmOpt) input_fn dflags
   where 
         -- we always (unless -optlo specified) run Opt since we rely on it to
         -- fix up some pretty big deficiencies in the code we generate
-        llvmOpts = ["-mem2reg", "-O1", "-O2"]
+        llvmOpts = ["-mem2reg -globalopt", "-O1", "-O2"]
 
 -----------------------------------------------------------------------------
 -- LlvmLlc phase
@@ -1665,7 +1665,17 @@ mkNoteObjsToLinkIntoBinary dflags dep_packages = do
                                    text elfSectionNote,
                                    text "\n",
 
-          text "\t.ascii \"", info', text "\"\n" ]
+          text "\t.ascii \"", info', text "\"\n",
+
+          -- ALL generated assembly must have this section to disable
+          -- executable stacks.  See also
+          -- compiler/nativeGen/AsmCodeGen.lhs for another instance
+          -- where we need to do this.
+          (if platformHasGnuNonexecStack (targetPlatform dflags)
+           then text ".section .note.GNU-stack,\"\",@progbits\n"
+           else empty)
+
+           ]
           where
             info' = text $ escape info
 
@@ -2194,8 +2204,12 @@ doCpp dflags raw input_fn output_fn = do
                     ++ map SysTools.Option backend_defs
                     ++ map SysTools.Option hscpp_opts
                     ++ map SysTools.Option sse_defs
+        -- Set the language mode to assembler-with-cpp when preprocessing. This
+        -- alleviates some of the C99 macro rules relating to whitespace and the hash
+        -- operator, which we tend to abuse. Clang in particular is not very happy
+        -- about this.
                     ++ [ SysTools.Option     "-x"
-                       , SysTools.Option     "c"
+                       , SysTools.Option     "assembler-with-cpp"
                        , SysTools.Option     input_fn
         -- We hackily use Option instead of FileOption here, so that the file
         -- name is not back-slashed on Windows.  cpp is capable of

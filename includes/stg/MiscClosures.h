@@ -98,6 +98,7 @@ RTS_FUN(stg_BCO);
 RTS_ENTRY(stg_EVACUATED);
 RTS_ENTRY(stg_WEAK);
 RTS_ENTRY(stg_DEAD_WEAK);
+RTS_ENTRY(stg_C_FINALIZER_LIST);
 RTS_ENTRY(stg_STABLE_NAME);
 RTS_ENTRY(stg_MVAR_CLEAN);
 RTS_ENTRY(stg_MVAR_DIRTY);
@@ -292,7 +293,9 @@ RTS_FUN_DECL(stg_block_noregs);
 RTS_FUN_DECL(stg_block_blackhole);
 RTS_FUN_DECL(stg_block_blackhole_finally);
 RTS_FUN_DECL(stg_block_takemvar);
+RTS_FUN_DECL(stg_block_atomicreadmvar);
 RTS_RET(stg_block_takemvar);
+RTS_RET(stg_block_atomicreadmvar);
 RTS_FUN_DECL(stg_block_putmvar);
 RTS_RET(stg_block_putmvar);
 #ifdef mingw32_HOST_OS
@@ -379,8 +382,10 @@ RTS_FUN_DECL(stg_isEmptyMVarzh);
 RTS_FUN_DECL(stg_newMVarzh);
 RTS_FUN_DECL(stg_takeMVarzh);
 RTS_FUN_DECL(stg_putMVarzh);
+RTS_FUN_DECL(stg_atomicReadMVarzh);
 RTS_FUN_DECL(stg_tryTakeMVarzh);
 RTS_FUN_DECL(stg_tryPutMVarzh);
+RTS_FUN_DECL(stg_tryAtomicReadMVarzh);
 
 RTS_FUN_DECL(stg_waitReadzh);
 RTS_FUN_DECL(stg_waitWritezh);
@@ -496,6 +501,9 @@ extern StgWord      RTS_VAR(CCS_LIST);         /* registered CCS list */
 extern StgWord      CCS_SYSTEM[];
 extern unsigned int RTS_VAR(CC_ID);            /* global ids */
 extern unsigned int RTS_VAR(CCS_ID);
+
+// Capability.c
+extern unsigned int n_capabilities;
 
 #endif
 

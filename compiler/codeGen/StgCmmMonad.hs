@@ -76,7 +76,6 @@ import Outputable
 import Control.Monad
 import Data.List
 import Prelude hiding( sequence, succ )
-import qualified Prelude( sequence )
 
 infixr 9 `thenC`        -- Right-associative!
 infixr 9 `thenFC`
@@ -447,8 +446,10 @@ newUniqSupply = do
 
 newUnique :: FCode Unique
 newUnique = do
-        us <- newUniqSupply
-        return (uniqFromSupply us)
+        state <- getState
+        let (u,us') = takeUniqFromSupply (cgs_uniqs state)
+        setState $ state { cgs_uniqs = us' }
+        return u
 
 ------------------
 getInfoDown :: FCode CgInfoDownwards
