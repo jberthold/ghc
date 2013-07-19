@@ -363,6 +363,15 @@ primop   PopCnt64Op   "popCnt64#"   GenPrimOp   WORD64 -> Word#
 primop   PopCntOp   "popCnt#"   Monadic   Word# -> Word#
     {Count the number of set bits in a word.}
 
+primop   BSwap16Op   "byteSwap16#"   Monadic   Word# -> Word#
+    {Swap bytes in the lower 16 bits of a word. The higher bytes are undefined. }
+primop   BSwap32Op   "byteSwap32#"   Monadic   Word# -> Word#
+    {Swap bytes in the lower 32 bits of a word. The higher bytes are undefined. }
+primop   BSwap64Op   "byteSwap64#"   Monadic   WORD64 -> WORD64
+    {Swap bytes in a 64 bits of a word.}
+primop   BSwapOp     "byteSwap#"     Monadic   Word# -> Word#
+    {Swap bytes in a word.}
+
 ------------------------------------------------------------------------
 section "Narrowings" 
 	{Explicit narrowing of native-sized ints or words.}
@@ -1717,7 +1726,7 @@ primop  TryPutMVarOp "tryPutMVar#" GenPrimOp
    out_of_line      = True
    has_side_effects = True
 
-primop  AtomicReadMVarOp "atomicReadMVar#" GenPrimOp
+primop  ReadMVarOp "readMVar#" GenPrimOp
    MVar# s a -> State# s -> (# State# s, a #)
    {If {\tt MVar\#} is empty, block until it becomes full.
    Then read its contents without modifying the MVar, without possibility
@@ -1726,7 +1735,7 @@ primop  AtomicReadMVarOp "atomicReadMVar#" GenPrimOp
    out_of_line      = True
    has_side_effects = True
 
-primop  TryAtomicReadMVarOp "tryAtomicReadMVar#" GenPrimOp
+primop  TryReadMVarOp "tryReadMVar#" GenPrimOp
    MVar# s a -> State# s -> (# State# s, Int#, a #)
    {If {\tt MVar\#} is empty, immediately return with integer 0 and value undefined.
    Otherwise, return with integer 1 and contents of {\tt MVar\#}.}
