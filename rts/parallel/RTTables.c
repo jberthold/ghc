@@ -88,6 +88,12 @@ void freePort(void* port) {
   stgFree(port); 
 }
 void freeRTT(void) {
+
+  // we might end up here due to a failure at startup.
+  // return immediately if nothing should be freed
+  if (threadproctable == NULL && threadrecvtable == NULL)
+    return;
+
   // NOPE: ASSERT(processtable == NULL);
 
   // there can still be processes around, childprocesses on the main
