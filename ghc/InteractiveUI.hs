@@ -312,6 +312,7 @@ defFullHelpText =
   "   :show breaks                show the active breakpoints\n" ++
   "   :show context               show the breakpoint context\n" ++
   "   :show imports               show the current imports\n" ++
+  "   :show linker                show current linker state\n" ++
   "   :show modules               show the currently loaded modules\n" ++
   "   :show packages              show the currently active package flags\n" ++
   "   :show language              show the currently active language flags\n" ++
@@ -608,6 +609,7 @@ fileLoop hdl = do
 
 mkPrompt :: GHCi String
 mkPrompt = do
+  st <- getGHCiState
   imports <- GHC.getContext
   resumes <- GHC.getResumeContext
 
@@ -638,12 +640,12 @@ mkPrompt = do
 
         deflt_prompt = dots <> context_bit <> modules_bit
 
+        f ('%':'l':xs) = ppr (1 + line_number st) <> f xs
         f ('%':'s':xs) = deflt_prompt <> f xs
         f ('%':'%':xs) = char '%' <> f xs
         f (x:xs) = char x <> f xs
         f [] = empty
 
-  st <- getGHCiState
   dflags <- getDynFlags
   return (showSDoc dflags (f (prompt st)))
 
@@ -779,7 +781,7 @@ checkInputForLayout stmt getStmt = do
      _other              -> do
        st1 <- lift getGHCiState
        let p = prompt st1
-       lift $ setGHCiState st1{ prompt = "%s| " }
+       lift $ setGHCiState st1{ prompt = prompt2 st1 }
        mb_stmt <- ghciHandle (\ex -> case fromException ex of
                             Just UserInterrupt -> return Nothing
                             _ -> case fromException ex of
@@ -2421,7 +2423,7 @@ completeShowOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) opts)
     where opts = ["args", "prog", "prompt", "prompt2", "editor", "stop",
                      "modules", "bindings", "linker", "breaks",
-                     "context", "packages", "language"]
+                     "context", "packages", "language", "imports"]
 
 completeShowiOptions = wrapCompleter flagWordBreakChars $ \w -> do
   return (filter (w `isPrefixOf`) ["language"])
