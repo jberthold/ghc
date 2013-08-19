@@ -23,6 +23,8 @@ send data format is always PvmDataRaw, containing longs
 #include "RtsUtils.h" // utilities for error msg. etc.
 #include "PEOpCodes.h" // message codes only
 
+#warning CHECK THE PVM SOLUTION FOR PORTABILITY! (LINUXes/MAC)
+#include <string.h> // for basename() function
 
 // pvm-specific error control:
 #define checkComms(c,s)		do {                  \
@@ -37,6 +39,43 @@ send data format is always PvmDataRaw, containing longs
 #define ANY_TASK (-1)
 #define ANY_CODE (-1)
 
+// this is picked up from pvm3.h (version 3.4.6, but assumed stable API)
+// we need to make all constants positive, though... :-)
+char* pvmError[] = {
+  [PvmOk] = "PvmOk", /* Success */
+  [-PvmBadParam] = "PvmBadParam",       /* Bad parameter */
+  [-PvmMismatch] = "PvmMismatch",       /* Parameter mismatch */
+  [-PvmOverflow] = "PvmOverflow", /* Value too large */
+  [-PvmNoData] = "PvmNoData", /* End of buffer */
+  [-PvmNoHost] = "PvmNoHost", /* No such host */
+  [-PvmNoFile] = "PvmNoFile", /* No such file */
+  [-PvmDenied] = "PvmDenied", /* Permission denied */
+  [-PvmNoMem] = "PvmNoMem", /* Malloc failed */
+  [-PvmBadMsg] = "PvmBadMsg", /* Can't decode message */
+  [-PvmSysErr] = "PvmSysErr", /* Can't contact local daemon */
+  [-PvmNoBuf] = "PvmNoBuf", /* No current buffer */
+  [-PvmNoSuchBuf] = "PvmNoSuchBuf", /* No such buffer */
+  [-PvmNullGroup] = "PvmNullGroup", /* Null group name */
+  [-PvmDupGroup] = "PvmDupGroup", /* Already in group */
+  [-PvmNoGroup] = "PvmNoGroup", /* No such group */
+  [-PvmNotInGroup] = "PvmNotInGroup", /* Not in group */
+  [-PvmNoInst] = "PvmNoInst", /* No such instance */
+  [-PvmHostFail] = "PvmHostFail", /* Host failed */
+  [-PvmNoParent] = "PvmNoParent", /* No parent task */
+  [-PvmNotImpl] = "PvmNotImpl", /* Not implemented */
+  [-PvmDSysErr] = "PvmDSysErr", /* Pvmd system error */
+  [-PvmBadVersion] = "PvmBadVersion", /* Version mismatch */
+  [-PvmOutOfRes] = "PvmOutOfRes", /* Out of resources */
+  [-PvmDupHost] = "PvmDupHost", /* Duplicate host */
+  [-PvmCantStart] = "PvmCantStart", /* Can't start pvmd */
+  [-PvmAlready] = "PvmAlready", /* Already in progress */
+  [-PvmNoTask] = "PvmNoTask", /* No such task */
+  [-PvmNotFound] = "PvmNotFound", /* Not Found */
+  [-PvmExists] = "PvmExists", /* Already exists */
+  [-PvmHostrNMstr] = "PvmHostrNMstr", /* Hoster run on non-master host */
+  [-PvmParentNotSet] = "PvmParentNotSet", /* Spawning parent set PvmNoSpawnParent */
+  [-PvmIPLoopback] = "PvmIPLoopback" /* Master Host's IP is Loopback */
+};
 
 // Global conditions defined here.
 // main thread (PE 1 in logical numbering)
@@ -190,7 +229,7 @@ rtsBool MP_start(int* argc, char* argv[]) {
 
   if (pvmParent == PvmNoParent) {
 // code for the main node:
-    char *progname;
+    char *progname, *tmp;
     int nArch, nHost;
     struct pvmhostinfo *hostp; 
     int taskTag = PvmTaskDefault;
@@ -235,14 +274,16 @@ rtsBool MP_start(int* argc, char* argv[]) {
     }
 
     if (nPEs > 1) {
-      /*   if needed, we spawn the program name set in ENV("PE"), 
+      /*   if needed, we spawn the program (the same name as ourselves),
 	   assuming it is in scope in $PVM_ROOT/bin/$PVM_ARCH.
 	   This variable has been set by the generated startup script. */
       int i, myHost;
       nat tasks;
 
-      // determine program name
-      progname = argv[0];
+      // determine program name. This dance with tmp is necessary
+      // since basename likes to modify its argument.
+      tmp = strdup(argv[0]);
+      progname = basename(tmp);
 
       IF_PAR_DEBUG(mpcomm, 
 		   debugBelch("Spawning pvm-program %s\n",progname));
@@ -258,32 +299,44 @@ rtsBool MP_start(int* argc, char* argv[]) {
 	  tasks++;
 	}
       }
-      // rest anywhere pvm likes: !!Here should be an error (use of argv in pvm_spawn, use &nPEs instead)
-      if (tasks < nPEs) 
+      // rest anywhere pvm likes. If this fails, error code is in
+      // allPEs array (at offset)
+      if (tasks < nPEs) {
 	tasks += pvm_spawn(progname, &(argv[1]), taskTag, 
-			   (char*)NULL, nPEs-tasks, allPEs+tasks);
+			       (char*)NULL, nPEs-tasks, allPEs+tasks);
+      }
+      i = nPEs - tasks;
+      while (i > 0) {
+	// some spawns went wrong, output error codes from allPEs array
+	debugBelch("PVM could not start node %d: %s (%d)\n",
+		   nPEs-i+1, pvmError[-allPEs[nPEs-i]], allPEs[nPEs-i]);
+	i--;
+      }
 
       IF_PAR_DEBUG(mpcomm, 
 		   debugBelch("%d tasks in total\n", tasks));
 
-
       // possibly correct nPEs value:
       nPEs=tasks;
       
-      // broadcast returned addresses
-      pvm_initsend(PvmDataRaw);
-      pvm_pkint((int*)&nPEs, 1, 1);
-      IF_PAR_DEBUG(mpcomm, 
-		   debugBelch("Packing allPEs array\n"));
-      pvm_pkint(allPEs, nPEs, 1);
-      checkComms(pvm_mcast(allPEs+1, nPEs-1,PP_PETIDS),
-		 "PVM -- Multicast of PE mapping failed");
-      IF_PAR_DEBUG(mpcomm, 
-		   debugBelch("Broadcasted addresses: \n"));
+      // we might end up having started nothing...
+      if (nPEs > 1) {
 
-      // register for receiving failure notice (by PP_FAIL) from children
-      checkComms(pvm_notify(PvmTaskExit, PP_FAIL, nPEs-1, allPEs+1),
-      		 "pvm_notify error");
+	// broadcast returned addresses
+	pvm_initsend(PvmDataRaw);
+	pvm_pkint((int*)&nPEs, 1, 1);
+	IF_PAR_DEBUG(mpcomm, 
+		     debugBelch("Packing allPEs array\n"));
+	pvm_pkint(allPEs, nPEs, 1);
+	checkComms(pvm_mcast(allPEs+1, nPEs-1,PP_PETIDS),
+		   "PVM -- Multicast of PE mapping failed");
+	IF_PAR_DEBUG(mpcomm, 
+		     debugBelch("Broadcasted addresses: \n"));
+	
+	// register for receiving failure notice (by PP_FAIL) from children
+	checkComms(pvm_notify(PvmTaskExit, PP_FAIL, nPEs-1, allPEs+1),
+		   "pvm_notify error");
+      }
     }
 
     // set back debug option (will be set again while digesting RTS flags)
