@@ -84,7 +84,7 @@ static void DonePacking(void);
 
 // little helpers: 
 STATIC_INLINE void 	RegisterOffset(StgClosure *closure);
-STATIC_INLINE nat  	OffsetFor(StgClosure *closure);
+STATIC_INLINE StgWord  	OffsetFor(StgClosure *closure);
 STATIC_INLINE rtsBool   AlreadyPacked(int offset);
 STATIC_INLINE StgInfoTable* 
     get_closure_info(StgClosure* node, nat *size, nat *ptrs, 
@@ -138,7 +138,7 @@ StgClosure* DuplicateNearbyGraph(StgClosure* graphroot, StgTSO* tso,
 static void PackClosure (StgClosure *closure);
 // packing static addresses and offsets
 STATIC_INLINE void PackPLC(StgPtr addr);
-STATIC_INLINE void PackOffset(int offset);
+STATIC_INLINE void PackOffset(StgWord offset);
 // the standard case: a heap-alloc'ed closure
 static void PackGeneric(StgClosure *closure);
 
@@ -249,6 +249,7 @@ static char fingerPrintStr[MAX_FINGER_PRINT_LEN];
 static void GraphFingerPrint(StgClosure *graphroot);
 static HashTable *tmpClosureTable;  // used in GraphFingerPrint and PrintGraph
 
+void checkPacket(rtsPackBuffer *packBuffer);
 #endif
 
 // functionality:
@@ -352,14 +353,14 @@ RegisterOffset(StgClosure *closure){
 }
 
 /* OffsetFor returns an offset for a closure which is already being packed. */
-STATIC_INLINE nat
+STATIC_INLINE StgWord
 OffsetFor(StgClosure *closure) {
   // avoid typecast warnings...
   void* offset;
   offset = (lookupHashTable(offsetTable, 
 			    // remove tag for offset
 			    UNTAG_CAST(StgWord, closure)));
-  return (nat) offset;
+  return (StgWord) offset;
 }
 
 /* AlreadyPacked determines whether the closure's already being packed.
@@ -386,10 +387,19 @@ STATIC_INLINE StgInfoTable*
   /* We remove the potential tag before doing anything. */
   node = UNTAG_CLOSURE(node);
 
-  info = get_itbl(node);
+  // note that we might find a _tagged_ info pointer here!  (in case
+  // we are looking at a packet slot instead of the heap) Therefore,
+  // we do not use ClosureMacros:get_itbl, but rather a copy of it
+  // which untags the info pointer midway.
+
+  if (GET_CLOSURE_TAG((StgClosure*) node->header.info)) {
+    IF_PAR_DEBUG(packet, debugBelch("get_closure_info: tagged info ptr %p",
+				    node->header.info));
+  }
+  info = INFO_PTR_TO_STRUCT((StgInfoTable*) UNTAG_CLOSURE((StgClosure*) node->header.info));
 
   // from Storage.h => included it here! (not part of Rts.h!)
-  *size = closure_sizeW(node);
+  *size = closure_sizeW_(node, info);
 
   /* Caution: layout field is union, may contain different information
      according to closure type! see InfoTables.h:
@@ -409,13 +419,15 @@ STATIC_INLINE StgInfoTable*
   case PAP:
     *vhs = 1; /* arity/args */
     *ptrs = 1;
-    *nonptrs = 0; /* wrong, but not used in the unpacking code! */
+    /* wrong (some are ptrs), but not used in the unpacking code! */
+    *nonptrs = *size - 2 - sizeofW(StgHeader);
     break;
   case AP_STACK:
   case AP:
     *vhs = sizeofW(StgThunkHeader) - sizeofW(StgHeader) + 1;
     *ptrs = 1;
-    *nonptrs = 0; /* wrong, but not used in the unpacking code! */
+    /* wrong (some are ptrs), but not used in the unpacking code! */
+    *nonptrs = *size - *vhs - 1;
     break;
 
     /* For Word arrays, no pointers need to be filled in. 
@@ -427,14 +439,17 @@ STATIC_INLINE StgInfoTable*
     *nonptrs = (((StgArrWords*) node)->bytes)/ sizeof(StgWord);
     break;
 
-    /* For Arrays of pointers, we need to fill in all the pointers */
+    /* For Arrays of pointers, we need to fill in all the pointers and
+       allocate additional space for the card table at the end.
+     */
   case MUT_ARR_PTRS_CLEAN:
   case MUT_ARR_PTRS_DIRTY:
   case MUT_ARR_PTRS_FROZEN0:
   case MUT_ARR_PTRS_FROZEN:
     *vhs = 2;
     *ptrs = ((StgMutArrPtrs*) node)->ptrs;
-    *nonptrs = 0; // could indicate card table... (?)
+    *nonptrs = ((StgMutArrPtrs*) node)->size - *ptrs; // count card table
+    // NB nonptrs field for array closures is only used in checkPacket
     break;
 
     /* we do not want to see these here (until thread migration) */
@@ -457,6 +472,8 @@ STATIC_INLINE StgInfoTable*
     *nonptrs = (nat) (info->layout.payload.nptrs);
     *vhs = *size - *ptrs - *nonptrs - sizeofW(StgHeader);
   }
+
+  ASSERT(*size == sizeofW(StgHeader) + *vhs + *ptrs + *nonptrs);
 
   return info;
 
@@ -730,7 +747,7 @@ STATIC_INLINE void PackPLC(StgPtr addr) {
 }
 
 // packing an offset (repeatedly packed same closure)
-STATIC_INLINE void PackOffset(int offset) {
+STATIC_INLINE void PackOffset(StgWord offset) {
   Pack(OFFSET);			/* weight */
   //  Pack(0L);			/* pe */
   Pack(offset);		        /* slot/offset */
@@ -815,7 +832,7 @@ rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso,
 		      (long)globalPackBuffer->size, thunks_packed, 
 		      (long)globalPackBuffer->unpacked_size));;
 
-  // TODO: IF_DEBUG(sanity, checkPacket(...));
+  IF_DEBUG(sanity, checkPacket(globalPackBuffer));
 
   return (globalPackBuffer);
 }
@@ -840,7 +857,7 @@ STATIC_INLINE StgClosure* UNWIND_IND(StgClosure *closure)
 static void PackClosure(StgClosure* closure) {
 
   StgInfoTable *info;
-  nat offset;
+  StgWord offset;
 
   // Ensure we can always pack this closure as an offset/PLC.
   RoomToPack(sizeofW(StgWord));
@@ -1513,12 +1530,11 @@ UnpackGraph(rtsPackBuffer *packBuffer,
   */
   nat currentOffset;
 
+  IF_DEBUG(sanity, // do a sanity check on the incoming packet
+  	   checkPacket(packBuffer));
+
   /* Initialisation */
   InitPacking(rtsTrue);      // same as in PackNearbyGraph
-
-  /*  IF_DEBUG(sanity, // do a sanity check on the incoming packet
-  	   checkPacket(packBuffer));
-  */
 
   graphroot = (StgClosure *)NULL;
 
@@ -2653,6 +2669,146 @@ static void GraphFingerPrint_(StgClosure *p) {
   }
  
 }    
+
+/*  Doing a sanity check on a packet.
+    This does a full iteration over the packet, as in UnpackGraph.
+*/
+void checkPacket(rtsPackBuffer *packBuffer) {
+  StgInt packsize, openptrs;
+  nat clsize, ptrs, nonptrs, vhs;
+  StgWord *bufptr;
+  HashTable *offsets;
+
+  IF_PAR_DEBUG(pack, debugBelch("checking packet %" FMT_Word " (@ %p) ...", 
+				packBuffer->id, packBuffer));
+
+  offsets = allocHashTable(); // used to identify valid offsets
+  packsize = 0; // compared against value stored in packet
+  openptrs = 1; // counting pointers (but no need for a queue to fill them in)
+                // initially, one pointer is open (graphroot)
+  bufptr = packBuffer->buffer;
+
+  do {
+    StgWord tag;
+    StgInfoTable *ip;
+
+    IF_DEBUG(sanity, ASSERT(*bufptr != END_OF_BUFFER_MARKER));
+
+    // unpackclosure essentials are mimicked here
+    tag = *bufptr; // marker in buffer (PLC | OFFSET | CLOSURE)
+
+    if (tag == PLC) {
+      bufptr++; // skip marker
+      // check that this looks like a PLC (static data)
+      // which is however complicated when code and data mix... TODO
+
+      bufptr++; // move forward
+      packsize += 2;
+    } else if (tag == OFFSET) {
+      bufptr++; // skip marker
+      if (!lookupHashTable(offsets, *bufptr)) { //
+	barf("invalid offset %" FMT_Word " in packet %" FMT_Word 
+	     " at position %p", *bufptr, packBuffer->id, bufptr);
+      }
+      bufptr++; // move forward
+      packsize += 2;
+    } else if (tag == CLOSURE) {
+      bufptr++; // skip marker
+
+      // untag the info pointer (first word of the closure)
+      ip = UNTAG_CAST(StgInfoTable*, *bufptr);
+
+      // check info ptr
+      if (!LOOKS_LIKE_INFO_PTR((StgWord) ip)) {
+	barf("Non-closure found in packet %" FMT_Word 
+	     " at position %p (value %p)\n", 
+	     packBuffer->id, bufptr, ip);
+      }
+
+      // analogous to unpacking, we pretend the buffer is a heap closure
+      ip = get_closure_info((StgClosure*) bufptr, &clsize, 
+			    &ptrs, &nonptrs, &vhs);
+
+      // IF_PAR_DEBUG(pack,debugBelch("size (%ld + %d + %d +%d, = %d)", 
+      // 		      HEADERSIZE, vhs, ptrs, nonptrs, clsize));
+  
+      // This is rather a test for get_closure_info...but used here
+      if (clsize != (nat) HEADERSIZE + vhs + ptrs + nonptrs) {
+	barf("size mismatch in packed closure at %p (packet %" FMT_Word "):"
+	     "(%d + %d + %d +%d != %d)", bufptr, packBuffer->id, 
+	     HEADERSIZE, vhs, ptrs, nonptrs, clsize);
+      }
+
+      // do a plausibility check on the values. Assume we never see
+      // large numbers of ptrs and non-ptrs simultaneously
+      if (ptrs > 99 && nonptrs > 99) {
+	barf("Found weird infoptr %p in packet %" FMT_Word 
+	     " (position %p): vhs %d, %d ptrs, %d non-ptrs, size %d",
+	     ip, packBuffer->id, bufptr, vhs, ptrs, nonptrs, clsize);
+      }
+
+      // Register the pack location as a valid offset. Offsets are
+      // one-based, lucky we incremented bufptr before.
+      insertHashTable(offsets, 
+		      (StgWord) (bufptr - (packBuffer->buffer)),
+		      bufptr);  // No need to store any value
+
+      switch (ip->type) {
+	// some closures need special treatment, as their size in the
+	// packet is unobvious
+
+      case PAP:
+	// all arg.s packed as tag + value, 2 words per arg.
+	bufptr += sizeofW(StgHeader) + 1 + 2*((StgPAP*) bufptr)->n_args;
+	packsize += 1 + sizeofW(StgHeader) + 1 + 2*((StgPAP*) bufptr)->n_args;
+	break;
+      case AP: // same, but thunk header
+	bufptr += sizeofW(StgThunkHeader) + 1 + 2*((StgAP*) bufptr)->n_args;
+	packsize += 1 + sizeofW(StgThunkHeader) + 1 + 2*((StgAP*) bufptr)->n_args;
+	break;
+      case MUT_ARR_PTRS_CLEAN:
+      case MUT_ARR_PTRS_DIRTY:
+      case MUT_ARR_PTRS_FROZEN0:
+      case MUT_ARR_PTRS_FROZEN:
+	// card table is counted as non-pointer, but not in packet
+	bufptr += sizeofW(StgHeader) + vhs;
+	packsize += 1 + sizeofW(StgHeader) + vhs;
+	break;
+      default: // standard (ptrs. first) layout
+	bufptr += HEADERSIZE + vhs + nonptrs;
+	packsize += (StgInt) 1 + HEADERSIZE + vhs + nonptrs;
+      }
+
+      openptrs += (StgInt) ptrs; // closure needs some pointers to be filled in
+    } else {
+      barf("found invalid tag %x in packet", *bufptr);
+    }
+
+    openptrs--; // one thing was unpacked
+
+  } while (openptrs != 0 && packsize < packBuffer->size);
+
+  IF_PAR_DEBUG(pack,
+	       debugBelch(" traversed %" FMT_Word " words, %"
+			  FMT_Word " open pointers ", packsize, openptrs));
+
+  if (openptrs != 0) {
+    barf("%d open pointers at end of packet %" FMT_Word, 
+	 openptrs, packBuffer->id);
+  }
+
+  IF_DEBUG(sanity, ASSERT(*(bufptr++) == END_OF_BUFFER_MARKER && packsize++));
+
+  if (packsize != packBuffer->size) {
+    barf("surplus data (%" FMT_Word " words) at end of packet %" FMT_Word,
+	 packBuffer->size - packsize, packBuffer->id);
+  }
+
+  freeHashTable(offsets, NULL);
+  IF_PAR_DEBUG(pack, debugBelch("packet %" FMT_Word " OK\n",
+				packBuffer->id));
+
+}
 
 /* END OF DEBUG */
 #endif 
