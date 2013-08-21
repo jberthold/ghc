@@ -35,11 +35,6 @@ import ghczmprim_GHCziTypes_False_closure;
 import sm_mutex;
 #endif
 
-#ifdef PARALLEL_RTS
-import nPEs;
-import thisPE;
-#endif
-
 /*-----------------------------------------------------------------------------
   Array Primitives
 
