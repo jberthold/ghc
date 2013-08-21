@@ -59,12 +59,23 @@
 
 // forward declarations:
 
-/*
-  Tagging macros will work for any word-sized type, not only
+/* Tagging macros will work for any word-sized type, not only
   closures. In the packet, we tag info pointers instead of
   closure pointers.
+  See "pointer tagging" before "PackNearbyGraph" routine for use.
 */
 #define UNTAG_CAST(type,p) ((type) UNTAG_CLOSURE((StgClosure*) (p)))
+
+/* Info pointer <--> Info offset (also for PLC pointers)
+   See "relocatable binaries" before "PackNearbyGraph" routine for use.
+*/
+#define BASE_SYM Main_main_info // base symbol for offset
+extern const StgInfoTable BASE_SYM[];
+
+// use this one on info pointers before they go into a packet
+#define P_OFFSET(ip) ((StgWord) ((StgWord) (ip)) - (StgWord) BASE_SYM)
+// use this one on info offsets taken from packets
+#define P_POINTER(val) ((StgWord)(val) + (StgWord) BASE_SYM)
 
 //   ADT of closure queues
 STATIC_INLINE void    	  InitClosureQueue(void);
@@ -87,8 +98,8 @@ STATIC_INLINE void 	RegisterOffset(StgClosure *closure);
 STATIC_INLINE StgWord  	OffsetFor(StgClosure *closure);
 STATIC_INLINE rtsBool   AlreadyPacked(int offset);
 STATIC_INLINE StgInfoTable* 
-    get_closure_info(StgClosure* node, nat *size, nat *ptrs, 
-		     nat *nonptrs, nat *vhs);
+    get_closure_info(StgClosure* node, StgInfoTable* info, 
+		     nat *size, nat *ptrs, nat *nonptrs, nat *vhs);
 
 // declared in Parallel.h
 // rtsBool IsBlackhole(StgClosure* closure);
@@ -376,29 +387,33 @@ AlreadyPacked(int offset) {
  * Perhaps find a different home for some of them? 
  * ----------------------------------------------------------- */
 
-/*  get_closure_info: returns payload structure/name/... 
-    Only used here */
+/*  get_closure_info: returns payload structure for closures. 
+    Only used in here 
+    IN:  node   - ptr to the closure / into the packet
+         info   - (optional) info _table_ (not info ptr!) for closure
+	          to be computed from info offset by caller when in packet
+    OUT: size   - total size of closure in heap (for allocation)
+         ptrs   - number of pointers in payload
+	 nonptrs- number of non-pointers in payload
+	 vhs    - variable header size
+    RETURNS: info _table_ (pointer)
+*/
 STATIC_INLINE StgInfoTable*
-    get_closure_info(StgClosure* node, nat *size, nat *ptrs, 
-		     nat *nonptrs, nat *vhs)
+    get_closure_info(StgClosure* node, StgInfoTable* info, 
+		     nat *size, nat *ptrs, nat *nonptrs, nat *vhs)
 {
-  StgInfoTable *info;
-
   /* We remove the potential tag before doing anything. */
   node = UNTAG_CLOSURE(node);
 
-  // note that we might find a _tagged_ info pointer here!  (in case
-  // we are looking at a packet slot instead of the heap) Therefore,
-  // we do not use ClosureMacros:get_itbl, but rather a copy of it
-  // which untags the info pointer midway.
-
-  if (GET_CLOSURE_TAG((StgClosure*) node->header.info)) {
-    IF_PAR_DEBUG(packet, debugBelch("get_closure_info: tagged info ptr %p",
-				    node->header.info));
+  if (info == NULL) { // supposed to compute info table by ourselves
+    // this will go very wrong if we use an info _offset_ instead (if
+    // we are supposed to look at a packet slot instead of the heap)
+    // Which is the case if we find something tagged.
+    ASSERT(!GET_CLOSURE_TAG((StgClosure*) node->header.info));
+    // not tagged, OK
+    info = get_itbl(node);
   }
-  info = INFO_PTR_TO_STRUCT((StgInfoTable*) UNTAG_CLOSURE((StgClosure*) node->header.info));
-
-  // from Storage.h => included it here! (not part of Rts.h!)
+  // ClosureMacros.h. NB relies on variable header for PAP, AP, Arrays
   *size = closure_sizeW_(node, info);
 
   /* Caution: layout field is union, may contain different information
@@ -731,6 +746,22 @@ StgClosure* DeQueueClosure(void)
  *   pointers to a closure. The tags are restored right after
  *   unpacking, inside unpackClosure(). See comments there for details.
  * 
+ *  About relocatable binaries:
+ *   Packing relies on shipping pointers to info tables between
+ *   running RTS instances. When these addresses are unstable
+ *   (relocatable binaries), they need to be computed using a known
+ *   (and usually very low) address is subtracted from any info
+ *   pointer packed.
+ *
+ *   We use the terminology of an "info offset" as opposed to an "info
+ *   pointer".  (Furthermore there are proper "info tables", see
+ *   ClosureMacros.h for the difference ->TABLES_NEXT_TO_CODE ).
+ *
+ *   Info offsets are computed from the info pointer in the heap
+ *   closure's header when packing, tagged (see above) and put into
+ *   the packet. The receiver restores the info pointer and uses the
+ *   tag for pointers to the respective unpacked closure.
+ *
  *******************************************************************/
 
 // helper accessing the pack buffer
@@ -741,9 +772,9 @@ STATIC_INLINE void Pack(StgWord data) {
 
 // packing a static value
 STATIC_INLINE void PackPLC(StgPtr addr) {
-  Pack(PLC);			/* weight */
-  // pointer tag of addr still present, packed as-is
-  Pack((StgWord) addr);		/* address */
+  Pack(PLC);                     /* weight */
+  // pointer tag of addr still present, packed as-is (with offset)
+  Pack((StgWord) P_OFFSET(addr)); /* address */
 }
 
 // packing an offset (repeatedly packed same closure)
@@ -1128,7 +1159,7 @@ static void PackGeneric(StgClosure* closure) {
   closure = UNTAG_CLOSURE(closure);
 
   /* get info about basic layout of the closure */
-  get_closure_info(closure, &size, &ptrs, &nonptrs, &vhs);
+  get_closure_info(closure, NULL, &size, &ptrs, &nonptrs, &vhs);
 
   ASSERT(!IsBlackhole(closure));
 
@@ -1163,10 +1194,13 @@ static void PackGeneric(StgClosure* closure) {
         +-------------------------------------------------+
 	| FIXED HEADER | VARIABLE HEADER | PTRS | NON-PRS |
         +-------------------------------------------------+
+	
+	The first (and actually only, in the default system) word of
+	the header is the info pointer, tagging and offset apply.
   */
   /* pack fixed and variable header */
-  // store the tag inside the first word (==infopointer)
-  Pack((StgWord) (TAG_CLOSURE(tag, (StgClosure*) *((StgPtr) closure ))));
+  // First word (==infopointer) is tagged and offset using macros above
+    Pack((StgWord) (P_OFFSET(TAG_CLOSURE(tag, (StgClosure*) *((StgPtr) closure )))));
   // pack the rest of the header (variable header)
   for (i = 1; i < HEADERSIZE + vhs; ++i)
     Pack((StgWord)*(((StgPtr)closure)+i));
@@ -1281,9 +1315,10 @@ static void PackPAP(StgPAP *pap) {
    * PAP. Besides, both have one extra StgWord containing
    * (arity|n_args) resp. size. hsize got adjusted above, now pack
    * exactly this amount of StgWords.
-   * And store tag in first word of header (==infopointer)
+   * 
+   * Store tag in first word of header (==infopointer) and offset it.
    */
-  Pack((StgWord) (TAG_CLOSURE(tag, (StgClosure*) *((StgPtr) pap ))));
+  Pack((StgWord) (P_OFFSET(TAG_CLOSURE(tag, (StgClosure*) *((StgPtr) pap )))));
   for(i = 1; i < hsize; i++) { 
     Pack((StgWord) *(((StgWord*)pap)+i));
   }
@@ -1314,6 +1349,10 @@ static void PackPAP(StgPAP *pap) {
    * Unpacking a PAP is the counterpart, which
    * creates an extra indirection for every pointer on the stack and
    * puts the indirection on the stack.
+   *
+   * TODO we should just pack the bitmap instead of doing all this
+   * again when unpacking. TODO also handle large bitmap case (needs
+   * offset, as we will be packing another pointer).
    */
   switch(funInfo->f.fun_type) {
 
@@ -1460,8 +1499,9 @@ PackArray(StgClosure *closure) {
     Pack((StgWord) CLOSURE);  // marker for unglobalised closure
 
   /* Pack the header (2 words: info ptr and the number of bytes to follow) 
+     First word (info pointer) is tagged and offset
    */
-  Pack((StgWord) (TAG_CLOSURE(tag, (StgClosure*) *((StgPtr) closure ))));
+  Pack((StgWord) (P_OFFSET(TAG_CLOSURE(tag, (StgClosure*) *((StgPtr) closure )))));
   Pack((StgWord) ((StgArrWords *)closure)->bytes);
 
   if (info->type == ARR_WORDS) {
@@ -1766,7 +1806,7 @@ nat *pptrP, *pptrsP, *pvhsP;
     if (*parentP == NULL)
       break;
     else {
-      get_closure_info(*parentP, &size, pptrsP, &nonptrs, pvhsP);
+      get_closure_info(*parentP, NULL, &size, pptrsP, &nonptrs, pvhsP);
       *pptrP = 0;
     }
   }
@@ -1830,13 +1870,16 @@ UnpackClosure (StgWord **bufptrP, Capability* cap) {
 
     (*bufptrP)++; // skip marker
 
-    /* remove and store the tag added to the info pointer.
-       (*bufptrP) points to a packed closure, first word has been
-       tagged before packing, we read and remove the tag before
-       doing anything!
+    /* The first word of a closure is the info pointer. In contrast,
+       in the packet (where (*bufptrP) points to a packed closure),
+       the first word is an info _offset_, which additionally was
+       tagged before packing. We remove and store the tag added to the
+       info offset, and compute the untagged info table pointer from
+       the info offset.
+       The original value is overwritten inside the buffer.
     */
     tag = GET_CLOSURE_TAG((StgClosure*) **bufptrP);
-    **bufptrP = UNTAG_CAST(StgWord, **bufptrP);
+    **bufptrP = UNTAG_CAST(StgWord, P_POINTER(**bufptrP));
     IF_PAR_DEBUG(packet,
 		 debugBelch("pointer tagging: removed tag %d "
 			    "from info pointer %p in packet\n",
@@ -1860,7 +1903,8 @@ UnpackClosure (StgWord **bufptrP, Capability* cap) {
      * is organized the same way as they will be in the heap...at
      * least up through the end of the variable header.
      */
-    ip = get_closure_info((StgClosure *) *bufptrP, 
+
+    ip = get_closure_info((StgClosure *) *bufptrP, NULL,
 			  &size, &ptrs, &nonptrs, &vhs);
   
     switch (ip->type) {
@@ -2130,7 +2174,8 @@ UnpackPLC(StgWord **bufptrP)
 
   (*bufptrP)++; // skip marker
   // Not much to unpack; just a static local address
-  plc = (StgClosure*) **bufptrP;
+  // but need to correct the offset
+  plc = (StgClosure*) P_POINTER(**bufptrP);
   (*bufptrP)++; // skip address
   IF_PAR_DEBUG(packet,
 	       debugBelch("*<^^ Unpacked PLC at %p\n", plc)); 
@@ -2715,8 +2760,9 @@ void checkPacket(rtsPackBuffer *packBuffer) {
     } else if (tag == CLOSURE) {
       bufptr++; // skip marker
 
-      // untag the info pointer (first word of the closure)
-      ip = UNTAG_CAST(StgInfoTable*, *bufptr);
+      // untag info offset and compute info pointer (first word of the
+      // closure), then compute a proper info table
+      ip = UNTAG_CAST(StgInfoTable*,P_POINTER(*bufptr));
 
       // check info ptr
       if (!LOOKS_LIKE_INFO_PTR((StgWord) ip)) {
@@ -2726,8 +2772,8 @@ void checkPacket(rtsPackBuffer *packBuffer) {
       }
 
       // analogous to unpacking, we pretend the buffer is a heap closure
-      ip = get_closure_info((StgClosure*) bufptr, &clsize, 
-			    &ptrs, &nonptrs, &vhs);
+      ip = get_closure_info((StgClosure*) bufptr, INFO_PTR_TO_STRUCT(ip),
+			    &clsize, &ptrs, &nonptrs, &vhs);
 
       // IF_PAR_DEBUG(pack,debugBelch("size (%ld + %d + %d +%d, = %d)", 
       // 		      HEADERSIZE, vhs, ptrs, nonptrs, clsize));
