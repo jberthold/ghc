@@ -404,7 +404,8 @@ usage_text[] = {
 "     binary event log file instead.",
 # if defined(PARALLEL_RTS)
 "",
-"  -qD  DEBUG(parallel):",
+"  -qW       wait for debugger to attach (in all spawned processes)",
+"  -qD*  DEBUG (parallel), see below",
 # endif
 "",
 #endif /* DEBUG */
@@ -1717,7 +1718,7 @@ help_par_debug_options(nat n) {
 
   for (i=0; i<=MAX_PAR_DEBUG_OPTION; i++) 
     if ((n>>i)&1) 
-      debugBelch("%s", par_debug_opts_strs[i]);
+      errorBelch("%s", par_debug_opts_strs[i]);
 }
 
 #endif /* DEBUG */

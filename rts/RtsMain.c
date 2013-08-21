@@ -74,8 +74,10 @@ static void real_main(void)
       debugBelch("Process is ready for attaching debugger.\n"
 		 "%s %d (on host %s) and set RtsFlags.ParFlags.wait=rtsFalse\n"
 		 , progargv[0], getpid(), hostname);
-      while (RtsFlags.ParFlags.wait != 0)
+      while (RtsFlags.ParFlags.wait != 0) {
+	RtsFlags.ParFlags.wait--;
         sleep(1);
+      }
     }
 # endif
 
