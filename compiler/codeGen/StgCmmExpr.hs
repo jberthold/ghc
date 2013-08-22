@@ -106,7 +106,7 @@ cgLneBinds join_id (StgNonRec bndr rhs)
                 -- See Note [Saving the current cost centre]
         ; (info, fcode) <- cgLetNoEscapeRhs join_id local_cc bndr rhs
         ; fcode
-        ; addBindC (cg_id info) info }
+        ; addBindC info }
 
 cgLneBinds join_id (StgRec pairs)
   = do  { local_cc <- saveCurrentCostCentre
@@ -313,12 +313,19 @@ cgCase (StgOpApp (StgPrimOp op) args _) bndr (AlgAlt tycon) alts
 
 {-
 Note [case on bool]
-
+~~~~~~~~~~~~~~~~~~~
 This special case handles code like
 
   case a <# b of
     True ->
     False ->
+
+-->  case tagToEnum# (a <$# b) of
+        True -> .. ; False -> ...
+
+--> case (a <$# b) of r ->
+    case tagToEnum# r of
+        True -> .. ; False -> ...
 
 If we let the ordinary case code handle it, we'll get something like
 
@@ -622,29 +629,16 @@ cgConApp con stg_args
         ; emit =<< fcode_init
         ; emitReturn [idInfoToAmode idinfo] }
 
-
 cgIdApp :: Id -> [StgArg] -> FCode ReturnKind
 cgIdApp fun_id [] | isVoidId fun_id = emitReturn []
-cgIdApp fun_id args
-  = do  { fun_info <- getCgIdInfo fun_id
-        ; case maybeLetNoEscape fun_info of
-            Just (blk_id, lne_regs) -> cgLneJump blk_id lne_regs args
-            Nothing -> cgTailCall (cg_id fun_info) fun_info args }
-            -- NB. use (cg_id fun_info) instead of fun_id, because the former
-            -- may be externalised for -split-objs.
-            -- See StgCmm.maybeExternaliseId.
-
-cgLneJump :: BlockId -> [LocalReg] -> [StgArg] -> FCode ReturnKind
-cgLneJump blk_id lne_regs args  -- Join point; discard sequel
-  = do  { adjustHpBackwards -- always do this before a tail-call
-        ; cmm_args <- getNonVoidArgAmodes args
-        ; emitMultiAssign lne_regs cmm_args
-        ; emit (mkBranch blk_id)
-        ; return AssignedDirectly }
-
-cgTailCall :: Id -> CgIdInfo -> [StgArg] -> FCode ReturnKind
-cgTailCall fun_id fun_info args = do
-    dflags <- getDynFlags
+cgIdApp fun_id args = do
+    dflags   <- getDynFlags
+    fun_info <- getCgIdInfo fun_id
+    let fun_arg     = StgVarArg fun_id
+        fun_name    = idName            fun_id
+        fun         = idInfoToAmode     fun_info
+        lf_info     = cg_lf        fun_info
+        node_points dflags = nodeMustPointToIt dflags lf_info
     case (getCallMethod dflags fun_name (idCafInfo fun_id) lf_info (length args)) of
 
             -- A value in WHNF, so we can just return it.
@@ -665,15 +659,14 @@ cgTailCall fun_id fun_info args = do
                      then directCall NativeNodeCall   lbl arity (fun_arg:args)
                      else directCall NativeDirectCall lbl arity args }
 
-        JumpToIt {} -> panic "cgTailCall"       -- ???
-
-  where
-    fun_arg     = StgVarArg fun_id
-    fun_name    = idName            fun_id
-    fun         = idInfoToAmode     fun_info
-    lf_info     = cgIdInfoLF        fun_info
-    node_points dflags = nodeMustPointToIt dflags lf_info
-
+        -- Let-no-escape call
+        JumpToIt -> let (LneLoc blk_id lne_regs) = cg_loc fun_info
+                    in do
+                       { adjustHpBackwards -- always do this before a tail-call
+                       ; cmm_args <- getNonVoidArgAmodes args
+                       ; emitMultiAssign lne_regs cmm_args
+                       ; emit (mkBranch blk_id)
+                       ; return AssignedDirectly }
 
 emitEnter :: CmmExpr -> FCode ReturnKind
 emitEnter fun = do
