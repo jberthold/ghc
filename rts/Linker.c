@@ -137,16 +137,6 @@
 #include <sys/tls.h>
 #endif
 
-// Defining this as 'int' rather than 'const int' means that we don't get
-// warnings like
-//    error: function might be possible candidate for attribute ‘noreturn’
-// from gcc:
-#ifdef DYNAMIC_GHC_PROGRAMS
-int dynamicGhcPrograms = 1;
-#else
-int dynamicGhcPrograms = 0;
-#endif
-
 /* Hash table mapping symbol names to Symbol */
 static /*Str*/HashTable *symhash;
 
@@ -2196,10 +2186,6 @@ loadArchive( pathchar *path )
     IF_DEBUG(linker, debugBelch("loadArchive: start\n"));
     IF_DEBUG(linker, debugBelch("loadArchive: Loading archive `%" PATH_FMT" '\n", path));
 
-    if (dynamicGhcPrograms) {
-        barf("loadArchive called, but using dynamic GHC (%s)", path);
-    }
-
     gnuFileIndex = NULL;
     gnuFileIndexSize = 0;
 
@@ -2590,10 +2576,6 @@ loadObj( pathchar *path )
 #  endif
 #endif
    IF_DEBUG(linker, debugBelch("loadObj %" PATH_FMT "\n", path));
-
-   if (dynamicGhcPrograms) {
-       barf("loadObj called, but using dynamic GHC (%s)", path);
-   }
 
    initLinker();
 
@@ -3784,7 +3766,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
        * => I suspect we've been incorrectly handling .bss sections in (relocatable)
        * object files up until now. This turned out to bite us with ghc-6.4.1's use
        * of gcc-3.4.x, which has started to emit initially-zeroed-out local 'static'
-       * variable decls into to the .bss section. (The specific function in Q which
+       * variable decls into the .bss section. (The specific function in Q which
        * triggered this is libraries/base/cbits/dirUtils.c:__hscore_getFolderPath())
        */
       if (sectab_i->VirtualSize == 0 && sectab_i->SizeOfRawData == 0) continue;
