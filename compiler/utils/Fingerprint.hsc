@@ -13,7 +13,7 @@ module Fingerprint (
         readHexFingerprint,
         fingerprintData,
         fingerprintString,
-        -- Re-exported rom GHC.Fingerprint for GHC >= 7.7, local otherwise
+        -- Re-exported from GHC.Fingerprint for GHC >= 7.7, local otherwise
         getFileHash
    ) where
 
@@ -26,6 +26,7 @@ import Numeric          ( readHex )
 import Foreign
 import Panic
 import System.IO
+import Control.Monad    ( when )
 #endif
 
 import GHC.Fingerprint
@@ -50,7 +51,10 @@ getFileHash path = withBinaryFile path ReadMode $ \h -> do
 
   fileSize <- toIntFileSize `fmap` hFileSize h
 
-  allocaBytes fileSize (\bufPtr -> fingerprintData bufPtr fileSize)
+  allocaBytes fileSize $ \bufPtr -> do
+    n <- hGetBuf h bufPtr fileSize
+    when (n /= fileSize) readFailedError
+    fingerprintData bufPtr fileSize
 
   where
     toIntFileSize :: Integer -> Int
@@ -59,4 +63,7 @@ getFileHash path = withBinaryFile path ReadMode $ \h -> do
           Sorry $ "Fingerprint.getFileHash: Tried to calculate hash of file "
                   ++ path ++ " with size > maxBound :: Int. This is not supported."
       | otherwise = fromIntegral size
+
+    readFailedError = throwGhcException $
+        Panic $ "Fingerprint.getFileHash: hGetBuf failed on interface file"
 #endif
