@@ -69,7 +69,7 @@
 /* Info pointer <--> Info offset (also for PLC pointers)
    See "relocatable binaries" before "PackNearbyGraph" routine for use.
 */
-#define BASE_SYM Main_main_info // base symbol for offset
+#define BASE_SYM ZCMain_main_info // base symbol for offset
 extern const StgInfoTable BASE_SYM[];
 
 // use this one on info pointers before they go into a packet
