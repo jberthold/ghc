@@ -838,6 +838,7 @@ rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso,
       DonePacking();
       globalPackBuffer->tso = NULL;
       return ((rtsPackBuffer *)NULL);
+    }
   } while (!QueueEmpty());
   
 
