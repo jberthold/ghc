@@ -95,7 +95,7 @@ static void DonePacking(void);
 
 // little helpers: 
 STATIC_INLINE void 	RegisterOffset(StgClosure *closure);
-STATIC_INLINE nat  	OffsetFor(StgClosure *closure);
+STATIC_INLINE StgWord  	OffsetFor(StgClosure *closure);
 STATIC_INLINE rtsBool   AlreadyPacked(int offset);
 STATIC_INLINE StgInfoTable* 
     get_closure_info(StgClosure* node, StgInfoTable* info, 
@@ -149,7 +149,7 @@ StgClosure* DuplicateNearbyGraph(StgClosure* graphroot, StgTSO* tso,
 static void PackClosure (StgClosure *closure);
 // packing static addresses and offsets
 STATIC_INLINE void PackPLC(StgPtr addr);
-STATIC_INLINE void PackOffset(int offset);
+STATIC_INLINE void PackOffset(StgWord offset);
 // the standard case: a heap-alloc'ed closure
 static void PackGeneric(StgClosure *closure);
 
@@ -260,6 +260,7 @@ static char fingerPrintStr[MAX_FINGER_PRINT_LEN];
 static void GraphFingerPrint(StgClosure *graphroot);
 static HashTable *tmpClosureTable;  // used in GraphFingerPrint and PrintGraph
 
+void checkPacket(rtsPackBuffer *packBuffer);
 #endif
 
 // functionality:
@@ -363,14 +364,14 @@ RegisterOffset(StgClosure *closure){
 }
 
 /* OffsetFor returns an offset for a closure which is already being packed. */
-STATIC_INLINE nat
+STATIC_INLINE StgWord
 OffsetFor(StgClosure *closure) {
   // avoid typecast warnings...
   void* offset;
   offset = (lookupHashTable(offsetTable, 
 			    // remove tag for offset
 			    UNTAG_CAST(StgWord, closure)));
-  return (nat) offset;
+  return (StgWord) offset;
 }
 
 /* AlreadyPacked determines whether the closure's already being packed.
@@ -433,13 +434,15 @@ STATIC_INLINE StgInfoTable*
   case PAP:
     *vhs = 1; /* arity/args */
     *ptrs = 1;
-    *nonptrs = 0; /* wrong, but not used in the unpacking code! */
+    /* wrong (some are ptrs), but not used in the unpacking code! */
+    *nonptrs = *size - 2 - sizeofW(StgHeader);
     break;
   case AP_STACK:
   case AP:
     *vhs = sizeofW(StgThunkHeader) - sizeofW(StgHeader) + 1;
     *ptrs = 1;
-    *nonptrs = 0; /* wrong, but not used in the unpacking code! */
+    /* wrong (some are ptrs), but not used in the unpacking code! */
+    *nonptrs = *size - *vhs - 1;
     break;
 
     /* For Word arrays, no pointers need to be filled in. 
@@ -451,14 +454,17 @@ STATIC_INLINE StgInfoTable*
     *nonptrs = (((StgArrWords*) node)->bytes)/ sizeof(StgWord);
     break;
 
-    /* For Arrays of pointers, we need to fill in all the pointers */
+    /* For Arrays of pointers, we need to fill in all the pointers and
+       allocate additional space for the card table at the end.
+     */
   case MUT_ARR_PTRS_CLEAN:
   case MUT_ARR_PTRS_DIRTY:
   case MUT_ARR_PTRS_FROZEN0:
   case MUT_ARR_PTRS_FROZEN:
     *vhs = 2;
     *ptrs = ((StgMutArrPtrs*) node)->ptrs;
-    *nonptrs = 0; // could indicate card table... (?)
+    *nonptrs = ((StgMutArrPtrs*) node)->size - *ptrs; // count card table
+    // NB nonptrs field for array closures is only used in checkPacket
     break;
 
     /* we do not want to see these here (until thread migration) */
@@ -481,6 +487,8 @@ STATIC_INLINE StgInfoTable*
     *nonptrs = (nat) (info->layout.payload.nptrs);
     *vhs = *size - *ptrs - *nonptrs - sizeofW(StgHeader);
   }
+
+  ASSERT(*size == sizeofW(StgHeader) + *vhs + *ptrs + *nonptrs);
 
   return info;
 
@@ -774,7 +782,7 @@ STATIC_INLINE void PackPLC(StgPtr addr) {
 }
 
 // packing an offset (repeatedly packed same closure)
-STATIC_INLINE void PackOffset(int offset) {
+STATIC_INLINE void PackOffset(StgWord offset) {
   Pack(OFFSET);			/* weight */
   //  Pack(0L);			/* pe */
   Pack(offset);		        /* slot/offset */
@@ -862,7 +870,7 @@ rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso,
 		      (long)globalPackBuffer->size, thunks_packed, 
 		      (long)globalPackBuffer->unpacked_size));;
 
-  // TODO: IF_DEBUG(sanity, checkPacket(...));
+  IF_DEBUG(sanity, checkPacket(globalPackBuffer));
 
   return (globalPackBuffer);
 }
@@ -887,7 +895,7 @@ STATIC_INLINE StgClosure* UNWIND_IND(StgClosure *closure)
 static void PackClosure(StgClosure* closure) {
 
   StgInfoTable *info;
-  nat offset;
+  StgWord offset;
 
   // Ensure we can always pack this closure as an offset/PLC.
   RoomToPack(sizeofW(StgWord));
@@ -1568,12 +1576,11 @@ UnpackGraph(rtsPackBuffer *packBuffer,
   */
   nat currentOffset;
 
+  IF_DEBUG(sanity, // do a sanity check on the incoming packet
+  	   checkPacket(packBuffer));
+
   /* Initialisation */
   InitPacking(rtsTrue);      // same as in PackNearbyGraph
-
-  /*  IF_DEBUG(sanity, // do a sanity check on the incoming packet
-  	   checkPacket(packBuffer));
-  */
 
   graphroot = (StgClosure *)NULL;
 
