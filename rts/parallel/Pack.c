@@ -561,7 +561,7 @@ RoomToPack(nat size) {
 	 size +                      // space needed for the current closure
 	 // for GUM: 
 	 // QueueSize * sizeof(FETCH_ME-in-buffer)
-	 + 1)*sizeof(StgWord)        // tag 
+	 1)*sizeof(StgWord)          // tag 
 	 >= 
        RTS_PACK_BUFFER_SIZE))
     {
@@ -660,15 +660,23 @@ STATIC_INLINE
 void QueueClosure(StgClosure* closure)
 {
   ASSERT(clq_pos <= clq_size);
-  if(clq_size < RTS_PACK_BUFFER_SIZE ) {
+  if(clq_size < RTS_PACK_BUFFER_SIZE/sizeof(StgClosure*) ) {
     IF_PAR_DEBUG(packet,
 		 debugBelch(">__> Q: %p (%s); %ld elems in q\n",
 			    closure, 
 			    info_type(UNTAG_CLOSURE(closure)), (long)clq_size-clq_pos+1));
     ClosureQueue[clq_size++] = closure;
   } else { 
-    barf("Pack.c: Closure Queue Overflow (EnQueueing %p (%s))", 
-	 closure, info_type(UNTAG_CLOSURE(closure)));
+    if (clq_pos != 0) { StuffClosureQueue(); QueueClosure(closure); }
+    else {
+      errorBelch("Pack.c: Closure Queue Overflow (enqueueing %p (%s)"
+		 ", %ld elem.s in queue).\nCurrent size %lu bytes,"
+		 " try increasing with RTS flag -qQ<size>",
+		 closure, 
+		 info_type(UNTAG_CLOSURE(closure)), (long)clq_size-clq_pos+1,
+		 (long unsigned int) RTS_PACK_BUFFER_SIZE);
+      stg_exit(EXIT_FAILURE);
+    }
   }
 }
 
@@ -706,16 +714,15 @@ StgClosure* DeQueueClosure(void)
  *
  *  About the GHC feature "pointer tagging":
  *   Every closure pointer carries a tag in its l.s. bits (those which
- *   are not needed since closures are word-aligned anyway). These
- *   tags should survive packing-sending-unpacking, so we must store
+ *   are not needed since closures are word-aligned anyway). 
+ *   These tags indicate that data pointed at is fully evaluated, and 
+ *   allow for a shortcut in case of small constructors (selecting 
+ *   arguments).
+ *   The tagged pointers are *references* to a closure. RTS must ensure
+ *   that every occurrence of one and the same pointer has the same tag.
+ *
+ *   Tags should survive packing-sending-unpacking, so we must store
  *   them in the packet somehow.
- *
- *   Retrieving the tag/closure ptr: the tagged pointers are
- *   *references* to a closure. NB: RTS must ensure that every
- *   occurrence of one and the same pointer has a correct tag (minor,
- *   or same tag)! OTOH, the tag must be inside the packed closure in
- *   the packet.  
- *
  *   => Closure pointers in the closure queue are stored *WITH TAGS*,
  *   and we pack the tags together with the closure.
  *   OTOH, *offsets* (HashTable entries) are stored without tags, in
@@ -723,11 +730,8 @@ StgClosure* DeQueueClosure(void)
  *   exist (possible?)
  *   (the tag of the first occurrence will win, a problem?)
  *
- *   a) Could use last bits of info-ptr (stored anyway) ? Is it
+ *   We use the last bits of the info-ptr (stored anyway), which is
  *   aligned just as closure pointers, in word size.
- *   b) spend an extra word on every heap-closure (for 3 bits :-| )
- *
- *   We clearly opt for a.
  *
  *   Anyway, closures are enqueued with tags, and the tag handled in
  *   functions called from PackClosure(): PackGeneric, or specialised
@@ -830,7 +834,9 @@ rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso,
   QueueClosure(closure);
   do {
     PackClosure(DeQueueClosure());
-    if (packing_aborted) 
+    if (packing_aborted) {
+      DonePacking();
+      globalPackBuffer->tso = NULL;
       return ((rtsPackBuffer *)NULL);
   } while (!QueueEmpty());
   
@@ -845,6 +851,8 @@ rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso,
   globalPackBuffer->unpacked_size = unpacked_size;
   globalPackBuffer->size = pack_locn;
 
+  /* done packing */
+  globalPackBuffer->tso = NULL;
   DonePacking();
 
   IF_PAR_DEBUG(pack,
@@ -1026,8 +1034,8 @@ static void PackClosure(StgClosure* closure) {
       // some Blackholes are actually indirections since ghc-7.0
       switch (((StgInfoTable*)get_itbl(UNTAG_CLOSURE(indirectee)))->type) {
 
-      case IND: // race cond. when threaded? 
-	// We keep this (unobvious) case in analogy to StgMiscClosures.cmm
+      case IND: // race cond. when threaded (blackhole just got updated) 
+	// This case is analogous with the one in StgMiscClosures.cmm
 	goto loop;
       case TSO: // no blocking queue yet. msgBlackHole will create one.
       case BLOCKING_QUEUE: // another thread already blocked here. Enqueue
@@ -1057,7 +1065,7 @@ static void PackClosure(StgClosure* closure) {
 	    tso->block_info.bh = msg;
 	    packing_aborted = rtsTrue; // packing failed, will get buffer=NULL
 	  } else {
-	    goto loop; // failed to block (race condition), try again
+	    goto loop; // could not block TSO (race condition), try again
 	  }
 	} else {
 	  // GUM TODO: if tso == NULL (RTS has requested packing,
@@ -1136,8 +1144,6 @@ static void PackClosure(StgClosure* closure) {
 
   default:
     barf("Pack: strange closure %d", (nat)(info->type));
-    packing_aborted = rtsTrue; // not reached...
-    return;
   } /* switch */
 }
 
