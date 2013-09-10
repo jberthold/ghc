@@ -24,7 +24,7 @@ send data format is always PvmDataRaw, containing longs
 #include "PEOpCodes.h" // message codes only
 
 #warning CHECK THE PVM SOLUTION FOR PORTABILITY! (LINUXes/MAC)
-#include <string.h> // for basename() function
+#include <libgen.h> // for basename() function
 
 // pvm-specific error control:
 #define checkComms(c,s)		do {                  \
