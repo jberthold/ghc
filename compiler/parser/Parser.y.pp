@@ -16,32 +16,6 @@
 --     http://hackage.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
 -- for details
 
-{-# OPTIONS_GHC -O0 -fno-ignore-interface-pragmas #-}
-{-
-Careful optimisation of the parser: we don't want to throw everything
-at it, because that takes too long and doesn't buy much, but we do want
-to inline certain key external functions, so we instruct GHC not to
-throw away inlinings as it would normally do in -O0 mode.
--}
-
--- CPP tricks because we want the directives in the output of the
--- first CPP pass.
---
--- Clang note, 6/17/2013 by aseipp: It is *extremely* important (for
--- some reason) that there be a line of whitespace between the two
--- definitions here, and the subsequent use of __IF_GHC_77__ - this
--- seems to be a bug in clang or something, where having the line of
--- whitespace will make the preprocessor correctly format the rendered
--- lines in the 'two step' CPP pass. No, this is not a joke.
-#define __IF_GHC_77__ #if __GLASGOW_HASKELL__ >= 707
-#define __ENDIF__ #endif
-
-__IF_GHC_77__
--- Required on x86 to avoid the register allocator running out of
--- stack slots when compiling this module with -fPIC -dynamic.
-{-# OPTIONS_GHC -fcmm-sink #-}
-__ENDIF__
-
 module Parser ( parseModule, parseStmt, parseIdentifier, parseType,
                 parseHeader ) where
 
@@ -59,7 +33,6 @@ import Type             ( funTyCon )
 import ForeignCall
 import OccName          ( varName, dataName, tcClsName, tvName )
 import DataCon          ( DataCon, dataConName )
-import CoAxiom          ( Role(..) )
 import SrcLoc
 import Module
 import Kind             ( Kind, liftedTypeKind, unliftedTypeKind, mkArrowKind )
@@ -68,6 +41,7 @@ import BasicTypes
 import DynFlags
 import OrdList
 import HaddockUtils
+import BooleanFormula   ( BooleanFormula, mkAnd, mkOr, mkTrue, mkVar )
 
 import FastString
 import Maybes           ( orElse )
@@ -265,18 +239,17 @@ incorrect.
  'unsafe'       { L _ ITunsafe }
  'mdo'          { L _ ITmdo }
  'family'       { L _ ITfamily }
+ 'role'         { L _ ITrole }
  'stdcall'      { L _ ITstdcallconv }
  'ccall'        { L _ ITccallconv }
  'capi'         { L _ ITcapiconv }
  'prim'         { L _ ITprimcallconv }
+ 'javascript'   { L _ ITjavascriptcallconv }
  'proc'         { L _ ITproc }          -- for arrow notation extension
  'rec'          { L _ ITrec }           -- for arrow notation extension
  'group'    { L _ ITgroup }     -- for list transform extension
  'by'       { L _ ITby }        -- for list transform extension
  'using'    { L _ ITusing }     -- for list transform extension
- 'N'        { L _ ITnominal }            -- Nominal role
- 'R'        { L _ ITrepresentational }   -- Representational role
- 'P'        { L _ ITphantom }            -- Phantom role
 
  '{-# INLINE'             { L _ (ITinline_prag _ _) }
  '{-# SPECIALISE'         { L _ ITspec_prag }
@@ -294,6 +267,7 @@ incorrect.
  '{-# VECTORISE'          { L _ ITvect_prag }
  '{-# VECTORISE_SCALAR'   { L _ ITvect_scalar_prag }
  '{-# NOVECTORISE'        { L _ ITnovect_prag }
+ '{-# MINIMAL'            { L _ ITminimal_prag }
  '{-# CTYPE'              { L _ ITctype }
  '#-}'                                          { L _ ITclose_prag }
 
@@ -599,6 +573,7 @@ topdecl :: { OrdList (LHsDecl RdrName) }
         | ty_decl                               { unitOL (L1 (TyClD (unLoc $1))) }
         | inst_decl                             { unitOL (L1 (InstD (unLoc $1))) }
         | stand_alone_deriving                  { unitOL (LL (DerivD (unLoc $1))) }
+        | role_annot                            { unitOL (L1 (RoleAnnotD (unLoc $1))) }
         | 'default' '(' comma_types0 ')'        { unitOL (LL $ DefD (DefaultDecl $3)) }
         | 'foreign' fdecl                       { unitOL (LL (unLoc $2)) }
         | '{-# DEPRECATED' deprecations '#-}'   { $2 }
@@ -809,6 +784,27 @@ stand_alone_deriving :: { LDerivDecl RdrName }
         : 'deriving' 'instance' inst_type { LL (DerivDecl $3) }
 
 -----------------------------------------------------------------------------
+-- Role annotations
+
+role_annot :: { LRoleAnnotDecl RdrName }
+role_annot : 'type' 'role' oqtycon maybe_roles
+              {% mkRoleAnnotDecl (comb3 $1 $3 $4) $3 (reverse (unLoc $4)) }
+
+-- Reversed!
+maybe_roles :: { Located [Located (Maybe FastString)] }
+maybe_roles : {- empty -}    { noLoc [] }
+            | roles          { $1 }
+
+roles :: { Located [Located (Maybe FastString)] }
+roles : role             { LL [$1] }
+      | roles role       { LL $ $2 : unLoc $1 }
+
+-- read it in as a varid for better error messages
+role :: { Located (Maybe FastString) }
+role : VARID             { L1 $ Just $ getVARID $1 }
+     | '_'               { L1 Nothing }
+
+-----------------------------------------------------------------------------
 -- Nested declarations
 
 -- Declaration in class bodies
@@ -995,6 +991,7 @@ callconv :: { CCallConv }
           | 'ccall'                     { CCallConv   }
           | 'capi'                      { CApiConv    }
           | 'prim'                      { PrimCallConv}
+          | 'javascript'                { JavaScriptCallConv }
 
 safety :: { Safety }
         : 'unsafe'                      { PlayRisky }
@@ -1133,7 +1130,6 @@ atype :: { LHsType RdrName }
         | '[:' ctype ':]'                { LL $ HsPArrTy  $2 }
         | '(' ctype ')'                  { LL $ HsParTy   $2 }
         | '(' ctype '::' kind ')'        { LL $ HsKindSig $2 $4 }
-        | atype '@' role                 { LL $ HsRoleAnnot $1 (unLoc $3) }
         | quasiquote                     { L1 (HsQuasiQuoteTy (unLoc $1)) }
         | '$(' exp ')'                   { LL $ mkHsSpliceTy $2 }
         | TH_ID_SPLICE                   { LL $ mkHsSpliceTy $ L1 $ HsVar $
@@ -1171,8 +1167,8 @@ tv_bndrs :: { [LHsTyVarBndr RdrName] }
          | {- empty -}                  { [] }
 
 tv_bndr :: { LHsTyVarBndr RdrName }
-        : tyvar                         { L1 (HsTyVarBndr (unLoc $1) Nothing Nothing) }
-        | '(' tyvar '::' kind ')'       { LL (HsTyVarBndr (unLoc $2) (Just $4) Nothing) }
+        : tyvar                         { L1 (UserTyVar (unLoc $1)) }
+        | '(' tyvar '::' kind ')'       { LL (KindedTyVar (unLoc $2) $4) }
 
 fds :: { Located [Located (FunDep RdrName)] }
         : {- empty -}                   { noLoc [] }
@@ -1189,11 +1185,6 @@ fd :: { Located (FunDep RdrName) }
 varids0 :: { Located [RdrName] }
         : {- empty -}                   { noLoc [] }
         | varids0 tyvar                 { LL (unLoc $2 : unLoc $1) }
-
-role :: { Located Role }
-          : 'N'                         { LL Nominal }
-          | 'R'                         { LL Representational }
-          | 'P'                         { LL Phantom }
 
 -----------------------------------------------------------------------------
 -- Kinds
@@ -1420,6 +1411,9 @@ sigdecl :: { Located (OrdList (LHsDecl RdrName)) }
                             | t <- $5] }
         | '{-# SPECIALISE' 'instance' inst_type '#-}'
                 { LL $ unitOL (LL $ SigD (SpecInstSig $3)) }
+        -- A minimal complete definition
+        | '{-# MINIMAL' name_boolformula_opt '#-}'
+                { LL $ unitOL (LL $ SigD (MinimalSig $2)) }
 
 activation :: { Maybe Activation }
         : {- empty -}                           { Nothing }
@@ -1860,6 +1854,22 @@ ipvar   :: { Located HsIPName }
 -----------------------------------------------------------------------------
 -- Warnings and deprecations
 
+name_boolformula_opt :: { BooleanFormula (Located RdrName) }
+        : name_boolformula          { $1 }
+        | {- empty -}               { mkTrue }
+
+name_boolformula :: { BooleanFormula (Located RdrName) }
+        : name_boolformula_and                      { $1 }
+        | name_boolformula_and '|' name_boolformula { mkOr [$1,$3] }
+
+name_boolformula_and :: { BooleanFormula (Located RdrName) }
+        : name_boolformula_atom                             { $1 }
+        | name_boolformula_atom ',' name_boolformula_and    { mkAnd [$1,$3] }
+
+name_boolformula_atom :: { BooleanFormula (Located RdrName) }
+        : '(' name_boolformula ')'  { $2 }
+        | name_var                  { mkVar $1 }
+
 namelist :: { Located [RdrName] }
 namelist : name_var              { L1 [unLoc $1] }
          | name_var ',' namelist { LL (unLoc $1 : unLoc $3) }
@@ -1936,7 +1946,7 @@ qtycon :: { Located RdrName }   -- Qualified or unqualified
         | tycon                         { $1 }
 
 tycon   :: { Located RdrName }  -- Unqualified
-        : upcase_id                     { L1 $! mkUnqual tcClsName (unLoc $1) }
+        : CONID                         { L1 $! mkUnqual tcClsName (getCONID $1) }
 
 qtyconsym :: { Located RdrName }
         : QCONSYM                       { L1 $! mkQual tcClsName (getQCONSYM $1) }
@@ -1989,8 +1999,8 @@ tyvarop :: { Located RdrName }
 tyvarop : '`' tyvarid '`'       { LL (unLoc $2) }
         | '.'                   {% parseErrorSDoc (getLoc $1)
                                       (vcat [ptext (sLit "Illegal symbol '.' in type"),
-                                             ptext (sLit "Perhaps you intended -XRankNTypes or similar flag"),
-                                             ptext (sLit "to enable explicit-forall syntax: forall <tvs>. <type>")])
+                                             ptext (sLit "Perhaps you intended to use RankNTypes or a similar language"),
+                                             ptext (sLit "extension to enable explicit-forall syntax: forall <tvs>. <type>")])
                                 }
 
 tyvarid :: { Located RdrName }
@@ -2020,6 +2030,9 @@ qvarid :: { Located RdrName }
         | QVARID                { L1 $! mkQual varName (getQVARID $1) }
         | PREFIXQVARSYM         { L1 $! mkQual varName (getPREFIXQVARSYM $1) }
 
+-- Note that 'role' and 'family' get lexed separately regardless of
+-- the use of extensions. However, because they are listed here, this
+-- is OK and they can be used as normal varids.
 varid :: { Located RdrName }
         : VARID                 { L1 $! mkUnqual varName (getVARID $1) }
         | special_id            { L1 $! mkUnqual varName (unLoc $1) }
@@ -2028,6 +2041,7 @@ varid :: { Located RdrName }
         | 'interruptible'       { L1 $! mkUnqual varName (fsLit "interruptible") }
         | 'forall'              { L1 $! mkUnqual varName (fsLit "forall") }
         | 'family'              { L1 $! mkUnqual varName (fsLit "family") }
+        | 'role'                { L1 $! mkUnqual varName (fsLit "role") }
 
 qvarsym :: { Located RdrName }
         : varsym                { $1 }
@@ -2051,8 +2065,8 @@ varsym_no_minus :: { Located RdrName } -- varsym not including '-'
 
 -- These special_ids are treated as keywords in various places,
 -- but as ordinary ids elsewhere.   'special_id' collects all these
--- except 'unsafe', 'interruptible', 'forall', and 'family' whose treatment differs
--- depending on context
+-- except 'unsafe', 'interruptible', 'forall', 'family', and 'role',
+-- whose treatment differs depending on context
 special_id :: { Located FastString }
 special_id
         : 'as'                  { L1 (fsLit "as") }
@@ -2065,6 +2079,7 @@ special_id
         | 'ccall'               { L1 (fsLit "ccall") }
         | 'capi'                { L1 (fsLit "capi") }
         | 'prim'                { L1 (fsLit "prim") }
+        | 'javascript'          { L1 (fsLit "javascript") }
         | 'group'               { L1 (fsLit "group") }
 
 special_sym :: { Located FastString }
@@ -2081,7 +2096,7 @@ qconid :: { Located RdrName }   -- Qualified or unqualified
         | PREFIXQCONSYM         { L1 $! mkQual dataName (getPREFIXQCONSYM $1) }
 
 conid   :: { Located RdrName }
-        : upcase_id             { L1 $ mkUnqual dataName (unLoc $1) }
+        : CONID                 { L1 $ mkUnqual dataName (getCONID $1) }
 
 qconsym :: { Located RdrName }  -- Qualified or unqualified
         : consym                { $1 }
@@ -2118,7 +2133,7 @@ close :: { () }
 -- Miscellaneous (mostly renamings)
 
 modid   :: { Located ModuleName }
-        : upcase_id             { L1 $ mkModuleNameFS (unLoc $1) }
+        : CONID                 { L1 $ mkModuleNameFS (getCONID $1) }
         | QCONID                { L1 $ let (mod,c) = getQCONID $1 in
                                   mkModuleNameFS
                                    (mkFastString
@@ -2128,12 +2143,6 @@ modid   :: { Located ModuleName }
 commas :: { Int }   -- One or more commas
         : commas ','                    { $1 + 1 }
         | ','                           { 1 }
-
-upcase_id :: { Located FastString }
-        : CONID                         { L1 $! getCONID $1 }
-        | 'N'                           { L1 (fsLit "N") }
-        | 'R'                           { L1 (fsLit "R") }
-        | 'P'                           { L1 (fsLit "P") }
 
 -----------------------------------------------------------------------------
 -- Documentation comments
@@ -2241,7 +2250,7 @@ hintMultiWayIf :: SrcSpan -> P ()
 hintMultiWayIf span = do
   mwiEnabled <- liftM ((Opt_MultiWayIf `xopt`) . dflags) getPState
   unless mwiEnabled $ parseErrorSDoc span $
-    text "Multi-way if-expressions need -XMultiWayIf turned on"
+    text "Multi-way if-expressions need MultiWayIf turned on"
 
 -- Hint about explicit-forall, assuming UnicodeSyntax is on
 hintExplicitForall :: SrcSpan -> P ()
@@ -2250,7 +2259,7 @@ hintExplicitForall span = do
     rulePrag    <- extension inRulePrag
     unless (forall || rulePrag) $ parseErrorSDoc span $ vcat
       [ text "Illegal symbol '\x2200' in type" -- U+2200 FOR ALL
-      , text "Perhaps you intended -XRankNTypes or similar flag"
-      , text "to enable explicit-forall syntax: \x2200 <tvs>. <type>"
+      , text "Perhaps you intended to use RankNTypes or a similar language"
+      , text "extension to enable explicit-forall syntax: \x2200 <tvs>. <type>"
       ]
 }

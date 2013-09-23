@@ -44,7 +44,7 @@ module TcRnTypes(
         -- Canonical constraints
         Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, dropDerivedWC,
         singleCt, extendCts, isEmptyCts, isCTyEqCan, isCFunEqCan,
-        isCDictCan_Maybe, isCFunEqCan_Maybe,
+        isCDictCan_Maybe, isCFunEqCan_maybe,
         isCIrredEvCan, isCNonCanonical, isWantedCt, isDerivedCt,
         isGivenCt, isHoleCt,
         ctEvidence,
@@ -460,7 +460,13 @@ data TcLclEnv           -- Changes as we move inside an expression
     }
 
 type TcTypeEnv = NameEnv TcTyThing
-data TcIdBinder = TcIdBndr TcId TopLevelFlag
+
+data TcIdBinder 
+  = TcIdBndr 
+       TcId 
+       TopLevelFlag    -- Tells whether the bindind is syntactically top-level
+                       -- (The monomorphic Ids for a recursive group count
+                       --  as not-top-level for this purpose.)
 
 {- Note [Given Insts]
    ~~~~~~~~~~~~~~~~~~
@@ -916,12 +922,13 @@ data Ct
       cc_loc  :: CtLoc
     }
 
-  | CNonCanonical { -- See Note [NonCanonical Semantics]
+  | CNonCanonical {        -- See Note [NonCanonical Semantics]
       cc_ev  :: CtEvidence,
       cc_loc :: CtLoc
     }
 
-  | CHoleCan {
+  | CHoleCan {             -- Treated as an "insoluble" constraint
+                           -- See Note [Insoluble constraints]
       cc_ev  :: CtEvidence,
       cc_loc :: CtLoc,
       cc_occ :: OccName    -- The name of this hole
@@ -1073,9 +1080,9 @@ isCIrredEvCan :: Ct -> Bool
 isCIrredEvCan (CIrredEvCan {}) = True
 isCIrredEvCan _                = False
 
-isCFunEqCan_Maybe :: Ct -> Maybe TyCon
-isCFunEqCan_Maybe (CFunEqCan { cc_fun = tc }) = Just tc
-isCFunEqCan_Maybe _ = Nothing
+isCFunEqCan_maybe :: Ct -> Maybe (TyCon, [Type])
+isCFunEqCan_maybe (CFunEqCan { cc_fun = tc, cc_tyargs = xis }) = Just (tc, xis)
+isCFunEqCan_maybe _ = Nothing
 
 isCFunEqCan :: Ct -> Bool
 isCFunEqCan (CFunEqCan {}) = True

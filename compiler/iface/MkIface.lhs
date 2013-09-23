@@ -1526,6 +1526,9 @@ tyConToIfaceDecl env tycon
     to_ifsyn_rhs (SynonymTyCon ty)
       = IfaceSynonymTyCon (tidyToIfaceType env1 ty)
 
+    to_ifsyn_rhs (BuiltInSynFamTyCon {}) = pprPanic "toIfaceDecl: BuiltInFamTyCon" (ppr tycon)
+
+
     ifaceConDecls (NewTyCon { data_con = con })     = IfNewTyCon  (ifaceConDecl con)
     ifaceConDecls (DataTyCon { data_cons = cons })  = IfDataTyCon (map ifaceConDecl cons)
     ifaceConDecls (DataFamilyTyCon {})              = IfDataFamTyCon
@@ -1573,6 +1576,7 @@ classToIfaceDecl env clas
                  ifFDs    = map toIfaceFD clas_fds,
                  ifATs    = map toIfaceAT clas_ats,
                  ifSigs   = map toIfaceClassOp op_stuff,
+                 ifMinDef = fmap getOccName (classMinimalDef clas),
                  ifRec    = boolToRecFlag (isRecursiveTyCon tycon) }
   where
     (clas_tyvars, clas_fds, sc_theta, _, clas_ats, op_stuff)
@@ -1723,7 +1727,7 @@ toIfaceIdInfo id_info
                     inline_hsinfo,  unfold_hsinfo] of
        []    -> NoInfo
        infos -> HasInfo infos
-               -- NB: strictness must appear in the list before unfolding
+               -- NB: strictness and arity must appear in the list before unfolding
                -- See TcIface.tcUnfolding
   where
     ------------  Arity  --------------
@@ -1762,10 +1766,6 @@ toIfUnfolding lb (CoreUnfolding { uf_tmpl = rhs, uf_arity = arity
           -> case guidance of
                UnfWhen unsat_ok boring_ok -> IfInlineRule arity unsat_ok boring_ok if_rhs
                _other                     -> IfCoreUnfold True if_rhs
-        InlineWrapper w | isExternalName n -> IfExtWrapper arity n
-                        | otherwise        -> IfLclWrapper arity (getFS n)
-                        where
-                          n = idName w
         InlineCompulsory -> IfCompulsory if_rhs
         InlineRhs        -> IfCoreUnfold False if_rhs
         -- Yes, even if guidance is UnfNever, expose the unfolding
@@ -1837,13 +1837,17 @@ toIfaceExpr (Case s x ty as)
   | otherwise               = IfaceCase (toIfaceExpr s) (getFS x) (map toIfaceAlt as)
 toIfaceExpr (Let b e)       = IfaceLet (toIfaceBind b) (toIfaceExpr e)
 toIfaceExpr (Cast e co)     = IfaceCast (toIfaceExpr e) (toIfaceCoercion co)
-toIfaceExpr (Tick t e)    = IfaceTick (toIfaceTickish t) (toIfaceExpr e)
+toIfaceExpr (Tick t e) 
+  | Just t' <- toIfaceTickish t = IfaceTick t' (toIfaceExpr e) 
+  | otherwise                   = toIfaceExpr e
 
 ---------------------
-toIfaceTickish :: Tickish Id -> IfaceTickish
-toIfaceTickish (ProfNote cc tick push) = IfaceSCC cc tick push
-toIfaceTickish (HpcTick modl ix)       = IfaceHpcTick modl ix
-toIfaceTickish _ = panic "toIfaceTickish"
+toIfaceTickish :: Tickish Id -> Maybe IfaceTickish
+toIfaceTickish (ProfNote cc tick push) = Just (IfaceSCC cc tick push)
+toIfaceTickish (HpcTick modl ix)       = Just (IfaceHpcTick modl ix)
+toIfaceTickish (Breakpoint {})         = Nothing 
+   -- Ignore breakpoints, since they are relevant only to GHCi, and 
+   -- should not be serialised (Trac #8333)
 
 ---------------------
 toIfaceBind :: Bind Id -> IfaceBinding

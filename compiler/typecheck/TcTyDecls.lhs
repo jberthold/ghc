@@ -19,7 +19,7 @@ files for imported data types.
 module TcTyDecls(
         calcRecFlags, RecTyInfo(..), 
         calcSynCycles, calcClassCycles,
-        RoleAnnots
+        extractRoleAnnots, emptyRoleAnnots, RoleAnnots
     ) where
 
 #include "HsVersions.h"
@@ -48,6 +48,7 @@ import UniqSet
 import Util
 import Maybes
 import Data.List
+import Control.Applicative (Applicative(..))
 import Control.Monad
 \end{code}
 
@@ -360,10 +361,11 @@ data RecTyInfo = RTI { rti_promotable :: Bool
                      , rti_roles      :: Name -> [Role]
                      , rti_is_rec     :: Name -> RecFlag }
 
-calcRecFlags :: ModDetails -> RoleAnnots -> [TyThing] -> RecTyInfo
+calcRecFlags :: ModDetails -> Bool  -- hs-boot file?
+             -> RoleAnnots -> [TyThing] -> RecTyInfo
 -- The 'boot_names' are the things declared in M.hi-boot, if M is the current module.
 -- Any type constructors in boot_names are automatically considered loop breakers
-calcRecFlags boot_details mrole_env tyclss
+calcRecFlags boot_details is_boot mrole_env tyclss
   = RTI { rti_promotable = is_promotable
         , rti_roles      = roles
         , rti_is_rec     = is_rec }
@@ -375,7 +377,7 @@ calcRecFlags boot_details mrole_env tyclss
 
     is_promotable = all (isPromotableTyCon rec_tycon_names) all_tycons
 
-    roles = inferRoles mrole_env all_tycons
+    roles = inferRoles is_boot mrole_env all_tycons
 
     ----------------- Recursion calculation ----------------
     is_rec n | n `elemNameSet` rec_names = Recursive
@@ -421,7 +423,7 @@ calcRecFlags boot_details mrole_env tyclss
     nt_edges = [(t, mk_nt_edges t) | t <- new_tycons]
 
     mk_nt_edges nt      -- Invariant: nt is a newtype
-        = concatMap (mk_nt_edges1 nt) (tcTyConsOfType (new_tc_rhs nt))
+        = concatMap (mk_nt_edges1 nt) (tyConsOfType (new_tc_rhs nt))
                         -- tyConsOfType looks through synonyms
 
     mk_nt_edges1 _ tc
@@ -438,7 +440,7 @@ calcRecFlags boot_details mrole_env tyclss
     mk_prod_edges tc    -- Invariant: tc is a product tycon
         = concatMap (mk_prod_edges1 tc) (dataConOrigArgTys (head (tyConDataCons tc)))
 
-    mk_prod_edges1 ptc ty = concatMap (mk_prod_edges2 ptc) (tcTyConsOfType ty)
+    mk_prod_edges1 ptc ty = concatMap (mk_prod_edges2 ptc) (tyConsOfType ty)
 
     mk_prod_edges2 ptc tc
         | tc `elem` prod_tycons   = [tc]                -- Local product
@@ -530,6 +532,25 @@ isPromotableType rec_tcs con_arg_ty
 
 %************************************************************************
 %*                                                                      *
+        Role annotations
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
+type RoleAnnots = NameEnv (LRoleAnnotDecl Name)
+
+extractRoleAnnots :: TyClGroup Name -> RoleAnnots
+extractRoleAnnots (TyClGroup { group_roles = roles })
+  = mkNameEnv [ (tycon, role_annot)
+              | role_annot@(L _ (RoleAnnotDecl (L _ tycon) _)) <- roles ]
+
+emptyRoleAnnots :: RoleAnnots
+emptyRoleAnnots = emptyNameEnv
+
+\end{code}
+
+%************************************************************************
+%*                                                                      *
         Role inference
 %*                                                                      *
 %************************************************************************
@@ -615,43 +636,58 @@ roles(~#) = N, N
 With -dcore-lint on, the output of this algorithm is checked in checkValidRoles,
 called from checkValidTycon.
 
+Note [Role-checking data constructor arguments]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+  data T a where
+    MkT :: Eq b => F a -> (a->a) -> T (G a)
+
+Then we want to check the roles at which 'a' is used
+in MkT's type.  We want to work on the user-written type,
+so we need to take into account
+  * the arguments:   (F a) and (a->a)
+  * the context:     C a b
+  * the result type: (G a)   -- this is in the eq_spec
+
 \begin{code}
 type RoleEnv    = NameEnv [Role]        -- from tycon names to roles
-type RoleAnnots = NameEnv [Maybe Role]  -- from tycon names to role annotations,
-                                        -- which may be left out
 
 -- This, and any of the functions it calls, must *not* look at the roles
 -- field of a tycon we are inferring roles about!
 -- See Note [Role inference]
-inferRoles :: RoleAnnots -> [TyCon] -> Name -> [Role]
-inferRoles annots tycons
-  = let role_env  = initialRoleEnv annots tycons
+inferRoles :: Bool -> RoleAnnots -> [TyCon] -> Name -> [Role]
+inferRoles is_boot annots tycons
+  = let role_env  = initialRoleEnv is_boot annots tycons
         role_env' = irGroup role_env tycons in
     \name -> case lookupNameEnv role_env' name of
       Just roles -> roles
       Nothing    -> pprPanic "inferRoles" (ppr name)
 
-initialRoleEnv :: RoleAnnots -> [TyCon] -> RoleEnv
-initialRoleEnv annots = extendNameEnvList emptyNameEnv .
-                        map (initialRoleEnv1 annots)
+initialRoleEnv :: Bool -> RoleAnnots -> [TyCon] -> RoleEnv
+initialRoleEnv is_boot annots = extendNameEnvList emptyNameEnv .
+                                map (initialRoleEnv1 is_boot annots)
 
-initialRoleEnv1 :: RoleAnnots -> TyCon -> (Name, [Role])
-initialRoleEnv1 annots_env tc
+initialRoleEnv1 :: Bool -> RoleAnnots -> TyCon -> (Name, [Role])
+initialRoleEnv1 is_boot annots_env tc
   | isFamilyTyCon tc = (name, map (const Nominal) tyvars)
   |  isAlgTyCon tc
   || isSynTyCon tc   = (name, default_roles)
   | otherwise        = pprPanic "initialRoleEnv1" (ppr tc)
   where name         = tyConName tc
         tyvars       = tyConTyVars tc
+        (kvs, tvs)   = span isKindVar tyvars
 
-         -- whether are not there are annotations, we're guaranteed that
-         -- the length of role_annots is appropriate
-        role_annots  = case lookupNameEnv annots_env name of
-                          Just annots -> annots
-                          Nothing     -> pprPanic "initialRoleEnv1 annots" (ppr name)
-        default_roles = let kvs = takeWhile isKindVar tyvars in
-                        map (const Nominal) kvs ++
-                        zipWith orElse role_annots (repeat Phantom)
+          -- if the number of annotations in the role annotation decl
+          -- is wrong, just ignore it. We check this in the validity check.
+        role_annots
+          = case lookupNameEnv annots_env name of
+              Just (L _ (RoleAnnotDecl _ annots))
+                | annots `equalLength` tvs -> map unLoc annots
+              _                            -> map (const Nothing) tvs
+        default_roles = map (const Nominal) kvs ++
+                        zipWith orElse role_annots (repeat default_role)
+
+        default_role = if is_boot then Representational else Phantom
 
 irGroup :: RoleEnv -> [TyCon] -> RoleEnv
 irGroup env tcs
@@ -695,9 +731,12 @@ irClass tc_name cls
 -- See Note [Role inference]
 irDataCon :: Name -> DataCon -> RoleM ()
 irDataCon tc_name datacon
-  = addRoleInferenceInfo tc_name (dataConUnivTyVars datacon) $
-    let ex_var_set = mkVarSet $ dataConExTyVars datacon in
-    mapM_ (irType ex_var_set) (dataConRepArgTys datacon)
+  = addRoleInferenceInfo tc_name univ_tvs $
+    mapM_ (irType ex_var_set) (eqSpecPreds eq_spec ++ theta ++ arg_tys)
+      -- See Note [Role-checking data constructor arguments] 
+  where
+    (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _res_ty) = dataConFullSig datacon
+    ex_var_set = mkVarSet ex_tvs
 
 irType :: VarSet -> Type -> RoleM ()
 irType = go
@@ -756,6 +795,14 @@ data RoleInferenceInfo = RII { var_ns :: VarPositions
 newtype RoleM a = RM { unRM :: Maybe RoleInferenceInfo
                             -> RoleInferenceState
                             -> (a, RoleInferenceState) }
+
+instance Functor RoleM where
+    fmap = liftM
+
+instance Applicative RoleM where
+    pure = return
+    (<*>) = ap
+
 instance Monad RoleM where
   return x = RM $ \_ state -> (x, state)
   a >>= f  = RM $ \m_info state -> let (a', state') = unRM a m_info state in
@@ -800,35 +847,4 @@ updateRoleEnv name n role
                               RIS { role_env = role_env', update = True }
                          else state )
 
-\end{code}
-
-%************************************************************************
-%*                                                                      *
-        Miscellaneous funcions
-%*                                                                      *
-%************************************************************************
-
-These two functions know about type representations, so they could be
-in Type or TcType -- but they are very specialised to this module, so
-I've chosen to put them here.
-
-\begin{code}
-tcTyConsOfType :: Type -> [TyCon]
--- tcTyConsOfType looks through all synonyms, but not through any newtypes.
--- When it finds a Class, it returns the class TyCon.  The reaons it's here
--- (not in Type.lhs) is because it is newtype-aware.
-tcTyConsOfType ty
-  = nameEnvElts (go ty)
-  where
-     go :: Type -> NameEnv TyCon  -- The NameEnv does duplicate elim
-     go ty | Just ty' <- tcView ty = go ty'
-     go (TyVarTy {})               = emptyNameEnv
-     go (LitTy {})                 = emptyNameEnv
-     go (TyConApp tc tys)          = go_tc tc tys
-     go (AppTy a b)                = go a `plusNameEnv` go b
-     go (FunTy a b)                = go a `plusNameEnv` go b
-     go (ForAllTy _ ty)            = go ty
-
-     go_tc tc tys = extendNameEnv (go_s tys) (tyConName tc) tc
-     go_s tys = foldr (plusNameEnv . go) emptyNameEnv tys
 \end{code}

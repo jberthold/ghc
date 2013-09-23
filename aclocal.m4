@@ -464,6 +464,7 @@ AC_DEFUN([FP_SETTINGS],
         SettingsPerlCommand="$PerlCmd"
         SettingsDllWrapCommand="/bin/false"
         SettingsWindresCommand="/bin/false"
+        SettingsLibtoolCommand="libtool"
         SettingsTouchCommand='touch'
         if test -z "$LlcCmd"
         then
@@ -490,6 +491,7 @@ AC_DEFUN([FP_SETTINGS],
     AC_SUBST(SettingsPerlCommand)
     AC_SUBST(SettingsDllWrapCommand)
     AC_SUBST(SettingsWindresCommand)
+    AC_SUBST(SettingsLibtoolCommand)
     AC_SUBST(SettingsTouchCommand)
     AC_SUBST(SettingsLlcCommand)
     AC_SUBST(SettingsOptCommand)
@@ -864,8 +866,8 @@ changequote([, ])dnl
 ])
 if test ! -f compiler/parser/Parser.hs || test ! -f compiler/cmm/CmmParse.hs || test ! -f compiler/parser/ParserCore.hs
 then
-    FP_COMPARE_VERSIONS([$fptools_cv_happy_version],[-lt],[1.16],
-      [AC_MSG_ERROR([Happy version 1.16 or later is required to compile GHC.])])[]
+    FP_COMPARE_VERSIONS([$fptools_cv_happy_version],[-lt],[1.19],
+      [AC_MSG_ERROR([Happy version 1.19 or later is required to compile GHC.])])[]
 fi
 HappyVersion=$fptools_cv_happy_version;
 AC_SUBST(HappyVersion)
@@ -893,8 +895,8 @@ FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-ge],[3.0],
   [Alex3=YES],[Alex3=NO])
 if test ! -f compiler/cmm/CmmLex.hs || test ! -f compiler/parser/Lexer.hs
 then
-    FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-lt],[2.1.0],
-      [AC_MSG_ERROR([Alex version 2.1.0 or later is required to compile GHC.])])[]
+    FP_COMPARE_VERSIONS([$fptools_cv_alex_version],[-lt],[3.1.0],
+      [AC_MSG_ERROR([Alex version 3.1.0 or later is required to compile GHC.])])[]
 fi
 if test ! -f utils/haddock/src/Haddock/Lex.hs
 then
@@ -1182,6 +1184,7 @@ AC_SUBST(GccLT46)
 
 dnl Check to see if the C compiler is clang or llvm-gcc
 dnl
+GccIsClang=NO
 AC_DEFUN([FP_CC_LLVM_BACKEND],
 [AC_REQUIRE([AC_PROG_CC])
 AC_MSG_CHECKING([whether C compiler is clang])
@@ -1189,6 +1192,7 @@ $CC -x c /dev/null -dM -E > conftest.txt 2>&1
 if grep "__clang__" conftest.txt >/dev/null 2>&1; then
   AC_SUBST([CC_CLANG_BACKEND], [1])
   AC_SUBST([CC_LLVM_BACKEND], [1])
+  GccIsClang=YES
   AC_MSG_RESULT([yes])
 else
   AC_MSG_RESULT([no])
@@ -1203,6 +1207,7 @@ else
     AC_MSG_RESULT([no])
   fi
 fi
+AC_SUBST(GccIsClang)
 
 rm -f conftest.txt
 ])
@@ -2047,7 +2052,16 @@ AC_DEFUN([FIND_GCC],[
     then
         $1="$CC"
     else
-        FP_ARG_WITH_PATH_GNU_PROG([$1], [$2], [$3])
+        FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [$2], [$3])
+        # From Xcode 5 on, OS X command line tools do not include gcc anymore. Use clang.
+        if test -z "$$1"
+        then
+            FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [clang], [clang])
+        fi
+        if test -z "$$1"
+        then
+            AC_MSG_ERROR([cannot find $3 nor clang in your PATH])
+        fi
     fi
     AC_SUBST($1)
 ])

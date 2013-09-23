@@ -29,6 +29,7 @@
 #include "StgPrimFloat.h" // for __int_encodeFloat etc.
 #include "Stable.h"
 #include "Proftimer.h"
+#include "GetEnv.h"
 
 #if !defined(mingw32_HOST_OS)
 #include "posix/Signals.h"
@@ -150,6 +151,9 @@ ObjectCode *objects = NULL;     /* initially empty */
    to be actually freed via checkUnload() */
 ObjectCode *unloaded_objects = NULL; /* initially empty */
 
+/* Type of the initializer */
+typedef void (*init_t) (int argc, char **argv, char **env);
+
 static HsInt loadOc( ObjectCode* oc );
 static ObjectCode* mkOc( pathchar *path, char *image, int imageSize,
                          char *archiveMemberName
@@ -169,7 +173,6 @@ static ObjectCode* mkOc( pathchar *path, char *image, int imageSize,
 #define struct_stat struct _stat
 #define open wopen
 #define WSTR(s) L##s
-#define PATH_FMT "S"
 #else
 #define pathcmp strcmp
 #define pathlen strlen
@@ -177,7 +180,6 @@ static ObjectCode* mkOc( pathchar *path, char *image, int imageSize,
 #define pathstat stat
 #define struct_stat struct stat
 #define WSTR(s) s
-#define PATH_FMT "s"
 #endif
 
 static pathchar* pathdup(pathchar *path)
@@ -198,6 +200,7 @@ static pathchar* pathdup(pathchar *path)
 static int ocVerifyImage_ELF    ( ObjectCode* oc );
 static int ocGetNames_ELF       ( ObjectCode* oc );
 static int ocResolve_ELF        ( ObjectCode* oc );
+static int ocRunInit_ELF        ( ObjectCode* oc );
 #if defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH) || defined(arm_HOST_ARCH)
 static int ocAllocateSymbolExtras_ELF ( ObjectCode* oc );
 #endif
@@ -205,12 +208,14 @@ static int ocAllocateSymbolExtras_ELF ( ObjectCode* oc );
 static int ocVerifyImage_PEi386 ( ObjectCode* oc );
 static int ocGetNames_PEi386    ( ObjectCode* oc );
 static int ocResolve_PEi386     ( ObjectCode* oc );
+static int ocRunInit_PEi386     ( ObjectCode* oc );
 static void *lookupSymbolInDLLs ( unsigned char *lbl );
 static void zapTrailingAtSign   ( unsigned char *sym );
 #elif defined(OBJFORMAT_MACHO)
 static int ocVerifyImage_MachO    ( ObjectCode* oc );
 static int ocGetNames_MachO       ( ObjectCode* oc );
 static int ocResolve_MachO        ( ObjectCode* oc );
+static int ocRunInit_MachO        ( ObjectCode* oc );
 
 #ifndef USE_MMAP
 static int machoGetMisalignment( FILE * );
@@ -878,6 +883,8 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_ap_d_ret)                       \
       SymI_HasProto(stg_ap_l_ret)                       \
       SymI_HasProto(stg_ap_v16_ret)                     \
+      SymI_HasProto(stg_ap_v32_ret)                     \
+      SymI_HasProto(stg_ap_v64_ret)                     \
       SymI_HasProto(stg_ap_n_ret)                       \
       SymI_HasProto(stg_ap_p_ret)                       \
       SymI_HasProto(stg_ap_pv_ret)                      \
@@ -1112,6 +1119,7 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(getProgArgv)                                        \
       SymI_HasProto(getFullProgArgv)                                    \
       SymI_HasProto(getStablePtr)                                       \
+      SymI_HasProto(foreignExportStablePtr)                             \
       SymI_HasProto(hs_init)                                            \
       SymI_HasProto(hs_exit)                                            \
       SymI_HasProto(hs_set_argv)                                        \
@@ -1143,8 +1151,11 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_labelThreadzh)                                  \
       SymI_HasProto(stg_newArrayzh)                                     \
       SymI_HasProto(stg_newArrayArrayzh)                                \
+      SymI_HasProto(stg_casArrayzh)                                     \
       SymI_HasProto(stg_newBCOzh)                                       \
       SymI_HasProto(stg_newByteArrayzh)                                 \
+      SymI_HasProto(stg_casIntArrayzh)                                  \
+      SymI_HasProto(stg_fetchAddIntArrayzh)                             \
       SymI_HasProto_redirect(newCAF, newDynCAF)                         \
       SymI_HasProto(stg_newMVarzh)                                      \
       SymI_HasProto(stg_newMutVarzh)                                    \
@@ -1239,12 +1250,16 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_MUT_ARR_PTRS_DIRTY_info)                        \
       SymI_HasProto(stg_MUT_ARR_PTRS_FROZEN_info)                       \
       SymI_HasProto(stg_MUT_ARR_PTRS_FROZEN0_info)                      \
+      SymI_HasProto(stg_MUT_VAR_CLEAN_info)                             \
+      SymI_HasProto(stg_MUT_VAR_DIRTY_info)                             \
       SymI_HasProto(stg_WEAK_info)                                      \
       SymI_HasProto(stg_ap_v_info)                                      \
       SymI_HasProto(stg_ap_f_info)                                      \
       SymI_HasProto(stg_ap_d_info)                                      \
       SymI_HasProto(stg_ap_l_info)                                      \
       SymI_HasProto(stg_ap_v16_info)                                    \
+      SymI_HasProto(stg_ap_v32_info)                                    \
+      SymI_HasProto(stg_ap_v64_info)                                    \
       SymI_HasProto(stg_ap_n_info)                                      \
       SymI_HasProto(stg_ap_p_info)                                      \
       SymI_HasProto(stg_ap_pv_info)                                     \
@@ -1261,6 +1276,8 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_ap_d_fast)                                      \
       SymI_HasProto(stg_ap_l_fast)                                      \
       SymI_HasProto(stg_ap_v16_fast)                                    \
+      SymI_HasProto(stg_ap_v32_fast)                                    \
+      SymI_HasProto(stg_ap_v64_fast)                                    \
       SymI_HasProto(stg_ap_n_fast)                                      \
       SymI_HasProto(stg_ap_p_fast)                                      \
       SymI_HasProto(stg_ap_pv_fast)                                     \
@@ -1361,6 +1378,8 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(unlockFile)                                         \
       SymI_HasProto(startProfTimer)                                     \
       SymI_HasProto(stopProfTimer)                                      \
+      SymI_HasProto(atomic_inc)                                         \
+      SymI_HasProto(atomic_dec)                                         \
       RTS_USER_SIGNALS_SYMBOLS                                          \
       RTS_INTCHAR_SYMBOLS
 
@@ -1717,7 +1736,7 @@ internal_dlsym(void *hdl, const char *symbol) {
             return v;
         }
     }
-    v = dlsym(hdl, symbol)
+    v = dlsym(hdl, symbol);
     RELEASE_LOCK(&dl_mutex);
     return v;
 }
@@ -1943,6 +1962,37 @@ lookupSymbol( char *lbl )
 }
 
 /* -----------------------------------------------------------------------------
+   Create a StablePtr for a foeign export.  This is normally called by
+   a C function with __attribute__((constructor)), which is generated
+   by GHC and linked into the module.
+
+   If the object code is being loaded dynamically, then we remember
+   which StablePtrs were allocated by the constructors and free them
+   again in unloadObj().
+   -------------------------------------------------------------------------- */
+
+static ObjectCode *loading_obj = NULL;
+
+StgStablePtr foreignExportStablePtr (StgPtr p)
+{
+    ForeignExportStablePtr *fe_sptr;
+    StgStablePtr *sptr;
+
+    sptr = getStablePtr(p);
+
+    if (loading_obj != NULL) {
+        fe_sptr = stgMallocBytes(sizeof(ForeignExportStablePtr),
+                                 "foreignExportStablePtr");
+        fe_sptr->stable_ptr = sptr;
+        fe_sptr->next = loading_obj->stable_ptrs;
+        loading_obj->stable_ptrs = fe_sptr;
+    }
+
+    return sptr;
+}
+
+
+/* -----------------------------------------------------------------------------
  * Debugging aid: look in GHCi's object symbol tables for symbols
  * within DELTA bytes of the specified address, and show their names.
  */
@@ -2138,6 +2188,7 @@ mkOc( pathchar *path, char *image, int imageSize,
    oc->symbols           = NULL;
    oc->sections          = NULL;
    oc->proddables        = NULL;
+   oc->stable_ptrs       = NULL;
 
 #ifndef USE_MMAP
 #ifdef darwin_HOST_OS
@@ -2779,6 +2830,23 @@ resolveObjs( void )
             barf("resolveObjs: not implemented on this platform");
 #           endif
             if (!r) { return r; }
+
+            // run init/init_array/ctors/mod_init_func
+
+            loading_obj = oc; // tells foreignExportStablePtr what to do
+#if defined(OBJFORMAT_ELF)
+            r = ocRunInit_ELF ( oc );
+#elif defined(OBJFORMAT_PEi386)
+            r = ocRunInit_PEi386 ( oc );
+#elif defined(OBJFORMAT_MACHO)
+            r = ocRunInit_MachO ( oc );
+#else
+            barf("resolveObjs: initializers not implemented on this platform");
+#endif
+            loading_obj = NULL;
+
+            if (!r) { return r; }
+
             oc->status = OBJECT_RESOLVED;
         }
     }
@@ -2800,7 +2868,7 @@ unloadObj( pathchar *path )
 
     initLinker();
 
-    IF_DEBUG(linker, debugBelch("unloadObj: %s\n", path));
+    IF_DEBUG(linker, debugBelch("unloadObj: %" PATH_FMT "\n", path));
 
     prev = NULL;
     for (oc = objects; oc; prev = oc, oc = next) {
@@ -2844,6 +2912,18 @@ unloadObj( pathchar *path )
             }
 
             freeProddableBlocks(oc);
+
+            // Release any StablePtrs that were created when this
+            // object module was initialized.
+            {
+                ForeignExportStablePtr *fe_ptr, *next;
+
+                for (fe_ptr = oc->stable_ptrs; fe_ptr != NULL; fe_ptr = next) {
+                    next = fe_ptr->next;
+                    freeStablePtr(fe_ptr->stable_ptr);
+                    stgFree(fe_ptr);
+                }
+            }
 
             oc->status = OBJECT_UNLOADED;
 
@@ -3810,6 +3890,11 @@ ocGetNames_PEi386 ( ObjectCode* oc )
       /* I'm sure this is the Right Way to do it.  However, the
          alternative of testing the sectab_i->Name field seems to
          work ok with Cygwin.
+
+         EZY: We should strongly consider using this style, because
+         it lets us pick up sections that should be added (e.g.
+         for a while the linker did not work due to missing .eh_frame
+         in this section.)
       */
       if (sectab_i->Characteristics & MYIMAGE_SCN_CNT_CODE ||
           sectab_i->Characteristics & MYIMAGE_SCN_CNT_INITIALIZED_DATA)
@@ -3819,11 +3904,14 @@ ocGetNames_PEi386 ( ObjectCode* oc )
       if (0==strcmp(".text",(char*)secname) ||
           0==strcmp(".text.startup",(char*)secname) ||
           0==strcmp(".rdata",(char*)secname)||
+          0==strcmp(".eh_frame", (char*)secname)||
           0==strcmp(".rodata",(char*)secname))
          kind = SECTIONKIND_CODE_OR_RODATA;
       if (0==strcmp(".data",(char*)secname) ||
           0==strcmp(".bss",(char*)secname))
          kind = SECTIONKIND_RWDATA;
+      if (0==strcmp(".ctors", (char*)secname))
+         kind = SECTIONKIND_INIT_ARRAY;
 
       ASSERT(sectab_i->SizeOfRawData == 0 || sectab_i->VirtualSize == 0);
       sz = sectab_i->SizeOfRawData;
@@ -3840,13 +3928,13 @@ ocGetNames_PEi386 ( ObjectCode* oc )
           /* Ignore sections called which contain exception information. */
           && 0 != strcmp(".pdata", (char*)secname)
           && 0 != strcmp(".xdata", (char*)secname)
-          /* ignore constructor section for now */
-          && 0 != strcmp(".ctors", (char*)secname)
           /* ignore section generated from .ident */
           && 0!= strncmp(".debug", (char*)secname, 6)
           /* ignore unknown section that appeared in gcc 3.4.5(?) */
           && 0!= strcmp(".reloc", (char*)secname)
           && 0 != strcmp(".rdata$zzz", (char*)secname)
+          /* ignore linker directive sections */
+          && 0 != strcmp(".drectve", (char*)secname)
          ) {
          errorBelch("Unknown PEi386 section name `%s' (while processing: %" PATH_FMT")", secname, oc->fileName);
          stgFree(secname);
@@ -4002,7 +4090,6 @@ ocResolve_PEi386 ( ObjectCode* oc )
           || 0 == strcmp(".stabstr", (char*)secname)
           || 0 == strcmp(".pdata", (char*)secname)
           || 0 == strcmp(".xdata", (char*)secname)
-          || 0 == strcmp(".ctors", (char*)secname)
           || 0 == strncmp(".debug", (char*)secname, 6)
           || 0 == strcmp(".rdata$zzz", (char*)secname)) {
           stgFree(secname);
@@ -4167,6 +4254,49 @@ ocResolve_PEi386 ( ObjectCode* oc )
 
    IF_DEBUG(linker, debugBelch("completed %" PATH_FMT, oc->fileName));
    return 1;
+}
+
+static int
+ocRunInit_PEi386 ( ObjectCode *oc )
+{
+    COFF_header*  hdr;
+    COFF_section* sectab;
+    UChar*        strtab;
+    int i;
+
+    hdr = (COFF_header*)(oc->image);
+    sectab = (COFF_section*) (
+                ((UChar*)(oc->image))
+                + sizeof_COFF_header + hdr->SizeOfOptionalHeader
+             );
+    strtab = ((UChar*)(oc->image))
+             + hdr->PointerToSymbolTable
+             + hdr->NumberOfSymbols * sizeof_COFF_symbol;
+
+    int argc, envc;
+    char **argv, **envv;
+
+    getProgArgv(&argc, &argv);
+    getProgEnvv(&envc, &envv);
+
+    for (i = 0; i < hdr->NumberOfSections; i++) {
+        COFF_section* sectab_i
+            = (COFF_section*)
+                myindex ( sizeof_COFF_section, sectab, i );
+        char *secname = cstring_from_section_name(sectab_i->Name, strtab);
+        if (0 == strcmp(".ctors", (char*)secname)) {
+            UChar *init_startC = (UChar*)(oc->image) + sectab_i->PointerToRawData;
+            init_t *init_start, *init_end, *init;
+            init_start = (init_t*)init_startC;
+            init_end = (init_t*)(init_startC + sectab_i->SizeOfRawData);
+            // ctors are run *backwards*!
+            for (init = init_end - 1; init >= init_start; init--) {
+                (*init)(argc, argv, envv);
+            }
+        }
+    }
+    freeProgEnvv(envc, envv);
+    return 1;
 }
 
 #endif /* defined(OBJFORMAT_PEi386) */
@@ -4643,6 +4773,12 @@ static int getSectionKind_ELF( Elf_Shdr *hdr, int *is_bss )
         && (hdr->sh_flags & SHF_ALLOC) && !(hdr->sh_flags & SHF_WRITE)) {
         /* .rodata-style section */
         return SECTIONKIND_CODE_OR_RODATA;
+    }
+
+    if (hdr->sh_type == SHT_INIT_ARRAY
+        && (hdr->sh_flags & SHF_ALLOC) && (hdr->sh_flags & SHF_WRITE)) {
+       /* .init_array section */
+        return SECTIONKIND_INIT_ARRAY;
     }
 
     if (hdr->sh_type == SHT_NOBITS
@@ -5390,12 +5526,12 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
           barf("R_X86_64_GOTTPOFF relocation, but ALWAYS_PIC.");
 #else
         /* determine the offset of S to the current thread's tls
-           area 
+           area
            XXX: Move this to the beginning of function */
           struct tls_info ti;
           get_tls_area(0, &ti, sizeof(ti));
           /* make entry in GOT that contains said offset */
-          StgInt64 gotEntry = (StgInt64) &makeSymbolExtra(oc, ELF_R_SYM(info), 
+          StgInt64 gotEntry = (StgInt64) &makeSymbolExtra(oc, ELF_R_SYM(info),
                                          (S - (Elf64_Addr)(ti.base)))->addr;
           *(Elf64_Word *)P = gotEntry + A - P;
 #endif
@@ -5457,6 +5593,60 @@ ocResolve_ELF ( ObjectCode* oc )
    ocFlushInstructionCache( oc );
 #endif
 
+   return 1;
+}
+
+static int ocRunInit_ELF( ObjectCode *oc )
+{
+   int   i;
+   char*     ehdrC = (char*)(oc->image);
+   Elf_Ehdr* ehdr  = (Elf_Ehdr*) ehdrC;
+   Elf_Shdr* shdr  = (Elf_Shdr*) (ehdrC + ehdr->e_shoff);
+   char* sh_strtab = ehdrC + shdr[ehdr->e_shstrndx].sh_offset;
+   int argc, envc;
+   char **argv, **envv;
+
+   getProgArgv(&argc, &argv);
+   getProgEnvv(&envc, &envv);
+
+   // XXX Apparently in some archs .init may be something
+   // special!  See DL_DT_INIT_ADDRESS macro in glibc
+   // as well as ELF_FUNCTION_PTR_IS_SPECIAL.  We've not handled
+   // it here, please file a bug report if it affects you.
+   for (i = 0; i < ehdr->e_shnum; i++) {
+      init_t *init_start, *init_end, *init;
+      int is_bss = FALSE;
+      SectionKind kind = getSectionKind_ELF(&shdr[i], &is_bss);
+      if (kind == SECTIONKIND_CODE_OR_RODATA
+       && 0 == memcmp(".init", sh_strtab + shdr[i].sh_name, 5)) {
+         init_t init_f = (init_t)(ehdrC + shdr[i].sh_offset);
+         init_f(argc, argv, envv);
+      }
+
+      if (kind == SECTIONKIND_INIT_ARRAY) {
+         char *init_startC = ehdrC + shdr[i].sh_offset;
+         init_start = (init_t*)init_startC;
+         init_end = (init_t*)(init_startC + shdr[i].sh_size);
+         for (init = init_start; init < init_end; init++) {
+            (*init)(argc, argv, envv);
+         }
+      }
+
+      // XXX could be more strict and assert that it's
+      // SECTIONKIND_RWDATA; but allowing RODATA seems harmless enough.
+      if ((kind == SECTIONKIND_RWDATA || kind == SECTIONKIND_CODE_OR_RODATA)
+       && 0 == memcmp(".ctors", sh_strtab + shdr[i].sh_name, 6)) {
+         char *init_startC = ehdrC + shdr[i].sh_offset;
+         init_start = (init_t*)init_startC;
+         init_end = (init_t*)(init_startC + shdr[i].sh_size);
+         // ctors run in reverse
+         for (init = init_end - 1; init >= init_start; init--) {
+            (*init)(argc, argv, envv);
+         }
+      }
+   }
+
+   freeProgEnvv(envc, envv);
    return 1;
 }
 
@@ -5537,7 +5727,7 @@ ocAllocateSymbolExtras_MachO(ObjectCode* oc)
 
     IF_DEBUG(linker, debugBelch("ocAllocateSymbolExtras_MachO: start\n"));
 
-    for (i = 0; i < header->ncmds; i++) {   
+    for (i = 0; i < header->ncmds; i++) {
         if (lc->cmd == LC_SYMTAB) {
 
                 // Find out the first and last undefined external
@@ -5594,7 +5784,7 @@ ocAllocateSymbolExtras_MachO(ObjectCode* oc)
 
     IF_DEBUG(linker, debugBelch("ocAllocateSymbolExtras_MachO: start\n"));
 
-    for (i = 0; i < header->ncmds; i++) {   
+    for (i = 0; i < header->ncmds; i++) {
         if (lc->cmd == LC_SYMTAB) {
 
                 // Just allocate one entry for every symbol
@@ -5869,7 +6059,7 @@ relocateSection(
 				       " and should be defined in a section, but isn't!\n", nm);
 		    }
 	    }
-	    
+
             value = (uint64_t) &makeSymbolExtra(oc, reloc->r_symbolnum, (unsigned long)addr)->addr;
 
             type = X86_64_RELOC_SIGNED;
@@ -6202,7 +6392,7 @@ relocateSection(
                         return 0;
                     }
 
-                    if (reloc->r_pcrel) {  
+                    if (reloc->r_pcrel) {
 #ifdef powerpc_HOST_ARCH
                             // In the .o file, this should be a relative jump to NULL
                             // and we'll change it to a relative jump to the symbol
@@ -6363,32 +6553,21 @@ ocGetNames_MachO(ObjectCode* oc)
             sections[i].offset = zeroFillArea - image;
         }
 
-        if (!strcmp(sections[i].sectname,"__text")) {
+        SectionKind kind = SECTIONKIND_OTHER;
 
-            IF_DEBUG(linker, debugBelch("ocGetNames_MachO: adding __text section\n"));
-            addSection(oc, SECTIONKIND_CODE_OR_RODATA,
-                (void*) (image + sections[i].offset),
-                (void*) (image + sections[i].offset + sections[i].size));
+        if (0==strcmp(sections[i].sectname,"__text")) {
+            kind = SECTIONKIND_CODE_OR_RODATA;
         }
-        else if (!strcmp(sections[i].sectname,"__const")) {
-
-            IF_DEBUG(linker, debugBelch("ocGetNames_MachO: adding __const section\n"));
-            addSection(oc, SECTIONKIND_RWDATA,
-                (void*) (image + sections[i].offset),
-                (void*) (image + sections[i].offset + sections[i].size));
-        }    
-        else if (!strcmp(sections[i].sectname,"__data")) {
-
-            IF_DEBUG(linker, debugBelch("ocGetNames_MachO: adding __data section\n"));
-            addSection(oc, SECTIONKIND_RWDATA,
-                (void*) (image + sections[i].offset),
-                (void*) (image + sections[i].offset + sections[i].size));
+        else if (0==strcmp(sections[i].sectname,"__const") ||
+                 0==strcmp(sections[i].sectname,"__data") ||
+                 0==strcmp(sections[i].sectname,"__bss") ||
+                 0==strcmp(sections[i].sectname,"__common") ||
+                 0==strcmp(sections[i].sectname,"__mod_init_func")) {
+            kind = SECTIONKIND_RWDATA;
         }
-        else if(!strcmp(sections[i].sectname,"__bss")
-                || !strcmp(sections[i].sectname,"__common")) {
 
-            IF_DEBUG(linker, debugBelch("ocGetNames_MachO: adding __bss section\n"));
-            addSection(oc, SECTIONKIND_RWDATA,
+        if (kind != SECTIONKIND_OTHER) {
+            addSection(oc, kind,
                 (void*) (image + sections[i].offset),
                 (void*) (image + sections[i].offset + sections[i].size));
         }
@@ -6568,6 +6747,52 @@ ocResolve_MachO(ObjectCode* oc)
     ocFlushInstructionCache( oc );
 #endif
 
+    return 1;
+}
+
+static int ocRunInit_MachO ( ObjectCode *oc )
+{
+    char *image = (char*) oc->image;
+    struct mach_header *header = (struct mach_header*) image;
+    struct load_command *lc = (struct load_command*) (image + sizeof(struct mach_header));
+    struct segment_command *segLC = NULL;
+    struct section *sections;
+    nat i;
+
+    for (i = 0; i < header->ncmds; i++) {
+        if (lc->cmd == LC_SEGMENT || lc->cmd == LC_SEGMENT_64) {
+            segLC = (struct segment_command*) lc;
+        }
+        lc = (struct load_command *) ( ((char*)lc) + lc->cmdsize );
+    }
+    if (!segLC) {
+        barf("ocRunInit_MachO: no segment load command");
+    }
+    sections = (struct section*) (segLC+1);
+
+    int argc, envc;
+    char **argv, **envv;
+
+    getProgArgv(&argc, &argv);
+    getProgEnvv(&envc, &envv);
+
+    for (i = 0; i < segLC->nsects; i++) {
+        // ToDo: replace this with a proper check for the S_MOD_INIT_FUNC_POINTERS
+        // flag.  We should do this elsewhere in the Mach-O linker code
+        // too.  Note that the system linker will *refuse* to honor
+        // sections which don't have this flag, so this could cause
+        // weird behavior divergence (albeit reproduceable).
+        if (0 == strcmp(sections[i].sectname,"__mod_init_func")) {
+            char *init_startC = image + sections[i].offset;
+            init_t *init = (init_t*)init_startC;
+            init_t *init_end = (init_t*)(init_startC + sections[i].size);
+            for (; init < init_end; init++) {
+                (*init)(argc, argv, envv);
+            }
+        }
+    }
+
+    freeProgEnvv(envc, envv);
     return 1;
 }
 

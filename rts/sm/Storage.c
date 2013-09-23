@@ -181,7 +181,9 @@ initStorage (void)
 
 #ifdef THREADED_RTS
   initSpinLock(&gc_alloc_block_sync);
+#ifdef PROF_SPIN
   whitehole_spin = 0;
+#endif
 #endif
 
   N = 0;
@@ -215,7 +217,7 @@ void storageAddCapabilities (nat from, nat to)
     // we've moved the nurseries, so we have to update the rNursery
     // pointers from the Capabilities.
     for (i = 0; i < to; i++) {
-        capabilities[i].r.rNursery = &nurseries[i];
+        capabilities[i]->r.rNursery = &nurseries[i];
     }
 
     /* The allocation area.  Policy: keep the allocation area
@@ -229,7 +231,7 @@ void storageAddCapabilities (nat from, nat to)
     // allocate a block for each mut list
     for (n = from; n < to; n++) {
         for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
-            capabilities[n].mut_lists[g] = allocBlock();
+            capabilities[n]->mut_lists[g] = allocBlock();
         }
     }
 
@@ -493,8 +495,8 @@ assignNurseriesToCapabilities (nat from, nat to)
     nat i;
 
     for (i = from; i < to; i++) {
-        capabilities[i].r.rCurrentNursery = nurseries[i].blocks;
-        capabilities[i].r.rCurrentAlloc   = NULL;
+        capabilities[i]->r.rCurrentNursery = nurseries[i].blocks;
+        capabilities[i]->r.rCurrentAlloc   = NULL;
     }
 }
 
@@ -939,7 +941,7 @@ void updateNurseriesStats (void)
     nat i;
 
     for (i = 0; i < n_capabilities; i++) {
-        capabilities[i].total_allocated += countOccupied(nurseries[i].blocks);
+        capabilities[i]->total_allocated += countOccupied(nurseries[i].blocks);
     }
 }
 

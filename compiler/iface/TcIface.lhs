@@ -7,7 +7,8 @@ Type checking of type signatures in interface files
 
 \begin{code}
 module TcIface ( 
-        tcImportDecl, importDecl, checkWiredInTyCon, tcHiBootIface, typecheckIface, 
+        tcLookupImported_maybe, 
+        importDecl, checkWiredInTyCon, tcHiBootIface, typecheckIface, 
         tcIfaceDecl, tcIfaceInst, tcIfaceFamInst, tcIfaceRules,
         tcIfaceVectInfo, tcIfaceAnnotations, 
         tcIfaceExpr,    -- Desired by HERMIT (Trac #7683)
@@ -17,6 +18,7 @@ module TcIface (
 
 #include "HsVersions.h"
 
+import TcTypeNats(typeNatCoAxiomRules)
 import IfaceSyn
 import LoadIface
 import IfaceEnv
@@ -34,7 +36,6 @@ import CoreSyn
 import CoreUtils
 import CoreUnfold
 import CoreLint
-import WorkWrap                     ( mkWrapper )
 import MkCore                       ( castBottomExpr )
 import Id
 import MkId
@@ -46,7 +47,7 @@ import DataCon
 import PrelNames
 import TysWiredIn
 import TysPrim          ( superKindTyConName )
-import BasicTypes       ( Arity, strongLoopBreaker )
+import BasicTypes       ( strongLoopBreaker )
 import Literal
 import qualified Var
 import VarEnv
@@ -55,7 +56,7 @@ import Name
 import NameEnv
 import NameSet
 import OccurAnal        ( occurAnalyseExpr )
-import Demand           ( isBottomingSig )
+import Demand
 import Module
 import UniqFM
 import UniqSupply
@@ -68,6 +69,8 @@ import Util
 import FastString
 
 import Control.Monad
+import qualified Data.Map as Map
+import Data.Traversable ( traverse )
 \end{code}
 
 This module takes
@@ -114,20 +117,25 @@ where the code that e1 expands to might import some defns that
 also turn out to be needed by the code that e2 expands to.
 
 \begin{code}
-tcImportDecl :: Name -> TcM TyThing
+tcLookupImported_maybe :: Name -> TcM (MaybeErr MsgDoc TyThing)
+-- Returns (Failed err) if we can't find the interface file for the thing
+tcLookupImported_maybe name
+  = do  { hsc_env <- getTopEnv
+        ; mb_thing <- liftIO (lookupTypeHscEnv hsc_env name)
+        ; case mb_thing of  
+            Just thing -> return (Succeeded thing)
+            Nothing    -> tcImportDecl_maybe name }
+
+tcImportDecl_maybe :: Name -> TcM (MaybeErr MsgDoc TyThing)
 -- Entry point for *source-code* uses of importDecl
-tcImportDecl name 
+tcImportDecl_maybe name 
   | Just thing <- wiredInNameTyThing_maybe name
   = do  { when (needWiredInHomeIface thing)
                (initIfaceTcRn (loadWiredInHomeIface name))
                 -- See Note [Loading instances for wired-in things]
-        ; return thing }
+        ; return (Succeeded thing) }
   | otherwise
-  = do  { traceIf (text "tcImportDecl" <+> ppr name)
-        ; mb_thing <- initIfaceTcRn (importDecl name)
-        ; case mb_thing of
-            Succeeded thing -> return thing
-            Failed err      -> failWithTc err }
+  = initIfaceTcRn (importDecl name)
 
 importDecl :: Name -> IfM lcl (MaybeErr MsgDoc TyThing)
 -- Get the TyThing for this Name from an interface file
@@ -504,7 +512,7 @@ tc_iface_decl _parent ignore_prags
             (IfaceClass {ifCtxt = rdr_ctxt, ifName = tc_occ,
                          ifTyVars = tv_bndrs, ifRoles = roles, ifFDs = rdr_fds, 
                          ifATs = rdr_ats, ifSigs = rdr_sigs, 
-                         ifRec = tc_isrec })
+                         ifMinDef = mindef_occ, ifRec = tc_isrec })
 -- ToDo: in hs-boot files we should really treat abstract classes specially,
 --       as we do abstract tycons
   = bindIfaceTyVars tv_bndrs $ \ tyvars -> do
@@ -515,10 +523,11 @@ tc_iface_decl _parent ignore_prags
     ; sigs <- mapM tc_sig rdr_sigs
     ; fds  <- mapM tc_fd rdr_fds
     ; traceIf (text "tc-iface-class3" <+> ppr tc_occ)
+    ; mindef <- traverse lookupIfaceTop mindef_occ
     ; cls  <- fixM $ \ cls -> do
               { ats  <- mapM (tc_at cls) rdr_ats
               ; traceIf (text "tc-iface-class4" <+> ppr tc_occ)
-              ; buildClass ignore_prags tc_name tyvars roles ctxt fds ats sigs tc_isrec }
+              ; buildClass ignore_prags tc_name tyvars roles ctxt fds ats sigs mindef tc_isrec }
     ; return (ATyCon (classTyCon cls)) }
   where
    tc_sc pred = forkM (mk_sc_doc pred) (tcIfaceType pred)
@@ -606,33 +615,36 @@ tcIfaceDataCons tycon_name tycon _ if_cons
                          ifConStricts = if_stricts})
      = bindIfaceTyVars univ_tvs $ \ univ_tyvars -> do
        bindIfaceTyVars ex_tvs    $ \ ex_tyvars -> do
-        { name  <- lookupIfaceTop occ
+        { traceIf (text "Start interface-file tc_con_decl" <+> ppr occ)
+        ; name  <- lookupIfaceTop occ
 
         -- Read the context and argument types, but lazily for two reasons
         -- (a) to avoid looking tugging on a recursive use of 
         --     the type itself, which is knot-tied
         -- (b) to avoid faulting in the component types unless 
         --     they are really needed
-        ; ~(eq_spec, theta, arg_tys) <- forkM (mk_doc name) $
+        ; ~(eq_spec, theta, arg_tys, stricts) <- forkM (mk_doc name) $
              do { eq_spec <- tcIfaceEqSpec spec
                 ; theta   <- tcIfaceCtxt ctxt
                 ; arg_tys <- mapM tcIfaceType args
-                ; return (eq_spec, theta, arg_tys) }
+                ; stricts <- mapM tc_strict if_stricts 
+                        -- The IfBang field can mention 
+                        -- the type itself; hence inside forkM
+                ; return (eq_spec, theta, arg_tys, stricts) }
         ; lbl_names <- mapM lookupIfaceTop field_lbls
-
-        ; stricts <- mapM tc_strict if_stricts
 
         -- Remember, tycon is the representation tycon
         ; let orig_res_ty = mkFamilyTyConApp tycon 
                                 (substTyVars (mkTopTvSubst eq_spec) univ_tyvars)
 
-        ; buildDataCon (pprPanic "tcIfaceDataCons: FamInstEnvs" (ppr name))
+        ; con <- buildDataCon (pprPanic "tcIfaceDataCons: FamInstEnvs" (ppr name))
                        name is_infix
                        stricts lbl_names
                        univ_tyvars ex_tyvars 
                        eq_spec theta 
                        arg_tys orig_res_ty tycon
-        }
+        ; traceIf (text "Done interface-file tc_con_decl" <+> ppr name)
+        ; return con } 
     mk_doc con_name = ptext (sLit "Constructor") <+> ppr con_name
 
     tc_strict IfNoBang = return HsNoBang
@@ -1011,9 +1023,19 @@ tcIfaceCo (IfaceInstCo c1 t2)       = InstCo   <$> tcIfaceCo c1
 tcIfaceCo (IfaceNthCo d c)          = NthCo d  <$> tcIfaceCo c
 tcIfaceCo (IfaceLRCo lr c)          = LRCo lr  <$> tcIfaceCo c
 tcIfaceCo (IfaceSubCo c)            = SubCo    <$> tcIfaceCo c
+tcIfaceCo (IfaceAxiomRuleCo ax tys cos) = AxiomRuleCo
+                                            <$> tcIfaceCoAxiomRule ax
+                                            <*> mapM tcIfaceType tys
+                                            <*> mapM tcIfaceCo cos
 
 tcIfaceCoVar :: FastString -> IfL CoVar
 tcIfaceCoVar = tcIfaceLclId
+
+tcIfaceCoAxiomRule :: FastString -> IfL CoAxiomRule
+tcIfaceCoAxiomRule n =
+  case Map.lookup n typeNatCoAxiomRules of
+    Just ax -> return ax
+    _  -> pprPanic "tcIfaceCoAxiomRule" (ppr n)
 \end{code}
 
 
@@ -1247,17 +1269,18 @@ tcUnfolding :: Name -> Type -> IdInfo -> IfaceUnfolding -> IfL Unfolding
 tcUnfolding name _ info (IfCoreUnfold stable if_expr)
   = do  { dflags <- getDynFlags
         ; mb_expr <- tcPragExpr name if_expr
-        ; let unf_src = if stable then InlineStable else InlineRhs
-        ; return (case mb_expr of
-                    Nothing   -> NoUnfolding
-                    Just expr -> mkUnfolding dflags unf_src
-                                             True {- Top level -} 
-                                             is_bottoming
-                                             expr) }
+        ; let unf_src | stable    = InlineStable
+                      | otherwise = InlineRhs
+        ; return $ case mb_expr of
+            Nothing -> NoUnfolding
+            Just expr -> mkUnfolding dflags unf_src
+                           True {- Top level -}
+                           (isBottomingSig strict_sig)
+                           expr
+        }
   where
      -- Strictness should occur before unfolding!
-    is_bottoming = isBottomingSig $ strictnessInfo info              
-
+    strict_sig = strictnessInfo info
 tcUnfolding name _ _ (IfCompulsory if_expr)
   = do  { mb_expr <- tcPragExpr name if_expr
         ; return (case mb_expr of
@@ -1281,31 +1304,6 @@ tcUnfolding name dfun_ty _ (IfDFunUnfold bs ops)
   where
     doc = text "Class ops for dfun" <+> ppr name
     (_, _, cls, _) = tcSplitDFunTy dfun_ty
-
-tcUnfolding name ty info (IfExtWrapper arity wkr)
-  = tcIfaceWrapper name ty info arity (tcIfaceExtId wkr)
-tcUnfolding name ty info (IfLclWrapper arity wkr)
-  = tcIfaceWrapper name ty info arity (tcIfaceLclId wkr)
-
--------------
-tcIfaceWrapper :: Name -> Type -> IdInfo -> Arity -> IfL Id -> IfL Unfolding
-tcIfaceWrapper name ty info arity get_worker
-  = do  { mb_wkr_id <- forkM_maybe doc get_worker
-        ; us <- newUniqueSupply
-        ; dflags <- getDynFlags
-        ; return (case mb_wkr_id of
-                     Nothing     -> noUnfolding
-                     Just wkr_id -> make_inline_rule dflags wkr_id us) }
-  where
-    doc = text "Worker for" <+> ppr name
-
-    make_inline_rule dflags wkr_id us 
-        = mkWwInlineRule wkr_id
-                         (initUs_ us (mkWrapper dflags ty strict_sig) wkr_id) 
-                         arity
-        -- Again we rely here on strictness info 
-        -- always appearing before unfolding
-    strict_sig = strictnessInfo info
 \end{code}
 
 For unfoldings we try to do the job lazily, so that we never type check

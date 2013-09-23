@@ -40,9 +40,10 @@ main = do hSetBuffering stdout LineBuffering
                   doCheck dir
               "copy" : dir : distDir
                      : strip : myDestDir : myPrefix : myLibdir : myDocdir
-                     : args' ->
+                     : ghcLibWays : args' ->
                   doCopy dir distDir
                          strip myDestDir myPrefix myLibdir myDocdir
+                         ("dyn" `elem` words ghcLibWays)
                          args'
               "register" : dir : distDir : ghc : ghcpkg : topdir
                          : myDestDir : myPrefix : myLibdir : myDocdir
@@ -127,11 +128,11 @@ runHsColour directory distdir args
  $ defaultMainArgs ("hscolour" : "--builddir" : distdir : args)
 
 doCopy :: FilePath -> FilePath
-       -> FilePath -> FilePath -> FilePath -> FilePath -> FilePath
+       -> FilePath -> FilePath -> FilePath -> FilePath -> FilePath -> Bool
        -> [String]
        -> IO ()
 doCopy directory distDir
-       strip myDestDir myPrefix myLibdir myDocdir
+       strip myDestDir myPrefix myLibdir myDocdir withSharedLibs
        args
  = withCurrentDirectory directory $ do
      let copyArgs = ["copy", "--builddir", distDir]
@@ -167,12 +168,13 @@ doCopy directory distDir
                                                  (installDirTemplates lbi)
                 progs = withPrograms lbi
                 stripProgram' = stripProgram {
-                    programFindLocation = \_ -> return (Just strip) }
+                    programFindLocation = \_ _ -> return (Just strip) }
 
             progs' <- configureProgram verbosity stripProgram' progs
             let lbi' = lbi {
                                withPrograms = progs',
-                               installDirTemplates = idts
+                               installDirTemplates = idts,
+                               withSharedLib = withSharedLibs
                            }
             f pd lbi' us flags
 
@@ -205,12 +207,13 @@ doRegister directory distDir ghc ghcpkg topdir
                 progs = withPrograms lbi
                 ghcpkgconf = topdir </> "package.conf.d"
                 ghcProgram' = ghcProgram {
-                    programPostConf = \_ _ -> return ["-B" ++ topdir],
-                    programFindLocation = \_ -> return (Just ghc) }
+                    programPostConf = \_ cp -> return cp { programDefaultArgs = ["-B" ++ topdir] },
+                    programFindLocation = \_ _ -> return (Just ghc) }
                 ghcPkgProgram' = ghcPkgProgram {
-                    programPostConf = \_ _ -> return $ ["--global-package-db", ghcpkgconf]
-                                                    ++ ["--force" | not (null myDestDir) ],
-                    programFindLocation = \_ -> return (Just ghcpkg) }
+                    programPostConf = \_ cp -> return cp { programDefaultArgs =
+                                                                ["--global-package-db", ghcpkgconf]
+                                                                ++ ["--force" | not (null myDestDir) ] },
+                    programFindLocation = \_ _ -> return (Just ghcpkg) }
                 configurePrograms ps conf = foldM (flip (configureProgram verbosity)) conf ps
 
             progs' <- configurePrograms [ghcProgram', ghcPkgProgram'] progs

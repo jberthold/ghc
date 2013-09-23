@@ -16,7 +16,7 @@ A ``lint'' pass to check for Core correctness
 
 {-# OPTIONS_GHC -fprof-auto #-}
 
-module CoreLint ( lintCoreBindings, lintUnfolding ) where
+module CoreLint ( lintCoreBindings, lintUnfolding, lintExpr ) where
 
 #include "HsVersions.h"
 
@@ -54,6 +54,7 @@ import OptCoercion ( checkAxInstCo )
 import Control.Monad
 import MonadUtils
 import Data.Maybe
+import Pair
 \end{code}
 
 Note [GHC Formalism]
@@ -120,14 +121,15 @@ find an occurence of an Id, we fetch it from the in-scope set.
 
 
 \begin{code}
-lintCoreBindings :: CoreProgram -> (Bag MsgDoc, Bag MsgDoc)
+lintCoreBindings :: [Var] -> CoreProgram -> (Bag MsgDoc, Bag MsgDoc)
 --   Returns (warnings, errors)
 -- If you edit this function, you may need to update the GHC formalism
 -- See Note [GHC Formalism]
-lintCoreBindings binds
+lintCoreBindings local_in_scope binds
   = initL $ 
-    addLoc TopLevelBindings $
-    addInScopeVars binders  $
+    addLoc TopLevelBindings        $
+    addInScopeVars local_in_scope  $
+    addInScopeVars binders         $
 	-- Put all the top-level binders in scope at the start
 	-- This is because transformation rules can bring something
 	-- into use 'unexpectedly'
@@ -177,6 +179,18 @@ lintUnfolding locn vars expr
   where
     (_warns, errs) = initL (addLoc (ImportedUnfolding locn) $
                             addInScopeVars vars	           $
+                            lintCoreExpr expr)
+
+lintExpr :: [Var]		-- Treat these as in scope
+	 -> CoreExpr
+	 -> Maybe MsgDoc	-- Nothing => OK
+
+lintExpr vars expr
+  | isEmptyBag errs = Nothing
+  | otherwise       = Just (pprMessageBag errs)
+  where
+    (_warns, errs) = initL (addLoc TopLevelBindings $
+                            addInScopeVars vars	    $
                             lintCoreExpr expr)
 \end{code}
 
@@ -974,6 +988,53 @@ lintCoercion co@(SubCo co')
   = do { (k,s,t,r) <- lintCoercion co'
        ; checkRole co Nominal r
        ; return (k,s,t,Representational) }
+
+
+lintCoercion this@(AxiomRuleCo co ts cs)
+  = do _ks <- mapM lintType ts
+       eqs <- mapM lintCoercion cs
+
+       let tyNum = length ts
+
+       case compare (coaxrTypeArity co) tyNum of
+         EQ -> return ()
+         LT -> err "Too many type arguments"
+                    [ txt "expected" <+> int (coaxrTypeArity co)
+                    , txt "provided" <+> int tyNum ]
+         GT -> err "Not enough type arguments"
+                    [ txt "expected" <+> int (coaxrTypeArity co)
+                          , txt "provided" <+> int tyNum ]
+       checkRoles 0 (coaxrAsmpRoles co) eqs
+
+       case coaxrProves co ts [ Pair l r | (_,l,r,_) <- eqs ] of
+         Nothing -> err "Malformed use of AxiomRuleCo" [ ppr this ]
+         Just (Pair l r) ->
+           do kL <- lintType l
+              kR <- lintType r
+              unless (eqKind kL kR)
+                $ err "Kind error in CoAxiomRule"
+                       [ppr kL <+> txt "/=" <+> ppr kR]
+              return (kL, l, r, coaxrRole co)
+  where
+  txt       = ptext . sLit
+  err m xs  = failWithL $
+                hang (txt m) 2 $ vcat (txt "Rule:" <+> ppr (coaxrName co) : xs)
+
+  checkRoles n (e : es) ((_,_,_,r) : rs)
+    | e == r    = checkRoles (n+1) es rs
+    | otherwise = err "Argument roles mismatch"
+                      [ txt "In argument:" <+> int (n+1)
+                      , txt "Expected:" <+> ppr e
+                      , txt "Found:" <+> ppr r ]
+  checkRoles _ [] []  = return ()
+  checkRoles n [] rs  = err "Too many coercion arguments"
+                          [ txt "Expected:" <+> int n
+                          , txt "Provided:" <+> int (n + length rs) ]
+
+  checkRoles n es []  = err "Not enough coercion arguments"
+                          [ txt "Expected:" <+> int (n + length es)
+                          , txt "Provided:" <+> int n ]
+
 \end{code}
 
 %************************************************************************
@@ -1011,6 +1072,13 @@ The same substitution also supports let-type, current expressed as
 	(/\(a:*). body) ty
 Here we substitute 'ty' for 'a' in 'body', on the fly.
 -}
+
+instance Functor LintM where
+      fmap = liftM
+
+instance Applicative LintM where
+      pure = return
+      (<*>) = ap
 
 instance Monad LintM where
   return x = LintM (\ _   _     errs -> (Just x, errs))

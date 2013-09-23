@@ -388,13 +388,13 @@ is fine, and has type Bool.  This is one reason we need a type on
 the case expression: if the alternatives are empty we can't get the type
 from the alternatives!  I'll write this
    case (error Int "Hello") of Bool {}
-with the return type just before the alterantives.
+with the return type just before the alternatives.
 
 Here's another example:
   data T
   f :: T -> Bool
   f = \(x:t). case x of Bool {}
-Since T has no data constructors, the case alterantives are of course
+Since T has no data constructors, the case alternatives are of course
 empty.  However note that 'x' is not bound to a visbily-bottom value;
 it's the *type* that tells us it's going to diverge.  Its a bit of a
 degnerate situation but we do NOT want to replace
@@ -714,7 +714,9 @@ data Unfolding
 
 ------------------------------------------------
 data UnfoldingSource
-  = InlineRhs          -- The current rhs of the function
+  = -- See also Note [Historical note: unfoldings for wrappers]
+   
+    InlineRhs          -- The current rhs of the function
     		       -- Replace uf_tmpl each time around
 
   | InlineStable       -- From an INLINE or INLINABLE pragma 
@@ -738,13 +740,6 @@ data UnfoldingSource
     		       -- Only a few primop-like things have this property 
                        -- (see MkId.lhs, calls to mkCompulsoryUnfolding).
                        -- Inline absolutely always, however boring the context.
-
-  | InlineWrapper Id   -- This unfolding is a the wrapper in a 
-		       --     worker/wrapper split from the strictness analyser
-	               -- The Id is the worker-id
-		       -- Used to abbreviate the uf_tmpl in interface files
-		       --	which don't need to contain the RHS; 
-		       --	it can be derived from the strictness info
 
 
 
@@ -774,6 +769,25 @@ data UnfoldingGuidance
 
   | UnfNever	    -- The RHS is big, so don't inline it
 \end{code}
+
+Note [Historical note: unfoldings for wrappers]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We used to have a nice clever scheme in interface files for
+wrappers. A wrapper's unfolding can be reconstructed from its worker's
+id and its strictness. This decreased .hi file size (sometimes
+significantly, for modules like GHC.Classes with many high-arity w/w
+splits) and had a slight corresponding effect on compile times.
+
+However, when we added the second demand analysis, this scheme lead to
+some Core lint errors. The second analysis could change the strictness
+signatures, which sometimes resulted in a wrapper's regenerated
+unfolding applying the wrapper to too many arguments.
+
+Instead of repairing the clever .hi scheme, we abandoned it in favor
+of simplicity. The .hi sizes are usually insignificant (excluding the
++1M for base libraries), and compile time barely increases (~+1% for
+nofib). The nicer upshot is that the UnfoldingSource no longer mentions
+an Id, so, eg, substitutions need not traverse them.
 
 
 Note [DFun unfoldings]
@@ -844,9 +858,8 @@ isStableSource :: UnfoldingSource -> Bool
 -- Keep the unfolding template
 isStableSource InlineCompulsory   = True
 isStableSource InlineStable       = True
-isStableSource (InlineWrapper {}) = True
 isStableSource InlineRhs          = False
- 
+
 -- | Retrieves the template of an unfolding: panics if none is known
 unfoldingTemplate :: Unfolding -> CoreExpr
 unfoldingTemplate = uf_tmpl

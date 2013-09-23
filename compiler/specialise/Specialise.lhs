@@ -10,7 +10,7 @@ module Specialise ( specProgram ) where
 
 import Id
 import TcType hiding( substTy, extendTvSubstList )
-import Type( TyVar, isDictTy, mkPiTypes, classifyPredType, PredTree(..), isIPClass )
+import Type   hiding( substTy, extendTvSubstList )
 import Coercion( Coercion )
 import CoreMonad
 import qualified CoreSubst
@@ -34,6 +34,7 @@ import Outputable
 import FastString
 import State
 
+import Control.Applicative (Applicative(..))
 import Control.Monad
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -1614,10 +1615,10 @@ mkCallUDs env f args
     _trace_doc = vcat [ppr f, ppr args, ppr n_tyvars, ppr n_dicts
                       , ppr (map (interestingDict env) dicts)]
     (tyvars, theta, _) = tcSplitSigmaTy (idType f)
-    constrained_tyvars = tyVarsOfTypes theta
+    constrained_tyvars = closeOverKinds (tyVarsOfTypes theta)
     n_tyvars           = length tyvars
     n_dicts            = length theta
-
+   
     spec_tys = [mk_spec_ty tv ty | (tv, Type ty) <- tyvars `zip` args]
     dicts    = [dict_expr | (_, dict_expr) <- theta `zip` (drop n_tyvars args)]
 
@@ -1866,6 +1867,13 @@ data SpecState = SpecState {
                      spec_uniq_supply :: UniqSupply,
                      spec_dflags :: DynFlags
                  }
+
+instance Functor SpecM where
+    fmap = liftM
+
+instance Applicative SpecM where
+    pure = return
+    (<*>) = ap
 
 instance Monad SpecM where
     SpecM x >>= f = SpecM $ do y <- x

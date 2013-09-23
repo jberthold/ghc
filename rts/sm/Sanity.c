@@ -620,7 +620,7 @@ checkLocalMutableLists (nat cap_no)
 {
     nat g;
     for (g = 1; g < RtsFlags.GcFlags.generations; g++) {
-        checkMutableList(capabilities[cap_no].mut_lists[g], g);
+        checkMutableList(capabilities[cap_no]->mut_lists[g], g);
     }
 }
 
@@ -761,7 +761,7 @@ findMemoryLeak (void)
     nat g, i;
     for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
         for (i = 0; i < n_capabilities; i++) {
-            markBlocks(capabilities[i].mut_lists[g]);
+            markBlocks(capabilities[i]->mut_lists[g]);
             markBlocks(gc_threads[i]->gens[g].part_list);
             markBlocks(gc_threads[i]->gens[g].scavd_list);
             markBlocks(gc_threads[i]->gens[g].todo_bd);
@@ -772,7 +772,7 @@ findMemoryLeak (void)
 
     for (i = 0; i < n_capabilities; i++) {
         markBlocks(nurseries[i].blocks);
-        markBlocks(capabilities[i].pinned_object_block);
+        markBlocks(capabilities[i]->pinned_object_block);
     }
 
 #ifdef PROFILING
@@ -852,7 +852,7 @@ memInventory (rtsBool show)
   for (g = 0; g < RtsFlags.GcFlags.generations; g++) {
       gen_blocks[g] = 0;
       for (i = 0; i < n_capabilities; i++) {
-	  gen_blocks[g] += countBlocks(capabilities[i].mut_lists[g]);
+          gen_blocks[g] += countBlocks(capabilities[i]->mut_lists[g]);
           gen_blocks[g] += countBlocks(gc_threads[i]->gens[g].part_list);
           gen_blocks[g] += countBlocks(gc_threads[i]->gens[g].scavd_list);
           gen_blocks[g] += countBlocks(gc_threads[i]->gens[g].todo_bd);
@@ -864,10 +864,10 @@ memInventory (rtsBool show)
   for (i = 0; i < n_capabilities; i++) {
       ASSERT(countBlocks(nurseries[i].blocks) == nurseries[i].n_blocks);
       nursery_blocks += nurseries[i].n_blocks;
-      if (capabilities[i].pinned_object_block != NULL) {
-          nursery_blocks += capabilities[i].pinned_object_block->blocks;
+      if (capabilities[i]->pinned_object_block != NULL) {
+          nursery_blocks += capabilities[i]->pinned_object_block->blocks;
       }
-      nursery_blocks += countBlocks(capabilities[i].pinned_object_blocks);
+      nursery_blocks += countBlocks(capabilities[i]->pinned_object_blocks);
   }
 
   retainer_blocks = 0;
