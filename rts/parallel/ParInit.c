@@ -91,10 +91,6 @@ synchroniseSystem(void)
   // initialise runtime tables
   initRTT();
 
-  // care not to GC any CAFs. Incoming packets might refer to them
-  // This variable lives in Storage.c
-  keepCAFs = rtsTrue;
-
   // initialise "system tso" which owns blackholes and stores blocking queues
   SET_HDR(&stg_system_tso, &stg_TSO_info, CCS_SYSTEM);
   stg_system_tso.indirectee = (StgClosure*) END_TSO_QUEUE;

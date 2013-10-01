@@ -2066,28 +2066,57 @@ section "Distributed heap parallelism"
    {Running GHC in several instances in a network. 
    
     These primitive operations implement the coordination language
-    {\tt Eden}, see http://www.mathematik.uni-marburg.de/~eden
-   }
+    {\tt Eden}, see http://www.mathematik.uni-marburg.de/~eden,
+    and expose a small IO-monadic message-passing API to Haskell.
+    Also exposed: a data serialisation mechanism used by the former.
+}
 
-------------------------------------------------------------------------
+primop TrySerializeOp "trySerialize#" GenPrimOp
+   a -> State# s -> (# State# s, Int#, ByteArray# #)
+  { Try to serialise a subgraph in the heap, into a primitive array.
 
-primop DuplicateOp "duplicate#" GenPrimOp
-   a -> State# RealWorld -> (# State# RealWorld, a #)
-  {for tests only: Packs and unpacks a subgraph in the local heap.}
+    Returns an error code if serialisation fails.
+    The runtime system defines the following error codes:
+
+    * 0: P_SUCCESS (no error. Only used as return value)
+
+    * 1: P_BLACKHOLE (packing hit a black hole - data under evaluation.)
+
+    * 2: P_NOBUFFER (the system's buffer is too small)
+
+    * 3: P_CANNOTPACK (packing found a type which cannot be packed (MVar, TVar))
+
+    * 4: P_UNSUPPORTED (packing found a type which is not supported (but could/should be))
+
+    * 5: P_IMPOSSIBLE (packing found an impossible type (stack frame,msg, etc))
+
+    * 6: P_GARBLED (unpacking failed because of corrupted packet data)
+
+    {\tt trySerialize\#} never blocks. When a black hole is found in the 
+    subgraph to serialise, the call returns code P_BLACKHOLE.
+}
    with
    has_side_effects = True
    out_of_line      = True
 
 primop SerializeOp "serialize#" GenPrimOp
-   a -> State# s -> (# State# s, ByteArray# #)
-  { serialize a subgraph in the heap, into a primitive array }
+   a -> State# s -> (# State# s, Int#, ByteArray# #)
+  { Serialize a subgraph in the heap, into a primitive array.
+
+    {\tt serialize\#} uses the error codes explained above.
+    The difference to {\tt trySerialize\#} defined before is that
+    the calling thread is blocked when the subgraph contains a black hole,
+    retrying the serialisation as soon as the blackhole has been updated
+    by another thread.
+}
    with
    has_side_effects = True
    out_of_line      = True
 
 primop DeserializeOp "deserialize#" GenPrimOp
-   ByteArray# -> State# s -> (# State# s, a #)
-  { deserialize a subgraph serialized before, into the heap }
+   ByteArray# -> State# s -> (# State# s, Int#, a #)
+  { deserialize a subgraph serialized before, into the heap.
+    May return one error code: P_GARBLED, or P_SUCCESS.}
    with
    has_side_effects = True
    out_of_line      = True

@@ -157,7 +157,7 @@ struct MISC_FLAGS {
                                   * for the linker, NULL ==> off */
 };
 
-#if defined(THREADED_RTS) || defined(PARALLEL_RTS)
+#if defined(THREADED_RTS) || defined(PARALLEL_RTS) || defined(PACKING)
 #ifdef PARALLEL_RTS
 struct PAR_DEBUG_FLAGS {  
   /* flags to control debugging output in various subsystems */
@@ -178,10 +178,12 @@ struct PAR_DEBUG_FLAGS {
 #endif /* PARALLEL_RTS */
 
 struct PAR_FLAGS {
+#if defined(PARALLEL_RTS) || defined(PACKING)
+  nat      packBufferSize;
+#endif
 #if defined(PARALLEL_RTS)
   struct PAR_DEBUG_FLAGS Debug;         /* debugging options */
   nat      sendBufferSize;
-  nat      packBufferSize;
   nat      placement;            
 
   long   wait;
@@ -210,7 +212,7 @@ struct PAR_FLAGS {
   rtsBool        setAffinity;    /* force thread affinity with CPUs */
 #endif /* THREADED_RTS */
 };
-#endif /* THREADED || PARALLEL */
+#endif /* THREADED || PARALLEL || PACKING */
 
 struct TICKY_FLAGS {
     rtsBool showTickyStats;
@@ -252,7 +254,7 @@ typedef struct _RTS_FLAGS {
     struct TRACE_FLAGS       TraceFlags;
     struct TICKY_FLAGS	     TickyFlags;
 
-#if defined(THREADED_RTS) || defined(PARALLEL_RTS)
+#if defined(THREADED_RTS) || defined(PARALLEL_RTS) || defined(PACKING)
     struct PAR_FLAGS	ParFlags;
 #endif
 #ifdef USE_PAPI

@@ -228,10 +228,12 @@ void initRtsFlagsDefaults(void)
     RtsFlags.ParFlags.setAffinity       = 0;
 #endif
 
-#ifdef PARALLEL_RTS
-    // common parallelism options:
+#if defined(PACKING) || defined (PARALLEL_RTS)
     RtsFlags.ParFlags.packBufferSize	= 10485760; // 10MB, avoid trouble
-    RtsFlags.ParFlags.sendBufferSize	= 20; // MD this default should be tested;
+#endif /* PACKING || PARALLEL_RTS */
+
+#ifdef PARALLEL_RTS
+    RtsFlags.ParFlags.sendBufferSize	= 20; /* MD should be tested */
     RtsFlags.ParFlags.placement         = 0; /* default: RR placement,
 						including local PE*/
 #endif /* PARALLEL_RTS */
@@ -1276,19 +1278,36 @@ error = rtsTrue;
                     ) break;
 
 	      case 'q':
-#ifdef PARALLEL_RTS
-                //suppose that all options for the PARALLEL_RTS extension are safe
-		OPTION_SAFE;
 		      // historically, "-q<option>" were for parallel Haskell.
 		      // taken for threaded RTS: a,b,g,m,w below.
-		      // When parallel: branch into separate option processing
-                        process_par_option(arg, &error);
-                      // uses global rts_argc and rts_argv
-                        break;
-#endif //PARALLEL_RTS
-                //other q... options are unsafe
+
+                // treat pack buffer flag specially (PACKING separated)
+#if defined(PACKING) || defined(PARALLEL_RTS)
+                OPTION_SAFE;
+                if (rts_argv[arg][2] == 'Q') {
+                  // -qQ<n> ... set pack buffer size to <n> bytes
+                  if (rts_argv[arg][3] != '\0') {
+                    RtsFlags.ParFlags.packBufferSize = 
+                      decodeSize(rts_argv[arg], 3, 1024, HS_INT_MAX);
+                    IF_PAR_DEBUG(verbose,
+                       debugBelch("-qQ<n>: pack buffer size set to %d bytes\n"
+                                  , RtsFlags.ParFlags.packBufferSize));
+                  } else {
+                    errorBelch("missing size of PackBuffer (for -qQ)\n");
+                    error = rtsTrue;
+                  }
+                  break;
+                }
+#endif
+#if defined(PARALLEL_RTS)
+                    // todo: move process_par code here
+                    OPTION_SAFE; // par options are assumed safe
+                    process_par_option(arg, &error);
+                    break;
+#endif
+                //other q... options are unsafe (THREADED)
+                THREADED_BUILD_ONLY(
 		OPTION_UNSAFE;
-		THREADED_BUILD_ONLY(
 		    switch (rts_argv[arg][2]) {
 		    case '\0':
 			errorBelch("incomplete RTS option: %s",rts_argv[arg]);
@@ -1332,7 +1351,7 @@ error = rtsTrue;
 			break;
 		    }
                     ) break;
-#endif
+#endif /* NOSMP */
 	      /* =========== PARALLEL =========================== */
 	      case 'e':
 		OPTION_UNSAFE;

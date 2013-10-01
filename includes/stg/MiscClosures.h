@@ -454,8 +454,8 @@ RTS_FUN_DECL(stg_getSparkzh);
 RTS_FUN_DECL(stg_numSparkszh);
 
 /* parallel haskell primops */
-RTS_FUN_DECL(stg_duplicatezh);
 RTS_FUN_DECL(stg_serializzezh);
+RTS_FUN_DECL(stg_trySerializzezh);
 RTS_FUN_DECL(stg_deserializzezh);
 RTS_FUN_DECL(stg_expectDatazh);
 RTS_FUN_DECL(stg_connectToPortzh);

@@ -1363,8 +1363,8 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_traceCcszh)                                     \
       SymI_HasProto(nPEs)                                               \
       SymI_HasProto(thisPE)                                             \
-      SymI_HasProto(stg_duplicatezh)                                    \
       SymI_HasProto(stg_serializzezh)                                   \
+      SymI_HasProto(stg_trySerializzezh)                                \
       SymI_HasProto(stg_deserializzezh)                                 \
       SymI_HasProto(stg_expectDatazh)                                   \
       SymI_HasProto(stg_connectToPortzh)                                \

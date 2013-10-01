@@ -269,13 +269,27 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     // PackNearbyGraph will send parts to sendingtso's receiver and
     // change the tag to PP_PART if the graph is too large for one
     // message.
-    packedData = PackNearbyGraph(data, sendingtso, &sendTag);
+    ACQUIRE_LOCK(&pack_mutex);
+
+    packedData = PackNearbyGraph(data, sendingtso);
 
     // graph might contain blackholes, in which case sendingtso 
     // blocks (state set in PackNearbyGraph, blocked when returning
     // success == 0 to the calling primop sendData# )
-    success = (packedData != (rtsPackBuffer *) NULL); 
-
+    success = (!isPackError(packedData)); 
+    if (isPackError(packedData)) {
+      switch ((StgWord)packedData) {
+      case P_BLACKHOLE: 
+        success = 0;
+        break;
+      case P_NOBUFFER: 
+        stg_exit(EXIT_FAILURE);
+      default:
+        stg_exit(EXIT_FAILURE);
+      }
+    } else {
+      success = 2;
+    }
     break;
 
   default:
@@ -293,6 +307,8 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     } else {
       success = 2;
     }
+    RELEASE_LOCK(&pack_mutex);
+
     IF_PAR_DEBUG(mpcomm,debugBelch("Sending of message from thread %d returned code %d\n", (int) sendingtso->id, success));
   }
   if (success == 0 || success == 1) {
@@ -361,7 +377,9 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
   ASSERT(IsBlackhole(placeholder));
 
   // unpack the graph
+  ACQUIRE_LOCK(&pack_mutex);
   graph = UnpackGraph(gumPackBuffer, gumPackBuffer->receiver, cap);
+  RELEASE_LOCK(&pack_mutex);
 
   // replace placeholder by received data, possibly leaving port open
   switch(tag) {

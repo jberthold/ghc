@@ -33,20 +33,9 @@ StgInt newSpark (StgRegTable *reg, StgClosure *p);
 */
 extern nat nPEs, thisPE;
 
-#if defined(PARALLEL_RTS) 
+#define PACKING
 
-// parallel machine setup, startup / shutdown
-// in MPSystem file (PVMComm | MPIComm | CpComm currently)
-extern rtsBool IAmMainThread;
-
-void          startupParallelSystem(int* argc, char** argv[]);
-void          synchroniseSystem(void);
-void          shutdownParallelSystem(StgInt errorcode);
-
-// defined in ParInit.c, called in RtsStartup.c
-void          emitStartupEvents(void);
-
- 
+#if defined(PACKING) || defined(PARALLEL_RTS)
 // packing and sending:
 // Pack Buffer for constructing messages between PEs
 // defined here instead of in RtsTypes.h due to FLEXIBLE_ARRAY usage
@@ -62,32 +51,15 @@ typedef struct rtsPackBuffer_ {
   StgWord              buffer[FLEXIBLE_ARRAY];
 } rtsPackBuffer;
 
-// defined in Pack.c
-// void InitPackBuffer(void); not needed, done on demand
+// In multithreaded version, this lock must be held during pack and unpack
+// operations and while using return values of packNearbyGraph
+#ifdef THREADED_RTS
+extern Mutex pack_mutex;
+#endif
+
+// initialiser and destructor, defined in Pack.c
+void InitPackBuffer(void);
 void freePackBuffer(void);
-
-// resides in Schedule.c:
-// init on demand
-void freeRecvBuffer(void);
-
-// interfaces for (un-)packing, defined in Pack.c
-rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso,
-                               OpCode *msgtag);
-
-StgClosure*    UnpackGraph(rtsPackBuffer *packBuffer,
-			   Port inPort,
-			   Capability* cap);
-
-// testing: pack and unpack locally
-StgClosure* DuplicateNearbyGraph(StgClosure* graphroot, StgTSO* tso,
-				 Capability* cap);
-
-// serialisation into a Haskell Byte array
-StgClosure* PackToMemory(StgClosure* graphroot, StgTSO* tso,
-			 Capability* cap);
-// respective deserialisation (using local pack buffer for unpacking)
-StgClosure* UnpackGraphWrapper(StgArrWords* packBufferArray,
-			       Capability* cap);
 
 // minimum sizes for message buffers: 
 
@@ -99,6 +71,49 @@ StgClosure* UnpackGraphWrapper(StgArrWords* packBufferArray,
 			+ (sizeof(rtsPackBuffer)/sizeof(StgWord)) \
 			+ DEBUG_HEADROOM)
 
+// following functions internal if PACKING, used externally when PARALLEL_RTS
+
+// Check, defined in Pack.c as well. 
+// Is there still a macro for it somewhere else?
+rtsBool IsBlackhole(StgClosure* closure);
+
+// interfaces for (un-)packing, defined in Pack.c.
+
+// pack heap subgraph starting at closure (which might block the caller). 
+// Note that PackNearbyGraph returns a global data structure protected by
+// pack_mutex (should be held as long as return value is needed).
+rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso);
+
+// packing can fail for different reasons, encoded in small ints which are
+// returned by PackNearbyGraph: (corresponding HS type to be supplied)
+// constant definition in includes/Constants.h:
+// #define P_SUCCESS       0x00 /* used for return value of PackToMemory only */
+// #define P_BLACKHOLE     0x01 /* possibly also blocking the packing thread */
+// #define P_NOBUFFER      0x02 /* buffer too small */
+// #define P_CANNOTPACK    0x03 /* type cannot be packed (MVar, TVar) */
+// #define P_UNSUPPORTED   0x04 /* type not supported (but could/should be) */
+// #define P_IMPOSSIBLE    0x05 /* impossible type found (stack frame,msg, etc) */
+// #define P_GARBLED       0x06 /* invalid data for deserialisation */
+// #define P_ERRCODEMAX    0x06
+
+// // these codes will be returned instead of the pack buffer
+
+// predicate for checks:
+#define isPackError(bufptr) (((StgWord) (bufptr)) <= P_ERRCODEMAX)
+
+// unpack a graph from the packBuffer. caller should hold pack_mutex.
+StgClosure*    UnpackGraph(rtsPackBuffer *packBuffer,
+			   Port inPort,
+			   Capability* cap);
+
+// serialisation into a Haskell Byte array, returning error codes on failure
+StgClosure* tryPackToMemory(StgClosure* graphroot, StgTSO* tso,
+			 Capability* cap);
+
+// respective deserialisation (global pack buffer used for unpacking)
+StgClosure* UnpackGraphWrapper(StgArrWords* packBufferArray,
+			       Capability* cap);
+
 // creating a blackhole from scratch. Defined in Pack.c (where it is
 // used), but mainly used by the primitive for channel creation.
 StgClosure* createBH(Capability *cap); 
@@ -106,9 +121,27 @@ StgClosure* createBH(Capability *cap);
 // used in HLComms.c, defined in Pack.c
 StgClosure* createListNode(Capability *cap, 
               StgClosure *head, StgClosure *tail);
-// Check, defined in Pack.c as well. 
-// Is there still a macro for it somewhere else?
-rtsBool IsBlackhole(StgClosure* closure);
+
+#endif
+
+#if defined(PARALLEL_RTS) 
+
+
+// parallel machine setup, startup / shutdown
+// in MPSystem file (PVMComm | MPIComm | CpComm currently)
+extern rtsBool IAmMainThread;
+
+void          startupParallelSystem(int* argc, char** argv[]);
+void          synchroniseSystem(void);
+void          shutdownParallelSystem(StgInt errorcode);
+
+// defined in ParInit.c, called in RtsStartup.c
+void          emitStartupEvents(void);
+
+ 
+// resides in Schedule.c:
+// init on demand
+void freeRecvBuffer(void);
 
 // runtime table initialisation and release
 void initRTT(void);
