@@ -248,7 +248,7 @@
 
             <para>
                 Note: this interface will likely see continuous
-                refinment and API changes in future releases, so it
+                refinement and API changes in future releases, so it
                 should be considered a preview.
            </para>
        </listitem>
@@ -293,6 +293,17 @@
                     (-123)</literal>. Haskell 98 and Haskell 2010 both
                     specify that it should instead desugar to
                     <literal>negate (fromIntegral 123)</literal>
+               </para>
+           </listitem>
+       </itemizedlist>
+
+        <itemizedlist>
+            <listitem>
+                <para>
+                    There is a new extension,
+                    <literal>EmptyCase</literal>, which allows
+                    to write a case expression with no alternatives
+                    <literal>case ... of {}</literal>.
                </para>
            </listitem>
        </itemizedlist>
@@ -571,12 +582,20 @@
             <listitem>
                 <para>
                     There are now <literal>Foldable</literal> and <literal>Traversable</literal>
-                    instances for <literal>Either a</literal> and <literal>(,) a</literal>
+                    instances for <literal>Either a</literal>, <literal>Const r</literal>, and <literal>(,) a</literal>
                </para>
            </listitem>
             <listitem>
                 <para>
                     There is now a <literal>Data</literal> instance for <literal>Data.Version</literal>
+               </para>
+           </listitem>
+            <listitem>
+                <para>
+                    A zero-width unboxed poly-kinded <literal>Proxy#</literal>
+                    was added to <literal>GHC.Prim</literal>. It can be used to make it so
+                    that there is no the operational overhead for passing around proxy
+                    arguments to model type application.
                </para>
            </listitem>
              <listitem>
@@ -632,6 +651,15 @@
                      type-classes with cyclic default implementations
                      have been explicitly annotated with the new
                      <literal>{-# MINIMAL #-}</literal> pragma.
+               </para>
+           </listitem>
+            <listitem>
+                <para>
+                     <literal>Control.Applicative.WrappedMonad</literal>,
+                     which can be used to convert a <literal>Monad</literal>
+                     to an <literal>Applicative</literal>, has now
+                     a <literal>Monad m => Monad (WrappedMonad m)</literal>
+                     instance.
                </para>
            </listitem>
        </itemizedlist>

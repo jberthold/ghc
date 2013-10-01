@@ -1138,6 +1138,13 @@ wayGeneralFlags _ (WayCustom {}) = []
 wayGeneralFlags _ WayThreaded = []
 wayGeneralFlags _ WayDebug    = []
 wayGeneralFlags _ WayDyn      = [Opt_PIC]
+    -- We could get away without adding -fPIC when compiling the
+    -- modules of a program that is to be linked with -dynamic; the
+    -- program itself does not need to be position-independet, only
+    -- the libraries need to be.  HOWEVER, GHCi links objects into a
+    -- .so before loading the .so using the system linker.  Since only
+    -- PIC objects can be linked into a .so, we have to compile even
+    -- modules of the main program with -fPIC when using -dynamic.
 wayGeneralFlags _ WayProf     = [Opt_SccProfilingOn]
 wayGeneralFlags _ WayEventLog = []
 wayGeneralFlags _ WayParPvm   = []
@@ -2582,7 +2589,8 @@ fWarningFlags = [
   ( "warn-auto-orphans",                Opt_WarnAutoOrphans, nop ),
   ( "warn-tabs",                        Opt_WarnTabs, nop ),
   ( "warn-unrecognised-pragmas",        Opt_WarnUnrecognisedPragmas, nop ),
-  ( "warn-lazy-unlifted-bindings",      Opt_WarnLazyUnliftedBindings, nop ),
+  ( "warn-lazy-unlifted-bindings",      Opt_WarnLazyUnliftedBindings,
+    \_ -> deprecate "it has no effect, and will be removed in GHC 7.10" ),
   ( "warn-unused-do-bind",              Opt_WarnUnusedDoBind, nop ),
   ( "warn-wrong-do-bind",               Opt_WarnWrongDoBind, nop ),
   ( "warn-alternative-layout-rule-transitional", Opt_WarnAlternativeLayoutRuleTransitional, nop ),
@@ -3001,7 +3009,6 @@ standardWarnings
         Opt_WarnEmptyEnumerations,
         Opt_WarnMissingFields,
         Opt_WarnMissingMethods,
-        Opt_WarnLazyUnliftedBindings,
         Opt_WarnWrongDoBind,
         Opt_WarnUnsupportedCallingConventions,
         Opt_WarnDodgyForeignImports,
@@ -3503,7 +3510,7 @@ picCCOpts dflags
       -- otherwise things like stub.c files don't get compiled
       -- correctly.  They need to reference data in the Haskell
       -- objects, but can't without -fPIC.  See
-      -- http://hackage.haskell.org/trac/ghc/wiki/Commentary/PositionIndependentCode
+      -- http://ghc.haskell.org/trac/ghc/wiki/Commentary/PositionIndependentCode
        | gopt Opt_PIC dflags || not (gopt Opt_Static dflags) ->
           ["-fPIC", "-U __PIC__", "-D__PIC__"]
        | otherwise                             -> []

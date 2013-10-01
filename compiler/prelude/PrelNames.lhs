@@ -636,7 +636,7 @@ showParen_RDR           = varQual_RDR gHC_SHOW (fsLit "showParen")
 
 typeRep_RDR, mkTyCon_RDR, mkTyConApp_RDR,
     oldTypeOf_RDR, oldMkTyCon_RDR, oldMkTyConApp_RDR :: RdrName
-typeRep_RDR       = varQual_RDR tYPEABLE_INTERNAL    (fsLit "typeRep")
+typeRep_RDR       = varQual_RDR tYPEABLE_INTERNAL    (fsLit "typeRep#")
 mkTyCon_RDR       = varQual_RDR tYPEABLE_INTERNAL    (fsLit "mkTyCon")
 mkTyConApp_RDR    = varQual_RDR tYPEABLE_INTERNAL    (fsLit "mkTyConApp")
 oldTypeOf_RDR     = varQual_RDR oLDTYPEABLE_INTERNAL (fsLit "typeOf")
@@ -1465,7 +1465,7 @@ rep1TyConKey = mkPreludeTyConUnique 156
 -- Type-level naturals
 typeNatKindConNameKey, typeSymbolKindConNameKey,
   typeNatAddTyFamNameKey, typeNatMulTyFamNameKey, typeNatExpTyFamNameKey,
-  typeNatLeqTyFamNameKey
+  typeNatLeqTyFamNameKey, typeNatSubTyFamNameKey
   :: Unique
 typeNatKindConNameKey     = mkPreludeTyConUnique 160
 typeSymbolKindConNameKey  = mkPreludeTyConUnique 161
@@ -1473,11 +1473,15 @@ typeNatAddTyFamNameKey    = mkPreludeTyConUnique 162
 typeNatMulTyFamNameKey    = mkPreludeTyConUnique 163
 typeNatExpTyFamNameKey    = mkPreludeTyConUnique 164
 typeNatLeqTyFamNameKey    = mkPreludeTyConUnique 165
+typeNatSubTyFamNameKey    = mkPreludeTyConUnique 166
 
 ntTyConKey:: Unique
 ntTyConKey = mkPreludeTyConUnique 174
 coercibleTyConKey :: Unique
 coercibleTyConKey = mkPreludeTyConUnique 175
+
+proxyPrimTyConKey :: Unique
+proxyPrimTyConKey = mkPreludeTyConUnique 176
 
 ---------------- Template Haskell -------------------
 --      USES TyConUniques 200-299
@@ -1791,6 +1795,9 @@ isListClassKey = mkPreludeMiscIdUnique 198
 fromListClassOpKey = mkPreludeMiscIdUnique 199
 fromListNClassOpKey = mkPreludeMiscIdUnique 500
 toListClassOpKey = mkPreludeMiscIdUnique 501
+
+proxyHashKey :: Unique
+proxyHashKey = mkPreludeMiscIdUnique 502
 
 ---------------- Template Haskell -------------------
 --      USES IdUniques 200-499

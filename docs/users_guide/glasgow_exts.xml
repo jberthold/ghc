@@ -272,7 +272,7 @@ If the types of <literal>p</literal> and <literal>q</literal> are not unboxed,
 the resulting binding is lazy like any other Haskell pattern binding.  The
 above example desugars like this:
 <programlisting>
-  f x = let t = case h x o f{ (# p,q #) -> (p,q)
+  f x = let t = case h x of { (# p,q #) -> (p,q) }
             p = fst t
             q = snd t
         in ..body..
@@ -664,7 +664,7 @@ qualifier list has just one element, a boolean expression.
 <para>
 View patterns are enabled by the flag <literal>-XViewPatterns</literal>.
 More information and examples of view patterns can be found on the
-<ulink url="http://hackage.haskell.org/trac/ghc/wiki/ViewPatterns">Wiki
+<ulink url="http://ghc.haskell.org/trac/ghc/wiki/ViewPatterns">Wiki
 page</ulink>.
 </para>
 
@@ -782,7 +782,7 @@ let {(x -> y) = e1 ;
 </programlisting>
 
 (For some amplification on this design choice see
-<ulink url="http://hackage.haskell.org/trac/ghc/ticket/4061">Trac #4061</ulink>.)
+<ulink url="http://ghc.haskell.org/trac/ghc/ticket/4061">Trac #4061</ulink>.)
 
 </para>
 </listitem>
@@ -1734,7 +1734,7 @@ has no non-bottom values.  For example:
   f x = case x of { }
 </programlisting>
 With dependently-typed features it is more useful
-(see <ulink url="http://hackage.haskell.org/trac/ghc/ticket/2431">Trac</ulink>).
+(see <ulink url="http://ghc.haskell.org/trac/ghc/ticket/2431">Trac</ulink>).
 For example, consider these two candidate definitions of <literal>absurd</literal>:
 <programlisting>
 data a :==: b where
@@ -6269,7 +6269,7 @@ existential, and the above code is valid.
 </para>
 
 <para>
-See also <ulink url="http://hackage.haskell.org/trac/ghc/ticket/7347">Trac #7347</ulink>.
+See also <ulink url="http://ghc.haskell.org/trac/ghc/ticket/7347">Trac #7347</ulink>.
 </para>
 </sect2>
 
@@ -6941,7 +6941,11 @@ explicit context.  For example in the first argument of the
 constructor <function>MkSwizzle</function>, an implicit "<literal>forall a.</literal>" is
 prefixed to the argument type.  The implicit <literal>forall</literal>
 quantifies all type variables that are not already in scope, and are
-mentioned in the type quantified over.
+mentioned in the type quantified over. (Arguably, it would be better
+to <emphasis>require</emphasis> explicit quantification on constructor arguments
+where that is what is wanted.
+See <ulink url="http://ghc.haskell.org/trac/ghc/ticket/4426">Trac #4426</ulink>.)
+
 </para>
 
 <para>
@@ -6949,19 +6953,17 @@ As for type signatures, implicit quantification happens for non-overloaded
 types too.  So if you write this:
 
 <programlisting>
-  data T a = MkT (Either a b) (b -> b)
+  f :: (a -> a) -> a
 </programlisting>
 
 it's just as if you had written this:
 
 <programlisting>
-  data T a = MkT (forall b. Either a b) (forall b. b -> b)
+  f :: forall a. (a -> a) -> a
 </programlisting>
 
-That is, since the type variable <literal>b</literal> isn't in scope, it's
-implicitly universally quantified.  (Arguably, it would be better
-to <emphasis>require</emphasis> explicit quantification on constructor arguments
-where that is what is wanted.  Feedback welcomed.)
+That is, since the type variable <literal>a</literal> isn't in scope, it's
+implicitly universally quantified.
 </para>
 
 <para>
@@ -7550,7 +7552,7 @@ infer its type.  If you supply a type signature, then that fixes type of the bin
 </para><para>
 The rationale for this more conservative strategy is given in
 <ulink url="http://research.microsoft.com/~simonpj/papers/constraints/index.htm">the papers</ulink> "Let should not be generalised" and "Modular type inference with local assumptions", and
-a related <ulink url="http://hackage.haskell.org/trac/ghc/blog/LetGeneralisationInGhc7">blog post</ulink>.
+a related <ulink url="http://ghc.haskell.org/trac/ghc/blog/LetGeneralisationInGhc7">blog post</ulink>.
 </para><para>
 The flag <option>-XMonoLocalBinds</option> is implied by <option>-XTypeFamilies</option> and <option>-XGADTs</option>.  You can switch it off again
 with <option>-XNoMonoLocalBinds</option> but type inference becomes less predicatable if you do so. (Read the papers!)
@@ -7687,7 +7689,7 @@ main = print "b"
   </para>
   <para>
     For more motivation and details please refer to the <ulink
-      url="http://hackage.haskell.org/trac/ghc/wiki/DeferErrorsToRuntime">HaskellWiki</ulink>
+      url="http://ghc.haskell.org/trac/ghc/wiki/DeferErrorsToRuntime">HaskellWiki</ulink>
     page or the <ulink
       url="http://research.microsoft.com/en-us/um/people/simonpj/papers/ext-f/">original
       paper</ulink>.
@@ -8095,7 +8097,7 @@ as, say, using the string <literal>"|~]"</literal> instead), and make your
 quoter function interpret <literal>"|~]"</literal> as <literal>"|]"</literal>.
 One way to implement this is to compose your quoter with a pre-processing pass to
 perform your escape conversion.  See the
-<ulink url="http://hackage.haskell.org/trac/ghc/ticket/5348">
+<ulink url="http://ghc.haskell.org/trac/ghc/ticket/5348">
 discussion in Trac</ulink> for details.
 </para></listitem>
 </itemizedlist>
@@ -9228,7 +9230,7 @@ mindef ::= name
       <para>A vertical bar denotes disjunction, i.e. one of the two sides is required.
       A comma denotes conjunction, i.e. both sides are required.
       Conjunction binds stronger than disjunction.</para>
-      <para>If no MINIMAL pragma is used, then all methods without a default will be requried, excluding methods with a name that starts with an underscore.</para>
+      <para>If no MINIMAL pragma is used, then all methods without a default will be required, excluding methods with a name that starts with an underscore.</para>
       <para>This warning can be turned off with the flag <option>-fno-warn-missing-methods</option>.</para>
     </sect2>
 
@@ -9242,13 +9244,32 @@ mindef ::= name
 	<title>INLINE pragma</title>
 	<indexterm><primary>INLINE</primary></indexterm>
 
-	<para>GHC (with <option>-O</option>, as always) tries to
-        inline (or &ldquo;unfold&rdquo;) functions/values that are
-        &ldquo;small enough,&rdquo; thus avoiding the call overhead
-        and possibly exposing other more-wonderful optimisations.
-        Normally, if GHC decides a function is &ldquo;too
-        expensive&rdquo; to inline, it will not do so, nor will it
-        export that unfolding for other modules to use.</para>
+        <para>
+          GHC (with <option>-O</option>, as always) tries to inline
+          (or &ldquo;unfold&rdquo;) functions/values that are
+          &ldquo;small enough,&rdquo; thus avoiding the call overhead
+          and possibly exposing other more-wonderful optimisations.
+          GHC has a set of heuristics, tuned over a long period of
+          time using many benchmarks, that decide when it is
+          beneficial to inline a function at its call site.  The
+          heuristics are designed to inline functions when it appears
+          to be beneficial to do so, but without incurring excessive
+          code bloat.  If a function looks too big, it won't be
+          inlined, and functions larger than a certain size will not
+          even have their definition exported in the interface file.
+          Some of the thresholds that govern these heuristic decisions
+          can be changed using flags, see <xref linkend="options-f"
+          />.
+        </para>
+
+        <para>
+          Normally GHC will do a reasonable job of deciding by itself
+          when it is a good idea to inline a function.  However,
+          sometimes you might want to override the default behaviour.
+          For example, if you have a key function that is important to
+          inline because it leads to further optimisations, but GHC
+          judges it to be too big to inline.
+        </para>
 
         <para>The sledgehammer you can bring to bear is the
         <literal>INLINE</literal><indexterm><primary>INLINE
@@ -9358,11 +9379,6 @@ itself, so an INLINE pragma is always ignored.</para>
 	<para>See also the <literal>NOINLINE</literal> (<xref linkend="noinline-pragma"/>)
         and <literal>INLINABLE</literal> (<xref linkend="inlinable-pragma"/>)
         pragmas.</para>
-
-	<para>Note: the HBC compiler doesn't like <literal>INLINE</literal> pragmas,
-	  so if you want your code to be HBC-compatible you'll have to surround
-	  the pragma with C pre-processor directives
-	  <literal>#ifdef __GLASGOW_HASKELL__</literal>...<literal>#endif</literal>.</para>
 
       </sect3>
 
@@ -9769,10 +9785,6 @@ instance (Eq a) => Eq (Foo a) where {
 The pragma must occur inside the <literal>where</literal> part
 of the instance declaration.
 </para>
-<para>
-Compatible with HBC, by the way, except perhaps in the placement
-of the pragma.
-</para>
 
 </sect2>
 
@@ -9802,7 +9814,7 @@ data T = T {-# UNPACK #-} !Float
       conjunction with <option>-O</option><footnote>in fact, UNPACK
           has no effect without <option>-O</option>, for technical
           reasons
-      (see <ulink url="http://hackage.haskell.org/trac/ghc/ticket/5252">tick
+      (see <ulink url="http://ghc.haskell.org/trac/ghc/ticket/5252">tick
             5252</ulink>)</footnote>, in order to expose
       unfoldings to the compiler so the reboxing can be removed as
       often as possible.  For example:</para>

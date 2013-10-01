@@ -750,7 +750,7 @@ Prelude System.IO Map>
 </screen>
 
       <para>Note that the <literal>Prelude</literal> import is marked
-      as implicit.  It can be overriden with an explicit
+      as implicit.  It can be overridden with an explicit
       <literal>Prelude</literal> import, just like in a Haskell
       module.</para>
 
@@ -2558,7 +2558,7 @@ T Int :: * -> *
         <listitem>
           <para>Lists the source code around the definition of
           <replaceable>identifier</replaceable> or the current
-          breakpoint is not given. This requires the identifier be
+          breakpoint if not given. This requires that the identifier be
           defined in an interpreted module.  If your output device
           supports it, then GHCi will highlight the active
           subexpression in bold.</para>
