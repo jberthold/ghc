@@ -66,7 +66,7 @@ module TcRnTypes(
         CtEvidence(..),
         mkGivenLoc,
         isWanted, isGiven,
-        isDerived, canSolve, canRewrite,
+        isDerived, canRewrite,
         CtFlavour(..), ctEvFlavour, ctFlavour,
 
         -- Pretty printing
@@ -114,6 +114,14 @@ import ListSetOps
 import FastString
 
 import Data.Set (Set)
+
+#ifdef GHCI
+import Data.Map      ( Map )
+import Data.Dynamic  ( Dynamic )
+import Data.Typeable ( TypeRep )
+
+import qualified Language.Haskell.TH as TH
+#endif
 \end{code}
 
 
@@ -224,6 +232,7 @@ data TcGblEnv
           -- ^ Instance envt for all /home-package/ modules;
           -- Includes the dfuns in tcg_insts
         tcg_fam_inst_env :: FamInstEnv, -- ^ Ditto for family instances
+        tcg_ann_env      :: AnnEnv,     -- ^ And for annotations
 
                 -- Now a bunch of things about this module that are simply
                 -- accumulated, but never consulted until the end.
@@ -290,6 +299,20 @@ data TcGblEnv
 
         tcg_dependent_files :: TcRef [FilePath], -- ^ dependencies from addDependentFile
 
+#ifdef GHCI
+        tcg_th_topdecls :: TcRef [LHsDecl RdrName],
+        -- ^ Top-level declarations from addTopDecls
+
+        tcg_th_topnames :: TcRef NameSet,
+        -- ^ Exact names bound in top-level declarations in tcg_th_topdecls
+
+        tcg_th_modfinalizers :: TcRef [TH.Q ()],
+        -- ^ Template Haskell module finalizers
+
+        tcg_th_state :: TcRef (Map TypeRep Dynamic),
+        -- ^ Template Haskell state
+#endif /* GHCI */
+
         tcg_ev_binds  :: Bag EvBind,        -- Top-level evidence bindings
         tcg_binds     :: LHsBinds Id,       -- Value bindings in this module
         tcg_sigs      :: NameSet,           -- ...Top-level names that *lack* a signature
@@ -343,7 +366,7 @@ We gather two sorts of usage information
                (see RnNames.reportUnusedNames)
            (b) to generate version-tracking usage info in interface
                files (see MkIface.mkUsedNames)
-   This usage info is mainly gathered by the renamer's 
+   This usage info is mainly gathered by the renamer's
    gathering of free-variables
 
  * tcg_used_rdrnames
@@ -351,7 +374,7 @@ We gather two sorts of usage information
       Used only to report unused import declarations
       Notice that they are RdrNames, not Names, so we can
       tell whether the reference was qualified or unqualified, which
-      is esssential in deciding whether a particular import decl 
+      is esssential in deciding whether a particular import decl
       is unnecessary.  This info isn't present in Names.
 
 
@@ -461,9 +484,9 @@ data TcLclEnv           -- Changes as we move inside an expression
 
 type TcTypeEnv = NameEnv TcTyThing
 
-data TcIdBinder 
-  = TcIdBndr 
-       TcId 
+data TcIdBinder
+  = TcIdBndr
+       TcId
        TopLevelFlag    -- Tells whether the bindind is syntactically top-level
                        -- (The monomorphic Ids for a recursive group count
                        --  as not-top-level for this purpose.)
@@ -491,24 +514,26 @@ data ThStage    -- See Note [Template Haskell state diagram] in TcSplice
                 -- This code will be run *at compile time*;
                 --   the result replaces the splice
                 -- Binding level = 0
+      Bool      -- True if in a typed splice, False otherwise
 
   | Comp        -- Ordinary Haskell code
                 -- Binding level = 1
 
   | Brack                       -- Inside brackets
+      Bool                      --   True if inside a typed bracket, False otherwise
       ThStage                   --   Binding level = level(stage) + 1
       (TcRef [PendingSplice])   --   Accumulate pending splices here
       (TcRef WantedConstraints) --     and type constraints here
 
 topStage, topAnnStage, topSpliceStage :: ThStage
 topStage       = Comp
-topAnnStage    = Splice
-topSpliceStage = Splice
+topAnnStage    = Splice False
+topSpliceStage = Splice False
 
 instance Outputable ThStage where
-   ppr Splice        = text "Splice"
-   ppr Comp          = text "Comp"
-   ppr (Brack s _ _) = text "Brack" <> parens (ppr s)
+   ppr (Splice _)      = text "Splice"
+   ppr Comp            = text "Comp"
+   ppr (Brack _ s _ _) = text "Brack" <> parens (ppr s)
 
 type ThLevel = Int
         -- See Note [Template Haskell levels] in TcSplice
@@ -529,9 +554,9 @@ outerLevel = 1  -- Things defined outside brackets
 --      g2 = $(f ...)           is not OK; because we havn't compiled f yet
 
 thLevel :: ThStage -> ThLevel
-thLevel Splice        = 0
-thLevel Comp          = 1
-thLevel (Brack s _ _) = thLevel s + 1
+thLevel (Splice _)      = 0
+thLevel Comp            = 1
+thLevel (Brack _ s _ _) = thLevel s + 1
 
 ---------------------------
 -- Arrow-notation context
@@ -844,7 +869,7 @@ The @WhereFrom@ type controls where the renamer looks for an interface file
 data WhereFrom
   = ImportByUser IsBootInterface        -- Ordinary user import (perhaps {-# SOURCE #-})
   | ImportBySystem                      -- Non user import.
-  | ImportByPlugin                      -- Importing a plugin; 
+  | ImportByPlugin                      -- Importing a plugin;
                                         -- See Note [Care with plugin imports] in LoadIface
 
 instance Outputable WhereFrom where
@@ -889,7 +914,7 @@ data Ct
 
   | CIrredEvCan {  -- These stand for yet-unusable predicates
       cc_ev :: CtEvidence,   -- See Note [Ct/evidence invariant]
-        -- The ctev_pred of the evidence is 
+        -- The ctev_pred of the evidence is
         -- of form   (tv xi1 xi2 ... xin)
         --      or   (tv1 ~ ty2)   where the CTyEqCan  kind invariant fails
         --      or   (F tys ~ ty)  where the CFunEqCan kind invariant fails
@@ -940,7 +965,7 @@ Note [Kind orientation for CTyEqCan]
 Given an equality  (t:* ~ s:Open), we absolutely want to re-orient it.
 We can't solve it by updating t:=s, ragardless of how touchable 't' is,
 because the kinds don't work.  Indeed we don't want to leave it with
-the orientation (t ~ s), becuase if that gets into the inert set we'll
+the orientation (t ~ s), because if that gets into the inert set we'll
 start replacing t's by s's, and that too is the wrong way round.
 
 Hence in a CTyEqCan, (t:k1 ~ xi:k2) we require that k2 is a subkind of k1.
@@ -968,14 +993,14 @@ Eg wanted1 rewrites wanted2; if both were compatible kinds before,
    wanted2 will be afterwards.  Similarly givens.
 
 Caveat:
-  - Givens from higher-rank, such as: 
-          type family T b :: * -> * -> * 
-          type instance T Bool = (->) 
+  - Givens from higher-rank, such as:
+          type family T b :: * -> * -> *
+          type instance T Bool = (->)
 
-          f :: forall a. ((T a ~ (->)) => ...) -> a -> ... 
-          flop = f (...) True 
-     Whereas we would be able to apply the type instance, we would not be able to 
-     use the given (T Bool ~ (->)) in the body of 'flop' 
+          f :: forall a. ((T a ~ (->)) => ...) -> a -> ...
+          flop = f (...) True
+     Whereas we would be able to apply the type instance, we would not be able to
+     use the given (T Bool ~ (->)) in the body of 'flop'
 
 
 Note [CIrredEvCan constraints]
@@ -986,12 +1011,12 @@ CIrredEvCan constraints are used for constraints that are "stuck"
    - but they may become soluble if we substitute for some
      of the type variables in the constraint
 
-Example 1:  (c Int), where c :: * -> Constraint.  We can't do anything 
+Example 1:  (c Int), where c :: * -> Constraint.  We can't do anything
             with this yet, but if later c := Num, *then* we can solve it
 
 Example 2:  a ~ b, where a :: *, b :: k, where k is a kind variable
             We don't want to use this to substitute 'b' for 'a', in case
-            'k' is subequently unifed with (say) *->*, because then 
+            'k' is subequently unifed with (say) *->*, because then
             we'd have ill-kinded types floating about.  Rather we want
             to defer using the equality altogether until 'k' get resolved.
 
@@ -1033,15 +1058,15 @@ dropDerivedWC wc@(WC { wc_flat = flats, wc_insol = insols })
 Note [Insoluble derived constraints]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In general we discard derived constraints at the end of constraint solving;
-see dropDerivedWC.  For example, 
+see dropDerivedWC.  For example,
 
- * If we have an unsolved (Ord a), we don't want to complain about 
+ * If we have an unsolved (Ord a), we don't want to complain about
    an unsolved (Eq a) as well.
- * If we have kind-incompatible (a::* ~ Int#::#) equality, we 
-   don't want to complain about the kind error twice.  
+ * If we have kind-incompatible (a::* ~ Int#::#) equality, we
+   don't want to complain about the kind error twice.
 
-Arguably, for *some* derived constraints we might want to report errors. 
-Notably, functional dependencies.  If we have  
+Arguably, for *some* derived constraints we might want to report errors.
+Notably, functional dependencies.  If we have
     class C a b | a -> b
 and we have
     [W] C a b, [W] C a c
@@ -1224,6 +1249,7 @@ data Implication
 
       ic_given  :: [EvVar],      -- Given evidence variables
                                  --   (order does not matter)
+                                 -- See Invariant (GivenInv) in TcType
 
       ic_env   :: TcLclEnv,      -- Gives the source location and error context
                                  -- for the implicatdion, and hence for all the
@@ -1403,8 +1429,8 @@ isDerived :: CtEvidence -> Bool
 isDerived (CtDerived {}) = True
 isDerived _              = False
 
-canSolve :: CtFlavour -> CtFlavour -> Bool
--- canSolve ctid1 ctid2
+canRewrite :: CtFlavour -> CtFlavour -> Bool
+-- canRewrite ctid1 ctid2
 -- The constraint ctid1 can be used to solve ctid2
 -- "to solve" means a reaction where the active parts of the two constraints match.
 --  active(F xis ~ xi) = F xis
@@ -1412,18 +1438,13 @@ canSolve :: CtFlavour -> CtFlavour -> Bool
 --  active(D xis)      = D xis
 --  active(IP nm ty)   = nm
 --
--- NB:  either (a `canSolve` b) or (b `canSolve` a) must hold
+-- NB:  either (a `canRewrite` b) or (b `canRewrite` a) must hold
 -----------------------------------------
-canSolve Given   _       = True
-canSolve Wanted  Derived = True
-canSolve Wanted  Wanted  = True
-canSolve Derived Derived = True  -- Derived can't solve wanted/given
-canSolve _ _ = False                       -- No evidence for a derived, anyway
-
-canRewrite :: CtFlavour -> CtFlavour -> Bool
--- canRewrite ct1 ct2
--- The equality constraint ct1 can be used to rewrite inside ct2
-canRewrite = canSolve
+canRewrite Given   _       = True
+canRewrite Wanted  Derived = True
+canRewrite Wanted  Wanted  = True
+canRewrite Derived Derived = True  -- Derived can't solve wanted/given
+canRewrite _ _ = False             -- No evidence for a derived, anyway
 \end{code}
 
 %************************************************************************
@@ -1631,7 +1652,7 @@ data CtOrigin
   | HoleOrigin
   | UnboundOccurrenceOf RdrName
   | ListOrigin          -- An overloaded list
-  
+
 pprO :: CtOrigin -> SDoc
 pprO (GivenOrigin sk)      = ppr sk
 pprO (OccurrenceOf name)   = hsep [ptext (sLit "a use of"), quotes (ppr name)]
@@ -1639,8 +1660,8 @@ pprO AppOrigin             = ptext (sLit "an application")
 pprO (SpecPragOrigin name) = hsep [ptext (sLit "a specialisation pragma for"), quotes (ppr name)]
 pprO (IPOccOrigin name)    = hsep [ptext (sLit "a use of implicit parameter"), quotes (ppr name)]
 pprO RecordUpdOrigin       = ptext (sLit "a record update")
-pprO (AmbigOrigin ctxt)    = ptext (sLit "the ambiguity check for") 
-                             <+> case ctxt of 
+pprO (AmbigOrigin ctxt)    = ptext (sLit "the ambiguity check for")
+                             <+> case ctxt of
                                     FunSigCtxt name -> quotes (ppr name)
                                     InfSigCtxt name -> quotes (ppr name)
                                     _               -> pprUserTypeCtxt ctxt

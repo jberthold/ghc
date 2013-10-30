@@ -22,7 +22,8 @@ module TcRnDriver (
     ) where
 
 #ifdef GHCI
-import {-# SOURCE #-} TcSplice ( tcSpliceDecls )
+import {-# SOURCE #-} TcSplice ( tcSpliceDecls, runQuasi )
+import RnSplice ( rnSplice )
 #endif
 
 import DynFlags
@@ -34,7 +35,8 @@ import TcHsSyn
 import TcExpr
 import TcRnMonad
 import TcEvidence
-import Coercion( pprCoAxiom, pprCoAxBranch )
+import PprTyThing( pprTyThing )
+import Coercion( pprCoAxiom )
 import FamInst
 import InstEnv
 import FamInstEnv
@@ -76,6 +78,7 @@ import Type
 import Class
 import CoAxiom
 import Inst     ( tcGetInstEnvs, tcGetInsts )
+import Annotations
 import Data.List ( sortBy )
 import Data.IORef ( readIORef )
 import Data.Ord
@@ -239,23 +242,18 @@ implicitPreludeWarn
 tcRnImports :: HscEnv -> Module
             -> [LImportDecl RdrName] -> TcM TcGblEnv
 tcRnImports hsc_env this_mod import_decls
-  = do  { (rn_imports, rdr_env, imports,hpc_info) <- rnImports import_decls ;
+  = do  { (rn_imports, rdr_env, imports, hpc_info) <- rnImports import_decls ;
 
         ; let { dep_mods :: ModuleNameEnv (ModuleName, IsBootInterface)
-                -- Make sure we record the dependencies from the DynFlags in the EPS or we
-                -- end up hitting the sanity check in LoadIface.loadInterface that
-                -- checks for unknown home-package modules being loaded. We put
-                -- these dependencies on the left so their (non-source) imports
-                -- take precedence over the (possibly-source) imports on the right.
-                -- We don't add them to any other field (e.g. the imp_dep_mods of
-                -- imports) because we don't want to load their instances etc.
-              ; dep_mods = listToUFM [(mod_nm, (mod_nm, False)) | mod_nm <- dynFlagDependencies (hsc_dflags hsc_env)]
-                                `plusUFM` imp_dep_mods imports
+              ; dep_mods = imp_dep_mods imports
 
                 -- We want instance declarations from all home-package
                 -- modules below this one, including boot modules, except
                 -- ourselves.  The 'except ourselves' is so that we don't
-                -- get the instances from this module's hs-boot file
+                -- get the instances from this module's hs-boot file.  This
+                -- filtering also ensures that we don't see instances from
+                -- modules batch (@--make@) compiled before this one, but
+                -- which are not below this one.
               ; want_instances :: ModuleName -> Bool
               ; want_instances mod = mod `elemUFM` dep_mods
                                    && mod /= moduleName this_mod
@@ -473,55 +471,94 @@ tcRnSrcDecls boot_iface decls
    } }
 
 tc_rn_src_decls :: ModDetails
-                    -> [LHsDecl RdrName]
-                    -> TcM (TcGblEnv, TcLclEnv)
+                -> [LHsDecl RdrName]
+                -> TcM (TcGblEnv, TcLclEnv)
 -- Loops around dealing with each top level inter-splice group
 -- in turn, until it's dealt with the entire module
 tc_rn_src_decls boot_details ds
  = {-# SCC "tc_rn_src_decls" #-}
-   do { (first_group, group_tail) <- findSplice ds  ;
+   do { (first_group, group_tail) <- findSplice ds
                 -- If ds is [] we get ([], Nothing)
 
         -- The extra_deps are needed while renaming type and class declarations
         -- See Note [Extra dependencies from .hs-boot files] in RnSource
-        let { extra_deps = map tyConName (typeEnvTyCons (md_types boot_details)) } ;
+      ; let { extra_deps = map tyConName (typeEnvTyCons (md_types boot_details)) }
         -- Deal with decls up to, but not including, the first splice
-        (tcg_env, rn_decls) <- rnTopSrcDecls extra_deps first_group ;
+      ; (tcg_env, rn_decls) <- rnTopSrcDecls extra_deps first_group
                 -- rnTopSrcDecls fails if there are any errors
 
-        (tcg_env, tcl_env) <- setGblEnv tcg_env $
-                              tcTopSrcDecls boot_details rn_decls ;
+#ifdef GHCI
+        -- Get TH-generated top-level declarations and make sure they don't
+        -- contain any splices since we don't handle that at the moment
+      ; th_topdecls_var <- fmap tcg_th_topdecls getGblEnv
+      ; th_ds <- readTcRef th_topdecls_var
+      ; writeTcRef th_topdecls_var []
+
+      ; (tcg_env, rn_decls) <-
+            if null th_ds
+            then return (tcg_env, rn_decls)
+            else do { (th_group, th_group_tail) <- findSplice th_ds
+                    ; case th_group_tail of
+                        { Nothing -> return () ;
+                        ; Just (SpliceDecl (L loc _) _, _)
+                            -> setSrcSpan loc $
+                               addErr (ptext (sLit "Declaration splices are not permitted inside top-level declarations added with addTopDecls"))
+                        } ;
+                                         
+                    -- Rename TH-generated top-level declarations
+                    ; (tcg_env, th_rn_decls) <- setGblEnv tcg_env $
+                      rnTopSrcDecls extra_deps th_group
+
+                    -- Dump generated top-level declarations
+                    ; loc <- getSrcSpanM
+                    ; traceSplice (vcat [ppr loc <> colon <+> text "Splicing top-level declarations added with addTopDecls ",
+                                   nest 2 (nest 2 (ppr th_rn_decls))])
+
+                    ; return (tcg_env, appendGroups rn_decls th_rn_decls)
+                    }
+#endif /* GHCI */
+
+      -- Type check all declarations
+      ; (tcg_env, tcl_env) <- setGblEnv tcg_env $
+                              tcTopSrcDecls boot_details rn_decls
 
         -- If there is no splice, we're nearly done
-        setEnvs (tcg_env, tcl_env) $
-        case group_tail of {
-           Nothing -> do { tcg_env <- checkMain ;       -- Check for `main'
-                           traceTc "returning from tc_rn_src_decls: " $
-                             ppr $ nameEnvElts $ tcg_type_env tcg_env ;
-                           return (tcg_env, tcl_env)
-                      } ;
+      ; setEnvs (tcg_env, tcl_env) $
+        case group_tail of
+          { Nothing -> do { tcg_env <- checkMain       -- Check for `main'
+#ifdef GHCI
+                            -- Run all module finalizers
+                          ; th_modfinalizers_var <- fmap tcg_th_modfinalizers getGblEnv
+                          ; modfinalizers <- readTcRef th_modfinalizers_var
+                          ; writeTcRef th_modfinalizers_var []
+                          ; mapM_ runQuasi modfinalizers
+#endif /* GHCI */
+                          ; return (tcg_env, tcl_env)
+                          }
 
 #ifndef GHCI
-        -- There shouldn't be a splice
-           Just (SpliceDecl {}, _) -> do {
-        failWithTc (text "Can't do a top-level splice; need a bootstrapped compiler")
+            -- There shouldn't be a splice
+          ; Just (SpliceDecl {}, _) ->
+            failWithTc (text "Can't do a top-level splice; need a bootstrapped compiler")
+          }
 #else
-        -- If there's a splice, we must carry on
-           Just (SpliceDecl splice_expr _, rest_ds) -> do {
+            -- If there's a splice, we must carry on
+          ; Just (SpliceDecl (L _ splice) _, rest_ds) ->
+            do { -- Rename the splice expression, and get its supporting decls
+                 (rn_splice, splice_fvs) <- checkNoErrs (rnSplice splice)
+                 -- checkNoErrs: don't typecheck if renaming failed
+               ; rnDump (ppr rn_splice)
 
-        -- Rename the splice expression, and get its supporting decls
-        (rn_splice_expr, splice_fvs) <- checkNoErrs (rnLExpr splice_expr) ;
-                -- checkNoErrs: don't typecheck if renaming failed
-        rnDump (ppr rn_splice_expr) ;
+                 -- Execute the splice
+               ; spliced_decls <- tcSpliceDecls rn_splice
 
-        -- Execute the splice
-        spliced_decls <- tcSpliceDecls rn_splice_expr ;
-
-        -- Glue them on the front of the remaining decls and loop
-        setGblEnv (tcg_env `addTcgDUs` usesOnly splice_fvs) $
-        tc_rn_src_decls boot_details (spliced_decls ++ rest_ds)
+                 -- Glue them on the front of the remaining decls and loop
+               ; setGblEnv (tcg_env `addTcgDUs` usesOnly splice_fvs) $
+                 tc_rn_src_decls boot_details (spliced_decls ++ rest_ds)
+               }
+          }
 #endif /* GHCI */
-    } } }
+      }
 \end{code}
 
 %************************************************************************
@@ -850,20 +887,8 @@ bootMisMatch real_thing boot_thing
   = vcat [ppr real_thing <+>
           ptext (sLit "has conflicting definitions in the module"),
           ptext (sLit "and its hs-boot file"),
-          ptext (sLit "Main module:") <+> ppr_mismatch real_thing,
-          ptext (sLit "Boot file:  ") <+> ppr_mismatch boot_thing]
-  where
-      -- closed type families need special treatment, because they might differ
-      -- in their equations, which are not stored in the corresponding IfaceDecl
-    ppr_mismatch thing
-      | ATyCon tc <- thing
-      , Just (ClosedSynFamilyTyCon ax) <- synTyConRhs_maybe tc
-      = hang (ppr iface_decl <+> ptext (sLit "where"))
-           2 (vcat $ brListMap (pprCoAxBranch tc) (coAxiomBranches ax))
-      
-      | otherwise
-      = ppr iface_decl
-      where iface_decl = tyThingToIfaceDecl thing
+          ptext (sLit "Main module:") <+> PprTyThing.pprTyThing real_thing,
+          ptext (sLit "Boot file:  ") <+> PprTyThing.pprTyThing boot_thing]
 
 instMisMatch :: ClsInst -> SDoc
 instMisMatch inst
@@ -917,17 +942,31 @@ rnTopSrcDecls extra_deps group
 %************************************************************************
 %*                                                                      *
                 AMP warnings
-     The functions defined here issue warnings according to 
+     The functions defined here issue warnings according to
      the 2013 Applicative-Monad proposal. (Trac #8004)
 %*                                                                      *
 %************************************************************************
+
+Note [No AMP warning with NoImplicitPrelude]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If you have -XNoImplicitPrelude, then we suppress the AMP warnings.
+The AMP warnings need access to Monad, Applicative, etc, and they
+are defined in 'base'. If, when compiling package 'ghc-prim' (say),
+you try to load Monad (from 'base'), chaos results because 'base'
+depends on 'ghc-prim'.  See Note [Home module load error] in LoadIface,
+and Trac #8320.
+
+Using -XNoImplicitPrelude is a proxy for ensuring that all the
+'base' modules are below the home module in the dependency tree.
 
 \begin{code}
 -- | Main entry point for generating AMP warnings
 tcAmpWarn :: TcM ()
 tcAmpWarn =
-    do { warnFlag <- woptM Opt_WarnAMP
-       ; when warnFlag $ do {
+    do { implicit_prel <- xoptM Opt_ImplicitPrelude
+       ; warnFlag <- woptM Opt_WarnAMP
+       ; when (warnFlag && implicit_prel) $ do {
+              -- See Note [No AMP warning with NoImplicitPrelude]
 
          -- Monad without Applicative
        ; tcAmpMissingParentClassWarn monadClassName
@@ -1202,13 +1241,14 @@ tcTopSrcDecls boot_details
 
                 -- Extend the GblEnv with the (as yet un-zonked)
                 -- bindings, rules, foreign decls
-            ; tcg_env' = tcg_env { tcg_binds = tcg_binds tcg_env `unionBags` all_binds
-                                 , tcg_sigs  = tcg_sigs tcg_env `unionNameSets` sig_names
-                                 , tcg_rules = tcg_rules tcg_env ++ rules
-                                 , tcg_vects = tcg_vects tcg_env ++ vects
-                                 , tcg_anns  = tcg_anns tcg_env ++ annotations
-                                 , tcg_fords = tcg_fords tcg_env ++ foe_decls ++ fi_decls
-                                 , tcg_dus   = tcg_dus tcg_env `plusDU` usesOnly fo_fvs } } ;
+            ; tcg_env' = tcg_env { tcg_binds   = tcg_binds tcg_env `unionBags` all_binds
+                                 , tcg_sigs    = tcg_sigs tcg_env `unionNameSets` sig_names
+                                 , tcg_rules   = tcg_rules tcg_env ++ rules
+                                 , tcg_vects   = tcg_vects tcg_env ++ vects
+                                 , tcg_anns    = tcg_anns tcg_env ++ annotations
+                                 , tcg_ann_env = extendAnnEnvList (tcg_ann_env tcg_env) annotations
+                                 , tcg_fords   = tcg_fords tcg_env ++ foe_decls ++ fi_decls
+                                 , tcg_dus     = tcg_dus tcg_env `plusDU` usesOnly fo_fvs } } ;
                                  -- tcg_dus: see Note [Newtype constructor usage in foreign declarations]
 
         addUsedRdrNames fo_rdr_names ;

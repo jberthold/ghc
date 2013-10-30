@@ -117,6 +117,7 @@ module DynFlags (
 -- Only in stage 2 can we be sure that the RTS
 -- exposes the appropriate runtime boolean
         rtsIsProfiled,
+        dynamicGhc,
 #endif
 
 #include "../includes/dist-derivedconstants/header/GHCConstantsHaskellExports.hs"
@@ -166,6 +167,7 @@ import FastString
 import Outputable
 #ifdef GHCI
 import Foreign.C        ( CInt(..) )
+import System.IO.Unsafe ( unsafeDupablePerformIO )
 #endif
 import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessage )
 
@@ -283,6 +285,7 @@ data GeneralFlag
    | Opt_WarnIsError                    -- -Werror; makes warnings fatal
 
    | Opt_PrintExplicitForalls
+   | Opt_PrintExplicitKinds
 
    -- optimisation opts
    | Opt_Strictness
@@ -598,6 +601,9 @@ data DynFlags = DynFlags {
   parMakeCount          :: Maybe Int,   -- ^ The number of modules to compile in parallel
                                         --   in --make mode, where Nothing ==> compile as
                                         --   many in parallel as there are CPUs.
+
+  enableTimeStats       :: Bool,        -- ^ Enable RTS timing statistics?
+  ghcHeapSize           :: Maybe Int,   -- ^ The heap size to set.
 
   maxRelevantBinds      :: Maybe Int,   -- ^ Maximum number of bindings from the type envt
                                         --   to show in type error messages
@@ -1140,7 +1146,7 @@ wayGeneralFlags _ WayDebug    = []
 wayGeneralFlags _ WayDyn      = [Opt_PIC]
     -- We could get away without adding -fPIC when compiling the
     -- modules of a program that is to be linked with -dynamic; the
-    -- program itself does not need to be position-independet, only
+    -- program itself does not need to be position-independent, only
     -- the libraries need to be.  HOWEVER, GHCi links objects into a
     -- .so before loading the .so using the system linker.  Since only
     -- PIC objects can be linked into a .so, we have to compile even
@@ -1285,7 +1291,7 @@ dynamicTooMkDynamicDynFlags dflags0
 
 -----------------------------------------------------------------------------
 
--- | Used by 'GHC.newSession' to partially initialize a new 'DynFlags' value
+-- | Used by 'GHC.runGhc' to partially initialize a new 'DynFlags' value
 initDynFlags :: DynFlags -> IO DynFlags
 initDynFlags dflags = do
  let -- We can't build with dynamic-too on Windows, as labels before
@@ -1322,7 +1328,7 @@ initDynFlags dflags = do
         }
 
 -- | The normal 'DynFlags'. Note that they is not suitable for use in this form
--- and must be fully initialized by 'GHC.newSession' first.
+-- and must be fully initialized by 'GHC.runGhc' first.
 defaultDynFlags :: Settings -> DynFlags
 defaultDynFlags mySettings =
      DynFlags {
@@ -1347,6 +1353,9 @@ defaultDynFlags mySettings =
         strictnessBefore        = [],
 
         parMakeCount            = Just 1,
+
+        enableTimeStats         = False,
+        ghcHeapSize             = Nothing,
 
         cmdlineHcIncludes       = [],
         importPaths             = ["."],
@@ -1473,7 +1482,7 @@ defaultWays settings = if pc_DYNAMIC_BY_DEFAULT (sPlatformConstants settings)
                        else []
 
 interpWays :: [Way]
-interpWays = if cDYNAMIC_GHC_PROGRAMS
+interpWays = if dynamicGhc
              then [WayDyn]
              else []
 
@@ -2004,6 +2013,12 @@ parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
                         let ss = map (Set.fromList . words) (lines xs)
                         return $ dflags4 { dllSplit = Just ss }
 
+  -- Set timer stats & heap size
+  when (enableTimeStats dflags5) $ liftIO enableTimingStats
+  case (ghcHeapSize dflags5) of
+    Just x -> liftIO (setHeapSize x)
+    _      -> return ()
+
   liftIO $ setUnsafeGlobalDynFlags dflags5
 
   return (dflags5, leftover, consistency_warnings ++ sh_warns ++ warns)
@@ -2115,7 +2130,13 @@ dynamic_flags = [
 
   , Flag "j"        (OptIntSuffix (\n -> upd (\d -> d {parMakeCount = n})))
 
-        ------- ways --------------------------------------------------------
+    -- RTS options -------------------------------------------------------------
+  , Flag "H"           (HasArg (\s -> upd (\d ->
+          d { ghcHeapSize = Just $ fromIntegral (decodeSize s)})))
+
+  , Flag "Rghc-timing" (NoArg (upd (\d -> d { enableTimeStats = True })))
+
+    ------- ways ---------------------------------------------------------------
   , Flag "prof"           (NoArg (addWay WayProf))
   , Flag "eventlog"       (NoArg (addWay WayEventLog))
   , Flag "parallel"       (NoArg (addWay WayPar))
@@ -2623,6 +2644,7 @@ fFlags :: [FlagSpec GeneralFlag]
 fFlags = [
   ( "error-spans",                      Opt_ErrorSpans, nop ),
   ( "print-explicit-foralls",           Opt_PrintExplicitForalls, nop ),
+  ( "print-explicit-kinds",             Opt_PrintExplicitKinds, nop ),
   ( "strictness",                       Opt_Strictness, nop ),
   ( "late-dmd-anal",                    Opt_LateDmdAnal, nop ),
   ( "specialise",                       Opt_Specialise, nop ),
@@ -3089,7 +3111,21 @@ glasgowExtsFlags = [
 foreign import ccall unsafe "rts_isProfiled" rtsIsProfiledIO :: IO CInt
 
 rtsIsProfiled :: Bool
-rtsIsProfiled = unsafePerformIO rtsIsProfiledIO /= 0
+rtsIsProfiled = unsafeDupablePerformIO rtsIsProfiledIO /= 0
+#endif
+
+#ifdef GHCI
+-- Consult the RTS to find whether GHC itself has been built with
+-- dynamic linking.  This can't be statically known at compile-time,
+-- because we build both the static and dynamic versions together with
+-- -dynamic-too.
+foreign import ccall unsafe "rts_isDynamic" rtsIsDynamicIO :: IO CInt
+
+dynamicGhc :: Bool
+dynamicGhc = unsafeDupablePerformIO rtsIsDynamicIO /= 0
+#else
+dynamicGhc :: Bool
+dynamicGhc = False
 #endif
 
 setWarnSafe :: Bool -> DynP ()
@@ -3555,7 +3591,7 @@ compilerInfo dflags
        ("Support parallel --make",     "YES"),
        ("Dynamic by default",          if dYNAMIC_BY_DEFAULT dflags
                                        then "YES" else "NO"),
-       ("GHC Dynamic",                 if cDYNAMIC_GHC_PROGRAMS
+       ("GHC Dynamic",                 if dynamicGhc
                                        then "YES" else "NO"),
        ("Leading underscore",          cLeadingUnderscore),
        ("Debug on",                    show debugIsOn),
@@ -3713,3 +3749,21 @@ data LinkerInfo
   | DarwinLD [Option]
   | UnknownLD
   deriving Eq
+
+-- -----------------------------------------------------------------------------
+-- RTS hooks
+
+-- Convert sizes like "3.5M" into integers
+decodeSize :: String -> Integer
+decodeSize str
+  | c == ""      = truncate n
+  | c == "K" || c == "k" = truncate (n * 1000)
+  | c == "M" || c == "m" = truncate (n * 1000 * 1000)
+  | c == "G" || c == "g" = truncate (n * 1000 * 1000 * 1000)
+  | otherwise            = throwGhcException (CmdLineError ("can't decode size: " ++ str))
+  where (m, c) = span pred str
+        n      = readRational m
+        pred c = isDigit c || c == '.'
+
+foreign import ccall unsafe "setHeapSize"       setHeapSize       :: Int -> IO ()
+foreign import ccall unsafe "enableTimingStats" enableTimingStats :: IO ()

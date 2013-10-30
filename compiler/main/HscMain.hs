@@ -852,7 +852,7 @@ checkSafeImports dflags tcg_env
               (text $ "is imported both as a safe and unsafe import!"))
         | otherwise
         = return v1
-    
+
     -- easier interface to work with
     checkSafe (_, _, False) = return Nothing
     checkSafe (m, l, True ) = fst `fmap` hscCheckSafe' dflags m l
@@ -879,7 +879,7 @@ hscGetSafe hsc_env m l = runHsc hsc_env $ do
     let pkgs' | Just p <- self = p:pkgs
               | otherwise      = pkgs
     return (good, pkgs')
- 
+
 -- | Is a module trusted? If not, throw or log errors depending on the type.
 -- Return (regardless of trusted or not) if the trust type requires the modules
 -- own package be trusted and a list of other packages required to be trusted
@@ -963,7 +963,7 @@ hscCheckSafe' dflags m l = do
             Just _  -> return iface
             Nothing -> snd `fmap` (liftIO $ getModuleInterface hsc_env m)
         return iface'
-#else 
+#else
         return iface
 #endif
 
@@ -1280,12 +1280,8 @@ tryNewCodeGen hsc_env this_mod data_tycons
 
       | otherwise
         = {-# SCC "cmmPipeline" #-}
-          let initTopSRT = initUs_ us emptySRT in
-  
-          let run_pipeline topSRT cmmgroup = do
-                (topSRT, cmmgroup) <- cmmPipeline hsc_env topSRT cmmgroup
-                return (topSRT,cmmgroup)
-  
+          let initTopSRT = initUs_ us emptySRT
+              run_pipeline = cmmPipeline hsc_env
           in do topSRT <- Stream.mapAccumL run_pipeline initTopSRT ppr_stream1
                 Stream.yield (srtToData topSRT)
 
@@ -1354,10 +1350,12 @@ hscStmtWithLocation hsc_env0 stmt source linenumber =
         Nothing -> return Nothing
 
         Just parsed_stmt -> do
-            let icntxt   = hsc_IC hsc_env
-                rdr_env  = ic_rn_gbl_env icntxt
-                type_env = mkTypeEnvWithImplicits (ic_tythings icntxt)
-                src_span = srcLocSpan interactiveSrcLoc
+            let icntxt       = hsc_IC hsc_env
+                rdr_env      = ic_rn_gbl_env icntxt
+                type_env     = mkTypeEnvWithImplicits (ic_tythings icntxt)
+                fam_insts    = snd (ic_instances icntxt)
+                fam_inst_env = extendFamInstEnvList emptyFamInstEnv fam_insts
+                src_span     = srcLocSpan interactiveSrcLoc
 
             -- Rename and typecheck it
             -- Here we lift the stmt into the IO monad, see Note
@@ -1366,7 +1364,7 @@ hscStmtWithLocation hsc_env0 stmt source linenumber =
 
             -- Desugar it
             ds_expr <- ioMsgMaybe $
-                       deSugarExpr hsc_env iNTERACTIVE rdr_env type_env tc_expr
+                       deSugarExpr hsc_env iNTERACTIVE rdr_env type_env fam_inst_env tc_expr
             liftIO (lintInteractiveExpr "desugar expression" hsc_env ds_expr)
             handleWarnings
 
@@ -1616,7 +1614,7 @@ hscCompileCoreExpr' hsc_env srcspan ds_expr
          ; prepd_expr <- corePrepExpr dflags hsc_env tidy_expr
 
            {- Lint if necessary -}
-         ; lintInteractiveExpr "hscCompileExpr" hsc_env prepd_expr 
+         ; lintInteractiveExpr "hscCompileExpr" hsc_env prepd_expr
 
            {- Convert to BCOs -}
          ; bcos <- coreExprToBCOs dflags iNTERACTIVE prepd_expr
@@ -1658,4 +1656,3 @@ showModuleIndex (i,n) = "[" ++ padded ++ " of " ++ n_str ++ "] "
     n_str = show n
     i_str = show i
     padded = replicate (length n_str - length i_str) ' ' ++ i_str
-

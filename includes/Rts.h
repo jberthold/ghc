@@ -250,13 +250,23 @@ void getWin32ProgArgv(int *argc, wchar_t **argv[]);
 void setWin32ProgArgv(int argc, wchar_t *argv[]);
 #endif
 
-void stackOverflow(void);
+void stackOverflow(StgTSO* tso);
 
 void stg_exit(int n) GNU_ATTRIBUTE(__noreturn__);
 
 #ifndef mingw32_HOST_OS
 int stg_sig_install (int, int, void *);
 #endif
+
+/* -----------------------------------------------------------------------------
+   Ways
+   -------------------------------------------------------------------------- */
+
+// Returns non-zero if the RTS is a profiling version
+int rts_isProfiled(void);
+
+// Returns non-zero if the RTS is a dynamically-linked version
+int rts_isDynamic(void);
 
 /* -----------------------------------------------------------------------------
    RTS Exit codes

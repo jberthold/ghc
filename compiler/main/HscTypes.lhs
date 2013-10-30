@@ -56,7 +56,7 @@ module HscTypes (
 
         -- * Interfaces
         ModIface(..), mkIfaceWarnCache, mkIfaceHashCache, mkIfaceFixCache,
-        emptyIfaceWarnCache,
+        emptyIfaceWarnCache, 
 
         -- * Fixity
         FixityEnv, FixItem(..), lookupFixity, emptyFixityEnv,
@@ -139,7 +139,7 @@ import Id
 import IdInfo           ( IdDetails(..) )
 import Type
 
-import Annotations
+import Annotations      ( Annotation, AnnEnv, mkAnnEnv, plusAnnEnv )
 import Class
 import TyCon
 import CoAxiom
@@ -505,10 +505,10 @@ lookupIfaceByModule dflags hpt pit mod
 -- of its own, but it doesn't seem worth the bother.
 
 
--- | Find all the instance declarations (of classes and families) that are in
--- modules imported by this one, directly or indirectly, and are in the Home
--- Package Table.  This ensures that we don't see instances from modules @--make@
--- compiled before this one, but which are not below this one.
+-- | Find all the instance declarations (of classes and families) from
+-- the Home Package Table filtered by the provided predicate function.
+-- Used in @tcRnImports@, to select the instances that are in the
+-- transitive closure of imports from the currently compiled module.
 hptInstances :: HscEnv -> (ModuleName -> Bool) -> ([ClsInst], [FamInst])
 hptInstances hsc_env want_this_module
   = let (insts, famInsts) = unzip $ flip hptAllThings hsc_env $ \mod_info -> do
@@ -747,7 +747,7 @@ data ModIface
                 -- These are computed (lazily) from other fields
                 -- and are not put into the interface file
         mi_warn_fn   :: Name -> Maybe WarningTxt,        -- ^ Cached lookup for 'mi_warns'
-        mi_fix_fn    :: OccName -> Fixity,                -- ^ Cached lookup for 'mi_fixities'
+        mi_fix_fn    :: OccName -> Fixity,               -- ^ Cached lookup for 'mi_fixities'
         mi_hash_fn   :: OccName -> Maybe (OccName, Fingerprint),
                 -- ^ Cached lookup for 'mi_decls'.
                 -- The @Nothing@ in 'mi_hash_fn' means that the thing
@@ -1006,7 +1006,7 @@ data ModGuts
         -- ^ Class instance environment from /home-package/ modules (including
         -- this one); c.f. 'tcg_inst_env'
         mg_fam_inst_env :: FamInstEnv,
-        -- ^ Type-family instance enviroment for /home-package/ modules
+        -- ^ Type-family instance environment for /home-package/ modules
         -- (including this one); c.f. 'tcg_fam_inst_env'
         mg_safe_haskell :: SafeHaskellMode,
         -- ^ Safe Haskell mode
@@ -1751,7 +1751,6 @@ lookupFixity env n = case lookupNameEnv env n of
                         Just (FixItem _ fix) -> fix
                         Nothing         -> defaultFixity
 \end{code}
-
 
 %************************************************************************
 %*                                                                      *

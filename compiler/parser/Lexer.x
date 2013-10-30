@@ -315,14 +315,19 @@ $tab+         { warn Opt_WarnTabs (text "Tab character") }
 }
 
 <0> {
-  "[|"      / { ifExtension thEnabled } { token ITopenExpQuote }
-  "[e|"     / { ifExtension thEnabled } { token ITopenExpQuote }
-  "[p|"     / { ifExtension thEnabled } { token ITopenPatQuote }
-  "[d|"     / { ifExtension thEnabled } { layout_token ITopenDecQuote }
-  "[t|"     / { ifExtension thEnabled } { token ITopenTypQuote }
-  "|]"      / { ifExtension thEnabled } { token ITcloseQuote }
-  \$ @varid / { ifExtension thEnabled } { skip_one_varid ITidEscape }
-  "$("      / { ifExtension thEnabled } { token ITparenEscape }
+  "[|"        / { ifExtension thEnabled } { token ITopenExpQuote }
+  "[||"       / { ifExtension thEnabled } { token ITopenTExpQuote }
+  "[e|"       / { ifExtension thEnabled } { token ITopenExpQuote }
+  "[e||"      / { ifExtension thEnabled } { token ITopenTExpQuote }
+  "[p|"       / { ifExtension thEnabled } { token ITopenPatQuote }
+  "[d|"       / { ifExtension thEnabled } { layout_token ITopenDecQuote }
+  "[t|"       / { ifExtension thEnabled } { token ITopenTypQuote }
+  "|]"        / { ifExtension thEnabled } { token ITcloseQuote }
+  "||]"       / { ifExtension thEnabled } { token ITcloseTExpQuote }
+  \$ @varid   / { ifExtension thEnabled } { skip_one_varid ITidEscape }
+  "$$" @varid / { ifExtension thEnabled } { skip_two_varid ITidTyEscape }
+  "$("        / { ifExtension thEnabled } { token ITparenEscape }
+  "$$("       / { ifExtension thEnabled } { token ITparenTyEscape }
 
 -- For backward compatibility, accept the old dollar syntax
   "[$" @varid "|"  / { ifExtension qqEnabled }
@@ -580,8 +585,12 @@ data Token
   | ITopenDecQuote              --  [d|
   | ITopenTypQuote              --  [t|
   | ITcloseQuote                --  |]
+  | ITopenTExpQuote             --  [||
+  | ITcloseTExpQuote            --  ||]
   | ITidEscape   FastString     --  $x
   | ITparenEscape               --  $(
+  | ITidTyEscape   FastString   --  $$x
+  | ITparenTyEscape             --  $$(
   | ITtyQuote                   --  ''
   | ITquasiQuote (FastString,FastString,RealSrcSpan)
     -- ITquasiQuote(quoter, quote, loc)
@@ -652,7 +661,6 @@ reservedWordsFM = listToUFM $
          ( "then",           ITthen,          0 ),
          ( "type",           ITtype,          0 ),
          ( "where",          ITwhere,         0 ),
-         ( "_scc_",          ITscc,           0 ),            -- ToDo: remove
 
          ( "forall",         ITforall,        bit explicitForallBit .|.
                                               bit inRulePragBit),
@@ -765,6 +773,10 @@ idtoken f span buf len = return (L span $! (f buf len))
 skip_one_varid :: (FastString -> Token) -> Action
 skip_one_varid f span buf len
   = return (L span $! f (lexemeToFastString (stepOn buf) (len-1)))
+
+skip_two_varid :: (FastString -> Token) -> Action
+skip_two_varid f span buf len
+  = return (L span $! f (lexemeToFastString (stepOn (stepOn buf)) (len-2)))
 
 strtoken :: (String -> Token) -> Action
 strtoken f span buf len =
@@ -1589,7 +1601,7 @@ data PState = PState {
         -- This is the next token to be considered or, if it is Nothing,
         -- we need to get the next token from the input stream:
         alr_next_token :: Maybe (RealLocated Token),
-        -- This is what we consider to be the locatino of the last token
+        -- This is what we consider to be the location of the last token
         -- emitted:
         alr_last_loc :: RealSrcSpan,
         -- The stack of layout contexts:
@@ -2254,7 +2266,7 @@ alternativeLayoutRuleToken t
                  [] ->
                      do let ls = if isALRopen u
                                     then [ALRNoLayout (containsCommas u) False]
-                                    else ls
+                                    else []
                         setALRContext ls
                         -- XXX This is an error in John's code, but
                         -- it looks reachable to me at first glance
@@ -2290,16 +2302,17 @@ transitionalAlternativeLayoutWarning msg
    $$ text msg
 
 isALRopen :: Token -> Bool
-isALRopen ITcase        = True
-isALRopen ITif          = True
-isALRopen ITthen        = True
-isALRopen IToparen      = True
-isALRopen ITobrack      = True
-isALRopen ITocurly      = True
+isALRopen ITcase          = True
+isALRopen ITif            = True
+isALRopen ITthen          = True
+isALRopen IToparen        = True
+isALRopen ITobrack        = True
+isALRopen ITocurly        = True
 -- GHC Extensions:
-isALRopen IToubxparen   = True
-isALRopen ITparenEscape = True
-isALRopen _             = False
+isALRopen IToubxparen     = True
+isALRopen ITparenEscape   = True
+isALRopen ITparenTyEscape = True
+isALRopen _               = False
 
 isALRclose :: Token -> Bool
 isALRclose ITof     = True

@@ -7,7 +7,7 @@ Functions over HsSyn specialised to RdrName.
 module RdrHsSyn (
         mkHsOpApp,
         mkHsIntegral, mkHsFractional, mkHsIsString,
-        mkHsDo, mkHsSplice, mkTopSpliceDecl,
+        mkHsDo, mkSpliceDecl,
         mkRoleAnnotDecl,
         mkClassDecl, 
         mkTyData, mkFamInstData, 
@@ -120,7 +120,7 @@ mkClassDecl loc (L _ (mcxt, tycl_hdr)) fds where_cls
              cxt = fromMaybe (noLoc []) mcxt
        ; (cls, tparams) <- checkTyClHdr tycl_hdr
        ; tyvars <- checkTyVars tycl_hdr tparams      -- Only type vars allowed
-       ; return (L loc (ClassDecl { tcdCtxt = cxt, tcdLName = cls, tcdTyVars = tyvars,
+       ; return (L loc (ClassDecl { tcdCtxt = cxt, tcdLName = reLocate loc cls, tcdTyVars = tyvars,
                                     tcdFDs = unLoc fds, tcdSigs = sigs, tcdMeths = binds,
                                     tcdATs = ats, tcdATDefs = at_defs, tcdDocs  = docs,
                                     tcdFVs = placeHolderNames })) }
@@ -137,7 +137,7 @@ mkTyData loc new_or_data cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_deriv
   = do { (tc, tparams) <- checkTyClHdr tycl_hdr
        ; tyvars <- checkTyVars tycl_hdr tparams
        ; defn <- mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
-       ; return (L loc (DataDecl { tcdLName = tc, tcdTyVars = tyvars,
+       ; return (L loc (DataDecl { tcdLName = reLocate loc tc, tcdTyVars = tyvars,
                                    tcdDataDefn = defn,
                                    tcdFVs = placeHolderNames })) }
 
@@ -166,7 +166,7 @@ mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
   = do { checkDatatypeContext mcxt
        ; let cxt = fromMaybe (noLoc []) mcxt
        ; return (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
-                            , dd_ctxt = cxt 
+                            , dd_ctxt = cxt
                             , dd_cons = data_cons
                             , dd_kindSig = ksig
                             , dd_derivs = maybe_deriv }) }
@@ -178,8 +178,8 @@ mkTySynonym :: SrcSpan
 mkTySynonym loc lhs rhs
   = do { (tc, tparams) <- checkTyClHdr lhs
        ; tyvars <- checkTyVars lhs tparams
-       ; return (L loc (SynDecl { tcdLName = tc, tcdTyVars = tyvars,
-                                 tcdRhs = rhs, tcdFVs = placeHolderNames })) }
+       ; return (L loc (SynDecl { tcdLName = reLocate loc tc, tcdTyVars = tyvars
+                                , tcdRhs = rhs, tcdFVs = placeHolderNames })) }
 
 mkTyFamInstEqn :: LHsType RdrName
                -> LHsType RdrName
@@ -205,36 +205,37 @@ mkFamDecl :: SrcSpan
 mkFamDecl loc info lhs ksig
   = do { (tc, tparams) <- checkTyClHdr lhs
        ; tyvars <- checkTyVars lhs tparams
-       ; return (L loc (FamilyDecl info tc tyvars ksig)) }
+       ; return (L loc (FamilyDecl { fdInfo = info, fdLName = reLocate loc tc
+                                   , fdTyVars = tyvars, fdKindSig = ksig })) }
 
-mkTopSpliceDecl :: LHsExpr RdrName -> HsDecl RdrName
+reLocate :: SrcSpan -> Located a -> Located a
+-- For the main binder of a declaration, we make its SrcSpan to
+-- cover the whole declaration, rather than just the syntactic occurrence
+-- of the binder. This makes error messages refer to the declaration as
+-- a whole, rather than just the binding site
+reLocate loc (L _ x) = L loc x
+
+mkSpliceDecl :: LHsExpr RdrName -> HsDecl RdrName
 -- If the user wrote
 --      [pads| ... ]   then return a QuasiQuoteD
 --      $(e)           then return a SpliceD
 -- but if she wrote, say,
 --      f x            then behave as if she'd written $(f x)
 --                     ie a SpliceD
-mkTopSpliceDecl (L _ (HsQuasiQuoteE qq))            = QuasiQuoteD qq
-mkTopSpliceDecl (L _ (HsSpliceE (HsSplice _ expr))) = SpliceD (SpliceDecl expr       Explicit)
-mkTopSpliceDecl other_expr                          = SpliceD (SpliceDecl other_expr Implicit)
-
--- Ensure a type literal is used correctly; notably, we need the proper extension enabled,
--- and if it's an integer literal, the literal must be >= 0. This can occur with
--- -XNegativeLiterals enabled (see #8306)
-mkTyLit :: Located HsTyLit -> P (LHsType RdrName)
-mkTyLit lit = extension typeLiteralsEnabled >>= check
+mkSpliceDecl (L _ (HsQuasiQuoteE qq))   = QuasiQuoteD qq
+mkSpliceDecl (L loc (HsSpliceE splice)) = SpliceD (SpliceDecl (L loc splice) Explicit)
+mkSpliceDecl other_expr                 = SpliceD (SpliceDecl (L (getLoc other_expr) splice) Implicit)
   where
-    negLit (L _ (HsStrTy _)) = False
-    negLit (L _ (HsNumTy i)) = i < 0
+    HsSpliceE splice = mkHsSpliceE other_expr
 
-    check False =
-      parseErrorSDoc (getLoc lit)
-        (text "Illegal literal in type (use DataKinds to enable):" <+> ppr lit)
-    check True  =
-      if not (negLit lit) then return (HsTyLit `fmap` lit)
-       else parseErrorSDoc (getLoc lit)
-              (text "Illegal literal in type (type literals must not be negative):" <+> ppr lit)
-
+mkTyLit :: Located (HsTyLit) -> P (LHsType RdrName)
+mkTyLit l =
+  do allowed <- extension typeLiteralsEnabled
+     if allowed
+       then return (HsTyLit `fmap` l)
+       else parseErrorSDoc (getLoc l)
+              (text "Illegal literal in type (use DataKinds to enable):" <+>
+              ppr l)
 
 mkRoleAnnotDecl :: SrcSpan
                 -> Located RdrName                   -- type being annotated
@@ -660,6 +661,7 @@ checkAPat msg loc e0 = do
    RecordCon c _ (HsRecFields fs dd)
                       -> do fs <- mapM (checkPatField msg) fs
                             return (ConPatIn c (RecCon (HsRecFields fs dd)))
+   HsSpliceE s        -> return (SplicePat s)
    HsQuasiQuoteE q    -> return (QuasiQuotePat q)
    _                  -> patFail msg loc e0
 

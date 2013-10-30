@@ -213,11 +213,16 @@ warnAboutEmptyEnumerations dflags fromExpr mThnExpr toExpr
   | otherwise = return ()
 
 getLHsIntegralLit :: LHsExpr Id -> Maybe (Integer, Name)
+-- See if the expression is an Integral literal
+-- Remember to look through automatically-added tick-boxes! (Trac #8384)
+getLHsIntegralLit (L _ (HsPar e))            = getLHsIntegralLit e
+getLHsIntegralLit (L _ (HsTick _ e))         = getLHsIntegralLit e
+getLHsIntegralLit (L _ (HsBinTick _ _ e))    = getLHsIntegralLit e
 getLHsIntegralLit (L _ (HsOverLit over_lit)) = getIntegralLit over_lit
 getLHsIntegralLit _ = Nothing
 
 getIntegralLit :: HsOverLit Id -> Maybe (Integer, Name)
-getIntegralLit (OverLit { ol_val = HsIntegral i, ol_type = ty }) 
+getIntegralLit (OverLit { ol_val = HsIntegral i, ol_type = ty })
   | Just tc <- tyConAppTyCon_maybe ty
   = Just (i, tyConName tc)
 getIntegralLit _ = Nothing
@@ -260,7 +265,7 @@ tidyNPat tidy_lit_pat (OverLit val False _ ty) mb_neg _
         -- Once that is settled, look for cases where the type of the
         -- entire overloaded literal matches the type of the underlying literal,
         -- and in that case take the short cut
-        -- NB: Watch out for wierd cases like Trac #3382
+        -- NB: Watch out for weird cases like Trac #3382
         --        f :: Int -> Int
         --        f "blah" = 4
         --     which might be ok if we hvae 'instance IsString Int'

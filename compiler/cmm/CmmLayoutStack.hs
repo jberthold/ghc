@@ -147,7 +147,7 @@ layout :: DynFlags
           , [CmmBlock]                  -- [out] new blocks
           )
 
-layout dflags procpoints liveness entry entry_args final_stackmaps final_hwm blocks
+layout dflags procpoints liveness entry entry_args final_stackmaps final_sp_high blocks
   = go blocks init_stackmap entry_args []
   where
     (updfr, cont_info)  = collectContInfo blocks
@@ -204,14 +204,7 @@ layout dflags procpoints liveness entry entry_args final_stackmaps final_hwm blo
        --
        let middle_pre = blockToList $ foldl blockSnoc middle1 middle2
 
-           sp_high = final_hwm - entry_args
-              -- The stack check value is adjusted by the Sp offset on
-              -- entry to the proc, which is entry_args.  We are
-              -- assuming that we only do a stack check at the
-              -- beginning of a proc, and we don't modify Sp before the
-              -- check.
-
-           final_blocks = manifestSp dflags final_stackmaps stack0 sp0 sp_high entry0
+           final_blocks = manifestSp dflags final_stackmaps stack0 sp0 final_sp_high entry0
                               middle_pre sp_off last1 fixup_blocks
 
            acc_stackmaps' = mapUnion acc_stackmaps out
@@ -777,28 +770,40 @@ arguments.
 -}
 
 areaToSp :: DynFlags -> ByteOff -> ByteOff -> (Area -> StackLoc) -> CmmExpr -> CmmExpr
-areaToSp dflags sp_old _sp_hwm area_off (CmmStackSlot area n) =
-  cmmOffset dflags (CmmReg spReg) (sp_old - area_off area - n)
-areaToSp dflags _ sp_hwm _ (CmmLit CmmHighStackMark) = mkIntExpr dflags sp_hwm
-areaToSp dflags _ _ _ (CmmMachOp (MO_U_Lt _)  -- Note [null stack check]
+
+areaToSp dflags sp_old _sp_hwm area_off (CmmStackSlot area n)
+  = cmmOffset dflags (CmmReg spReg) (sp_old - area_off area - n)
+    -- Replace (CmmStackSlot area n) with an offset from Sp
+
+areaToSp dflags _ sp_hwm _ (CmmLit CmmHighStackMark) 
+  = mkIntExpr dflags sp_hwm
+    -- Replace CmmHighStackMark with the number of bytes of stack used, 
+    -- the sp_hwm.   See Note [Stack usage] in StgCmmHeap
+
+areaToSp dflags _ _ _ (CmmMachOp (MO_U_Lt _)  
                           [CmmMachOp (MO_Sub _)
-                                  [ CmmReg (CmmGlobal Sp)
-                                  , CmmLit (CmmInt 0 _)],
-                           CmmReg (CmmGlobal SpLim)]) = zeroExpr dflags
+                                  [ CmmRegOff (CmmGlobal Sp) x_off
+                                  , CmmLit (CmmInt y_lit _)],
+                           CmmReg (CmmGlobal SpLim)])
+  | fromIntegral x_off >= y_lit 
+  = zeroExpr dflags
+    -- Replace a stack-overflow test that cannot fail with a no-op
+    -- See Note [Always false stack check]
+
 areaToSp _ _ _ _ other = other
 
--- -----------------------------------------------------------------------------
--- Note [null stack check]
+-- Note [Always false stack check]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- We can optimise stack checks of the form
 --
--- If the high-water Sp is zero, then we end up with
+--   if ((Sp + x) - y < SpLim) then .. else ..
 --
---   if (Sp - 0 < SpLim) then .. else ..
---
--- and possibly some dead code for the failure case.  Optimising this
--- away depends on knowing that SpLim <= Sp, so it is really the job
--- of the stack layout algorithm, hence we do it now.  This is also
--- convenient because control-flow optimisation later will drop the
--- dead code.
+-- where are non-negative integer byte offsets.  Since we know that
+-- SpLim <= Sp (remember the stack grows downwards), this test must
+-- yield False if (x >= y), so we can rewrite the comparison to False.
+-- A subsequent sinking pass will later drop the dead code.
+-- Optimising this away depends on knowing that SpLim <= Sp, so it is
+-- really the job of the stack layout algorithm, hence we do it now.
 
 optStackCheck :: CmmNode O C -> CmmNode O C
 optStackCheck n = -- Note [null stack check]
@@ -1021,4 +1026,3 @@ insertReloads stackmap =
 
 stackSlotRegs :: StackMap -> [(LocalReg, StackLoc)]
 stackSlotRegs sm = eltsUFM (sm_regs sm)
-

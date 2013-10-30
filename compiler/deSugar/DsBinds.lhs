@@ -575,10 +575,10 @@ SPEC f :: ty                [n]   INLINE [k]
 
 \begin{code}
 decomposeRuleLhs :: [Var] -> CoreExpr -> Either SDoc ([Var], Id, [CoreExpr])
--- Take apart the LHS of a RULE.  It's supposed to look like
---     /\a. f a Int dOrdInt
--- or  /\a.\d:Ord a. let { dl::Ord [a] = dOrdList a d } in f [a] dl
--- That is, the RULE binders are lambda-bound
+-- (decomposeRuleLhs bndrs lhs) takes apart the LHS of a RULE,
+-- The 'bndrs' are the quantified binders of the rules, but decomposeRuleLhs
+-- may add some extra dictionary binders (see Note [Constant rule dicts])
+--
 -- Returns Nothing if the LHS isn't of the expected shape
 decomposeRuleLhs bndrs lhs 
   =  -- Note [Simplifying the left-hand side of a RULE]
@@ -810,7 +810,7 @@ wrapInEqRCase e mkBody = do
   cov <- newSysLocalDs (mkCoercionType Representational ty1 ty2)
   body' <- mkBody (mkCoVarCo cov)
   return $
-        ASSERT (tc == coercibleTyCon)
+        ASSERT(tc == coercibleTyCon)
         mkWildCase
                 e
                 (exprType e)
@@ -844,7 +844,7 @@ dsTcCoercion role co thing_inside
                                            (uniqsFromSupply us)
 
              subst = mkCvSubst emptyInScopeSet [(eqv, mkCoVarCo cov) | (eqv, cov) <- eqvs_covs]
-             result_expr = thing_inside (ds_tc_coercion subst role co)
+             result_expr = thing_inside (ds_tc_coercion subst role co) 
              result_ty   = exprType result_expr
 
        ; return (foldr (wrap_in_case result_ty) result_expr eqvs_covs) }
@@ -875,7 +875,9 @@ ds_tc_coercion subst role tc_co
 
     go r (TcRefl ty)            = Refl r (Coercion.substTy subst ty)
     go r (TcTyConAppCo tc cos)  = mkTyConAppCo r tc (zipWith go (tyConRolesX r tc) cos)
-    go r (TcAppCo co1 co2)      = mkAppCo (go r co1) (go Nominal co2)
+    go r (TcAppCo co1 co2)      = let leftCo    = go r co1
+                                      rightRole = nextRole leftCo in
+                                  mkAppCoFlexible leftCo rightRole (go rightRole co2)
     go r (TcForAllCo tv co)     = mkForAllCo tv' (ds_tc_coercion subst' r co)
                               where
                                 (subst', tv') = Coercion.substTyVarBndr subst tv

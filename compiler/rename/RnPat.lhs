@@ -18,7 +18,7 @@ free variables.
 
 {-# LANGUAGE ScopedTypeVariables #-}
 module RnPat (-- main entry points
-              rnPat, rnPats, rnBindPat,
+              rnPat, rnPats, rnBindPat, rnPatAndThen,
 
               NameMaker, applyNameMaker,     -- a utility for making names:
               localRecNameMaker, topRecNameMaker,  --   sometimes we want to make local names,
@@ -26,8 +26,11 @@ module RnPat (-- main entry points
 
               rnHsRecFields1, HsRecFieldContext(..),
 
+              -- CpsRn monad
+              CpsRn, liftCps,
+
               -- Literals
-              rnLit, rnOverLit,     
+              rnLit, rnOverLit,
 
              -- Pattern Error messages that are also used elsewhere
              checkTupSize, patSigErr
@@ -37,6 +40,7 @@ module RnPat (-- main entry points
 
 import {-# SOURCE #-} RnExpr ( rnLExpr )
 #ifdef GHCI
+import {-# SOURCE #-} RnSplice ( rnSplicePat )
 import {-# SOURCE #-} TcSplice ( runQuasiQuotePat )
 #endif  /* GHCI */
 
@@ -49,6 +53,9 @@ import RnEnv
 import RnTypes
 import DynFlags
 import PrelNames
+import TyCon               ( tyConName )
+import DataCon             ( dataConTyCon )
+import TypeRep             ( TyThing(..) )
 import Name
 import NameSet
 import RdrName
@@ -418,9 +425,15 @@ rnPatAndThen mk (TuplePat pats boxed _)
        ; return (TuplePat pats' boxed placeHolderType) }
 
 #ifndef GHCI
+rnPatAndThen _ p@(SplicePat {})
+  = pprPanic "Can't do SplicePat without GHCi" (ppr p)
 rnPatAndThen _ p@(QuasiQuotePat {}) 
   = pprPanic "Can't do QuasiQuotePat without GHCi" (ppr p)
 #else
+rnPatAndThen _ (SplicePat splice)
+  = do { -- XXX How to deal with free variables?
+         (pat, _) <- liftCps $ rnSplicePat splice
+       ; return pat }
 rnPatAndThen mk (QuasiQuotePat qq)
   = do { pat <- liftCps $ runQuasiQuotePat qq
          -- Wrap the result of the quasi-quoter in parens so that we don't
@@ -599,9 +612,14 @@ rnHsRecFields1 ctxt mk_arg (HsRecFields { rec_flds = flds, rec_dotdot = dotdot }
     -- That is, the parent of the data constructor.  
     -- That's the parent to use for looking up record fields.
     find_tycon env con 
-      = case lookupGRE_Name env con of
-          [GRE { gre_par = ParentIs p }] -> p
-          gres  -> pprPanic "find_tycon" (ppr con $$ ppr gres)
+      | Just (ADataCon dc) <- wiredInNameTyThing_maybe con
+      = tyConName (dataConTyCon dc)   -- Special case for [], which is built-in syntax
+                                      -- and not in the GlobalRdrEnv (Trac #8448)
+      | [GRE { gre_par = ParentIs p }] <- lookupGRE_Name env con
+      = p
+
+      | otherwise
+      = pprPanic "find_tycon" (ppr con $$ ppr (lookupGRE_Name env con))
 
     dup_flds :: [[RdrName]]
         -- Each list represents a RdrName that occurred more than once
