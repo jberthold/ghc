@@ -2357,7 +2357,8 @@ dynamic_flags = [
   , Flag "ddump-rn-trace"          (setDumpFlag Opt_D_dump_rn_trace)
   , Flag "ddump-if-trace"          (setDumpFlag Opt_D_dump_if_trace)
   , Flag "ddump-cs-trace"          (setDumpFlag Opt_D_dump_cs_trace)
-  , Flag "ddump-tc-trace"          (setDumpFlag Opt_D_dump_tc_trace)
+  , Flag "ddump-tc-trace"          (NoArg (do { setDumpFlag' Opt_D_dump_tc_trace
+                                              ; setDumpFlag' Opt_D_dump_cs_trace }))
   , Flag "ddump-vt-trace"          (setDumpFlag Opt_D_dump_vt_trace)
   , Flag "ddump-splices"           (setDumpFlag Opt_D_dump_splices)
   , Flag "ddump-rn-stats"          (setDumpFlag Opt_D_dump_rn_stats)
@@ -3154,10 +3155,10 @@ checkTemplateHaskellOk turn_on
   | otherwise
   = getCurLoc >>= \l -> upd (\d -> d { thOnLoc = l })
 #else
--- In stage 1 we don't know that the RTS has rts_isProfiled,
--- so we simply say "ok".  It doesn't matter because TH isn't
--- available in stage 1 anyway.
-checkTemplateHaskellOk _ = return ()
+-- In stage 1, Template Haskell is simply illegal
+checkTemplateHaskellOk turn_on
+  | turn_on   = addWarn "Template Haskell requires GHC with interpreter support\n    Perhaps you are using a stage-1 compiler?"
+  | otherwise = return ()
 #endif
 
 {- **********************************************************************
@@ -3288,7 +3289,6 @@ forceRecompile = do dfs <- liftEwM getCmdLineState
                     when (force_recomp dfs) (setGeneralFlag Opt_ForceRecomp)
         where
           force_recomp dfs = isOneShot (ghcMode dfs)
-
 setVerboseCore2Core :: DynP ()
 setVerboseCore2Core = do setDumpFlag' Opt_D_verbose_core2core
                          upd (\dfs -> dfs { shouldDumpSimplPhase = Nothing })

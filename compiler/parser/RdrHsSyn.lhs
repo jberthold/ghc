@@ -10,13 +10,14 @@ module RdrHsSyn (
         mkHsDo, mkSpliceDecl,
         mkRoleAnnotDecl,
         mkClassDecl, 
-        mkTyData, mkFamInstData, 
+        mkTyData, mkDataFamInst, 
         mkTySynonym, mkTyFamInstEqn,
         mkTyFamInst, 
         mkFamDecl, 
         splitCon, mkInlinePragma,
         mkRecConstrOrUpdate, -- HsExp -> [HsFieldUpdate] -> P HsExp
         mkTyLit,
+        mkTyClD, mkInstD,
 
         cvBindGroup,
         cvBindsAndSigs,
@@ -36,7 +37,6 @@ module RdrHsSyn (
         -- checking and constructing values
         checkPrecP,           -- Int -> P Int
         checkContext,         -- HsType -> P HsContext
-        checkTyVars,          -- [LHsType RdrName] -> P ()
         checkPattern,         -- HsExp -> P HsPat
         bang_RDR,
         checkPatterns,        -- SrcLoc -> [HsExp] -> P [HsPat]
@@ -109,6 +109,12 @@ Similarly for mkConDecl, mkClassOpSig and default-method names.
         *** See "THE NAMING STORY" in HsDecls ****
 
 \begin{code}
+mkTyClD :: LTyClDecl n -> LHsDecl n
+mkTyClD (L loc d) = L loc (TyClD d)
+
+mkInstD :: LInstDecl n -> LHsDecl n
+mkInstD (L loc d) = L loc (InstD d)
+
 mkClassDecl :: SrcSpan
             -> Located (Maybe (LHsContext RdrName), LHsType RdrName)
             -> Located [Located (FunDep RdrName)]
@@ -119,7 +125,8 @@ mkClassDecl loc (L _ (mcxt, tycl_hdr)) fds where_cls
   = do { let (binds, sigs, ats, at_defs, _, docs) = cvBindsAndSigs (unLoc where_cls)
              cxt = fromMaybe (noLoc []) mcxt
        ; (cls, tparams) <- checkTyClHdr tycl_hdr
-       ; tyvars <- checkTyVars tycl_hdr tparams      -- Only type vars allowed
+       ; tyvars <- checkTyVars (ptext (sLit "class")) whereDots
+                               cls tparams      -- Only type vars allowed
        ; return (L loc (ClassDecl { tcdCtxt = cxt, tcdLName = reLocate loc cls, tcdTyVars = tyvars,
                                     tcdFDs = unLoc fds, tcdSigs = sigs, tcdMeths = binds,
                                     tcdATs = ats, tcdATDefs = at_defs, tcdDocs  = docs,
@@ -135,25 +142,11 @@ mkTyData :: SrcSpan
          -> P (LTyClDecl RdrName)
 mkTyData loc new_or_data cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_deriv
   = do { (tc, tparams) <- checkTyClHdr tycl_hdr
-       ; tyvars <- checkTyVars tycl_hdr tparams
+       ; tyvars <- checkTyVars (ppr new_or_data) equalsDots tc tparams
        ; defn <- mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
        ; return (L loc (DataDecl { tcdLName = reLocate loc tc, tcdTyVars = tyvars,
                                    tcdDataDefn = defn,
                                    tcdFVs = placeHolderNames })) }
-
-mkFamInstData :: SrcSpan
-         -> NewOrData
-         -> Maybe CType
-         -> Located (Maybe (LHsContext RdrName), LHsType RdrName)
-         -> Maybe (LHsKind RdrName)
-         -> [LConDecl RdrName]
-         -> Maybe [LHsType RdrName]
-         -> P (LDataFamInstDecl RdrName)
-mkFamInstData loc new_or_data cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_deriv
-  = do { (tc, tparams) <- checkTyClHdr tycl_hdr
-       ; defn <- mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
-       ; return (L loc (DataFamInstDecl { dfid_tycon = tc, dfid_pats = mkHsWithBndrs tparams
-                                        , dfid_defn = defn, dfid_fvs = placeHolderNames })) }
 
 mkDataDefn :: NewOrData
            -> Maybe CType
@@ -177,7 +170,7 @@ mkTySynonym :: SrcSpan
             -> P (LTyClDecl RdrName)
 mkTySynonym loc lhs rhs
   = do { (tc, tparams) <- checkTyClHdr lhs
-       ; tyvars <- checkTyVars lhs tparams
+       ; tyvars <- checkTyVars (ptext (sLit "type")) equalsDots tc tparams
        ; return (L loc (SynDecl { tcdLName = reLocate loc tc, tcdTyVars = tyvars
                                 , tcdRhs = rhs, tcdFVs = placeHolderNames })) }
 
@@ -190,23 +183,43 @@ mkTyFamInstEqn lhs rhs
                               , tfie_pats  = mkHsWithBndrs tparams
                               , tfie_rhs   = rhs }) }
 
+mkDataFamInst :: SrcSpan
+         -> NewOrData
+         -> Maybe CType
+         -> Located (Maybe (LHsContext RdrName), LHsType RdrName)
+         -> Maybe (LHsKind RdrName)
+         -> [LConDecl RdrName]
+         -> Maybe [LHsType RdrName]
+         -> P (LInstDecl RdrName)
+mkDataFamInst loc new_or_data cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_deriv
+  = do { (tc, tparams) <- checkTyClHdr tycl_hdr
+       ; defn <- mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
+       ; return (L loc (DataFamInstD (
+                  DataFamInstDecl { dfid_tycon = tc, dfid_pats = mkHsWithBndrs tparams
+                                  , dfid_defn = defn, dfid_fvs = placeHolderNames }))) }
+
 mkTyFamInst :: SrcSpan
             -> LTyFamInstEqn RdrName
-            -> P (LTyFamInstDecl RdrName)
+            -> P (LInstDecl RdrName)
 mkTyFamInst loc eqn
-  = return (L loc (TyFamInstDecl { tfid_eqn  = eqn
-                                 , tfid_fvs  = placeHolderNames }))
+  = return (L loc (TyFamInstD (TyFamInstDecl { tfid_eqn  = eqn
+                                             , tfid_fvs  = placeHolderNames })))
 
 mkFamDecl :: SrcSpan
           -> FamilyInfo RdrName
           -> LHsType RdrName   -- LHS
           -> Maybe (LHsKind RdrName) -- Optional kind signature
-          -> P (LFamilyDecl RdrName)
+          -> P (LTyClDecl RdrName)
 mkFamDecl loc info lhs ksig
   = do { (tc, tparams) <- checkTyClHdr lhs
-       ; tyvars <- checkTyVars lhs tparams
-       ; return (L loc (FamilyDecl { fdInfo = info, fdLName = reLocate loc tc
-                                   , fdTyVars = tyvars, fdKindSig = ksig })) }
+       ; tyvars <- checkTyVars (ppr info) equals_or_where tc tparams
+       ; return (L loc (FamDecl (FamilyDecl { fdInfo = info, fdLName = reLocate loc tc
+                                            , fdTyVars = tyvars, fdKindSig = ksig }))) }
+  where
+    equals_or_where = case info of
+                        DataFamily          -> empty
+                        OpenTypeFamily      -> empty
+                        ClosedTypeFamily {} -> whereDots
 
 reLocate :: SrcSpan -> Located a -> Located a
 -- For the main binder of a declaration, we make its SrcSpan to
@@ -492,13 +505,10 @@ we can bring x,y into scope.  So:
    * For RecCon we do not
 
 \begin{code}
-checkTyVars :: LHsType RdrName -> [LHsType RdrName] -> P (LHsTyVarBndrs RdrName)
+checkTyVars :: SDoc -> SDoc -> Located RdrName -> [LHsType RdrName] -> P (LHsTyVarBndrs RdrName)
 -- Check whether the given list of type parameters are all type variables
--- (possibly with a kind signature).  If the second argument is `False',
--- only type variables are allowed and we raise an error on encountering a
--- non-variable; otherwise, we allow non-variable arguments and return the
--- entire list of parameters.
-checkTyVars tycl_hdr tparms = do { tvs <- mapM chk tparms
+-- (possibly with a kind signature).
+checkTyVars pp_what equals_or_where tc tparms = do { tvs <- mapM chk tparms
                                  ; return (mkHsQTvs tvs) }
   where
         -- Check that the name space is correct!
@@ -508,9 +518,15 @@ checkTyVars tycl_hdr tparms = do { tvs <- mapM chk tparms
         | isRdrTyVar tv    = return (L l (UserTyVar tv))
     chk t@(L l _)
         = parseErrorSDoc l $
-          vcat [ sep [ ptext (sLit "Unexpected type") <+> quotes (ppr t)
-                     , ptext (sLit "where type variable expected") ]
-               , ptext (sLit "In the declaration of") <+> quotes (ppr tycl_hdr) ]
+          vcat [ ptext (sLit "Unexpected type") <+> quotes (ppr t)
+               , ptext (sLit "In the") <+> pp_what <+> ptext (sLit "declaration for") <+> quotes (ppr tc)
+               , vcat[ (ptext (sLit "A") <+> pp_what <+> ptext (sLit "declaration should have form"))
+                     , nest 2 (pp_what <+> ppr tc <+> ptext (sLit "a b c")
+                               <+> equals_or_where) ] ]
+
+whereDots, equalsDots :: SDoc
+whereDots  = ptext (sLit "where ...")
+equalsDots = ptext (sLit "= ...")
 
 checkDatatypeContext :: Maybe (LHsContext RdrName) -> P ()
 checkDatatypeContext Nothing = return ()
