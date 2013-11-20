@@ -11,8 +11,8 @@ import TcCanonical
 import VarSet
 import Type
 import Unify
-import FamInstEnv(TcBuiltInSynFamily(..))
 import InstEnv( lookupInstEnv, instanceDFunId )
+import CoAxiom(sfInteractTop, sfInteractInert)
 
 import Var
 import TcType
@@ -770,22 +770,21 @@ kickOutRewritable new_ev new_tv
                                                    `andCts` insols_out) }
 
     (tv_eqs_out,  tv_eqs_in) = foldVarEnv kick_out_eqs ([], emptyVarEnv) tv_eqs
-    (feqs_out,   feqs_in)    = partitionFunEqs  kick_out_ct funeqmap
-    (dicts_out,  dicts_in)   = partitionDicts   kick_out_ct dictmap
-    (irs_out,    irs_in)     = partitionBag     kick_out_ct irreds
-    (insols_out, insols_in)  = partitionBag     kick_out_ct insols
+    (feqs_out,   feqs_in)    = partitionFunEqs  kick_out_ct    funeqmap
+    (dicts_out,  dicts_in)   = partitionDicts   kick_out_ct    dictmap
+    (irs_out,    irs_in)     = partitionBag     kick_out_irred irreds
+    (insols_out, insols_in)  = partitionBag     kick_out_ct    insols
       -- Kick out even insolubles; see Note [Kick out insolubles]
 
-    kick_out_ct inert_ct = new_ev `canRewrite` ctEvidence inert_ct &&
-                          (new_tv `elemVarSet` tyVarsOfCt inert_ct)
-                    -- NB: tyVarsOfCt will return the type
-                    --     variables /and the kind variables/ that are
-                    --     directly visible in the type. Hence we will
-                    --     have exposed all the rewriting we care about
-                    --     to make the most precise kinds visible for
-                    --     matching classes etc. No need to kick out
-                    --     constraints that mention type variables whose
-                    --     kinds could contain this variable!
+    kick_out_ct :: Ct -> Bool
+    kick_out_ct ct =  new_ev `canRewrite` ctEvidence ct
+                   && new_tv `elemVarSet` tyVarsOfCt ct
+         -- See Note [Kicking out inert constraints]
+
+    kick_out_irred :: Ct -> Bool
+    kick_out_irred ct =  new_ev `canRewrite` ctEvidence ct
+                      && new_tv `elemVarSet` closeOverKinds (tyVarsOfCt ct)
+          -- See Note [Kicking out Irreds]
 
     kick_out_eqs :: EqualCtList -> ([Ct], TyVarEnv EqualCtList) 
                  -> ([Ct], TyVarEnv EqualCtList)
@@ -809,6 +808,37 @@ kickOutRewritable new_ev new_tv
 
     kick_out_eq other_ct = pprPanic "kick_out_eq" (ppr other_ct)
 \end{code}
+
+Note [Kicking out inert constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Given a new (a -> ty) inert, wewant to kick out an existing inert
+constraint if
+  a) the new constraint can rewrite the inert one
+  b) 'a' is free in the inert constraint (so that it *will*)
+     rewrite it if we kick it out.
+
+For (b) we use tyVarsOfCt, which returns the type variables /and
+the kind variables/ that are directly visible in the type. Hence we
+will have exposed all the rewriting we care about to make the most
+precise kinds visible for matching classes etc. No need to kick out
+constraints that mention type variables whose kinds contain this
+variable!  (Except see Note [Kicking out Irreds].)
+
+Note [Kicking out Irreds]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+There is an awkward special case for Irreds.  When we have a
+kind-mis-matched equality constraint (a:k1) ~ (ty:k2), we turn it into
+an Irred (see Note [Equalities with incompatible kinds] in
+TcCanonical). So in this case the free kind variables of k1 and k2
+are not visible.  More precisely, the type looks like
+   (~) k1 (a:k1) (ty:k2)
+because (~) has kind forall k. k -> k -> Constraint.  So the constraint
+itself is ill-kinded.  We can "see" k1 but not k2.  That's why we use
+closeOverKinds to make sure we see k2.
+
+This is not pretty. Maybe (~) should have kind 
+   (~) :: forall k1 k1. k1 -> k2 -> Constraint
+
 
 Note [Kick out insolubles]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1811,7 +1841,7 @@ matchClassInst _ clas [ ty ] _
       _ -> panicTcS (text "Unexpected evidence for" <+> ppr (className clas)
                      $$ vcat (map (ppr . idType) (classMethods clas)))
 
-matchClassInst _ clas [ ty1, ty2 ] _
+matchClassInst _ clas [ _k, ty1, ty2 ] _
   | clas == coercibleClass =  do
       traceTcS "matchClassInst for" $ ppr clas <+> ppr ty1 <+> ppr ty2
       rdr_env <- getGlobalRdrEnvTcS
@@ -1929,6 +1959,7 @@ getCoercibleInst safeMode rdr_env ty1 ty2
   | Just (tc,tyArgs) <- splitTyConApp_maybe ty1,
     Just (_, _, _) <- unwrapNewTyCon_maybe tc,
     not (isRecursiveTyCon tc),
+    newTyConEtadArity tc <= length tyArgs,
     dataConsInScope rdr_env tc -- Do noot look at all tyConsOfTyCon
   = do markDataConsAsUsed rdr_env tc
        let concTy = newTyConInstRhs tc tyArgs
@@ -1939,6 +1970,7 @@ getCoercibleInst safeMode rdr_env ty1 ty2
   | Just (tc,tyArgs) <- splitTyConApp_maybe ty2,
     Just (_, _, _) <- unwrapNewTyCon_maybe tc,
     not (isRecursiveTyCon tc),
+    newTyConEtadArity tc <= length tyArgs,
     dataConsInScope rdr_env tc -- Do noot look at all tyConsOfTyCon
   = do markDataConsAsUsed rdr_env tc
        let concTy = newTyConInstRhs tc tyArgs
@@ -1948,7 +1980,6 @@ getCoercibleInst safeMode rdr_env ty1 ty2
 
   | otherwise
   = return NoInstance
-
 
 nominalArgsAgree :: TyCon -> [Type] -> [Type] -> Bool
 nominalArgsAgree tc tys1 tys2 = all ok $ zip3 (tyConRoles tc) tys1 tys2
@@ -1973,7 +2004,9 @@ markDataConsAsUsed rdr_env tc = addUsedRdrNamesTcS
   , Imported (imp_spec:_) <- [gre_prov (head gres)] ]
 
 requestCoercible :: TcType -> TcType -> TcS MaybeNew
-requestCoercible ty1 ty2 = newWantedEvVar (coercibleClass `mkClassPred` [ty1, ty2])
+requestCoercible ty1 ty2 =
+    ASSERT2( typeKind ty1 `eqKind` typeKind ty2, ppr ty1 <+> ppr ty2)
+    newWantedEvVar (coercibleClass `mkClassPred` [typeKind ty1, ty1, ty2])
 
 \end{code}
 
@@ -1985,7 +2018,8 @@ their evidence out of thin air, in getCoercibleInst. The following â€œinstancesâ
 are present:
 
  1. instance Coercible a a
-    for any type a.
+    for any type a at any kind k.
+
  2. instance (Coercible t1_r t1'_r, Coercible t2_r t2_r',...) =>
        Coercible (C t1_r  t2_r  ... t1_p  t2_p  ... t1_n t2_n ...)
                  (C t1_r' t2_r' ... t1_p' t2_p' ... t1_n t2_n ...)
@@ -1993,17 +2027,30 @@ are present:
      * the nominal type arguments are not changed,
      * the phantom type arguments may change arbitrarily
      * the representational type arguments are again Coercible
+
+    The type constructor can be used undersaturated; then the Coercible
+    instance is at a higher kind. This does not cause problems.
+
     Furthermore in Safe Haskell code, we check that
      * the data constructors of C are in scope and
      * the data constructors of all type constructors used in the definition of C are in scope.
        This is required as otherwise the previous check can be circumvented by
        just adding a local data type around C.
+
  3. instance Coercible r b => Coercible (NT t1 t2 ...) b
     instance Coercible a r => Coercible a (NT t1 t2 ...)
     for a newtype constructor NT where
      * NT is not recursive
      * r is the concrete type of NT, instantiated with the arguments t1 t2 ...
      * the data constructors of NT are in scope.
+
+    Again, the newtype TyCon can appear undersaturated, but only if it has
+    enough arguments to apply the newtype coercion (which is eta-reduced). Examples:
+      newtype NT a = NT (Either a Int)
+      Coercible (NT Int) (Either Int Int) -- ok
+      newtype NT2 a b = NT2 (b -> a)
+      newtype NT3 a b = NT3 (b -> a)
+      Coercible (NT2 Int) (NT3 Int) -- cannot be derived
 
 These three shapes of instances correspond to the three constructors of
 EvCoercible (defined in EvEvidence). They are assembled here and turned to Core

@@ -377,23 +377,35 @@ is_improvement_pty ty = go (classifyPredType ty)
 \begin{code}
 canIrred :: CtLoc -> CtEvidence -> TcS StopOrContinue
 -- Precondition: ty not a tuple and no other evidence form
-canIrred d ev
-  = do { let ty = ctEvPred ev
-       ; traceTcS "can_pred" (text "IrredPred = " <+> ppr ty)
-       ; (xi,co) <- flatten d FMFullFlatten ev ty -- co :: xi ~ ty
-       ; let no_flattening = xi `eqType` ty
-             -- We can't use isTcReflCo, because even if the coercion is
-             -- Refl, the output type might have had a substitution
-             -- applied to it.  For example  'a' might now be 'C b'
+canIrred d old_ev
+  = do { let old_ty = ctEvPred old_ev
+       ; traceTcS "can_pred" (text "IrredPred = " <+> ppr old_ty)
+       ; (xi,co) <- flatten d FMFullFlatten old_ev old_ty -- co :: xi ~ old_ty
+       ; mb <- rewriteCtFlavor old_ev xi co
+       ; case mb of {
+             Nothing     -> return Stop ;
+             Just new_ev ->
 
-       ; if no_flattening then
-           continueWith $
-           CIrredEvCan { cc_ev = ev, cc_loc = d }
-         else do
-       { mb <- rewriteCtFlavor ev xi co
-       ; case mb of
-             Just new_ev -> canEvNC d new_ev  -- Re-classify and try again
-             Nothing     -> return Stop } }   -- Found a cached copy
+    do { -- Re-classify, in case flattening has improved its shape
+       ; case classifyPredType (ctEvPred new_ev) of
+           ClassPred cls tys -> canClassNC d new_ev cls tys
+           TuplePred tys     -> canTuple   d new_ev tys
+           EqPred ty1 ty2
+              | something_changed old_ty ty1 ty2 -> canEqNC d new_ev ty1 ty2
+           _  -> continueWith $
+                 CIrredEvCan { cc_ev = new_ev, cc_loc = d } } } }
+  where
+    -- If the constraint was a kind-mis-matched equality, we must
+    -- retry canEqNC only if something has changed, otherwise we
+    -- get an infinite loop
+    something_changed old_ty new_ty1 new_ty2
+       | EqPred old_ty1 old_ty2 <- classifyPredType old_ty
+       = not (            new_ty1 `eqType`          old_ty1
+              && typeKind new_ty1 `eqKind` typeKind old_ty1
+              &&          new_ty2 `eqType`          old_ty2
+              && typeKind new_ty2 `eqKind` typeKind old_ty2)
+       | otherwise
+       = True
 
 canHole :: CtLoc -> CtEvidence -> OccName -> TcS StopOrContinue
 canHole d ev occ
@@ -1009,15 +1021,18 @@ reOrient (FunCls {}) _      = False             -- Fun/Other on rhs
 reOrient (VarCls {})   (FunCls {})           = True
 reOrient (VarCls {})   (OtherCls {})         = False
 reOrient (VarCls tv1)  (VarCls tv2)
-  | not (k2 `isSubKind` k1),   k1 `isSubKind` k2   = True  -- Note [Kind orientation for CTyEqCan]
-                                                           -- in TcRnTypes
-  | not (isMetaTyVar tv1),     isMetaTyVar     tv2 = True
-  | not (isFlatSkolTyVar tv1), isFlatSkolTyVar tv2 = True  -- Note [Eliminate flat-skols]
-  | otherwise                                      = False
+  | k1 `eqKind` k2      = tv2 `better_than` tv1
+  | k1 `isSubKind` k2   = True  -- Note [Kind orientation for CTyEqCan]
+  | otherwise           = False -- in TcRnTypes
   where
     k1 = tyVarKind tv1
     k2 = tyVarKind tv2
-  -- Just for efficiency, see CTyEqCan invariants
+
+    tv2 `better_than` tv1
+      | isMetaTyVar tv1     = False   -- Never swap a meta-tyvar
+      | isFlatSkolTyVar tv1 = isMetaTyVar tv2
+      | otherwise           = isMetaTyVar tv2 || isFlatSkolTyVar tv2
+                            -- Note [Eliminate flat-skols]
 
 ------------------
 
