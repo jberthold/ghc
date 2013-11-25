@@ -2258,22 +2258,20 @@ stg_sendDatazh(W_ mode, gcptr graphroot)
      returns: unit
 
   !! TSO gets blocked if the graph to send contains black holes.
-     Proper reaction to this case not coded in RTS, 
-     depends on the high-level language concepts.
   */
   W_ success;
 
 #if defined(PARALLEL_RTS)
   (success) = ccall sendWrapper(CurrentTSO "ptr", mode, graphroot "ptr");
-  // ( 0=blocked, -1=send failed, otherwise successfully packed/sent away )
+  // ( returns error codes defined in Constants.h, see there)
 #else
   // system does not support parallel primops, complain and crash the thread
   ccall debugBelch(no_parallel_primops, graphroot);
     R1 = CurrentTSO; R2=NULL; jump stg_killMyself [R1,R2];
-  success = 1;
+  success = MSG_OK;
 #endif
 
-  if (success == 0) {
+  if (success == MSG_BLOCKED) {
     // Packing code has written block_reason and -closure, and
     // created/modified a blocking queue by a new message, see packing code.
     // So just adjust the TSO stack for blocked state and return to the
@@ -2289,15 +2287,14 @@ stg_sendDatazh(W_ mode, gcptr graphroot)
     jump stg_block_pack(mode, graphroot);
   }
 
-  if (success == 1) {
-
-    //    ccall debugBelch("send failed in PrimOps.cmm");
-
+  if (success == MSG_FAILED) {
     // send failed, after successfully packing. The packet has been thrown
     // away (see sendWrapper), so save arguments and do it all again
 
     jump stg_yield_send(mode, graphroot);
   }
+
+  ASSERT(success == MSG_OK)
 
     // normal unit return
   return ();

@@ -173,9 +173,8 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
   rtsPackBuffer *packedData = (rtsPackBuffer*) NULL;
   rtsPackBuffer dummyBuffer;
   OpCode sendTag = 0;
-  int success=2; // indicates successful packing, becomes return value 
-                 // CONVENTION: 0 = packing failed, 1 = sending failed
-                 // other values = all fine
+  int success=MSG_OK; // indicates successful packing, becomes return value 
+                      // codes defined in includes/rts/Constants.h
 
   // mode splits into ( data payload | last 3 bits: "real" mode)
   int m; // mode 0..7
@@ -275,12 +274,11 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
 
     // graph might contain blackholes, in which case sendingtso 
     // blocks (state set in PackNearbyGraph, blocked when returning
-    // success == 0 to the calling primop sendData# )
-    success = (!isPackError(packedData)); 
+    // success == MSG_BLOCKED to the calling primop sendData# )
     if (isPackError(packedData)) {
       switch ((StgWord)packedData) {
       case P_BLACKHOLE: 
-        success = 0;
+        success = MSG_BLOCKED;
         break;
       case P_NOBUFFER: 
         stg_exit(EXIT_FAILURE);
@@ -288,7 +286,7 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
         stg_exit(EXIT_FAILURE);
       }
     } else {
-      success = 2;
+      success = MSG_OK;
     }
     break;
 
@@ -297,21 +295,21 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
 
   } // switch
 
-  if (success != 0) {
+  if (success != MSG_BLOCKED) {
     // successfully packed, or not packed at all => OK, send it away
     packedData->receiver = *receiver;
     packedData->sender = sender;
     if ( !sendMsg(sendTag, packedData)) {
-      // handle failing send, by returning -1 to the caller (primitive op.)
-      success = 1;
+      // failing send, return MSG_FAILED to the caller (primitive op.)
+      success = MSG_FAILED;
     } else {
-      success = 2;
+      success = MSG_OK;
     }
     RELEASE_LOCK(&pack_mutex);
 
     IF_PAR_DEBUG(mpcomm,debugBelch("Sending of message from thread %d returned code %d\n", (int) sendingtso->id, success));
   }
-  if (success == 0 || success == 1) {
+  if (success == MSG_BLOCKED || success == MSG_FAILED) {
     // in rFork case, packing might have failed, so RR-placement must
     // restore the last targetPE for the next call
     if ( m==4 && (mode >> 3) == 0) {

@@ -275,6 +275,14 @@
 #define P_GARBLED       0x06 /* invalid data for deserialisation */
 #define P_ERRCODEMAX    0x06
 
+/* 
+ * sendWrapper (rts/parallel/DataComms.c) returns special codes to
+ * indicate temporary failures, used in DataComms.c and PrimOps.cmm:
+ */
+#define MSG_BLOCKED    0x00 /* packing hit a black hole, block thread */
+#define MSG_FAILED     0x01 /* sending failed, deschedule and retry */
+#define MSG_OK         0x02 /* packing and msg. passing succeeded */
+
 /*
  * Used by the sanity checker to check whether TSOs are on the correct
  * mutable list.

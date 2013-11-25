@@ -155,8 +155,9 @@ void newProcess(StgTSO* firstTSO);
 // Sending messages. sender and receiver included in the buffer
 // Send operation may fail inside the communication subsystem.
 rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer);
+
 // sendWrapper is called by primitive operations, does not need
-// declaration here.
+// declaration here. 
 
 // Unpacking and updating placeholders (if valid data)
 void processDataMsg(Capability* cap, OpCode opcode, 
