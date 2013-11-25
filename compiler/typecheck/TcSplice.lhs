@@ -255,6 +255,9 @@ Note [Template Haskell levels]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 * Imported things are impLevel (= 0)
 
+* However things at level 0 are not *necessarily* imported.
+      eg  $( \b -> ... )   here b is bound at level 0
+
 * In GHCi, variables bound by a previous command are treated
   as impLevel, because we have bytecode for them.
 
@@ -287,46 +290,12 @@ When a variable is used, we compare
     - Non-top-level     Only if there is a liftable instance
                                 h = \(x:Int) -> [| x |]
 
-See Note [What is a top-level Id?]
+  To track top-level-ness we use the ThBindEnv in TcLclEnv
 
-Note [Quoting names]
-~~~~~~~~~~~~~~~~~~~~
-A quoted name 'n is a bit like a quoted expression [| n |], except that we
-have no cross-stage lifting (c.f. TcExpr.thBrackId).  So, after incrementing
-the use-level to account for the brackets, the cases are:
-
-        bind > use                      Error
-        bind = use                      OK
-        bind < use
-                Imported things         OK
-                Top-level things        OK
-                Non-top-level           Error
-
-See Note [What is a top-level Id?] in TcEnv.  Examples:
-
-  f 'map        -- OK; also for top-level defns of this module
-
-  \x. f 'x      -- Not ok (whereas \x. f [| x |] might have been ok, by
-                --                               cross-stage lifting
-
-  \y. [| \x. $(f 'y) |] -- Not ok (same reason)
-
-  [| \x. $(f 'x) |]     -- OK
-
-
-Note [What is a top-level Id?]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-In the level-control criteria above, we need to know what a "top level Id" is.
-There are three kinds:
-  * Imported from another module                (GlobalId, ExternalName)
-  * Bound at the top level of this module       (ExternalName)
-  * In GHCi, bound by a previous stmt           (GlobalId)
-It's strange that there is no one criterion tht picks out all three, but that's
-how it is right now.  (The obvious thing is to give an ExternalName to GHCi Ids
-bound in an earlier Stmt, but what module would you choose?  See
-Note [Interactively-bound Ids in GHCi] in TcRnDriver.)
-
-The predicate we use is TcEnv.thTopLevelId.
+  For example:
+           f = ...
+           g1 = $(map ...)         is OK
+           g2 = $(f ...)           is not OK; because we havn't compiled f yet
 
 
 %************************************************************************
@@ -362,32 +331,21 @@ tcBracket brack ps res_ty
          tc_bracket brack ps_ref
        }
   where
-    tcUntypedBracket :: HsBracket Name -> TcM TcType
-    tcUntypedBracket (VarBr _ _) = -- Result type is Var (not Q-monadic)
-                                   tcMetaTy nameTyConName
-    tcUntypedBracket (ExpBr _)   = -- Result type is ExpQ (= Q Exp)
-                                   tcMetaTy expQTyConName
-    tcUntypedBracket (TypBr _)   = -- Result type is Type (= Q Typ)
-                                   tcMetaTy typeQTyConName
-    tcUntypedBracket (DecBrG _)  = -- Result type is Q [Dec]
-                                   tcMetaTy decsQTyConName 
-    tcUntypedBracket (PatBr _)   = -- Result type is PatQ (= Q Pat)
-                                   tcMetaTy patQTyConName
-    tcUntypedBracket (DecBrL _)  = panic "tcUntypedBracket: Unexpected DecBrL"
-    tcUntypedBracket (TExpBr _)  = panic "tcUntypedBracket: Unexpected TExpBr"
-
     tc_bracket :: HsBracket Name -> TcRef [PendingSplice] -> TcM (HsExpr TcId)
     tc_bracket brack ps_ref
       | not (isTypedBracket brack)
-      = do { mapM_ tcPendingSplice ps
+      = do { traceTc "tc_bracked untyped" (ppr brack $$ ppr ps)
+           ; mapM_ tcPendingSplice ps
            ; meta_ty <- tcUntypedBracket brack
            ; ps' <- readMutVar ps_ref
            ; co <- unifyType meta_ty res_ty
+           ; traceTc "tc_bracked done untyped" (ppr meta_ty)
            ; return (mkHsWrapCo co (HsBracketOut brack ps'))
            }
 
     tc_bracket (TExpBr expr) ps_ref
-      = do { any_ty <- newFlexiTyVarTy openTypeKind
+      = do { traceTc "tc_bracked typed" (ppr brack)
+           ; any_ty <- newFlexiTyVarTy openTypeKind
              -- NC for no context; tcBracket does that
            ; _ <- tcMonoExprNC expr any_ty
            ; meta_ty <- tcTExpTy any_ty
@@ -399,6 +357,15 @@ tcBracket brack ps res_ty
 
     tc_bracket _ _
       = panic "tc_bracket: Expected untyped splice"
+
+tcUntypedBracket :: HsBracket Name -> TcM TcType
+tcUntypedBracket (VarBr _ _) = tcMetaTy nameTyConName  -- Result type is Var (not Q-monadic)
+tcUntypedBracket (ExpBr _)   = tcMetaTy expQTyConName  -- Result type is ExpQ (= Q Exp)
+tcUntypedBracket (TypBr _)   = tcMetaTy typeQTyConName -- Result type is Type (= Q Typ)
+tcUntypedBracket (DecBrG _)  = tcMetaTy decsQTyConName -- Result type is Q [Dec]
+tcUntypedBracket (PatBr _)   = tcMetaTy patQTyConName  -- Result type is PatQ (= Q Pat)
+tcUntypedBracket (DecBrL _)  = panic "tcUntypedBracket: Unexpected DecBrL"
+tcUntypedBracket (TExpBr _)  = panic "tcUntypedBracket: Unexpected TExpBr"
 
 tcPendingSplice :: PendingSplice -> TcM ()
 tcPendingSplice (PendingRnExpSplice n expr) 

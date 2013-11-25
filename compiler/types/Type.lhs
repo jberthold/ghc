@@ -63,7 +63,7 @@ module Type (
 
         -- ** Predicates on types
         isTypeVar, isKindVar,
-        isTyVarTy, isFunTy, isDictTy, isPredTy, 
+        isTyVarTy, isFunTy, isDictTy, isPredTy, isVoidTy,
 
         -- (Lifting and boxity)
         isUnLiftedType, isUnboxedTupleType, isAlgType, isClosedAlgType,
@@ -596,7 +596,7 @@ interfaces.  Notably this plays a role in tcTySigs in TcBinds.lhs.
 Note [Nullary unboxed tuple]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We represent the nullary unboxed tuple as the unary (but void) type
-State# RealWorld.  The reason for this is that the ReprArity is never
+Void#.  The reason for this is that the ReprArity is never
 less than the Arity (as it would otherwise be for a function type like
 (# #) -> Int).
 
@@ -642,7 +642,7 @@ repType ty
 
       | isUnboxedTupleTyCon tc
       = if null tys
-         then UnaryRep realWorldStatePrimTy -- See Note [Nullary unboxed tuple]
+         then UnaryRep voidPrimTy -- See Note [Nullary unboxed tuple]
          else UbxTupleRep (concatMap (flattenRepType . go rec_nts) tys)
 
     go _ ty = UnaryRep ty
@@ -687,6 +687,12 @@ typeRepArity 0 _ = 0
 typeRepArity n ty = case repType ty of
   UnaryRep (FunTy ty1 ty2) -> length (flattenRepType (repType ty1)) + typeRepArity (n - 1) ty2
   _                        -> pprPanic "typeRepArity: arity greater than type can handle" (ppr (n, ty))
+
+isVoidTy :: Type -> Bool
+-- True if the type has zero width
+isVoidTy ty = case repType ty of
+                UnaryRep (TyConApp tc _) -> isVoidRep (tyConPrimRep tc)
+                _                        -> False
 \end{code}
 
 Note [AppTy rep]
@@ -1160,11 +1166,13 @@ seqTypes (ty:tys) = seqType ty `seq` seqTypes tys
 
 \begin{code}
 eqKind :: Kind -> Kind -> Bool
+-- Watch out for horrible hack: See Note [Comparison with OpenTypeKind]
 eqKind = eqType
 
 eqType :: Type -> Type -> Bool
 -- ^ Type equality on source types. Does not look through @newtypes@ or
 -- 'PredType's, but it does look through type synonyms.
+-- Watch out for horrible hack: See Note [Comparison with OpenTypeKind]
 eqType t1 t2 = isEqual $ cmpType t1 t2
 
 eqTypeX :: RnEnv2 -> Type -> Type -> Bool
@@ -1195,6 +1203,7 @@ Now here comes the real worker
 
 \begin{code}
 cmpType :: Type -> Type -> Ordering
+-- Watch out for horrible hack: See Note [Comparison with OpenTypeKind]
 cmpType t1 t2 = cmpTypeX rn_env t1 t2
   where
     rn_env = mkRnEnv2 (mkInScopeSet (tyVarsOfType t1 `unionVarSet` tyVarsOfType t2))

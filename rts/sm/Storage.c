@@ -40,8 +40,9 @@
 /* 
  * All these globals require sm_mutex to access in THREADED_RTS mode.
  */
-StgClosure    *caf_list         = NULL;
-StgClosure    *revertible_caf_list = NULL;
+StgIndStatic  *dyn_caf_list        = NULL;
+StgIndStatic  *debug_caf_list      = NULL;
+StgIndStatic  *revertible_caf_list = NULL;
 rtsBool       keepCAFs;
 
 W_ large_alloc_lim;    /* GC if n_large_blocks in any nursery
@@ -171,8 +172,9 @@ initStorage (void)
 
   generations[0].max_blocks = 0;
 
-  caf_list = END_OF_STATIC_LIST;
-  revertible_caf_list = END_OF_STATIC_LIST;
+  dyn_caf_list = (StgIndStatic*)END_OF_STATIC_LIST;
+  debug_caf_list = (StgIndStatic*)END_OF_STATIC_LIST;
+  revertible_caf_list = (StgIndStatic*)END_OF_STATIC_LIST;
    
   /* initialise the allocate() interface */
   large_alloc_lim = RtsFlags.GcFlags.minAllocAreaSize * BLOCK_SIZE_W;
@@ -331,7 +333,7 @@ freeStorage (rtsBool free_heap)
 
    -------------------------------------------------------------------------- */
 
-STATIC_INLINE StgWord lockCAF (StgClosure *caf, StgClosure *bh)
+STATIC_INLINE StgWord lockCAF (StgIndStatic *caf, StgClosure *bh)
 {
     const StgInfoTable *orig_info;
 
@@ -360,23 +362,23 @@ STATIC_INLINE StgWord lockCAF (StgClosure *caf, StgClosure *bh)
 #endif
 
     // For the benefit of revertCAFs(), save the original info pointer
-    ((StgIndStatic *)caf)->saved_info  = orig_info;
+    caf->saved_info = orig_info;
 
-    ((StgIndStatic*)caf)->indirectee = bh;
+    caf->indirectee = bh;
     write_barrier();
-    SET_INFO(caf,&stg_IND_STATIC_info);
+    SET_INFO((StgClosure*)caf,&stg_IND_STATIC_info);
 
     return 1;
 }
 
 StgWord
-newCAF(StgRegTable *reg, StgClosure *caf, StgClosure *bh)
+newCAF(StgRegTable *reg, StgIndStatic *caf, StgClosure *bh)
 {
     if (lockCAF(caf,bh) == 0) return 0;
 
     if(keepCAFs)
     {
-        // HACK:
+        // Note [dyn_caf_list]
         // If we are in GHCi _and_ we are using dynamic libraries,
         // then we can't redirect newCAF calls to newDynCAF (see below),
         // so we make newCAF behave almost like newDynCAF.
@@ -387,19 +389,35 @@ newCAF(StgRegTable *reg, StgClosure *caf, StgClosure *bh)
         // do another hack here and do an address range test on caf to figure
         // out whether it is from a dynamic library.
 
-        ACQUIRE_SM_LOCK; // caf_list is global, locked by sm_mutex
-        ((StgIndStatic *)caf)->static_link = caf_list;
-        caf_list = caf;
+        ACQUIRE_SM_LOCK; // dyn_caf_list is global, locked by sm_mutex
+        caf->static_link = (StgClosure*)dyn_caf_list;
+        dyn_caf_list = caf;
         RELEASE_SM_LOCK;
     }
     else
     {
         // Put this CAF on the mutable list for the old generation.
-        ((StgIndStatic *)caf)->saved_info = NULL;
         if (oldest_gen->no != 0) {
-            recordMutableCap(caf, regTableToCapability(reg), oldest_gen->no);
+            recordMutableCap((StgClosure*)caf,
+                             regTableToCapability(reg), oldest_gen->no);
         }
+
+#ifdef DEBUG
+        // In the DEBUG rts, we keep track of live CAFs by chaining them
+        // onto a list debug_caf_list.  This is so that we can tell if we
+        // ever enter a GC'd CAF, and emit a suitable barf().
+        //
+        // The saved_info field of the CAF is used as the link field for
+        // debug_caf_list, because this field is only used by newDynCAF
+        // for revertible CAFs, and we don't put those on the
+        // debug_caf_list.
+        ACQUIRE_SM_LOCK; // debug_caf_list is global, locked by sm_mutex
+        ((StgIndStatic *)caf)->saved_info = (const StgInfoTable*)debug_caf_list;
+        debug_caf_list = (StgIndStatic*)caf;
+        RELEASE_SM_LOCK;
+#endif
     }
+
     return 1;
 }
 
@@ -420,13 +438,13 @@ setKeepCAFs (void)
 // The linker hackily arranges that references to newCaf from dynamic
 // code end up pointing to newDynCAF.
 StgWord
-newDynCAF (StgRegTable *reg STG_UNUSED, StgClosure *caf, StgClosure *bh)
+newDynCAF (StgRegTable *reg STG_UNUSED, StgIndStatic *caf, StgClosure *bh)
 {
     if (lockCAF(caf,bh) == 0) return 0;
 
     ACQUIRE_SM_LOCK;
 
-    ((StgIndStatic *)caf)->static_link = revertible_caf_list;
+    caf->static_link = (StgClosure*)revertible_caf_list;
     revertible_caf_list = caf;
 
     RELEASE_SM_LOCK;
@@ -1134,7 +1152,16 @@ AdjustorWritable allocateExec (W_ bytes, AdjustorExecutable *exec_ret)
     return (ret + 1);
 }
 
-// freeExec gets passed the executable address, not the writable address. 
+void flushExec (W_ len, AdjustorExecutable exec_addr)
+{
+  /* On ARM and other platforms, we need to flush the cache after
+     writing code into memory, so the processor reliably sees it. */
+  unsigned char* begin = (unsigned char*)exec_addr;
+  unsigned char* end   = begin + len;
+  __builtin___clear_cache(begin, end);
+}
+
+// freeExec gets passed the executable address, not the writable address.
 void freeExec (AdjustorExecutable addr)
 {
     AdjustorWritable writable;
@@ -1180,6 +1207,15 @@ AdjustorWritable execToWritable(AdjustorExecutable exec)
     return writ;
 }
 
+void flushExec (W_ len, AdjustorExecutable exec_addr)
+{
+  /* On ARM and other platforms, we need to flush the cache after
+     writing code into memory, so the processor reliably sees it. */
+  unsigned char* begin = (unsigned char*)exec_addr;
+  unsigned char* end   = begin + len;
+  __builtin___clear_cache(begin, end);
+}
+
 void freeExec(AdjustorExecutable exec)
 {
     AdjustorWritable writ;
@@ -1207,7 +1243,7 @@ AdjustorWritable allocateExec (W_ bytes, AdjustorExecutable *exec_ret)
         barf("allocateExec: can't handle large objects");
     }
 
-    if (exec_block == NULL || 
+    if (exec_block == NULL ||
         exec_block->free + n + 1 > exec_block->start + BLOCK_SIZE_W) {
         bdescr *bd;
         W_ pagesize = getPageSize();
@@ -1231,6 +1267,15 @@ AdjustorWritable allocateExec (W_ bytes, AdjustorExecutable *exec_ret)
     RELEASE_SM_LOCK
     *exec_ret = ret;
     return ret;
+}
+
+void flushExec (W_ len, AdjustorExecutable exec_addr)
+{
+  /* On ARM and other platforms, we need to flush the cache after
+     writing code into memory, so the processor reliably sees it. */
+  unsigned char* begin = (unsigned char*)exec_addr;
+  unsigned char* end   = begin + len;
+  __builtin___clear_cache(begin, end);
 }
 
 void freeExec (void *addr)
@@ -1265,7 +1310,7 @@ void freeExec (void *addr)
     }
 
     RELEASE_SM_LOCK
-}    
+}
 
 #endif /* mingw32_HOST_OS */
 

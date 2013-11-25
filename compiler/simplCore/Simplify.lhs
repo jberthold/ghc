@@ -16,7 +16,7 @@ import SimplUtils
 import FamInstEnv       ( FamInstEnv )
 import Literal          ( litIsLifted ) --, mkMachInt ) -- temporalily commented out. See #8326
 import Id
-import MkId             ( seqId, realWorldPrimId )
+import MkId             ( seqId, voidPrimId )
 import MkCore           ( mkImpossibleExpr, castBottomExpr )
 import IdInfo
 import Name             ( mkSystemVarName, isExternalName )
@@ -35,7 +35,7 @@ import CoreUtils
 import CoreArity
 --import PrimOp           ( tagToEnumKey ) -- temporalily commented out. See #8326
 import Rules            ( lookupRule, getRules )
-import TysPrim          ( realWorldStatePrimTy ) --, intPrimTy ) -- temporalily commented out. See #8326
+import TysPrim          ( voidPrimTy ) --, intPrimTy ) -- temporalily commented out. See #8326
 import BasicTypes       ( TopLevelFlag(..), isTopLevel, RecFlag(..) )
 import MonadUtils       ( foldlM, mapAccumLM, liftIO )
 import Maybes           ( orElse )
@@ -1051,9 +1051,8 @@ simplTick env tickish expr cont
                         _ -> False
 
   push_tick_inside t expr0
-     | not (tickishCanSplit t) = Nothing
-     | otherwise
-       = case expr0 of
+       = ASSERT(tickishScoped t)
+         case expr0 of
            Tick t' expr
               -- scc t (tick t' E)
               --   Pull the tick to the outside
@@ -1070,9 +1069,11 @@ simplTick env tickish expr cont
               | otherwise -> Nothing
 
            Case scrut bndr ty alts
-              -> Just (Case (mkTick t scrut) bndr ty alts')
-             where t_scope = mkNoTick t -- drop the tick on the dup'd ones
+              | not (tickishCanSplit t) -> Nothing
+              | otherwise -> Just (Case (mkTick t scrut) bndr ty alts')
+             where t_scope = mkNoCount t -- drop the tick on the dup'd ones
                    alts'   = [ (c,bs, mkTick t_scope e) | (c,bs,e) <- alts]
+
            _other -> Nothing
     where
 
@@ -1098,7 +1099,7 @@ simplTick env tickish expr cont
 --       ; (env', expr') <- simplExprF (zapFloats env) expr inc
 --       ; let tickish' = simplTickish env tickish
 --       ; let wrap_float (b,rhs) = (zapIdStrictness (setIdArity b 0),
---                                   mkTick (mkNoTick tickish') rhs)
+--                                   mkTick (mkNoCount tickish') rhs)
 --              -- when wrapping a float with mkTick, we better zap the Id's
 --              -- strictness info and arity, because it might be wrong now.
 --       ; let env'' = addFloats env (mapFloats env' wrap_float)
@@ -2472,8 +2473,8 @@ mkDupableAlt env case_bndr (con, bndrs', rhs') = do
         ; (final_bndrs', final_args)    -- Note [Join point abstraction]
                 <- if (any isId used_bndrs')
                    then return (used_bndrs', varsToCoreExprs used_bndrs')
-                    else do { rw_id <- newId (fsLit "w") realWorldStatePrimTy
-                            ; return ([rw_id], [Var realWorldPrimId]) }
+                    else do { rw_id <- newId (fsLit "w") voidPrimTy
+                            ; return ([setOneShotLambda rw_id], [Var voidPrimId]) }
 
         ; join_bndr <- newId (fsLit "$j") (mkPiTypes final_bndrs' rhs_ty')
                 -- Note [Funky mkPiTypes]
