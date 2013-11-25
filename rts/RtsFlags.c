@@ -234,9 +234,8 @@ void initRtsFlagsDefaults(void)
     RtsFlags.ParFlags.setAffinity       = 0;
 #endif
 
-#if defined(PACKING) || defined (PARALLEL_RTS)
+    /* this flag is always active, to support serialisation in seq.rts */
     RtsFlags.ParFlags.packBufferSize    = 10485760; // 10MB, avoid trouble
-#endif /* PACKING || PARALLEL_RTS */
 
 #ifdef PARALLEL_RTS
     RtsFlags.ParFlags.sendBufferSize    = 20; /* MD should be tested */
@@ -1287,8 +1286,7 @@ error = rtsTrue;
                       // historically, "-q<option>" were for parallel Haskell.
                       // taken for threaded RTS: a,b,g,m,w below.
 
-                // treat pack buffer flag specially (PACKING separated)
-#if defined(PACKING) || defined(PARALLEL_RTS)
+                // treat pack buffer flag specially (serialisation support)
                 OPTION_SAFE;
                 if (rts_argv[arg][2] == 'Q') {
                   // -qQ<n> ... set pack buffer size to <n> bytes
@@ -1304,7 +1302,6 @@ error = rtsTrue;
                   }
                   break;
                 }
-#endif
 #if defined(PARALLEL_RTS)
                 // todo: move process_par code here
                 OPTION_SAFE; // par options are assumed safe

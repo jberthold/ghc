@@ -11,9 +11,9 @@
    However, the best documentation is includes/Closure*h and rts/sm/Scav.c
 */
 
-#define PACKING
-
-#if defined(PACKING) /* whole file */
+// this file is always active, to support serialisation in the
+// sequential and threaded runtime system
+// #if defined(PACKING) /* whole file */
 
 #include "Rts.h"
 #include "RtsUtils.h"
@@ -2884,5 +2884,4 @@ void checkPacket(rtsPackBuffer *packBuffer) {
 /* END OF DEBUG */
 #endif 
 
-#endif /* PARALLEL_HASKELL */
-
+// #endif /* PACKING */

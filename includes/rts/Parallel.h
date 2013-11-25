@@ -25,6 +25,10 @@ StgInt newSpark (StgRegTable *reg, StgClosure *p);
   sequential system to work consistently.
 
   We only put globally visible things here.
+
+  Some parts of this file are always active to support serialisation
+  in the sequential and threaded RTS.
+
 */
 
 /* even when not parallel, these should be present (and 1) when
@@ -33,9 +37,7 @@ StgInt newSpark (StgRegTable *reg, StgClosure *p);
 */
 extern nat nPEs, thisPE;
 
-#define PACKING
 
-#if defined(PACKING) || defined(PARALLEL_RTS)
 // packing and sending:
 // Pack Buffer for constructing messages between PEs
 // defined here instead of in RtsTypes.h due to FLEXIBLE_ARRAY usage
@@ -122,10 +124,7 @@ StgClosure* createBH(Capability *cap);
 StgClosure* createListNode(Capability *cap, 
               StgClosure *head, StgClosure *tail);
 
-#endif
-
 #if defined(PARALLEL_RTS) 
-
 
 // parallel machine setup, startup / shutdown
 // in MPSystem file (PVMComm | MPIComm | CpComm currently)
