@@ -1,4 +1,4 @@
-%
+c%
 % (c) The University of Glasgow 2006
 % (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 %
@@ -12,7 +12,7 @@ module TcExpr ( tcPolyExpr, tcPolyExprNC, tcMonoExpr, tcMonoExprNC,
 
 #include "HsVersions.h"
 
-import {-# SOURCE #-}   TcSplice( tcSpliceExpr, tcBracket )
+import {-# SOURCE #-}   TcSplice( tcSpliceExpr, tcTypedBracket, tcUntypedBracket )
 #ifdef GHCI
 import DsMeta( liftStringName, liftName )
 #endif
@@ -201,7 +201,7 @@ tcExpr (HsIPVar x) res_ty
   -- Coerces a dictionry for `IP "x" t` into `t`.
   fromDict ipClass x ty =
     case unwrapNewTyCon_maybe (classTyCon ipClass) of
-      Just (_,_,ax) -> HsWrap $ WpCast $ mkTcUnbranchedAxInstCo ax [x,ty]
+      Just (_,_,ax) -> HsWrap $ mkWpCast $ mkTcUnbranchedAxInstCo Representational ax [x,ty]
       Nothing       -> panic "The dictionary for `IP` is not a newtype?"
 
 tcExpr (HsLam match) res_ty
@@ -334,7 +334,7 @@ tcExpr (OpApp arg1 op fix arg2) res_ty
 
        ; let op' = L loc (HsWrap (mkWpTyApps [a_ty, b_ty]) (HsVar op_id))
        ; return $ mkHsWrapCo (co_res) $
-         OpApp (mkLHsWrapCo (mkTcFunCo co_a co_b) $
+         OpApp (mkLHsWrapCo (mkTcFunCo Nominal co_a co_b) $
                 mkLHsWrapCo co_arg1 arg1')
                op' fix
                (mkLHsWrapCo co_a arg2') }
@@ -720,7 +720,7 @@ tcExpr (RecordUpd record_expr rbinds _ _ _) res_ty
 
         -- Step 7: make a cast for the scrutinee, in the case that it's from a type family
         ; let scrut_co | Just co_con <- tyConFamilyCoercion_maybe tycon
-                       = WpCast (mkTcUnbranchedAxInstCo co_con scrut_inst_tys)
+                       = mkWpCast (mkTcUnbranchedAxInstCo Representational co_con scrut_inst_tys)
                        | otherwise
                        = idHsWrapper
         -- Phew!
@@ -797,13 +797,12 @@ tcExpr (PArrSeq _ _) _
 %************************************************************************
 
 \begin{code}
-        -- Rename excludes these cases otherwise
-tcExpr (HsSpliceE splice)        res_ty = tcSpliceExpr splice res_ty
-tcExpr (HsRnBracketOut brack ps) res_ty = tcBracket brack ps res_ty
-tcExpr e@(HsBracketOut _ _) _ =
-    pprPanic "Should never see HsBracketOut in type checker" (ppr e)
-tcExpr e@(HsQuasiQuoteE _) _ =
-    pprPanic "Should never see HsQuasiQuoteE in type checker" (ppr e)
+tcExpr (HsSpliceE is_ty splice)  res_ty
+  = ASSERT( is_ty )   -- Untyped splices are expanced by the renamer
+   tcSpliceExpr splice res_ty
+
+tcExpr (HsBracket brack)         res_ty = tcTypedBracket   brack res_ty
+tcExpr (HsRnBracketOut brack ps) res_ty = tcUntypedBracket brack ps res_ty
 \end{code}
 
 
@@ -816,6 +815,7 @@ tcExpr e@(HsQuasiQuoteE _) _ =
 \begin{code}
 tcExpr other _ = pprPanic "tcMonoExpr" (ppr other)
   -- Include ArrForm, ArrApp, which shouldn't appear at all
+  -- Also HsTcBracketOut, HsQuasiQuoteE
 \end{code}
 
 
@@ -1235,14 +1235,14 @@ tcTagToEnum loc fun_name arg res_ty
         -- and returns a coercion between the two
     get_rep_ty ty tc tc_args
       | not (isFamilyTyCon tc)
-      = return (mkTcReflCo ty, tc, tc_args)
+      = return (mkTcReflCo Nominal ty, tc, tc_args)
       | otherwise
       = do { mb_fam <- tcLookupFamInst tc tc_args
            ; case mb_fam of
                Nothing -> failWithTc (tagToEnumError ty doc3)
                Just (FamInstMatch { fim_instance = rep_fam
                                   , fim_tys      = rep_args })
-                   -> return ( mkTcSymCo (mkTcUnbranchedAxInstCo co_tc rep_args)
+                   -> return ( mkTcSymCo (mkTcUnbranchedAxInstCo Nominal co_tc rep_args)
                              , rep_tc, rep_args )
                  where
                    co_tc  = famInstAxiom rep_fam
@@ -1290,10 +1290,7 @@ checkCrossStageLifting :: Id -> ThStage -> TcM ()
 --            [| map |]
 -- There is no error-checking to do, because the renamer did that
 
-checkCrossStageLifting _ Comp      = return ()
-checkCrossStageLifting _ (Splice _) = return ()
-
-checkCrossStageLifting id (Brack _ _ ps_var lie_var)
+checkCrossStageLifting id (Brack _ (TcPending ps_var lie_var))
   =     -- Nested identifiers, such as 'x' in
         -- E.g. \x -> [| h x |]
         -- We must behave as if the reference to x was
@@ -1316,16 +1313,18 @@ checkCrossStageLifting id (Brack _ _ ps_var lie_var)
                                      -- See Note [Lifting strings]
                         ; return (HsVar sid) }
                   else
-                     setConstraintVar lie_var   $ do
+                     setConstraintVar lie_var   $
                           -- Put the 'lift' constraint into the right LIE
                      newMethodFromName (OccurrenceOf (idName id))
                                        DsMeta.liftName id_ty
 
                    -- Update the pending splices
         ; ps <- readMutVar ps_var
-        ; writeMutVar ps_var (PendingTcSplice (idName id) (nlHsApp (noLoc lift) (nlHsVar id)) : ps)
+        ; writeMutVar ps_var ((idName id, nlHsApp (noLoc lift) (nlHsVar id)) : ps)
 
         ; return () }
+
+checkCrossStageLifting _ _ = return ()
 
 polySpliceErr :: Id -> SDoc
 polySpliceErr id

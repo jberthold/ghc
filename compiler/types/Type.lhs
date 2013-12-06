@@ -48,7 +48,7 @@ module Type (
         -- Pred types
         mkFamilyTyConApp,
         isDictLikeTy,
-        mkEqPred, mkPrimEqPred, mkReprPrimEqPred,
+        mkEqPred, mkCoerciblePred, mkPrimEqPred, mkReprPrimEqPred,
         mkClassPred,
         noParenPred, isClassPred, isEqPred,
         isIPPred, isIPPred_maybe, isIPTyCon, isIPClass,
@@ -56,7 +56,7 @@ module Type (
         -- Deconstructing predicate types
         PredTree(..), classifyPredType,
         getClassPredTys, getClassPredTys_maybe,
-        getEqPredTys, getEqPredTys_maybe,
+        getEqPredTys, getEqPredTys_maybe, getEqPredRole,
 
         -- ** Common type constructors
         funTyCon,
@@ -160,8 +160,9 @@ import NameEnv
 import Class
 import TyCon
 import TysPrim
-import {-# SOURCE #-} TysWiredIn ( eqTyCon, typeNatKind, typeSymbolKind )
-import PrelNames ( eqTyConKey, ipClassNameKey, openTypeKindTyConKey,
+import {-# SOURCE #-} TysWiredIn ( eqTyCon, coercibleTyCon, typeNatKind, typeSymbolKind )
+import PrelNames ( eqTyConKey, coercibleTyConKey,
+                   ipClassNameKey, openTypeKindTyConKey,
                    constraintKindTyConKey, liftedTypeKindTyConKey )
 import CoAxiom
 
@@ -898,6 +899,13 @@ mkEqPred ty1 ty2
   where
     k = typeKind ty1
 
+mkCoerciblePred :: Type -> Type -> PredType
+mkCoerciblePred ty1 ty2
+  = WARN( not (k `eqKind` typeKind ty2), ppr ty1 $$ ppr ty2 $$ ppr k $$ ppr (typeKind ty2) )
+    TyConApp coercibleTyCon [k, ty1, ty2]
+  where
+    k = typeKind ty1
+
 mkPrimEqPred :: Type -> Type -> Type
 mkPrimEqPred ty1  ty2
   = WARN( not (k `eqKind` typeKind ty2), ppr ty1 $$ ppr ty2 )
@@ -994,15 +1002,27 @@ getClassPredTys_maybe ty = case splitTyConApp_maybe ty of
 getEqPredTys :: PredType -> (Type, Type)
 getEqPredTys ty
   = case splitTyConApp_maybe ty of
-      Just (tc, (_ : ty1 : ty2 : tys)) -> ASSERT( tc `hasKey` eqTyConKey && null tys )
-                                          (ty1, ty2)
+      Just (tc, (_ : ty1 : ty2 : tys)) ->
+        ASSERT( null tys && (tc `hasKey` eqTyConKey || tc `hasKey` coercibleTyConKey) )
+        (ty1, ty2)
       _ -> pprPanic "getEqPredTys" (ppr ty)
 
-getEqPredTys_maybe :: PredType -> Maybe (Type, Type)
+getEqPredTys_maybe :: PredType -> Maybe (Role, Type, Type)
 getEqPredTys_maybe ty
   = case splitTyConApp_maybe ty of
-      Just (tc, [_, ty1, ty2]) | tc `hasKey` eqTyConKey -> Just (ty1, ty2)
+      Just (tc, [_, ty1, ty2])
+        | tc `hasKey` eqTyConKey -> Just (Nominal, ty1, ty2)
+        | tc `hasKey` coercibleTyConKey -> Just (Representational, ty1, ty2)
       _ -> Nothing
+
+getEqPredRole :: PredType -> Role
+getEqPredRole ty
+  = case splitTyConApp_maybe ty of
+      Just (tc, [_, _, _])
+        | tc `hasKey` eqTyConKey -> Nominal
+        | tc `hasKey` coercibleTyConKey -> Representational
+      _ -> pprPanic "getEqPredRole" (ppr ty)
+
 \end{code}
 
 %************************************************************************

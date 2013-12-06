@@ -2260,8 +2260,7 @@ The following syntax is stolen:
 
       <varlistentry>
 	<term>
-	  <literal>?<replaceable>varid</replaceable></literal>,
-	  <literal>%<replaceable>varid</replaceable></literal>
+	  <literal>?<replaceable>varid</replaceable></literal>
           <indexterm><primary>implicit parameters</primary></indexterm>
 	</term>
 	<listitem><para>
@@ -2275,7 +2274,11 @@ The following syntax is stolen:
 	  <literal>[e|</literal>, <literal>[p|</literal>,
 	  <literal>[d|</literal>, <literal>[t|</literal>,
 	  <literal>$(</literal>,
-	  <literal>$<replaceable>varid</replaceable></literal>
+	  <literal>$$(</literal>,
+	  <literal>[||</literal>,
+	  <literal>[e||</literal>,
+	  <literal>$<replaceable>varid</replaceable></literal>,
+	  <literal>$$<replaceable>varid</replaceable></literal>
           <indexterm><primary>Template Haskell</primary></indexterm>
 	</term>
 	<listitem><para>
@@ -2285,7 +2288,7 @@ The following syntax is stolen:
 
       <varlistentry>
 	<term>
-	  <literal>[:<replaceable>varid</replaceable>|</literal>
+	  <literal>[<replaceable>varid</replaceable>|</literal>
           <indexterm><primary>quasi-quotation</primary></indexterm>
 	</term>
 	<listitem><para>
@@ -6473,7 +6476,7 @@ a type variable any more!
 The <option>-XFlexibleContexts</option> flag lifts the Haskell 98 restriction
 that the type-class constraints in a type signature must have the
 form <emphasis>(class type-variable)</emphasis> or
-<emphasis>(class (type-variable type-variable ...))</emphasis>.
+<emphasis>(class (type-variable type1 type2 ... typen))</emphasis>.
 With <option>-XFlexibleContexts</option>
 these type signatures are perfectly OK
 <programlisting>

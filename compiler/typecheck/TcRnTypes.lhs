@@ -35,7 +35,7 @@ module TcRnTypes(
         pprTcTyThingCategory, pprPECategory,
 
         -- Template Haskell
-        ThStage(..), topStage, topAnnStage, topSpliceStage,
+        ThStage(..), PendingStuff(..), topStage, topAnnStage, topSpliceStage,
         ThLevel, impLevel, outerLevel, thLevel,
 
         -- Arrows
@@ -90,7 +90,7 @@ import TcEvidence
 import Type
 import Class    ( Class )
 import TyCon    ( TyCon )
-import DataCon  ( DataCon, dataConUserType )
+import DataCon  ( DataCon, dataConUserType, dataConOrigArgTys )
 import TcType
 import Annotations
 import InstEnv
@@ -536,10 +536,18 @@ data ThStage    -- See Note [Template Haskell state diagram] in TcSplice
                 -- Binding level = 1
 
   | Brack                       -- Inside brackets
-      Bool                      --   True if inside a typed bracket, False otherwise
-      ThStage                   --   Binding level = level(stage) + 1
-      (TcRef [PendingSplice])   --   Accumulate pending splices here
-      (TcRef WantedConstraints) --     and type constraints here
+      ThStage                   --   Enclosing stage
+      PendingStuff
+
+data PendingStuff
+  = RnPendingUntyped              -- Renaming the inside of an *untyped* bracket
+      (TcRef [PendingRnSplice])   -- Pending splices in here
+
+  | RnPendingTyped                -- Renaming the inside of a *typed* bracket
+
+  | TcPending                     -- Typechecking the iniside of a typed bracket
+      (TcRef [PendingTcSplice])   --   Accumulate pending splices here
+      (TcRef WantedConstraints)   --     and type constraints here
 
 topStage, topAnnStage, topSpliceStage :: ThStage
 topStage       = Comp
@@ -547,9 +555,9 @@ topAnnStage    = Splice False
 topSpliceStage = Splice False
 
 instance Outputable ThStage where
-   ppr (Splice _)      = text "Splice"
-   ppr Comp            = text "Comp"
-   ppr (Brack _ s _ _) = text "Brack" <> parens (ppr s)
+   ppr (Splice _)  = text "Splice"
+   ppr Comp        = text "Comp"
+   ppr (Brack s _) = text "Brack" <> parens (ppr s)
 
 type ThLevel = Int
     -- NB: see Note [Template Haskell levels] in TcSplice
@@ -563,9 +571,9 @@ impLevel = 0    -- Imported things; they can be used inside a top level splice
 outerLevel = 1  -- Things defined outside brackets
 
 thLevel :: ThStage -> ThLevel
-thLevel (Splice _)      = 0
-thLevel Comp            = 1
-thLevel (Brack _ s _ _) = thLevel s + 1
+thLevel (Splice _)  = 0
+thLevel Comp        = 1
+thLevel (Brack s _) = thLevel s + 1
 
 ---------------------------
 -- Arrow-notation context
@@ -1049,7 +1057,7 @@ ctPred :: Ct -> PredType
 ctPred ct = ctEvPred (cc_ev ct)
 
 dropDerivedWC :: WantedConstraints -> WantedConstraints
--- See Note [Insoluble derived constraints]
+-- See Note [Dropping derived constraints]
 dropDerivedWC wc@(WC { wc_flat = flats, wc_insol = insols })
   = wc { wc_flat  = filterBag isWantedCt          flats
        , wc_insol = filterBag (not . isDerivedCt) insols  }
@@ -1057,10 +1065,14 @@ dropDerivedWC wc@(WC { wc_flat = flats, wc_insol = insols })
     -- The implications are (recursively) already filtered
 \end{code}
 
-Note [Insoluble derived constraints]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Dropping derived constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In general we discard derived constraints at the end of constraint solving;
-see dropDerivedWC.  For example,
+see dropDerivedWC.  A consequence is that
+   we never report an error for a derived constraint,
+   and hence we do not need to take much care with their CtLoc
+
+For example,
 
  * If we have an unsolved (Ord a), we don't want to complain about
    an unsolved (Eq a) as well.
@@ -1072,9 +1084,10 @@ Notably, functional dependencies.  If we have
     class C a b | a -> b
 and we have
     [W] C a b, [W] C a c
-where a,b,c are all signature variables.  Then we could reasonably
-report an error unifying (b ~ c). But it's probably not worth it;
-after all, we also get an error because we can't discharge the constraint.
+where a,b,c are all signature variables.  Then we could imagine
+reporting an error unifying (b ~ c). But it's better to report that we can't
+solve (C a b) and (C a c) since those arose directly from something the
+programmer wrote.
 
 
 %************************************************************************
@@ -1563,9 +1576,9 @@ Note [Preventing recursive dictionaries]
 
 We have some classes where it is not very useful to build recursive
 dictionaries (Coercible, at the moment). So we need the constraint solver to
-prevent that. We conservativey ensure this property using the subgoal depth of
+prevent that. We conservatively ensure this property using the subgoal depth of
 the constraints: When solving a Coercible constraint at depth d, we do not
-consider evicence from a depth <= d as suitable.
+consider evidence from a depth <= d as suitable.
 
 Therefore we need to record the minimum depth allowed to solve a CtWanted. This
 is done in the SubGoalDepth field of CtWanted. Most code now uses mkCtWanted,
@@ -1771,6 +1784,11 @@ data CtOrigin
 
   | ScOrigin            -- Typechecking superclasses of an instance declaration
   | DerivOrigin         -- Typechecking deriving
+  | DerivOriginDC DataCon Int
+                        -- Checking constraints arising from this data con and field index
+  | DerivOriginCoerce Id Type Type
+                        -- DerivOriginCoerce id ty1 ty2: Trying to coerce class method `id` from
+                        -- `ty1` to `ty2`.
   | StandAloneDerivOrigin -- Typechecking stand-alone deriving
   | DefaultOrigin       -- Typechecking a default decl
   | DoOrigin            -- Arising from a do expression
@@ -1808,6 +1826,14 @@ pprO TupleOrigin           = ptext (sLit "a tuple")
 pprO NegateOrigin          = ptext (sLit "a use of syntactic negation")
 pprO ScOrigin              = ptext (sLit "the superclasses of an instance declaration")
 pprO DerivOrigin           = ptext (sLit "the 'deriving' clause of a data type declaration")
+pprO (DerivOriginDC dc n)  = hsep [ ptext (sLit "the"), speakNth n,
+                                    ptext (sLit "field of"), quotes (ppr dc),
+                                    parens (ptext (sLit "type") <+> quotes (ppr ty)) ]
+    where ty = dataConOrigArgTys dc !! (n-1)
+pprO (DerivOriginCoerce meth ty1 ty2)
+                           = fsep [ ptext (sLit "the coercion"), ptext (sLit "of the method")
+                                  , quotes (ppr meth), ptext (sLit "from type"), quotes (ppr ty1)
+                                  , ptext (sLit "to type"), quotes (ppr ty2) ]
 pprO StandAloneDerivOrigin = ptext (sLit "a 'deriving' declaration")
 pprO DefaultOrigin         = ptext (sLit "a 'default' declaration")
 pprO DoOrigin              = ptext (sLit "a do statement")

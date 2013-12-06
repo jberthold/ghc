@@ -268,14 +268,12 @@ freeStorage (rtsBool free_heap)
 }
 
 /* -----------------------------------------------------------------------------
-   CAF management.
+   Note [CAF management].
 
    The entry code for every CAF does the following:
-     
-      - builds a CAF_BLACKHOLE in the heap
 
-      - calls newCaf, which atomically updates the CAF with
-        IND_STATIC pointing to the CAF_BLACKHOLE
+      - calls newCaf, which builds a CAF_BLACKHOLE on the heap and atomically
+        updates the CAF with IND_STATIC pointing to the CAF_BLACKHOLE
 
       - if newCaf returns zero, it re-enters the CAF (see Note [atomic
         CAF entry])
@@ -289,13 +287,19 @@ freeStorage (rtsBool free_heap)
    frames would also need special cases for static update frames.
 
    newCaf() does the following:
-       
+
+      - atomically locks the CAF (see [atomic CAF entry])
+
+      - it builds a CAF_BLACKHOLE on the heap
+
       - it updates the CAF with an IND_STATIC pointing to the
         CAF_BLACKHOLE, atomically.
 
       - it puts the CAF on the oldest generation's mutable list.
         This is so that we treat the CAF as a root when collecting
         younger generations.
+
+      - links the CAF onto the CAF list (see below)
 
    ------------------
    Note [atomic CAF entry]
@@ -333,9 +337,12 @@ freeStorage (rtsBool free_heap)
 
    -------------------------------------------------------------------------- */
 
-STATIC_INLINE StgWord lockCAF (StgIndStatic *caf, StgClosure *bh)
+STATIC_INLINE StgInd *
+lockCAF (StgRegTable *reg, StgIndStatic *caf)
 {
     const StgInfoTable *orig_info;
+    Capability *cap = regTableToCapability(reg);
+    StgInd *bh;
 
     orig_info = caf->header.info;
 
@@ -345,7 +352,7 @@ STATIC_INLINE StgWord lockCAF (StgIndStatic *caf, StgClosure *bh)
     if (orig_info == &stg_IND_STATIC_info ||
         orig_info == &stg_WHITEHOLE_info) {
         // already claimed by another thread; re-enter the CAF
-        return 0;
+        return NULL;
     }
 
     cur_info = (const StgInfoTable *)
@@ -355,7 +362,7 @@ STATIC_INLINE StgWord lockCAF (StgIndStatic *caf, StgClosure *bh)
 
     if (cur_info != orig_info) {
         // already claimed by another thread; re-enter the CAF
-        return 0;
+        return NULL;
     }
 
     // successfully claimed by us; overwrite with IND_STATIC
@@ -364,17 +371,25 @@ STATIC_INLINE StgWord lockCAF (StgIndStatic *caf, StgClosure *bh)
     // For the benefit of revertCAFs(), save the original info pointer
     caf->saved_info = orig_info;
 
-    caf->indirectee = bh;
+    // Allocate the blackhole indirection closure
+    bh = (StgInd *)allocate(cap, sizeofW(*bh));
+    SET_HDR(bh, &stg_CAF_BLACKHOLE_info, caf->header.prof.ccs);
+    bh->indirectee = (StgClosure *)cap->r.rCurrentTSO;
+
+    caf->indirectee = (StgClosure *)bh;
     write_barrier();
     SET_INFO((StgClosure*)caf,&stg_IND_STATIC_info);
 
-    return 1;
+    return bh;
 }
 
-StgWord
-newCAF(StgRegTable *reg, StgIndStatic *caf, StgClosure *bh)
+StgInd *
+newCAF(StgRegTable *reg, StgIndStatic *caf)
 {
-    if (lockCAF(caf,bh) == 0) return 0;
+    StgInd *bh;
+
+    bh = lockCAF(reg, caf);
+    if (!bh) return NULL;
 
     if(keepCAFs)
     {
@@ -418,7 +433,7 @@ newCAF(StgRegTable *reg, StgIndStatic *caf, StgClosure *bh)
 #endif
     }
 
-    return 1;
+    return bh;
 }
 
 // External API for setting the keepCAFs flag. see #3900.
@@ -437,10 +452,13 @@ setKeepCAFs (void)
 //
 // The linker hackily arranges that references to newCaf from dynamic
 // code end up pointing to newDynCAF.
-StgWord
-newDynCAF (StgRegTable *reg STG_UNUSED, StgIndStatic *caf, StgClosure *bh)
+StgInd *
+newDynCAF (StgRegTable *reg, StgIndStatic *caf)
 {
-    if (lockCAF(caf,bh) == 0) return 0;
+    StgInd *bh;
+
+    bh = lockCAF(reg, caf);
+    if (!bh) return NULL;
 
     ACQUIRE_SM_LOCK;
 
@@ -449,7 +467,7 @@ newDynCAF (StgRegTable *reg STG_UNUSED, StgIndStatic *caf, StgClosure *bh)
 
     RELEASE_SM_LOCK;
 
-    return 1;
+    return bh;
 }
 
 /* -----------------------------------------------------------------------------
@@ -1134,6 +1152,31 @@ calcNeeded (rtsBool force_major, memcount *blocks_needed)
          should be modified to use allocateExec instead of VirtualAlloc.
    ------------------------------------------------------------------------- */
 
+#if defined(arm_HOST_ARCH) && defined(ios_HOST_OS)
+void sys_icache_invalidate(void *start, size_t len);
+#endif
+
+/* On ARM and other platforms, we need to flush the cache after
+   writing code into memory, so the processor reliably sees it. */
+void flushExec (W_ len, AdjustorExecutable exec_addr)
+{
+#if defined(i386_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+  /* x86 doesn't need to do anything, so just suppress some warnings. */
+  (void)len;
+  (void)exec_addr;
+#elif defined(arm_HOST_ARCH) && defined(ios_HOST_OS)
+  /* On iOS we need to use the special 'sys_icache_invalidate' call. */
+  sys_icache_invalidate(exec_addr, ((unsigned char*)exec_addr)+len);
+#elif defined(__GNUC__)
+  /* For all other platforms, fall back to a libgcc builtin. */
+  unsigned char* begin = (unsigned char*)exec_addr;
+  unsigned char* end   = begin + len;
+  __clear_cache((void*)begin, (void*)end);
+#else
+#error Missing support to flush the instruction cache
+#endif
+}
+
 #if defined(linux_HOST_OS)
 
 // On Linux we need to use libffi for allocating executable memory,
@@ -1150,15 +1193,6 @@ AdjustorWritable allocateExec (W_ bytes, AdjustorExecutable *exec_ret)
     *ret = ret; // save the address of the writable mapping, for freeExec().
     *exec_ret = exec + 1;
     return (ret + 1);
-}
-
-void flushExec (W_ len, AdjustorExecutable exec_addr)
-{
-  /* On ARM and other platforms, we need to flush the cache after
-     writing code into memory, so the processor reliably sees it. */
-  unsigned char* begin = (unsigned char*)exec_addr;
-  unsigned char* end   = begin + len;
-  __builtin___clear_cache(begin, end);
 }
 
 // freeExec gets passed the executable address, not the writable address.
@@ -1205,15 +1239,6 @@ AdjustorWritable execToWritable(AdjustorExecutable exec)
     }
     RELEASE_SM_LOCK;
     return writ;
-}
-
-void flushExec (W_ len, AdjustorExecutable exec_addr)
-{
-  /* On ARM and other platforms, we need to flush the cache after
-     writing code into memory, so the processor reliably sees it. */
-  unsigned char* begin = (unsigned char*)exec_addr;
-  unsigned char* end   = begin + len;
-  __builtin___clear_cache(begin, end);
 }
 
 void freeExec(AdjustorExecutable exec)
@@ -1269,15 +1294,6 @@ AdjustorWritable allocateExec (W_ bytes, AdjustorExecutable *exec_ret)
     return ret;
 }
 
-void flushExec (W_ len, AdjustorExecutable exec_addr)
-{
-  /* On ARM and other platforms, we need to flush the cache after
-     writing code into memory, so the processor reliably sees it. */
-  unsigned char* begin = (unsigned char*)exec_addr;
-  unsigned char* end   = begin + len;
-  __builtin___clear_cache(begin, end);
-}
-
 void freeExec (void *addr)
 {
     StgPtr p = (StgPtr)addr - 1;
@@ -1312,7 +1328,7 @@ void freeExec (void *addr)
     RELEASE_SM_LOCK
 }
 
-#endif /* mingw32_HOST_OS */
+#endif /* switch(HOST_OS) */
 
 #ifdef DEBUG
 

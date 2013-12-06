@@ -122,6 +122,7 @@ import VarEnv
 import Outputable
 import Bag
 import MonadUtils
+import UniqSupply
 
 import FastString
 import Util
@@ -992,6 +993,9 @@ instance Monad TcS where
   fail err  = TcS (\_ -> fail err)
   m >>= k   = TcS (\ebs -> unTcS m ebs >>= \r -> unTcS (k r) ebs)
 
+instance MonadUnique TcS where
+   getUniqueSupplyM = wrapTcS getUniqueSupplyM
+
 -- Basic functionality
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 wrapTcS :: TcM a -> TcS a
@@ -1423,7 +1427,7 @@ newFlattenSkolem ev fam_ty
 
        ; let rhs_ty = mkTyVarTy tv
              ctev = CtGiven { ctev_pred = mkTcEqPred fam_ty rhs_ty
-                            , ctev_evtm = EvCoercion (mkTcReflCo fam_ty)
+                            , ctev_evtm = EvCoercion (mkTcReflCo Nominal fam_ty)
                             , ctev_loc =  ctev_loc ev }
        ; dflags <- getDynFlags
        ; updInertTcS $ \ is@(IS { inert_fsks = fsks }) ->
@@ -1647,22 +1651,21 @@ xCtFlavor (CtDerived { ctev_loc = loc }) ptys _xev
        ; return (catMaybes ders) }
 
 -----------------------------
-rewriteCtFlavor :: CtEvidence
+rewriteCtFlavor :: CtEvidence   -- old evidence
                 -> TcPredType   -- new predicate
-                -> TcCoercion   -- new ~ old
+                -> TcCoercion   -- Of type :: new predicate ~ <type of old evidence>
                 -> TcS (Maybe CtEvidence)
--- Returns Just new_fl iff either (i)  'co' is reflexivity
+-- Returns Just new_ev iff either (i)  'co' is reflexivity
 --                             or (ii) 'co' is not reflexivity, and 'new_pred' not cached
--- In either case, there is nothing new to do with new_fl
+-- In either case, there is nothing new to do with new_ev
 {-
-     rewriteCtFlavor old_fl new_pred co
+     rewriteCtFlavor old_ev new_pred co
 Main purpose: create new evidence for new_pred;
               unless new_pred is cached already
-* Returns a new_fl : new_pred, with same wanted/given/derived flag as old_fl
-* If old_fl was wanted, create a binding for old_fl, in terms of new_fl
-* If old_fl was given, AND not cached, create a binding for new_fl, in terms of old_fl
-* Returns Nothing if new_fl is already cached
-
+* Returns a new_ev : new_pred, with same wanted/given/derived flag as old_ev
+* If old_ev was wanted, create a binding for old_ev, in terms of new_ev
+* If old_ev was given, AND not cached, create a binding for new_ev, in terms of old_ev
+* Returns Nothing if new_ev is already cached
 
         Old evidence    New predicate is               Return new evidence
         flavour                                        of same flavor
@@ -1700,11 +1703,12 @@ rewriteCtFlavor (CtGiven { ctev_evtm = old_tm , ctev_loc = loc }) new_pred co
   = do { new_ev <- newGivenEvVar loc new_pred new_tm  -- See Note [Bind new Givens immediately]
        ; return (Just new_ev) }
   where
-    new_tm = mkEvCast old_tm (mkTcSymCo co)  -- mkEvCast optimises ReflCo
+    new_tm = mkEvCast old_tm (mkTcSubCo (mkTcSymCo co))  -- mkEvCast optimises ReflCo
 
 rewriteCtFlavor (CtWanted { ctev_evar = evar, ctev_loc = loc }) new_pred co
   = do { new_evar <- newWantedEvVar loc new_pred
-       ; setEvBind evar (mkEvCast (getEvTerm new_evar) co)
+       ; MASSERT( tcCoercionRole co == Nominal )
+       ; setEvBind evar (mkEvCast (getEvTerm new_evar) (mkTcSubCo co))
        ; case new_evar of
             Fresh ctev -> return (Just ctev)
             _          -> return Nothing }
@@ -1722,13 +1726,13 @@ matchFam tycon args
            Nothing -> return Nothing
            Just (FamInstMatch { fim_instance = famInst
                               , fim_tys      = inst_tys })
-             -> let co = mkTcUnbranchedAxInstCo (famInstAxiom famInst) inst_tys
+             -> let co = mkTcUnbranchedAxInstCo Nominal (famInstAxiom famInst) inst_tys
                     ty = pSnd $ tcCoercionKind co
                 in return $ Just (co, ty) }
 
   | Just ax <- isClosedSynFamilyTyCon_maybe tycon
   , Just (ind, inst_tys) <- chooseBranch ax args
-  = let co = mkTcAxInstCo ax ind inst_tys
+  = let co = mkTcAxInstCo Nominal ax ind inst_tys
         ty = pSnd (tcCoercionKind co)
     in return $ Just (co, ty)
 
@@ -1745,19 +1749,23 @@ matchFam tycon args
 -- Deferring forall equalities as implications
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-deferTcSForAllEq :: (CtLoc,EvVar)  -- Original wanted equality flavor
+deferTcSForAllEq :: Role -- Nominal or Representational
+                 -> CtLoc  -- Original wanted equality flavor
                  -> ([TyVar],TcType)   -- ForAll tvs1 body1
                  -> ([TyVar],TcType)   -- ForAll tvs2 body2
-                 -> TcS ()
+                 -> TcS EvTerm
 -- Some of this functionality is repeated from TcUnify,
 -- consider having a single place where we create fresh implications.
-deferTcSForAllEq (loc,orig_ev) (tvs1,body1) (tvs2,body2)
+deferTcSForAllEq role loc (tvs1,body1) (tvs2,body2)
  = do { (subst1, skol_tvs) <- wrapTcS $ TcM.tcInstSkolTyVars tvs1
       ; let tys  = mkTyVarTys skol_tvs
             phi1 = Type.substTy subst1 body1
             phi2 = Type.substTy (zipTopTvSubst tvs2 tys) body2
             skol_info = UnifyForAllSkol skol_tvs phi1
-        ; mev <- newWantedEvVar loc (mkTcEqPred phi1 phi2)
+        ; mev <- newWantedEvVar loc $ case role of
+                Nominal ->          mkTcEqPred      phi1 phi2
+                Representational -> mkCoerciblePred phi1 phi2
+                Phantom ->          panic "deferTcSForAllEq Phantom"
         ; coe_inside <- case mev of
             Cached ev_tm -> return (evTermCoercion ev_tm)
             Fresh ctev   -> do { ev_binds_var <- wrapTcS $ TcM.newTcEvBinds
@@ -1781,8 +1789,7 @@ deferTcSForAllEq (loc,orig_ev) (tvs1,body1) (tvs2,body2)
                                ; updTcSImplics (consBag imp)
                                ; return (TcLetCo ev_binds new_co) }
 
-        ; setEvBind orig_ev $
-          EvCoercion (foldr mkTcForAllCo coe_inside skol_tvs)
+        ; return $ EvCoercion (foldr mkTcForAllCo coe_inside skol_tvs)
         }
 \end{code}
 
