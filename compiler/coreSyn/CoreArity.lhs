@@ -145,7 +145,7 @@ exprBotStrictness_maybe e
 	Just ar -> Just (ar, sig ar)
   where
     env    = AE { ae_bndrs = [], ae_ped_bot = True, ae_cheap_fn = \ _ _ -> False }
-    sig ar = mkStrictSig (mkTopDmdType (replicate ar topDmd) botRes)
+    sig ar = mkClosedStrictSig (replicate ar topDmd) botRes
                   -- For this purpose we can be very simple
 \end{code}
 
@@ -730,7 +730,7 @@ arityType env (Cast e co)
 
 arityType _ (Var v)
   | strict_sig <- idStrictness v
-  , not $ isTopSig strict_sig
+  , not $ isNopSig strict_sig
   , (ds, res) <- splitStrictSig strict_sig
   , let arity = length ds
   = if isBotRes res then ABot arity

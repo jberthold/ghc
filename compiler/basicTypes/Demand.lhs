@@ -19,7 +19,7 @@ module Demand (
         peelUseCall, cleanUseDmd_maybe, strictenDmd, bothCleanDmd,
 
         DmdType(..), dmdTypeDepth, lubDmdType, bothDmdEnv, bothDmdType,
-        topDmdType, botDmdType, mkDmdType, mkTopDmdType, 
+        nopDmdType, botDmdType, mkDmdType,
 
         DmdEnv, emptyDmdEnv,
 
@@ -28,14 +28,14 @@ module Demand (
         topRes, botRes, cprProdRes, cprSumRes,
         appIsBottom, isBottomingSig, pprIfaceStrictSig, 
         returnsCPR, returnsCPRProd, returnsCPR_maybe,
-        StrictSig(..), mkStrictSig, topSig, botSig, cprProdSig,
-        isTopSig, splitStrictSig, increaseStrictSigArity,
+        StrictSig(..), mkStrictSig, mkClosedStrictSig, nopSig, botSig, cprProdSig,
+        isNopSig, splitStrictSig, increaseStrictSigArity,
        
         seqDemand, seqDemandList, seqDmdType, seqStrictSig, 
 
         evalDmd, cleanEvalDmd, cleanEvalProdDmd, isStrictDmd, 
         splitDmdTy, splitFVs,
-        deferDmd, deferType, deferAndUse, deferEnv, modifyEnv,
+        deferDmd, deferType, deferAndUse, deferAfterIO, deferEnv, modifyEnv,
 
         splitProdDmd, splitProdDmd_maybe, peelCallDmd, mkCallDmd,
         dmdTransformSig, dmdTransformDataConSig, dmdTransformDictSelSig,
@@ -1030,23 +1030,24 @@ instance Outputable DmdType where
 emptyDmdEnv :: VarEnv Demand
 emptyDmdEnv = emptyVarEnv
 
-topDmdType, botDmdType :: DmdType
-topDmdType = DmdType emptyDmdEnv [] topRes
+-- nopDmdType is the demand of doing nothing
+-- (lazy, absent, no CPR information, no termination information).
+-- Note that it is ''not'' the top of the lattice (which would be "may use everything"),
+-- so it is (no longer) called topDmd
+nopDmdType, botDmdType :: DmdType
+nopDmdType = DmdType emptyDmdEnv [] topRes
 botDmdType = DmdType emptyDmdEnv [] botRes
 
 cprProdDmdType :: DmdType
 cprProdDmdType = DmdType emptyDmdEnv [] cprProdRes
 
-isTopDmdType :: DmdType -> Bool
-isTopDmdType (DmdType env [] res)
+isNopDmdType :: DmdType -> Bool
+isNopDmdType (DmdType env [] res)
   | isTopRes res && isEmptyVarEnv env = True
-isTopDmdType _                        = False
+isNopDmdType _                        = False
 
 mkDmdType :: DmdEnv -> [Demand] -> DmdResult -> DmdType
 mkDmdType fv ds res = DmdType fv ds res
-
-mkTopDmdType :: [Demand] -> DmdResult -> DmdType
-mkTopDmdType ds res = DmdType emptyDmdEnv ds res
 
 dmdTypeDepth :: DmdType -> Arity
 dmdTypeDepth (DmdType _ ds _) = length ds
@@ -1086,6 +1087,23 @@ useType (DmdType fv ds res_ty) = DmdType (useEnv fv) ds res_ty
 useEnv :: DmdEnv -> DmdEnv
 useEnv fv = mapVarEnv useDmd fv
 
+-- When e is evaluated after executing an IO action, and d is e's demand, then
+-- what of this demand should we consider, given that the IO action can cleanly
+-- exit?
+-- * We have to kill all strictness demands (i.e. lub with a lazy demand)
+-- * We can keep demand information (i.e. lub with an absent deman)
+-- * We have to kill definite divergence
+-- * We can keep CPR information.
+-- See Note [IO hack in the demand analyser]
+deferAfterIO :: DmdType -> DmdType
+deferAfterIO d@(DmdType _ _ res) =
+    case d `lubDmdType` nopDmdType of
+        DmdType fv ds _ -> DmdType fv ds (defer_res res)
+  where
+  defer_res BotCPR  = NoCPR
+  defer_res r       = r
+
+
 modifyEnv :: Bool                       -- No-op if False
           -> (Demand -> Demand)         -- The zapper
           -> DmdEnv -> DmdEnv           -- Env1 and Env2
@@ -1115,7 +1133,7 @@ toCleanDmd :: (CleanDemand -> e -> (DmdType, e))
 -- See Note [Analyzing with lazy demand and lambdas]
 toCleanDmd anal (JD { strd = s, absd = u }) e
   = case (s,u) of
-      (_, Abs) -> mf (const topDmdType) (anal (CD { sd = HeadStr, ud = Used }) e)
+      (_, Abs) -> mf (const nopDmdType) (anal (CD { sd = HeadStr, ud = Used }) e)
                   --  See Note [Always analyse in virgin pass]
              
       (Str s', Use c u') -> mf (deferAndUse False c) (anal (CD { sd = s',      ud = u' }) e)
@@ -1215,6 +1233,9 @@ instance Outputable StrictSig where
 mkStrictSig :: DmdType -> StrictSig
 mkStrictSig dmd_ty = StrictSig dmd_ty
 
+mkClosedStrictSig :: [Demand] -> DmdResult -> StrictSig
+mkClosedStrictSig ds res = mkStrictSig (DmdType emptyDmdEnv ds res)
+
 splitStrictSig :: StrictSig -> ([Demand], DmdResult)
 splitStrictSig (StrictSig (DmdType _ dmds res)) = (dmds, res)
 
@@ -1223,14 +1244,14 @@ increaseStrictSigArity :: Int -> StrictSig -> StrictSig
 increaseStrictSigArity arity_increase (StrictSig (DmdType env dmds res))
   = StrictSig (DmdType env (replicate arity_increase topDmd ++ dmds) res)
 
-isTopSig :: StrictSig -> Bool
-isTopSig (StrictSig ty) = isTopDmdType ty
+isNopSig :: StrictSig -> Bool
+isNopSig (StrictSig ty) = isNopDmdType ty
 
 isBottomingSig :: StrictSig -> Bool
 isBottomingSig (StrictSig (DmdType _ _ res)) = isBotRes res
 
-topSig, botSig :: StrictSig
-topSig = StrictSig topDmdType
+nopSig, botSig :: StrictSig
+nopSig = StrictSig nopDmdType
 botSig = StrictSig botDmdType
 
 cprProdSig :: StrictSig
@@ -1284,7 +1305,7 @@ dmdTransformSig (StrictSig dmd_ty@(DmdType _ arg_ds _))
     go_abs (_:as) (UCall One d') = go_abs as d'
     go_abs _      _              = False
 
-    -- NB: it's important to use deferType, and not just return topDmdType
+    -- NB: it's important to use deferType, and not just return nopDmdType
     -- Consider     let { f x y = p + x } in f 1
     -- The application isn't saturated, but we must nevertheless propagate 
     --      a lazy demand for p!  
@@ -1302,7 +1323,7 @@ dmdTransformDataConSig arity (StrictSig (DmdType _ _ con_res))
                 -- Must remember whether it's a product, hence con_res, not TopRes
 
   | otherwise   -- Not saturated
-  = topDmdType
+  = nopDmdType
   where
     go_str 0 dmd        = Just (splitStrProdDmd arity dmd)
     go_str n (SCall s') = go_str (n-1) s'
@@ -1323,7 +1344,7 @@ dmdTransformDictSelSig (StrictSig (DmdType _ [dict_dmd] _)) cd
    , Just jds <- splitProdDmd_maybe dict_dmd
    = DmdType emptyDmdEnv [mkManyUsedDmd $ mkProdDmd $ map (enhance cd') jds] topRes
    | otherwise
-   = topDmdType              -- See Note [Demand transformer for a dictionary selector]
+   = nopDmdType              -- See Note [Demand transformer for a dictionary selector]
   where
     enhance cd old | isAbsDmd old = old
                    | otherwise    = mkManyUsedDmd cd
@@ -1342,7 +1363,7 @@ For single-method classes, which are represented by newtypes the signature
 of 'op' won't look like U(...), so the splitProdDmd_maybe will fail.
 That's fine: if we are doing strictness analysis we are also doing inling,
 so we'll have inlined 'op' into a cast.  So we can bale out in a conservative
-way, returning topDmdType.
+way, returning nopDmdType.
 
 It is (just.. Trac #8329) possible to be running strictness analysis *without*
 having inlined class ops from single-method classes.  Suppose you are using

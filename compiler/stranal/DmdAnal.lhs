@@ -35,6 +35,9 @@ import Util
 import Maybes		( isJust, orElse )
 import TysWiredIn	( unboxedPairDataCon )
 import TysPrim		( realWorldStatePrimTy )
+import ErrUtils         ( dumpIfSet_dyn )
+import Name             ( getName, stableNameCmp )
+import Data.Function    ( on )
 \end{code}
 
 %************************************************************************
@@ -48,6 +51,8 @@ dmdAnalProgram :: DynFlags -> CoreProgram -> IO CoreProgram
 dmdAnalProgram dflags binds
   = do {
 	let { binds_plus_dmds = do_prog binds } ;
+        dumpIfSet_dyn dflags Opt_D_dump_strsigs "Strictness signatures" $
+            dumpStrSig binds_plus_dmds ;
 	return binds_plus_dmds
     }
   where
@@ -121,9 +126,9 @@ dmdAnal :: AnalEnv
 -- The CleanDemand is always strict and not absent
 --    See Note [Ensure demand is strict]
 
-dmdAnal _ _ (Lit lit)     = (topDmdType, Lit lit)
-dmdAnal _ _ (Type ty)     = (topDmdType, Type ty)	-- Doesn't happen, in fact
-dmdAnal _ _ (Coercion co) = (topDmdType, Coercion co)
+dmdAnal _ _ (Lit lit)     = (nopDmdType, Lit lit)
+dmdAnal _ _ (Type ty)     = (nopDmdType, Type ty)	-- Doesn't happen, in fact
+dmdAnal _ _ (Coercion co) = (nopDmdType, Coercion co)
 
 dmdAnal env dmd (Var var)
   = (dmdTransform env var dmd, Var var)
@@ -332,9 +337,11 @@ dmdAnalAlt env dmd (con,bndrs,rhs)
 	(rhs_ty, rhs')   = dmdAnal env dmd rhs
         rhs_ty'          = addDataConPatDmds con bndrs rhs_ty
 	(alt_ty, bndrs') = annotateBndrs env rhs_ty' bndrs
-	final_alt_ty | io_hack_reqd = alt_ty `lubDmdType` topDmdType
+	final_alt_ty | io_hack_reqd = deferAfterIO alt_ty
 		     | otherwise    = alt_ty
 
+        -- Note [IO hack in the demand analyser]
+        --
 	-- There's a hack here for I/O operations.  Consider
 	-- 	case foo x s of { (# s, r #) -> y }
 	-- Is this strict in 'y'.  Normally yes, but what if 'foo' is an I/O
@@ -1066,7 +1073,7 @@ getStrictness :: AnalEnv -> Id -> StrictSig
 getStrictness env fn
   | isGlobalId fn                        = idStrictness fn
   | Just (sig, _) <- lookupSigEnv env fn = sig
-  | otherwise                            = topSig
+  | otherwise                            = nopSig
 
 addInitialSigs :: TopLevelFlag -> AnalEnv -> [Id] -> AnalEnv
 -- See Note [Initialising strictness]
@@ -1100,6 +1107,16 @@ set_idDemandInfo env id dmd
 set_idStrictness :: AnalEnv -> Id -> StrictSig -> Id
 set_idStrictness env id sig
   = setIdStrictness id (zapStrictSig (ae_dflags env) sig)
+
+dumpStrSig :: CoreProgram -> SDoc
+dumpStrSig binds = vcat (map printId ids)
+  where
+  ids = sortBy (stableNameCmp `on` getName) (concatMap getIds binds)
+  getIds (NonRec i _) = [ i ]
+  getIds (Rec bs)     = map fst bs
+  printId id | isExportedId id = ppr id <> colon <+> pprIfaceStrictSig (idStrictness id)
+             | otherwise       = empty
+
 \end{code}
 
 Note [Initial CPR for strict binders]
