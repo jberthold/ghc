@@ -434,7 +434,7 @@ dataConCPR con
   , isVanillaDataCon con  -- No existentials 
   , wkr_arity > 0
   , wkr_arity <= mAX_CPR_SIZE
-  = if is_prod then cprProdRes 
+  = if is_prod then vanillaCprProdRes (dataConRepArity con)
                else cprSumRes (dataConTag con)
   | otherwise
   = topRes
@@ -1319,7 +1319,8 @@ inlined.
 \begin{code}
 realWorldPrimId :: Id   -- :: State# RealWorld
 realWorldPrimId = pcMiscPrelId realWorldName realWorldStatePrimTy
-                     (noCafIdInfo `setUnfoldingInfo` evaldUnfolding)    -- Note [evaldUnfoldings]
+                     (noCafIdInfo `setUnfoldingInfo` evaldUnfolding    -- Note [evaldUnfoldings]
+                                  `setOneShotInfo` stateHackOneShot)
 
 voidPrimId :: Id     -- Global constant :: Void#
 voidPrimId  = pcMiscPrelId voidPrimIdName voidPrimTy

@@ -11,8 +11,8 @@ module WwLib ( mkWwBodies, mkWWstr, mkWorkerArgs, deepSplitProductType_maybe ) w
 import CoreSyn
 import CoreUtils        ( exprType, mkCast )
 import Id               ( Id, idType, mkSysLocal, idDemandInfo, setIdDemandInfo,
-                          isOneShotLambda, setOneShotLambda, setIdUnfolding,
-                          setIdInfo
+                          setIdUnfolding,
+                          setIdInfo, idOneShotInfo, setIdOneShotInfo
                         )
 import IdInfo           ( vanillaIdInfo )
 import DataCon
@@ -23,7 +23,7 @@ import TysPrim          ( voidPrimTy )
 import TysWiredIn       ( tupleCon )
 import Type
 import Coercion hiding  ( substTy, substTyVarBndr )
-import BasicTypes       ( TupleSort(..) )
+import BasicTypes       ( TupleSort(..), OneShotInfo(..), worstOneShot )
 import Literal          ( absentLiteralOf )
 import TyCon
 import UniqSupply
@@ -108,7 +108,7 @@ mkWwBodies :: DynFlags
            -> Type                              -- Type of original function
            -> [Demand]                          -- Strictness of original function
            -> DmdResult                         -- Info about function result
-           -> [Bool]                            -- One-shot-ness of the function
+           -> [OneShotInfo]                     -- One-shot-ness of the function, value args only
            -> UniqSM ([Demand],                 -- Demands for worker (value) args
                       Id -> CoreExpr,           -- Wrapper body, lacking only the worker Id
                       CoreExpr -> CoreExpr)     -- Worker body, lacking the original function rhs
@@ -125,8 +125,8 @@ mkWwBodies :: DynFlags
 --                        E
 
 mkWwBodies dflags fun_ty demands res_info one_shots
-  = do  { let arg_info = demands `zip` (one_shots ++ repeat False)
-              all_one_shots = all snd arg_info
+  = do  { let arg_info = demands `zip` (one_shots ++ repeat NoOneShotInfo)
+              all_one_shots = foldr (worstOneShot . snd) OneShotLam arg_info
         ; (wrap_args, wrap_fn_args, work_fn_args, res_ty) <- mkWWargs emptyTvSubst fun_ty arg_info
         ; (work_args, wrap_fn_str,  work_fn_str) <- mkWWstr dflags wrap_args
 
@@ -178,7 +178,7 @@ We use the state-token type which generates no code.
 
 \begin{code}
 mkWorkerArgs :: DynFlags -> [Var]
-             -> Bool    -- Whether all arguments are one-shot
+             -> OneShotInfo  -- Whether all arguments are one-shot
              -> Type    -- Type of body
              -> ([Var], -- Lambda bound args
                  [Var]) -- Args at call site
@@ -194,14 +194,11 @@ mkWorkerArgs dflags args all_one_shot res_ty
            -- see Note [Protecting the last value argument]
 
       -- see Note [All One-Shot Arguments of a Worker]
-      newArg = if all_one_shot
-               then setOneShotLambda voidArgId
-               else voidArgId
+      newArg = setIdOneShotInfo voidArgId all_one_shot
 \end{code}
 
 Note [Protecting the last value argument]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 If the user writes (\_ -> E), they might be intentionally disallowing
 the sharing of E. Since absence analysis and worker-wrapper are keen
 to remove such unused arguments, we add in a void argument to prevent
@@ -215,21 +212,27 @@ so f can't be inlined *under a lambda*.
 
 Note [All One-Shot Arguments of a Worker]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Sometimes, derived joint-points are just lambda-lifted thunks, whose
+Sometimes, derived join-points are just lambda-lifted thunks, whose
 only argument is of the unit type and is never used. This might
 interfere with the absence analysis, basing on which results these
 never-used arguments are eliminated in the worker. The additional
 argument `all_one_shot` of `mkWorkerArgs` is to prevent this.
 
-An example for this phenomenon is a `treejoin` program from the
-`nofib` suite, which features the following joint points:
+Example.  Suppose we have
+   foo = \p(one-shot) q(one-shot). y + 3
+Then we drop the unused args to give
+   foo   = \pq. $wfoo void#
+   $wfoo = \void(one-shot). y + 3
 
-$j_s1l1 =
-  \ _ ->
-     case GHC.Prim.<=# 56320 y_aOy of _ {
-        GHC.Types.False -> $j_s1kP GHC.Prim.realWorld#;
-        GHC.Types.True ->  ... }
+But suppse foo didn't have all one-shot args:
+   foo = \p(not-one-shot) q(one-shot). expensive y + 3
+Then we drop the unused args to give
+   foo   = \pq. $wfoo void#
+   $wfoo = \void(not-one-shot). y + 3
+
+If we made the void-arg one-shot we might inline an expensive
+computation for y, which would be terrible!
+
 
 %************************************************************************
 %*                                                                      *
@@ -271,8 +274,8 @@ the \x to get what we want.
 mkWWargs :: TvSubst             -- Freshening substitution to apply to the type
                                 --   See Note [Freshen type variables]
          -> Type                -- The type of the function
-         -> [(Demand,Bool)]     -- Demands and one-shot info for value arguments
-         -> UniqSM  ([Var],             -- Wrapper args
+         -> [(Demand,OneShotInfo)]     -- Demands and one-shot info for value arguments
+         -> UniqSM  ([Var],            -- Wrapper args
                      CoreExpr -> CoreExpr,      -- Wrapper fn
                      CoreExpr -> CoreExpr,      -- Worker fn
                      Type)                      -- Type of wrapper body
@@ -327,12 +330,11 @@ mkWWargs subst fun_ty arg_info
 applyToVars :: [Var] -> CoreExpr -> CoreExpr
 applyToVars vars fn = mkVarApps fn vars
 
-mk_wrap_arg :: Unique -> Type -> Demand -> Bool -> Id
+mk_wrap_arg :: Unique -> Type -> Demand -> OneShotInfo -> Id
 mk_wrap_arg uniq ty dmd one_shot
-  = set_one_shot one_shot (setIdDemandInfo (mkSysLocal (fsLit "w") uniq ty) dmd)
-  where
-    set_one_shot True  id = setOneShotLambda id
-    set_one_shot False id = id
+  = mkSysLocal (fsLit "w") uniq ty
+       `setIdDemandInfo` dmd
+       `setIdOneShotInfo` one_shot
 \end{code}
 
 Note [Freshen type variables]
@@ -462,13 +464,13 @@ mkWWstr_one dflags arg
 
   where
     dmd = idDemandInfo arg
+    one_shot = idOneShotInfo arg
         -- If the wrapper argument is a one-shot lambda, then
         -- so should (all) the corresponding worker arguments be
         -- This bites when we do w/w on a case join point
-    set_worker_arg_info worker_arg demand = set_one_shot (setIdDemandInfo worker_arg demand)
-
-    set_one_shot | isOneShotLambda arg = setOneShotLambda
-                 | otherwise           = \x -> x
+    set_worker_arg_info worker_arg demand 
+      = worker_arg `setIdDemandInfo`  demand
+                   `setIdOneShotInfo` one_shot
 
 ----------------------
 nop_fn :: CoreExpr -> CoreExpr
@@ -538,6 +540,7 @@ mkWWcpr body_ty res
        Just con_tag | Just stuff <- deepSplitCprType_maybe con_tag body_ty
                     -> mkWWcpr_help stuff
                     |  otherwise
+                       -- See Note [non-algebraic or open body type warning]
                     -> WARN( True, text "mkWWcpr: non-algebraic or open body type" <+> ppr body_ty )
                        return (id, id, body_ty)
 
@@ -587,6 +590,25 @@ mkUnpackCase scrut co uniq boxing_con unpk_args body
     casted_scrut = scrut `mkCast` co
     bndr = mk_ww_local uniq (exprType casted_scrut)
 \end{code}
+
+Note [non-algebraic or open body type warning]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+There are a few cases where the W/W transformation is told that something
+returns a constructor, but the type at hand doesn't really match this. One
+real-world example involves unsafeCoerce:
+  foo = IO a
+  foo = unsafeCoere c_exit
+  foreign import ccall "c_exit" c_exit :: IO ()
+Here CPR will tell you that `foo` returns a () constructor for sure, but trying
+to create a worker/wrapper for type `a` obviously fails.
+(This was a real example until ee8e792  in libraries/base.)
+
+It does not seem feasilbe to avoid all such cases already in the analyser (and
+after all, the analysis is not really wrong), so we simply do nothing here in
+mkWWcpr. But we still want to emit warning with -DDEBUG, to hopefully catch
+other cases where something went avoidably wrong.
+
 
 Note [Profiling and unpacking]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
