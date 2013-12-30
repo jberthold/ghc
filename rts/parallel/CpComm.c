@@ -1504,16 +1504,22 @@ char buffer[256];
 rtsBool MP_start(int* argc, char** argv) {
 	//printf("MP_Start: Starting CopyWay system... :)\n");
 
-  /* HACK:
-     RtsFlags are parsed between calls to MP_start() and MP_sync(),
-     but needed here!
-     Either move the startup entirely to MP_sync() or move the parsing.
-     For now just do an additional parse...
-  */
-//  parse_rts_flags(argc,argv);
+  if (*argc < 2) {
+    debugBelch("Need argument to specify number of PEs");
+    exit(EXIT_FAILURE);
+  }
+
   /* first argument is number of PEs
      (handled by startup script in compiler/main/DriverPipeline.hs */
   ASSERT(argv && argv[1]);
+
+  // start in debug mode if negative number (or "-0")
+  if (argv[1][0] == '-') {
+    RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
+    IF_PAR_DEBUG(mpcomm,
+		 debugBelch("CP Way debug mode! Starting\n"));
+  }
+
   nPEs = (nat)atoi(argv[1]);
   if (nPEs == (nat)0)
     nPEs = 1;
@@ -1525,7 +1531,9 @@ rtsBool MP_start(int* argc, char** argv) {
   buffer[1] = '\0';
   GetEnvironmentVariable("IsEdenChild", buffer, 256);
   sscanf(buffer, "%i", &thisPE);
-  //printf("IsEdenChild = %i\n", thisPE);
+
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("IsEdenChild = %i\n", thisPE));
  if(thisPE == 0) {
     thisPE = 1;
     IAmMainThread = rtsTrue;
@@ -1544,7 +1552,10 @@ rtsBool MP_sync(void){
 
   /* set buffer sizes */
   num_msgs = RtsFlags.ParFlags.sendBufferSize * (int)nPEs;
-  //printf(" Buffer: %i messages/%i PEs\n", num_msgs, nPEs);
+
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MP_sync: buffer for %i messages/%i PEs\n",
+                          num_msgs, nPEs));
 
   /* 
      init process
@@ -1552,48 +1563,56 @@ rtsBool MP_sync(void){
 
   if(thisPE == 1) {
     if (cpw_shm_create() != CPW_NOERROR) {
+      nPEs = 0; // avoid calling MP_quit from stg_exit
       barf(" MPSystem CpWay: error creating shared memory!\n");
     }
     STARTUPINFO si;
     GetStartupInfo(&si);
     PROCESS_INFORMATION *pi = malloc(sizeof(PROCESS_INFORMATION) *(nPEs -1));
     int i;
+    sprintf(buffer, "%lu", (DWORD) shared_memory.hShm);
+    SetEnvironmentVariable("SHMHandle", buffer);
     for (i = 2; i <= (int)nPEs; i++) {
 			
       /* start other processes */
-			
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("fork child %d", i));
+  
       sprintf(buffer, "%u", i);
       SetEnvironmentVariable("IsEdenChild", buffer);
-      sprintf(buffer, "%lu", (DWORD) shared_memory.hShm);
-      SetEnvironmentVariable("SHMHandle", buffer);		
       char *argsTmp = stgMallocBytes(strlen(args)+1, "args");
-	  strcpy(argsTmp, args);
-	  
+      strcpy(argsTmp, args);
+      
       CreateProcess(NULL, argsTmp, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi[i-2]);
       
-	  free(argsTmp);
+      free(argsTmp);
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("child %d forked", i));
     }
-	free(args);
+    free(args);
   }
   else {
     GetEnvironmentVariable("SHMHandle", buffer, 256);
-    sscanf(buffer, "%lu", &shared_memory.hShm);
+    sscanf(buffer, "%lu", (DWORD) &shared_memory.hShm);
 
     if (cpw_shm_init() != CPW_NOERROR) {
+      /* avoid calling back in here, this PE cannot send/receive msg.s */
+      /* barf would otherwise call MP_quit, which sends messages */
+      nPEs=0;
       barf(" MPSystem CpWay: error init shared memory!\n");
     }
   }
 
-	cpw_shm_debug_info(&shared_memory);
-  /* check errors before forking */
-  cpw_shm_check_errors();
-  //printf("MP_sync()\n");
+  IF_PAR_DEBUG(mpcomm, cpw_shm_debug_info(&shared_memory));
 
   /* check for fork errors */
   cpw_shm_check_errors();
+
   /* wait until all nodes ready */
+  IF_PAR_DEBUG(mpcomm, debugBelch("%d  sync.ing", thisPE));
   cpw_sync_synchronize(shared_memory.hSync); /* Fails after CPW_SYNC_TIMEOUT seconds */
-  /* GO */
+
+  IF_PAR_DEBUG(mpcomm, debugBelch("%d ready to go", thisPE));
   return rtsTrue;
 }
 
@@ -1604,12 +1623,15 @@ rtsBool MP_sync(void){
  */
 
 rtsBool MP_quit(int isError){
-  //printf(" MP_quit()\n");
 
     long data[1] = {isError};
     nat sender;
     int length;
     OpCode code;
+
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch(" MP_quit(%d)", isError));
+
   if (IAmMainThread) {
     /* send FINISH to other PEs */
     int i;
@@ -1620,7 +1642,7 @@ rtsBool MP_quit(int isError){
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("awaiting FINISH replies from children (have %d)",
                             finishRecvd));
-    while (finishRecvd != nPEs-1) {
+    while ((nat) finishRecvd != nPEs-1) {
         cpw_shm_recv_msg(&sender, &code, &length, data);
         if (code == PP_FINISH) {
           finishRecvd++;
@@ -1628,10 +1650,8 @@ rtsBool MP_quit(int isError){
                        debugBelch("received reply, now %d", finishRecvd));
         }
     }
-    /* wait for children to return */
-    //printf("Waiting for children to return.\n");
-    /* TODO */
-    //printf("All kids are safe home.\n");
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("All kids are safe home."));
 
   } else {
     /* send PP_FINISH to parent, including error code received */
@@ -1680,6 +1700,9 @@ rtsBool MP_quit(int isError){
   /* close shared memory*/
   cpw_shm_close(&shared_memory);
 
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MP_quit: Finished."));
+
   /* indicate that quit has been executed */
   nPEs = 0;
 	
@@ -1712,13 +1735,14 @@ Needed functionality: */
  *   rtsBool: success or failure inside comm. subsystem
  */
 rtsBool MP_send(int node, OpCode tag, long *data, int length){
-  //printf("MP_send()\n");
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MP_send()"));
 
   /* check for errors */
   cpw_shm_check_errors();
 
   /* check length */
-  ASSERT(length <= DATASPACEWORDS);
+  ASSERT(length <= (int)DATASPACEWORDS);
   
   /* send */
   switch (cpw_shm_send_msg(node, tag, length, data)) {
@@ -1750,7 +1774,8 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
  */
 int MP_recv(STG_UNUSED int maxlength, long *destination, // IN
 	    OpCode *code, nat *sender){       // OUT
-  //printf("MP_recv()\n");
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MP_recv()"));
 
   /* check for errors */
   cpw_shm_check_errors();
@@ -1783,7 +1808,8 @@ int MP_recv(STG_UNUSED int maxlength, long *destination, // IN
  * (unspecified sender, no receive buffers any more) 
  */
 rtsBool MP_probe(void) {
-  //printf("MP_probe()\n");
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MP_probe()"));
   /* check for errors */
   cpw_shm_check_errors();
 
@@ -1872,7 +1898,7 @@ static int cpw_sem_post(cpw_sem_t *sem) {
 /* close semaphore */
 static int cpw_sem_close(cpw_sem_t *sem) {
   if (CloseHandle(sem->semaphore) == 0) {
-    //printf("Could not close semaphore\n");
+    sysErrorBelch("Could not close semaphore\n");
     /* Not necessary to handle */
     return CPW_SEM_FAIL;
   }
@@ -1885,7 +1911,10 @@ static int cpw_sem_close(cpw_sem_t *sem) {
 
 /* print debug information for shared memory */
 static void cpw_shm_debug_info(cpw_shm_t *shm) {	
-  /*printf("#############################\n"
+#ifdef DEBUG
+  char msg[3200]; /* 25lines x 80characters, estimated upper bound */
+  snprintf(msg, 3200,
+             "#############################\n"
 	     "      # Shared Memory Debug Info: #\n"
 	     "      #############################\n"
 	     "\n"
@@ -1895,16 +1924,16 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
 	     "      \n"
 	     "      Structure Information:\n"
 	     "      - status (@%p): %i\n"
-		 
-		 "      - hSync (@%p)\n"
-		 "      - hSync counter: %i\n"
-		 "      - hSync mutex (@%p): %i\n"
-		 "      - hSync wait (@%p): %i\n"
-		 
-		 "      - hCanAlloc (@%p): %i\n"
-		 "      - hDoAlloc (@%p): %i\n"
-		 "      - wSems[1] (@%p): %i\n"
-		 "      - rSems[1] (@%p): %i\n"
+             
+             "      - hSync (@%p)\n"
+             "      - hSync counter: %i\n"
+             "      - hSync mutex (@%p): %i\n"
+             "      - hSync wait (@%p): %i\n"
+             
+             "      - hCanAlloc (@%p): %i\n"
+             "      - hDoAlloc (@%p): %i\n"
+             "      - wSems[1] (@%p): %i\n"
+             "      - rSems[1] (@%p): %i\n"
 		 
 	     "      - free_slots (@%p): %i\n"
 	     "      - msgs_read@%p:\n"
@@ -1914,22 +1943,22 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
 	     shm->base, 
 	     shm->status, *shm->status, 
 		 
-		 shm->hSync,
-		 shm->hSync->count,
-		 &shm->hSync->mutex, shm->hSync->mutex.semaphore,
-		 &shm->hSync->wait, shm->hSync->wait.semaphore,
-		 
-		 shm->hCan_alloc, shm->hCan_alloc->semaphore,
-		 shm->hDo_alloc, shm->hDo_alloc->semaphore,
-		 shm->hW_sems, shm->hW_sems->semaphore,
-		 shm->hR_sems, shm->hR_sems->semaphore,
-		 
+             shm->hSync,
+             shm->hSync->count,
+             &shm->hSync->mutex, shm->hSync->mutex.semaphore,
+             &shm->hSync->wait, shm->hSync->wait.semaphore,
+             
+             shm->hCan_alloc, shm->hCan_alloc->semaphore,
+             shm->hDo_alloc, shm->hDo_alloc->semaphore,
+             shm->hW_sems, shm->hW_sems->semaphore,
+             shm->hR_sems, shm->hR_sems->semaphore,
+
 	     shm->free_slots, *shm->free_slots,
 	     shm->msgs_read,
-	     shm->msgs_write); */
-
-
-  //printf("free message slots:\n");
+	     shm->msgs_write);
+  debugBelch(msg);
+               
+  debugBelch("free message slots:\n");
   size_t next_slot_off = *shm->free_slots;
   cpw_shm_slot_off_t *next_slot = (cpw_shm_slot_off_t *) ((size_t)shared_memory.base + shared_memory.slots_start + next_slot_off);
 
@@ -1937,18 +1966,18 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
   while (next_slot_off != 0) {
       cpw_msg_off_t *msg = (cpw_msg_off_t *) ((size_t) shared_memory.base + shared_memory.msgs_start + next_slot->addr);
     num++;
-    /*printf("- %i (@%p) (offset: %i)\n"
+    debugBelch("- %i (@%p) (offset: %i)\n"
 	       "      +-> points to message @%i\n"
 	       "        +-> points to data @%i\n", 
 	       num, next_slot, next_slot_off,
-	       next_slot->addr, msg->data); */
+               next_slot->addr, msg->data);
 
     next_slot_off = next_slot->next;
     next_slot = (cpw_shm_slot_off_t *) ((size_t)shared_memory.base + shared_memory.slots_start + next_slot_off);
   }
 
-  //printf("total of %i free slots\n\n", num);
-  //printf("message queues:\n");
+  debugBelch("total of %i free slots\n\n", num);
+  debugBelch("message queues:\n");
   int i; 
   for (i = 0; i < (int)nPEs; i++) {
     num = 0;
@@ -1962,22 +1991,23 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
     
     slot_off = shm->msgs_read[i];
     slot = (cpw_shm_slot_off_t *) ((size_t) shared_memory.base + shared_memory.slots_start + slot_off);
-    /*printf("- msgs_read[%i] (@%p)\n"
-	       "      +-> points to slot @%i\n"
-	       "      | +-> is hole = %i\n"
-	       "      +-> has %i message linked\n\n",
-	       i,&shm->msgs_read[i],
-	       shm->msgs_read[i],  slot->is_hole,
-	       num); */
+    debugBelch("- msgs_read[%i] (@%p)\n"
+               "      +-> points to slot @%i\n"
+               "      | +-> is hole = %i\n"
+               "      +-> has %i message linked\n\n",
+               i,&shm->msgs_read[i],
+               shm->msgs_read[i],  slot->is_hole,
+               num);
 
     slot_off = shm->msgs_write[i];
     slot = (cpw_shm_slot_off_t *) ((size_t) shared_memory.base + shared_memory.slots_start + slot_off);
-    /*printf("- msgs_write[%i] (@%p)\n"
-	       "      +-> points to slot @%i\n"
-	       "        +-> is hole = %i\n",
-	       i,&shm->msgs_write[i],
-	       shm->msgs_write[i],slot->is_hole); */
+    debugBelch("- msgs_write[%i] (@%p)\n"
+               "      +-> points to slot @%i\n"
+               "        +-> is hole = %i\n",
+               i,&shm->msgs_write[i],
+               shm->msgs_write[i],slot->is_hole);
   }
+#endif
 }
 
 /* create and initialize shared memory */
@@ -2378,7 +2408,7 @@ static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, long *data) {
   /* wake receiver */
   cpw_sem_post(shared_memory.hR_sems + toPE);
   
-  cpw_shm_debug_info(&shared_memory);
+  // IF_PAR_DEBUG(mpcomm, cpw_shm_debug_info(&shared_memory));
   return CPW_NOERROR;
 }
 
@@ -2683,7 +2713,7 @@ static int cpw_mk_name(char *res) {
 	
   ASSERT(1 + strlen(s_magic) + 12 + 1 <= CPW_MAX_FILENAME_LENGTH);
 	
-  if (sprintf(res, "/%s%08x%04x", s_magic, "1234", next_unique++) < 0) {
+  if (sprintf(res, "/%s%08x%04x", s_magic, 1234, next_unique++) < 0) {
     return CPW_FILENAME_FAIL;
   }
 	

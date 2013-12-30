@@ -300,12 +300,13 @@ rtsDebugMsgFn(const char *s, va_list ap)
  * - in case of error exit: shut down the system
  * - give the Eden website for bug reports
  * - prepend the PE number to debug messages
+ * - try a clean shutdown upon fatal internal errors
  * 
  * Otherwise, these functions are mostly copies from the above
  * "rts..."  functions. Unnecessary code for non-supported platforms.
  */
 
-void GNU_ATTRIBUTE(__noreturn__)
+void 
 edenFatalInternalErrorFn(const char *s, va_list ap)
 {
 #if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
@@ -313,7 +314,8 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
   {
      char title[BUFSIZE], message[BUFSIZE];
 
-     snprintf(title,   BUFSIZE, "%s: internal error", prog_name);
+     snprintf(title, BUFSIZE, "%s [PE %d]: internal error",
+              prog_name, thisPE);
      vsnprintf(message, BUFSIZE, s, ap);
 
      MessageBox(NULL /* hWnd */,
@@ -327,9 +329,9 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
     {
   /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
   if (prog_argv != NULL && prog_name != NULL) {
-    fprintf(stderr, "%s: internal error: ", prog_name);
+    fprintf(stderr, "%s [PE %d]: internal error: ", prog_name, thisPE);
   } else {
-    fprintf(stderr, "internal error: ");
+    fprintf(stderr, "[PE %d]: internal error: ", thisPE);
   }
   vfprintf(stderr, s, ap);
   fprintf(stderr, "\n");
@@ -350,43 +352,120 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
 void
 parErrorMsgFn(const char *s, va_list ap)
 {
-  /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
-  if (prog_name != NULL) {
-    fprintf(stderr, "%s [PE %d]: ", prog_name, thisPE);
-  } else {
-    fprintf(stderr, "[PE %d]: ", thisPE);
+#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+  if (isGUIApp())
+  {
+     char buf[BUFSIZE];
+     char title[BUFSIZE];
+     int r;
+
+     r = snprintf(title, BUFSIZE, "%s [PE %d]", prog_name, thisPE);
+     r = vsnprintf(buf, BUFSIZE, s, ap);
+     if (r > 0 && r < BUFSIZE) {
+       MessageBox(NULL /* hWnd */,
+                  buf,
+                  title,
+                  MB_OK | MB_ICONERROR | MB_TASKMODAL
+                  );
+     }
   }
-  vfprintf(stderr, s, ap);
-  fprintf(stderr, "\n");
-}
-
-void
-parSysErrorMsgFn(const char *s, va_list ap)
-{
-    char *syserr;
-
-    syserr = strerror(errno);
-    // ToDo: use strerror_r() if available
-    
+  else
+#endif
+  {
     /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
-    if (prog_argv != NULL && prog_name != NULL) {
+    if (prog_name != NULL) {
       fprintf(stderr, "%s [PE %d]: ", prog_name, thisPE);
     } else {
       fprintf(stderr, "[PE %d]: ", thisPE);
     }
     vfprintf(stderr, s, ap);
-    if (syserr) {
-      fprintf(stderr, ": %s\n", syserr);
-    } else {
-      fprintf(stderr, "\n");
+    fprintf(stderr, "\n");
+  }
+}
+
+void
+parSysErrorMsgFn(const char *s, va_list ap)
+{
+  char *syserr;
+
+#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+  FormatMessage(
+        FORMAT_MESSAGE_ALLOCATE_BUFFER | 
+        FORMAT_MESSAGE_FROM_SYSTEM | 
+        FORMAT_MESSAGE_IGNORE_INSERTS,
+        NULL,
+        GetLastError(),
+        MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), // Default language
+        (LPTSTR) &syserr,
+        0,
+        NULL );
+
+  if (isGUIApp())
+    {
+      char buf[BUFSIZE], title[BUFSIZE];
+	int r;
+	
+        r = snprintf(title, BUFSIZE, "%s [PE %d]", prog_name, thisPE);
+	r = vsnprintf(buf, BUFSIZE, s, ap);
+	if (r > 0 && r < BUFSIZE) {
+	    r = vsnprintf(buf+r, BUFSIZE-r, ": %s", syserr);
+	    MessageBox(NULL /* hWnd */,
+		       buf,
+		       title,
+		       MB_OK | MB_ICONERROR | MB_TASKMODAL
+		);
+	}
     }
+    else
+#else
+    syserr = strerror(errno);
+    // ToDo: use strerror_r() if available
+#endif
+    {
+      /* don't fflush(stdout); WORKAROUND bug in Linux glibc */
+      if (prog_argv != NULL && prog_name != NULL) {
+        fprintf(stderr, "%s [PE %d]: ", prog_name, thisPE);
+      } else {
+        fprintf(stderr, "[PE %d]: ", thisPE);
+      }
+      vfprintf(stderr, s, ap);
+      if (syserr) {
+#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+        // Win32 error messages have a terminating \n
+        fprintf(stderr, ": %s", syserr);
+#else
+        fprintf(stderr, ": %s\n", syserr);
+#endif
+      } else {
+        fprintf(stderr, "\n");
+      }
+    }
+
+#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+    if (syserr) LocalFree(syserr);
+#endif
 }
 
 void
 parDebugMsgFn(const char *s, va_list ap)
 {
-  fprintf(stderr, "[PE %d]", thisPE);
-  vfprintf(stderr, s, ap);
-  fflush(stderr);
+#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+  if (isGUIApp())
+  {
+     char buf[BUFSIZE];
+	 int r;
+
+	 r = vsnprintf(buf, BUFSIZE, s, ap);
+	 if (r > 0 && r < BUFSIZE) {
+       OutputDebugString(buf);
+     }
+  }
+  else
+#endif
+  {
+    fprintf(stderr, "[PE %d]", thisPE);
+    vfprintf(stderr, s, ap);
+    fflush(stderr);
+  }
 }
 #endif
