@@ -158,8 +158,9 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data);
  *   3: single data, receiver's inport is closed
  *   4: rFork, receiver creates thread to evaluate received graph
  *
- * HACK:
+ * PLACEMENT HACK:
  *  "real" mode is (mode & 007), last 3 bits. Rest is payload data.
+ *   [ ...mode...data...payload... int bits - 3 | mode: last 3 bits ]
  *
  * Ports:
  *  1-3 are sent via a "normal"/"data" port (machine,process,threadid)
@@ -176,7 +177,6 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
   int success=MSG_OK; // indicates successful packing, becomes return value 
                       // codes defined in includes/rts/Constants.h
 
-  // mode splits into ( data payload | last 3 bits: "real" mode)
   int m; // mode 0..7
   nat d; // data payload inside mode
 
@@ -208,7 +208,7 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     // same machine, same runtime tables, so we connect directly
     if ( sender.machine == receiver->machine ) {
       connectInportByP(*receiver, sender);
-      return 2;
+      return MSG_OK;
     }
 
     // no data needed
@@ -451,8 +451,8 @@ fakeDataMsg(StgClosure *graph,
 			    receiver.machine, 
 			    receiver.process, 
 			    receiver.id));
-    // should not happen... but just give up
-    return 2;
+    // should not happen... but just ignore (MSG_FAILED would retry)
+    return MSG_OK;
   }
 
   if (!(equalPorts(inport->sender,sender))) {
@@ -506,7 +506,7 @@ fakeDataMsg(StgClosure *graph,
   // use system tso as owner when waking up blocked threads
   updateThunk(cap, (StgTSO*) &stg_system_tso, placeholder, graph);
 
-  return 2;
+  return MSG_OK;
 }
 
 #endif /* PARALLEL_HASKELL -- whole file */
