@@ -97,9 +97,6 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
   int size;
   int destinationPE = 0;
 
-  // TODO should be checked in configure! (compile time constant)
-  ASSERT(sizeof(StgWord) == sizeof(long));
-
   ASSERT(!(isNoPort(dataBuffer->sender)));
   ASSERT(!(isNoPort(dataBuffer->receiver)));
   
@@ -121,12 +118,12 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
 			  dataBuffer->receiver.id));
 
   if (dataBuffer->size != 0) {
-    size = sizeof(rtsPackBuffer)/sizeof(long) + dataBuffer->size;
+    size = sizeof(rtsPackBuffer) + sizeof(StgWord)*dataBuffer->size;
   } else {
-    size = sizeof(rtsPackBuffer)/sizeof(long);
+    size = sizeof(rtsPackBuffer);
   }
 
-  if (MP_send(destinationPE, tag, (long*) dataBuffer, size)) {
+  if (MP_send(destinationPE, tag, (StgWord8*) dataBuffer, size)) {
     
     // edentrace: emit event sendMessage(tag,dataBuffer)
     traceSendMessageEvent(tag,dataBuffer);

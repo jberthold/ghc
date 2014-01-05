@@ -174,7 +174,7 @@ rtsBool MP_sync(void) {
  * count), then quit from MPI.
  */
 rtsBool MP_quit(int isError) {
-  long data[2];
+  StgWord data[2];
   MPI_Request sysRequest2;
 
   data[0] = PP_FINISH;
@@ -191,13 +191,13 @@ rtsBool MP_quit(int isError) {
     for (i=2; i<=(int)nPEs; i++){
       // synchronous send operation in order 2..nPEs ... might slow down. 
       MPI_Isend(&pingMessage, 1, MPI_INT, i-1, PP_FINISH, sysComm, &sysRequest2);  
-      MPI_Send(data,2,MPI_LONG,i-1, PP_FINISH, MPI_COMM_WORLD);
+      MPI_Send(data,2*sizeof(StgWord),MPI_BYTE,i-1, PP_FINISH, MPI_COMM_WORLD);
       MPI_Wait(&sysRequest2, MPI_STATUS_IGNORE);
     }
 
     // receive answers from all children (just counting)
     while (finishRecvd < mpiWorldSize-1) {
-      MPI_Recv(data, 2, MPI_LONG, MPI_ANY_SOURCE, PP_FINISH, 
+      MPI_Recv(data, 2*sizeof(StgWord), MPI_BYTE, MPI_ANY_SOURCE, PP_FINISH,
                MPI_COMM_WORLD, &status);
       ASSERT(status.MPI_TAG == PP_FINISH);
       // and receive corresponding sysComm ping:
@@ -216,12 +216,12 @@ rtsBool MP_quit(int isError) {
                             isError));
     // send FINISH to rank 0
     MPI_Isend(&pingMessage, 1, MPI_INT, 0, PP_FINISH, sysComm, &sysRequest2);
-    MPI_Send(data, 2, MPI_LONG, 0, PP_FINISH, MPI_COMM_WORLD);
+    MPI_Send(data, 2*sizeof(StgWord), MPI_BYTE, 0, PP_FINISH, MPI_COMM_WORLD);
     // can omit: MPI_Wait(&sysRequest2, MPI_STATUS_IGNORE);
 
     // if non-main PE terminates first, await answer
     if (finishRecvd < 1) {
-      MPI_Recv(data, 2, MPI_LONG, 0, PP_FINISH, 
+      MPI_Recv(data, 2*sizeof(StgWord), MPI_BYTE, 0, PP_FINISH,
                MPI_COMM_WORLD, MPI_STATUS_IGNORE);
       MPI_Recv(&pingMessage, 1, MPI_INT, 0, PP_FINISH, 
                sysComm, MPI_STATUS_IGNORE);
@@ -251,9 +251,8 @@ rtsBool MP_quit(int isError) {
       
     // receive whatever is out there...
     while (MP_probe()) {
-      MPI_Recv(voidbuffer, DATASPACEWORDS, MPI_LONG, 
-	       MPI_ANY_SOURCE, MPI_ANY_TAG, 
-	       MPI_COMM_WORLD, &status);
+      MPI_Recv(voidbuffer, DATASPACEWORDS * sizeof(StgWord), MPI_BYTE,
+	       MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
       if (ISSYSCODE(status.MPI_TAG)) 
         MPI_Recv(voidbuffer, 1, MPI_INT, 
                  MPI_ANY_SOURCE, MPI_ANY_TAG, 
@@ -262,9 +261,8 @@ rtsBool MP_quit(int isError) {
     MPI_Barrier(MPI_COMM_WORLD);
     // all in sync (noone sends further messages), receive rest
     while (MP_probe()) { 
-      MPI_Recv(voidbuffer, DATASPACEWORDS, MPI_LONG, 
-	       MPI_ANY_SOURCE, MPI_ANY_TAG, 
-	       MPI_COMM_WORLD, &status);
+      MPI_Recv(voidbuffer, DATASPACEWORDS * sizeof(StgWord), MPI_BYTE,
+	       MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
       if (ISSYSCODE(status.MPI_TAG)) 
         MPI_Recv(voidbuffer, 1, MPI_INT, 
                  MPI_ANY_SOURCE, MPI_ANY_TAG, 
@@ -288,9 +286,7 @@ rtsBool MP_quit(int isError) {
   return rtsTrue;
 }
 
-/* Dummies, TODO
- */
-rtsBool MP_send(int node, OpCode tag, long *data, int length){
+rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
   /* MPI normally uses blocking send operations (MPI_*send). When
    * using nonblocking operations (MPI_I*send), dataspace must remain
    * untouched until the message has been delivered (MPI_Wait)!
@@ -307,8 +303,8 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
   int hasFreeSpace;
   //MPI_Status* status;
 
-  StgPtr sendPos; // used for pointer arithmetics, so not void*. Assuming
-                  // sizeof(StgPtr)==sizeof(long) (see includes/stg/Types.h)
+  StgPtr sendPos; // used for pointer arithmetics, based on assumption that
+                  // sizeof(void*)==sizeof(StgWord) (see includes/stg/Types.h)
 
   ASSERT(node > 0 && (nat)node <= nPEs);
 
@@ -343,13 +339,13 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
   //calculate offset in mpiMsgBuffer
   // using ptr. arithmetics and void* size (see includes/stg/Types.h)
   sendPos = ((StgPtr)mpiMsgBuffer) + sendIndex * DATASPACEWORDS;
-  memcpy((void*)sendPos, data, length * sizeof(StgWord));
+  memcpy((void*)sendPos, data, length);
 
   if (ISSYSCODE(tag)){  //case system message (workaroud: send it on both communicators, because there is no receive on two comunicators.)
       MPI_Isend(&pingMessage, 1, MPI_INT, node, tag, 
             sysComm, &sysRequest);    
   }
-  MPI_Isend(sendPos, length, MPI_LONG, node, tag, 
+  MPI_Isend(sendPos, length, MPI_BYTE, node, tag, 
             MPI_COMM_WORLD, &(requests[sendIndex]));
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("Done sending message to PE %d\n", node+1));
@@ -359,7 +355,7 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
 /* - a blocking receive operation
    where system messages from main node have priority! */
 
-int MP_recv(int maxlength, long *destination,
+int MP_recv(int maxlength, StgWord8 *destination,
 	    OpCode *retcode, nat *sender) {
   /* MPI: Use MPI_Probe to get size, sender and code; check maxlength;
    *      receive required data size (must be known when receiving in
@@ -397,10 +393,10 @@ int MP_recv(int maxlength, long *destination,
 
   // get and check msg. size
   // size = status.st_length;
-  MPI_Get_count(&status, MPI_LONG, &size);
+  MPI_Get_count(&status, MPI_BYTE, &size);
   if (maxlength < size) 
     barf("wrong MPI message length (%d, too big)!!!", size);
-  MPI_Recv(destination, size, MPI_LONG, source, code, MPI_COMM_WORLD, &status);
+  MPI_Recv(destination, size, MPI_BYTE, source, code, MPI_COMM_WORLD, &status);
 
   *retcode = status.MPI_TAG;
   *sender  = 1+status.MPI_SOURCE;

@@ -712,7 +712,7 @@ static void processMessages(Capability *cap) {
     // using raw MP interface... And we unpack at most the maximum
     // size (MPSystem will determine and unpack the real size).
     MP_recv(sizeof(StgWord)*DATASPACEWORDS,
-	    (long*) recvBuffer, &opcode, &pe);
+	    (StgWord8*) recvBuffer, &opcode, &pe);
 	
     ASSERT(pe <= nPEs && pe > 0);
     ASSERT(ISOPCODE(opcode));

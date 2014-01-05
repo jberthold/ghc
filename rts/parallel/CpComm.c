@@ -128,8 +128,8 @@ static int cpw_shm_create(void);
 
 static void cpw_shm_check_errors(void);
 
-static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, long *data);
-static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data);
+static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, StgWord8 *data);
+static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, int *length, StgWord8 *data);
 static cpw_shm_slot_t* cpw_shm_acquire_slot(void);
 
 
@@ -139,9 +139,10 @@ static int cpw_shm_probe_sys(void);
 static int cpw_shm_free_pending_msg(void);
 static int cpw_shm_close(cpw_shm_t *shm);
 
+#ifdef DEBUG
 static void cpw_shm_debug_info(cpw_shm_t *shm);
-
-static int cpw_self_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data);
+#endif
+static int cpw_self_recv_msg(nat *fromPE, OpCode *tag, int *length, StgWord8 *data);
 static int cpw_self_probe(void);
 static int cpw_self_probe_sys(void);
 
@@ -208,8 +209,21 @@ cpw_sem_t  *w_sems, *r_sems;     /* synchronize msg queues */
  * Returns: Bool: success or failure
  */
 rtsBool MP_start(int* argc, char** argv) {
-  IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MP_Start: Starting CopyWay system... :)\n"));
+
+  /* first argument is number of PEs
+     (handled by startup script in compiler/main/DriverPipeline.hs */
+  if (*argc < 2) {
+    debugBelch("Need argument to specify number of PEs");
+    exit(EXIT_FAILURE);
+  }
+  ASSERT(argv && argv[1]);
+
+  // start in debug mode if negative number (or "-0")
+  if (argv[1][0] == '-') {
+    RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
+    IF_PAR_DEBUG(mpcomm,
+		 debugBelch("CP Way debug mode! Starting\n"));
+  }
 
   /* HACK:
      RtsFlags are parsed between calls to MP_start() and MP_sync(),
@@ -219,9 +233,6 @@ rtsBool MP_start(int* argc, char** argv) {
   */
   parse_rts_flags(argc,argv);
 
-  /* first argument is number of PEs
-     (handled by startup script in compiler/main/DriverPipeline.hs */
-  ASSERT(argv && argv[1]);
   nPEs = (nat)atoi(argv[1]);
   if (nPEs == (nat)0)
     nPEs = 1;
@@ -315,13 +326,16 @@ rtsBool MP_quit(int isError){
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch(" MP_quit()\n"));
 
-  long data[1] = {isError};
+  StgWord data[1] = {isError};
 
   if (IAmMainThread) {
     /* send FINISH to other PEs */
     int i;
     for (i=2; i<=(int)nPEs; i++) {
-      while (cpw_shm_send_msg(i, PP_FINISH, 1, data) != CPW_NOERROR);
+      while (cpw_shm_send_msg(i, PP_FINISH, sizeof(StgWord), (StgWord8*) data)
+             != CPW_NOERROR)
+        IF_PAR_DEBUG(mpcomm,
+                     debugBelch("sending FINISH failed, retry"));
     }
 
     /* wait for children to return */
@@ -339,16 +353,18 @@ rtsBool MP_quit(int isError){
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("child finishing (code %d),"
                             "sending FINISH", isError));
-    while (cpw_shm_send_msg(1,PP_FINISH, 1, data) != CPW_NOERROR)
+    while (cpw_shm_send_msg(1,PP_FINISH, sizeof(StgWord), (StgWord8*) data)
+           != CPW_NOERROR)
       IF_PAR_DEBUG(mpcomm,
                    debugBelch("sending FINISH failed, retry"));
     /* child must stay alive until answer arrives if error shutdown */
     if (isError != 0) {
       nat sender;
       int length;
+      StgWord8 space[DATASPACEWORDS * sizeof(StgWord)];
       OpCode code = PP_READY; // something != FINISH
       while (code != PP_FINISH)
-        cpw_shm_recv_msg(&sender, &code, &length, data);
+        cpw_shm_recv_msg(&sender, &code, &length, space);
       IF_PAR_DEBUG(mpcomm,
             debugBelch("child received reply, shutting down (error case)"));
     }
@@ -411,12 +427,12 @@ Needed functionality: */
  * Parameters:
  *   IN node     -- destination node, number between 1 and nPEs
  *   IN tag      -- message tag
- *   IN data     -- array of long values to send out
- *   IN length   -- length of data array. Allowed to be zero (no data).
+ *   IN data     -- array of bytes (unsigned char) to send out
+ *   IN length   -- length of array in bytes. Allowed to be zero (no data).
  * Returns:
  *   rtsBool: success or failure inside comm. subsystem
  */
-rtsBool MP_send(int node, OpCode tag, long *data, int length){
+rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("MP_send(%s)\n", getOpName(tag)));
 
@@ -424,7 +440,7 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
   cpw_shm_check_errors();
 
   /* check length */
-  ASSERT(((uint)length) <= DATASPACEWORDS);
+  ASSERT(((uint)length) <= DATASPACEWORDS * sizeof(StgWord));
   
   /* send */
   switch (cpw_shm_send_msg(node, tag, length, data)) {
@@ -440,22 +456,22 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
  *   where system messages from main node have priority! 
  * Effect:
  *   A message is received from a peer. 
- *   Data stored in destination (maximum space given), and 
- *   opcode and sender fields are set.
+ *   Data is received as bytes (unsigned char) and stored in destination
+ *   (capacity given in bytes), and opcode and sender fields are set.
  *   If no messages were waiting, the method blocks until a 
  *   message is available. If too much data arrives (> maxlength),
  *   the program stops with an error (resp. of higher levels).
  * 
  * Parameters: 
- *   IN  maxlength   -- maximum data length (security only)
- *   IN  destination -- where to unpack data (all of type long)
+ *   IN  maxlength   -- data capacity (in bytes)
+ *   IN  destination -- where to unpack data (bytes, StgWord8)
  *   OUT code   -- OpCode of message (aka message tag)
  *   OUT sender -- originator of this message 
  * Returns: 
  *   int: length of data received with message
  */
-int MP_recv(STG_UNUSED int maxlength, long *destination, // IN
-	    OpCode *code, nat *sender){       // OUT
+int MP_recv(STG_UNUSED int maxlength, StgWord8 *destination, // IN
+	    OpCode *code, nat *sender){                      // OUT
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("MP_recv()\n"));
 
@@ -631,6 +647,7 @@ static int cpw_sem_close(cpw_sem_t *sem) {
  * Shared Memory *
  *===============*/
 
+#ifdef DEBUG
 /* print debug information for shared memory */
 static void cpw_shm_debug_info(cpw_shm_t *shm) {	
   debugBelch("#############################\n"
@@ -745,6 +762,7 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
 	       shm->msgs_write[i],shm->msgs_write[i]->is_hole);
   }
 }
+#endif
 
 /* create and initialize shared memory */
 static int cpw_shm_create()
@@ -766,11 +784,12 @@ static int cpw_shm_create()
     + ALIGNMENT_VOID_P + SIZEOF_VOID_P * (int)nPEs /* root nodes for msg lists */
     + SIZEOF_VOID_P * (int)nPEs /* root nodes for msg lists */
     + sizeof(cpw_msg_t) + sizeof(cpw_msg_t) * num_msgs /* structure for msgs */
+    + sizeof(StgWord) * DATASPACEWORDS * num_msgs /* message data */
 #if SIZEOF_VOID_P == 8
-    + ALIGNMENT_WORD64 + SIZEOF_WORD64 * DATASPACEWORDS * num_msgs; /* message data */
+    + ALIGNMENT_WORD64; /* alignment for msg data */
 #else 
 #if SIZEOF_VOID_P == 4
-  + ALIGNMENT_WORD32 + SIZEOF_WORD32 * DATASPACEWORDS * num_msgs; /* message data */
+    + ALIGNMENT_WORD32; /* alignment for msg data */
 #else
 #error GHC untested on this architecture: sizeof(void *) != 4 or 8
 #endif
@@ -925,9 +944,9 @@ static int cpw_shm_create()
 }
 
 /* try to send a message */
-static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, long *data) {	
+static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, StgWord8 *data) {
   cpw_shm_slot_t *free_slot = NULL;
-  
+
   /* can we get a free slot? */
   if (cpw_sem_trywait(&can_alloc) == CPW_SEM_WOULD_LOCK) {
 		
@@ -954,7 +973,7 @@ static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, long *data) {
   free_slot->addr->sender = thisPE;
   free_slot->addr->tag    = tag;
   free_slot->addr->length = length;
-  memcpy(free_slot->addr->data, data, sizeof(long) * length);
+  memcpy(free_slot->addr->data, data, length);
 
 
   IF_PAR_DEBUG(mpcomm,
@@ -981,7 +1000,8 @@ static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, long *data) {
 }
 
 /* try to receive a message */
-static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data) {
+static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, 
+                            int *length, StgWord8 *data) {
   int me = thisPE - 1;
 	
   /* wait until msgs there */
@@ -995,7 +1015,7 @@ static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data) {
   *fromPE = used_slot->addr->sender;
   *tag    = used_slot->addr->tag;
   *length = used_slot->addr->length;
-  memcpy(data, used_slot->addr->data, sizeof(long) * used_slot->addr->length);
+  memcpy(data, used_slot->addr->data, used_slot->addr->length);
 
 	
   IF_PAR_DEBUG(mpcomm,
@@ -1035,7 +1055,7 @@ static cpw_shm_slot_t* cpw_shm_acquire_slot() {
   new_msg->sender = used_slot->addr->sender;
   new_msg->tag    = used_slot->addr->tag;
   new_msg->length = used_slot->addr->length;
-  memcpy(new_data, used_slot->addr->data, sizeof(long) * used_slot->addr->length);
+  memcpy(new_data, used_slot->addr->data, used_slot->addr->length);
 
   if (stored_msgs == NULL) {
     stored_msgs = new_node;
@@ -1051,16 +1071,16 @@ static cpw_shm_slot_t* cpw_shm_acquire_slot() {
   return used_slot;
 }
 
-static int cpw_self_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data) {
+static int cpw_self_recv_msg(nat *fromPE, OpCode *tag,
+                             int *length, StgWord8 *data) {
   cpw_shm_slot_t *used_slot = stored_msgs;
   stored_msgs = used_slot->next;
- 
 
   /* copy data */
   *fromPE = used_slot->addr->sender;
   *tag    = used_slot->addr->tag;
   *length = used_slot->addr->length;
-  memcpy(data, used_slot->addr->data, sizeof(long) * used_slot->addr->length);
+  memcpy(data, used_slot->addr->data, used_slot->addr->length);
 	
   stgFree(used_slot->addr->data);
   stgFree(used_slot->addr);
@@ -1310,6 +1330,8 @@ static void parse_rts_flags(int* argc, char** argv) {
 
 #else  /* not win32 */
 
+#error "Windows CP Way untested with StgWord8 data pointers"
+
 #include <Windows.h>
 #include <string.h>    /* strlen(), strcat(), ... */
 #include <stdio.h>
@@ -1433,8 +1455,8 @@ static int cpw_shm_init(void);
 
 static void cpw_shm_check_errors(void);
 
-static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, long *data);
-static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data);
+static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, StgWord8 *data);
+static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, int *length, StgWord8 *data);
 static size_t cpw_shm_acquire_slot(void);
 
 
@@ -1446,7 +1468,7 @@ static int cpw_shm_close(cpw_shm_t *shm);
 
 static void cpw_shm_debug_info(cpw_shm_t *shm);
 
-static int cpw_self_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data);
+static int cpw_self_recv_msg(nat *fromPE, OpCode *tag, int *length, StgWord8 *data);
 static int cpw_self_probe(void);
 static int cpw_self_probe_sys(void);
 
@@ -1624,7 +1646,8 @@ rtsBool MP_sync(void){
 
 rtsBool MP_quit(int isError){
 
-    long data[1] = {isError};
+    StgWord data[1] = {isError};
+    StgWord8 space[DATASPACEWORDS*sizeof(StgWord)];
     nat sender;
     int length;
     OpCode code;
@@ -1636,14 +1659,17 @@ rtsBool MP_quit(int isError){
     /* send FINISH to other PEs */
     int i;
     for (i=2; i<=(int)nPEs; i++) {
-      while (cpw_shm_send_msg(i, PP_FINISH, 1, data) != CPW_NOERROR);
+      while (cpw_shm_send_msg(i, PP_FINISH, sizeof(StgWord), (StgWord8*) data) 
+             != CPW_NOERROR)
+        IF_PAR_DEBUG(mpcomm,
+                     debugBelch("sending FINISH failed, retry"));
     }
 
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("awaiting FINISH replies from children (have %d)",
                             finishRecvd));
     while ((nat) finishRecvd != nPEs-1) {
-        cpw_shm_recv_msg(&sender, &code, &length, data);
+        cpw_shm_recv_msg(&sender, &code, &length, space);
         if (code == PP_FINISH) {
           finishRecvd++;
           IF_PAR_DEBUG(mpcomm,
@@ -1658,14 +1684,15 @@ rtsBool MP_quit(int isError){
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("child finishing (code %d),"
                             "sending FINISH", isError));
-    while (cpw_shm_send_msg(1,PP_FINISH, 1, data) != CPW_NOERROR)
+    while (cpw_shm_send_msg(1,PP_FINISH, sizeof(StgWord), (StgWord8*) data)
+           != CPW_NOERROR)
       IF_PAR_DEBUG(mpcomm,
                    debugBelch("sending FINISH failed, retry"));
     /* child must stay alive until answer arrives if error shutdown */
     if (isError != 0) {
       code = PP_READY; // something != FINISH
       while (code != PP_FINISH)
-        cpw_shm_recv_msg(&sender, &code, &length, data);
+        cpw_shm_recv_msg(&sender, &code, &length, space);
       IF_PAR_DEBUG(mpcomm,
             debugBelch("child received reply, shutting down (error case)"));
     }
@@ -1709,7 +1736,6 @@ rtsBool MP_quit(int isError){
   return rtsTrue;
 }
 
-
 /**************************************
  * Data Communication between nodes:  */
 
@@ -1729,12 +1755,12 @@ Needed functionality: */
  * Parameters:
  *   IN node     -- destination node, number between 1 and nPEs
  *   IN tag      -- message tag
- *   IN data     -- array of long values to send out
- *   IN length   -- length of data array. Allowed to be zero (no data).
+ *   IN data     -- array of bytes (StgWord8) to send out
+ *   IN length   -- data length in bytes. Allowed to be zero (no data).
  * Returns:
  *   rtsBool: success or failure inside comm. subsystem
  */
-rtsBool MP_send(int node, OpCode tag, long *data, int length){
+rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_send()"));
 
@@ -1765,14 +1791,14 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length){
  *   the program stops with an error (resp. of higher levels).
  * 
  * Parameters: 
- *   IN  maxlength   -- maximum data length (security only)
- *   IN  destination -- where to unpack data (all of type long)
+ *   IN  maxlength   -- maximum data length (in bytes)
+ *   IN  destination -- where to unpack data (byte array)
  *   OUT code   -- OpCode of message (aka message tag)
  *   OUT sender -- originator of this message 
  * Returns: 
  *   int: length of data received with message
  */
-int MP_recv(STG_UNUSED int maxlength, long *destination, // IN
+int MP_recv(STG_UNUSED int maxlength, StgWord8 *destination, // IN
 	    OpCode *code, nat *sender){       // OUT
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_recv()"));
@@ -2032,15 +2058,7 @@ static int cpw_shm_create()
     + sizeof(size_t) * (int)nPEs /* root nodes for r-msg lists */
     + sizeof(size_t) * (int)nPEs /* root nodes for w-msg lists */
     + sizeof(cpw_msg_off_t) * num_msgs /* structure for msgs */
-#if SIZEOF_VOID_P == 8
-    + SIZEOF_WORD64 * DATASPACEWORDS * num_msgs; /* message data */
-#else 
-#if SIZEOF_VOID_P == 4
-  + SIZEOF_WORD32 * DATASPACEWORDS * num_msgs; /* message data */
-#else
-#error GHC untested on this architecture: sizeof(void *) != 4 or 8
-#endif
-#endif
+    + sizeof(StgWord) * DATASPACEWORDS * num_msgs; /* message data */
 
   /* create shared memory region */
   shared_memory.hShm = CreateFileMapping(INVALID_HANDLE_VALUE, 
@@ -2176,17 +2194,7 @@ static int cpw_shm_create()
     cpw_shm_slot_off_t *next_addr = (cpw_shm_slot_off_t *) ((char*)shared_memory.base + addr_nodes_start + next_addr_off);
     size_t next_msg_off =  sizeof(cpw_msg_off_t) * i;
     cpw_msg_off_t *next_msg = (cpw_msg_off_t *) ((char*)shared_memory.base + msg_nodes_start + next_msg_off);
-    size_t next_data_off = 
-#if SIZEOF_VOID_P == 8
-      SIZEOF_WORD64 * DATASPACEWORDS * i; /* message data */
-#else 
-#if SIZEOF_VOID_P == 4
-      SIZEOF_WORD32 * DATASPACEWORDS * i; /* message data */
-#else
-#error GHC untested on this architecture: sizeof(void *) != 4 or 8
-#endif
-#endif
-
+    size_t next_data_off = sizeof(StgWord) * DATASPACEWORDS * i; // msg data
 		
     next_msg->data     = next_data_off;
     next_addr->addr    = next_msg_off;
@@ -2230,15 +2238,7 @@ static int cpw_shm_init()
     + sizeof(size_t) * (int)nPEs /* root nodes for r-msg lists */
     + sizeof(size_t) * (int)nPEs /* root nodes for w-msg lists */
     + sizeof(cpw_msg_off_t) * num_msgs /* structure for msgs */
-#if SIZEOF_VOID_P == 8
-    + SIZEOF_WORD64 * DATASPACEWORDS * num_msgs; /* message data */
-#else 
-#if SIZEOF_VOID_P == 4
-  + SIZEOF_WORD32 * DATASPACEWORDS * num_msgs; /* message data */
-#else
-#error GHC untested on this architecture: sizeof(void *) != 4 or 8
-#endif
-#endif
+    + sizeof(StgWord) * DATASPACEWORDS * num_msgs; /* message data */
 
   /* map shm object in own address space */
   shared_memory.base = MapViewOfFile(shared_memory.hShm, FILE_MAP_WRITE, 0, 0, 0);
@@ -2349,7 +2349,8 @@ static int cpw_shm_init()
 }
 
 /* try to send a message */
-static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, long *data) {	
+static int cpw_shm_send_msg(nat toPE, OpCode tag, 
+                            int length, StgWord8 *data) {
   size_t free_slot_off = 0;
   //printf("sending msg\n");
   /* can we get a free slot? */
@@ -2386,8 +2387,8 @@ static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, long *data) {
   msg->sender = thisPE;
   msg->tag    = tag;
   msg->length = length;
-  memcpy((char*)shared_memory.base + shared_memory.data_start + msg->data, data, sizeof(long) * length);
-
+  memcpy((char*)shared_memory.base + shared_memory.data_start + msg->data,
+         data, length);
 
   //printf(" sending msg to %i, tag %i\n", toPE,tag);
 	
@@ -2413,7 +2414,8 @@ static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, long *data) {
 }
 
 /* try to receive a message */
-static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data) {
+static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, 
+                            int *length, StgWord8 *data) {
   int me = thisPE - 1;
 	
   /* wait until msgs there */
@@ -2429,8 +2431,8 @@ static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data) {
   *fromPE = msg->sender;
   *tag    = msg->tag;
   *length = msg->length;
-  memcpy(data, (char*)shared_memory.base + shared_memory.data_start + msg->data, sizeof(long) * msg->length);
-
+  memcpy(data, (char*)shared_memory.base + shared_memory.data_start 
+                      + msg->data, msg->length);
 	
   //printf(" got a message from %i, tag = %i\n", *fromPE, *tag);
 
@@ -2470,7 +2472,8 @@ static size_t cpw_shm_acquire_slot() {
   new_msg->sender = msg->sender;
   new_msg->tag    = msg->tag;
   new_msg->length = msg->length;
-  memcpy(new_data, (char*)shared_memory.base + shared_memory.data_start + msg->data, sizeof(long) * msg->length);
+  memcpy(new_data, (char*)shared_memory.base + shared_memory.data_start 
+                          + msg->data, msg->length);
 
   if (stored_msgs == NULL) {
     stored_msgs = new_node;
@@ -2486,7 +2489,8 @@ static size_t cpw_shm_acquire_slot() {
   return used_slot_off;
 }
 
-static int cpw_self_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data) {
+static int cpw_self_recv_msg(nat *fromPE, OpCode *tag,
+                             int *length, StgWord8 *data) {
   cpw_shm_slot_t *used_slot = stored_msgs;
   stored_msgs = used_slot->next;
  
@@ -2495,7 +2499,7 @@ static int cpw_self_recv_msg(nat *fromPE, OpCode *tag, int *length, long *data) 
   *fromPE = used_slot->addr->sender;
   *tag    = used_slot->addr->tag;
   *length = used_slot->addr->length;
-  memcpy(data, used_slot->addr->data, sizeof(long) * used_slot->addr->length);
+  memcpy(data, used_slot->addr->data, used_slot->addr->length);
 	
   stgFree(used_slot->addr->data);
   stgFree(used_slot->addr);

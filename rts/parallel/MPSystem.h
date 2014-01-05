@@ -86,38 +86,41 @@ Needed functionality: */
  * tag. Length 0 is allowed and leads to a message containing no payload data.
  * The send action may fail, in which case rtsFalse is returned, and the 
  * caller is expected to handle this situation.
+ * Data length should be given in bytes, data will be sent raw
+ * (unsigned char).
  *
  * Parameters:
  *   IN node     -- destination node, number between 1 and nPEs
  *   IN tag      -- message tag
- *   IN data     -- array of long values to send out
+ *   IN data     -- array of raw data (unsigned char values) to send out
  *   IN length   -- length of data array. Allowed to be zero (no data).
  * Returns:
  *   rtsBool: success or failure inside comm. subsystem
  */
 
-rtsBool MP_send(int node, OpCode tag, long *data, int length);
+rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length);
 
 /* - a blocking receive operation
  *   where system messages from main node have priority! 
  * Effect:
  *   A message is received from a peer. 
- *   Data stored in destination (maximum space given), and 
- *   opcode and sender fields are set.
+ *   Data are received as unsigned char values and stored in
+ *   destination (capacity given in Bytes), and opcode and sender
+ *   fields set.
  *   If no messages were waiting, the method blocks until a 
  *   message is available. If too much data arrives (> maxlength),
  *   the program stops with an error (resp. of higher levels).
  * 
  * Parameters: 
- *   IN  maxlength   -- maximum data length (security only)
- *   IN  destination -- where to unpack data (all of type long)
+ *   IN  maxlength   -- maximum data length (in bytes)
+ *   IN  destination -- where to unpack data (unsigned char array)
  *   OUT code   -- OpCode of message (aka message tag)
  *   OUT sender -- originator of this message 
  * Returns: 
- *   int: length of data received with message
+ *   int: amount of data (in bytes) received with message
  */
-int MP_recv(int maxlength, long *destination, // IN
-	     OpCode *code, nat *sender);       // OUT
+int MP_recv(int maxlength, StgWord8 *destination, // IN
+	     OpCode *code, nat *sender);          // OUT
 
 /* - a non-blocking probe operation 
  * (unspecified sender, no receive buffers any more) 

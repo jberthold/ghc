@@ -24,6 +24,7 @@ send data format is always PvmDataRaw, containing longs
 #include "PEOpCodes.h" // message codes only
 
 #warning CHECK THE PVM SOLUTION FOR PORTABILITY! (LINUXes/MAC)
+#include <string.h> // for strdup() function
 #include <libgen.h> // for basename() function
 
 // pvm-specific error control:
@@ -126,7 +127,7 @@ static void MPMsgHandle(OpCode code, int buffer) {
 
   // for PE failure notification
   nat whofailed = 1;
-  long t;
+  int t;
 
   ASSERT(ISMPCODE(code)); // we only want to see internal messages...
   IF_PAR_DEBUG(mpcomm, 
@@ -146,13 +147,13 @@ static void MPMsgHandle(OpCode code, int buffer) {
   case PP_FAIL: 
     // one of the PEs has failed
     ASSERT(IAmMainThread);
-    pvm_upklong(&t,1,1);
+    pvm_upkint(&t,1,1);
     // t is PVM-ID (sent by pvm-demon), we need the logical PE number
     // in [2..nPEs]
     while (whofailed < nPEs && allPEs[whofailed] != t) {
       whofailed++;
     }
-    debugBelch("System failure on node %d (%lx).\n", whofailed+1, t);
+    debugBelch("System failure on node %d (%x).\n", whofailed+1, (nat)t);
     // delete from PE address table (avoid errors in shutdown). 
     if (whofailed < nPEs) { // found the terminated PE
       allPEs[whofailed] = 0; 
@@ -431,7 +432,7 @@ rtsBool MP_sync(void) {
  * Returns: Bool: success (1) or failure (0)
  */
 rtsBool MP_quit(int isError) {
-  long errval;
+  int errval;
 
   IF_PAR_DEBUG(mpcomm, 
 	       debugBelch("MP_quit: leaving system (exit code %d).\n", isError));
@@ -440,9 +441,9 @@ rtsBool MP_quit(int isError) {
   pvm_initsend(PvmDataRaw);
   // must repeat OpCode as a long int inside message data (common format)
   errval = PP_FINISH;
-  pvm_pklong(&errval,1,1);
+  pvm_pkint(&errval,1,1);
   errval = isError;
-  pvm_pklong(&errval,1,1);
+  pvm_pkint(&errval,1,1);
 
   if (!IAmMainThread) {
     IF_PAR_DEBUG(mpcomm,
@@ -495,16 +496,16 @@ rtsBool MP_quit(int isError) {
 
     // main node should wait for all others to terminate
     while (finishRecvd < (int) nPEs-1){
-      long errorcode;
+      int errorcode;
       int buffer, task, tag, bytes;
 
       buffer = pvm_recv(ANY_TASK, PP_FINISH);
       pvm_bufinfo(buffer, &bytes, &tag, &task);
-      pvm_upklong(&errorcode,1,1); // consume PP_FINISH field
+      pvm_upkint(&errorcode,1,1); // consume PP_FINISH field
       ASSERT(errorcode == PP_FINISH);
-      pvm_upklong(&errorcode,1,1);
+      pvm_upkint(&errorcode,1,1);
       IF_PAR_DEBUG(mpcomm,
-		   debugBelch("Received msg from task %x: Code %ld\n",
+		   debugBelch("Received msg from task %x: Code %d\n",
 			      task, errorcode));
       finishRecvd++;
     }
@@ -529,7 +530,7 @@ rtsBool MP_quit(int isError) {
 // note that any buffering of messages happens one level above!
 
 /* send operation directly using PVM */
-rtsBool MP_send(int node, OpCode tag, long *data, int length) {
+rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length) {
 
   ASSERT(node); // node > 0
   ASSERT(node <= (int) nPEs); // node is valid PE number
@@ -542,7 +543,7 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length) {
   pvm_initsend(PvmDataRaw);
   
   if (length > 0) {
-    pvm_pklong(data, length, 1);
+    pvm_pkbyte((char*) data, length, 1);
   }
   checkComms(pvm_send(allPEs[node-1],tag),
 	     "PVM:send failed");
@@ -551,7 +552,7 @@ rtsBool MP_send(int node, OpCode tag, long *data, int length) {
 
 /* - a blocking receive operation
    where system messages have priority! */
-int MP_recv(int maxlength, long *destination,
+int MP_recv(int maxlength, StgWord8 *destination,
 	    OpCode *retcode, nat *sender) {
   int bytes; // return value
   OpCode code; // internal use...
@@ -616,7 +617,7 @@ int MP_recv(int maxlength, long *destination,
   }
   if (!(*sender)) {
     // errorBelch: complain, but do not stop
-    errorBelch("MPSystem(PVM): unable to find ID of PE # %x, aborting.",
+    errorBelch("MPSystem(PVM): unable to find ID of PE # %x.",
 	       sendPE);
 #ifdef DEBUG
     stg_exit(EXIT_FAILURE);
@@ -628,12 +629,11 @@ int MP_recv(int maxlength, long *destination,
   }
 
   // unpack data, if enough space, abort if not
-  bytes = bytes / sizeof(long); // adjust bytes to longs
   if (bytes > maxlength) 
     // should never happen, higher levels send and expect at most maxlength bytes!
     barf("MPSystem(PVM): not enough space for packet (needed %d, have %d)!",
 	 bytes, maxlength);
-  pvm_upklong(destination, bytes, 1);
+  pvm_upkbyte((char*) destination, bytes, 1);
 
   if (*retcode == PP_FINISH) finishRecvd++; 
 
