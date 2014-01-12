@@ -223,6 +223,7 @@ rtsBool MP_start(int* argc, char** argv) {
     RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
     IF_PAR_DEBUG(mpcomm,
 		 debugBelch("CP Way debug mode! Starting\n"));
+    argv[1][0]='+';
   }
 
   /* HACK:
@@ -361,10 +362,10 @@ rtsBool MP_quit(int isError){
     if (isError != 0) {
       nat sender;
       int length;
-      StgWord8 space[DATASPACEWORDS * sizeof(StgWord)];
       OpCode code = PP_READY; // something != FINISH
       while (code != PP_FINISH)
-        cpw_shm_recv_msg(&sender, &code, &length, space);
+        cpw_shm_recv_msg(&sender, &code, &length, NULL);
+        /* destination NULL, so data is not copied */
       IF_PAR_DEBUG(mpcomm,
             debugBelch("child received reply, shutting down (error case)"));
     }
@@ -1000,6 +1001,7 @@ static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, StgWord8 *data) {
 }
 
 /* try to receive a message */
+/* if data == NULL, data are not copied (for error shutdown) */
 static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, 
                             int *length, StgWord8 *data) {
   int me = thisPE - 1;
@@ -1015,7 +1017,8 @@ static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag,
   *fromPE = used_slot->addr->sender;
   *tag    = used_slot->addr->tag;
   *length = used_slot->addr->length;
-  memcpy(data, used_slot->addr->data, used_slot->addr->length);
+  if (data != NULL)
+    memcpy(data, used_slot->addr->data, used_slot->addr->length);
 
 	
   IF_PAR_DEBUG(mpcomm,
@@ -1330,8 +1333,6 @@ static void parse_rts_flags(int* argc, char** argv) {
 
 #else  /* not win32 */
 
-#error "Windows CP Way untested with StgWord8 data pointers"
-
 #include <Windows.h>
 #include <string.h>    /* strlen(), strcat(), ... */
 #include <stdio.h>
@@ -1540,6 +1541,7 @@ rtsBool MP_start(int* argc, char** argv) {
     RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
     IF_PAR_DEBUG(mpcomm,
 		 debugBelch("CP Way debug mode! Starting\n"));
+    argv[1][0] = '+';
   }
 
   nPEs = (nat)atoi(argv[1]);
@@ -1615,7 +1617,7 @@ rtsBool MP_sync(void){
   }
   else {
     GetEnvironmentVariable("SHMHandle", buffer, 256);
-    sscanf(buffer, "%lu", (DWORD) &shared_memory.hShm);
+    sscanf(buffer, "%lu", (DWORD*) &shared_memory.hShm);
 
     if (cpw_shm_init() != CPW_NOERROR) {
       /* avoid calling back in here, this PE cannot send/receive msg.s */
@@ -1647,7 +1649,6 @@ rtsBool MP_sync(void){
 rtsBool MP_quit(int isError){
 
     StgWord data[1] = {isError};
-    StgWord8 space[DATASPACEWORDS*sizeof(StgWord)];
     nat sender;
     int length;
     OpCode code;
@@ -1669,7 +1670,8 @@ rtsBool MP_quit(int isError){
                  debugBelch("awaiting FINISH replies from children (have %d)",
                             finishRecvd));
     while ((nat) finishRecvd != nPEs-1) {
-        cpw_shm_recv_msg(&sender, &code, &length, space);
+        cpw_shm_recv_msg(&sender, &code, &length, NULL);
+	/* not actually receiving data, since destination is NULL */
         if (code == PP_FINISH) {
           finishRecvd++;
           IF_PAR_DEBUG(mpcomm,
@@ -1692,7 +1694,8 @@ rtsBool MP_quit(int isError){
     if (isError != 0) {
       code = PP_READY; // something != FINISH
       while (code != PP_FINISH)
-        cpw_shm_recv_msg(&sender, &code, &length, space);
+        cpw_shm_recv_msg(&sender, &code, &length, NULL);
+        /* destination NULL, so no data is received */
       IF_PAR_DEBUG(mpcomm,
             debugBelch("child received reply, shutting down (error case)"));
     }
@@ -1839,6 +1842,8 @@ rtsBool MP_probe(void) {
   /* check for errors */
   cpw_shm_check_errors();
 
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch(".."));
   if(cpw_shm_probe() || cpw_self_probe())
     return rtsTrue;
   else 
@@ -1953,13 +1958,13 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
              
              "      - hSync (@%p)\n"
              "      - hSync counter: %i\n"
-             "      - hSync mutex (@%p): %i\n"
-             "      - hSync wait (@%p): %i\n"
+             "      - hSync mutex (@%p): %p\n"
+             "      - hSync wait (@%p): %p\n"
              
-             "      - hCanAlloc (@%p): %i\n"
-             "      - hDoAlloc (@%p): %i\n"
-             "      - wSems[1] (@%p): %i\n"
-             "      - rSems[1] (@%p): %i\n"
+             "      - hCanAlloc (@%p): %p\n"
+             "      - hDoAlloc (@%p): %p\n"
+             "      - wSems[1] (@%p): %p\n"
+             "      - rSems[1] (@%p): %p\n"
 		 
 	     "      - free_slots (@%p): %i\n"
 	     "      - msgs_read@%p:\n"
@@ -2414,6 +2419,7 @@ static int cpw_shm_send_msg(nat toPE, OpCode tag,
 }
 
 /* try to receive a message */
+/* if data ptr is NULL, no data is copied (necessary for shutdown) */
 static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag, 
                             int *length, StgWord8 *data) {
   int me = thisPE - 1;
@@ -2431,8 +2437,9 @@ static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag,
   *fromPE = msg->sender;
   *tag    = msg->tag;
   *length = msg->length;
-  memcpy(data, (char*)shared_memory.base + shared_memory.data_start 
-                      + msg->data, msg->length);
+  if (data != NULL) /* only copy if a destination was given */
+    memcpy(data, (char*)shared_memory.base + shared_memory.data_start
+	                + msg->data, msg->length);
 	
   //printf(" got a message from %i, tag = %i\n", *fromPE, *tag);
 

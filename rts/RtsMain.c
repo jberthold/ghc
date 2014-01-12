@@ -57,8 +57,6 @@ static void real_main(void)
        to mainIO_closure representing the computation of the overall program;
        then enter the scheduler with this thread and off we go;
       
-       the same for GranSim (we have only one instance of this code)
-
        in a parallel setup, where we have many instances of this code
        running on different PEs, we should do this only for the main PE
        (IAmMainThread is set in startupHaskell) 
@@ -68,6 +66,10 @@ static void real_main(void)
 
 # if defined(DEBUG)
     if (RtsFlags.ParFlags.wait != 0) {
+#  if defined (mingw32_HOST_OS)
+      debugBelch("%s: wait loop during startup not supported in MinGW\n"
+		 , progargv[0]);
+#  else
     /* a wait loop to allow attachment of gdb to UNIX threads */
       char hostname[256];
       gethostname(hostname, sizeof(hostname));
@@ -78,6 +80,7 @@ static void real_main(void)
 	RtsFlags.ParFlags.wait--;
         sleep(1);
       }
+#  endif /* mingw */
     }
 # endif
 
