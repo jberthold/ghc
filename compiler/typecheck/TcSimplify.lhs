@@ -335,6 +335,7 @@ simplifyInfer _top_lvl apply_mr name_taus wanteds
        ; minimal_bound_ev_vars <- mapM TcM.newEvVar minimal_flat_preds
        ; let implic = Implic { ic_untch    = pushUntouchables untch
                              , ic_skols    = qtvs
+                             , ic_no_eqs   = False
                              , ic_fsks     = []  -- wanted_tansformed arose only from solveWanteds
                                                  -- hence no flatten-skolems (which come from givens)
                              , ic_given    = minimal_bound_ev_vars
@@ -728,30 +729,34 @@ solveImplication inerts
   = do { traceTcS "solveImplication {" (ppr imp)
 
          -- Solve the nested constraints
-         -- NB: 'inerts' has empty inert_fsks
-       ; (new_fsks, residual_wanted)
+       ; (no_given_eqs, new_fsks, residual_wanted)
             <- nestImplicTcS ev_binds untch inerts $
-               do { solveInteractGiven (mkGivenLoc info env) old_fsks givens
+               do { (no_eqs, new_fsks) <- solveInteractGiven (mkGivenLoc info env)
+                                                             old_fsks givens
+
                   ; residual_wanted <- solve_wanteds wanteds
                         -- solve_wanteds, *not* solve_wanteds_and_drop, because
                         -- we want to retain derived equalities so we can float
                         -- them out in floatEqualities
-                  ; more_fsks <- getFlattenSkols
-                  ; return (more_fsks ++ old_fsks, residual_wanted) }
+
+                  ; return (no_eqs, new_fsks, residual_wanted) }
 
        ; (floated_eqs, final_wanted)
-             <- floatEqualities (skols ++ new_fsks) givens residual_wanted
+             <- floatEqualities (skols ++ new_fsks) no_given_eqs residual_wanted
 
-       ; let res_implic | isEmptyWC final_wanted
-                        = emptyBag
+       ; let res_implic | isEmptyWC final_wanted && no_given_eqs
+                        = emptyBag  -- Reason for the no_given_eqs: we don't want to
+                                    -- lose the "inaccessible code" error message
                         | otherwise
                         = unitBag (imp { ic_fsks   = new_fsks
+                                       , ic_no_eqs = no_given_eqs
                                        , ic_wanted = dropDerivedWC final_wanted
                                        , ic_insol  = insolubleWC final_wanted })
 
        ; evbinds <- getTcEvBindsMap
        ; traceTcS "solveImplication end }" $ vcat
-             [ text "floated_eqs =" <+> ppr floated_eqs
+             [ text "no_given_eqs =" <+> ppr no_given_eqs
+             , text "floated_eqs =" <+> ppr floated_eqs
              , text "new_fsks =" <+> ppr new_fsks
              , text "res_implic =" <+> ppr res_implic
              , text "implication evbinds = " <+> ppr (evBindMapBinds evbinds) ]
@@ -798,14 +803,14 @@ Consider floated_eqs (all wanted or derived):
     simpl_loop.  So we iterate if there any of these
 
 \begin{code}
-floatEqualities :: [TcTyVar] -> [EvVar] -> WantedConstraints
+floatEqualities :: [TcTyVar] -> Bool -> WantedConstraints
                 -> TcS (Cts, WantedConstraints)
--- Post: The returned FlavoredEvVar's are only Wanted or Derived
+-- Post: The returned floated constraints (Cts) are only Wanted or Derived
 -- and come from the input wanted ev vars or deriveds
 -- Also performs some unifications, adding to monadically-carried ty_binds
 -- These will be used when processing floated_eqs later
-floatEqualities skols can_given wanteds@(WC { wc_flat = flats })
-  | hasEqualities can_given
+floatEqualities skols no_given_eqs wanteds@(WC { wc_flat = flats })
+  | not no_given_eqs  -- There are some given equalities, so don't float
   = return (emptyBag, wanteds)   -- Note [Float Equalities out of Implications]
   | otherwise
   = do { let (float_eqs, remaining_flats) = partitionBag is_floatable flats
@@ -889,14 +894,13 @@ approximateWC wc
 
     float_implic :: TcTyVarSet -> Implication -> Cts
     float_implic trapping_tvs imp
-      | hasEqualities (ic_given imp)  -- Don't float out of equalities
-      = emptyCts                      -- cf floatEqualities
-      | otherwise                     -- See Note [ApproximateWC]
+      | ic_no_eqs imp                 -- No equalities, so float
       = float_wc new_trapping_tvs (ic_wanted imp)
+      | otherwise                     -- Don't float out of equalities
+      = emptyCts                      -- See Note [ApproximateWC]
       where
         new_trapping_tvs = trapping_tvs `extendVarSetList` ic_skols imp
                                         `extendVarSetList` ic_fsks imp
-
     do_bag :: (a -> Bag c) -> Bag a -> Bag c
     do_bag f = foldrBag (unionBags.f) emptyBag
 \end{code}
@@ -1030,12 +1034,58 @@ But if we just leave them inside the implications we unify alpha := beta and
 solve everything.
 
 Principle:
-    We do not want to float equalities out which may need the given *evidence*
-    to become soluble.
+    We do not want to float equalities out which may
+    need the given *evidence* to become soluble.
 
 Consequence: classes with functional dependencies don't matter (since there is
 no evidence for a fundep equality), but equality superclasses do matter (since
 they carry evidence).
+
+Note [When does an implication have given equalities?]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider an implication
+   beta => alpha ~ Int
+where beta is a unification variable that has already been unified
+to () in an outer scope.  Then we can float the (alpha ~ Int) out
+just fine. So when deciding whether the givens contain an equality,
+we should canonicalise first, rather than just looking at the original
+givens (Trac #8644).
+
+This is the entire reason for the inert_no_eqs field in InertCans.
+We initialise it to False before processing the Givens of an implication;
+and set it to True when adding an inert equality in addInertCan.
+
+However, when flattening givens, we generate given equalities like
+  <F [a]> : F [a] ~ f,
+with Refl evidence, and we *don't* want those to count as an equality
+in the givens!  After all, the entire flattening business is just an
+internal matter, and the evidence does not mention any of the 'givens'
+of this implication.
+
+So we set the flag to False when adding an equality
+(TcSMonad.addInertCan) whose evidence whose CtOrigin is
+FlatSkolOrigin; see TcSMonad.isFlatSkolEv.  Note that we may transform
+the original flat-skol equality before adding it to the inerts, so
+it's important that the transformation preserves origin (which
+xCtEvidence and rewriteEvidence both do).  Example
+     instance F [a] = Maybe a
+     implication: C (F [a]) => blah
+  We flatten (C (F [a])) to C fsk, with <F [a]> : F [a] ~ fsk
+  Then we reduce the F [a] LHS, giving
+       g22 = ax7 ; <F [a]>
+       g22 : Maybe a ~ fsk
+  And before adding g22 we'll re-orient it to an ordinary tyvar
+  equality.  None of this should count as "adding a given equality".
+  This really happens (Trac #8651).
+
+An alternative we considered was to
+  * Accumulate the new inert equalities (in TcSMonad.addInertCan)
+  * In solveInteractGiven, check whether the evidence for the new
+    equalities mentions any of the ic_givens of this implication.
+This seems like the Right Thing, but it's more code, and more work
+at runtime, so we are using the FlatSkolOrigin idea intead. It's less
+obvious that it works, but I htink it does, and it's simple and efficient.
+
 
 Note [Float equalities from under a skolem binding]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

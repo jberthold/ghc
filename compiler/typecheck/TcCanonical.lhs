@@ -208,7 +208,7 @@ canTuple ev tys
   = do { traceTcS "can_pred" (text "TuplePred!")
        ; let xcomp = EvTupleMk
              xdecomp x = zipWith (\_ i -> EvTupleSel x i) tys [0..]
-       ; ctevs <- xCtFlavor ev (XEvTerm tys xcomp xdecomp)
+       ; ctevs <- xCtEvidence ev (XEvTerm tys xcomp xdecomp)
        ; canEvVarsCreated ctevs }
 \end{code}
 
@@ -335,7 +335,7 @@ newSCWorkFromFlavored flavor cls xis
              xev = XEvTerm { ev_preds  =  sc_theta
                            , ev_comp   = panic "Can't compose for given!"
                            , ev_decomp = xev_decomp }
-       ; ctevs <- xCtFlavor flavor xev
+       ; ctevs <- xCtEvidence flavor xev
        ; emitWorkNC ctevs }
 
   | isEmptyVarSet (tyVarsOfTypes xis)
@@ -530,40 +530,9 @@ flatten f ctxt (TyConApp tc tys)
                  -- The type function might be *over* saturated
                  -- in which case the remaining arguments should
                  -- be dealt with by AppTys
-               fam_ty = mkTyConApp tc xi_args
 
-         ; (ret_co, rhs_xi) <-
-             case f of
-               FMSubstOnly ->
-                 return (mkTcNomReflCo fam_ty, fam_ty)
-               FMFullFlatten ->
-                 do { mb_ct <- lookupFlatEqn tc xi_args
-                    ; case mb_ct of
-                        Just (ctev, rhs_ty)
-                          | ctev `canRewriteOrSame `ctxt    -- Must allows [W]/[W]
-                          -> -- You may think that we can just return (cc_rhs ct) but not so.
-                             --            return (mkTcCoVarCo (ctId ct), cc_rhs ct, [])
-                             -- The cached constraint resides in the cache so we have to flatten
-                             -- the rhs to make sure we have applied any inert substitution to it.
-                             -- Alternatively we could be applying the inert substitution to the
-                             -- cache as well when we interact an equality with the inert.
-                             -- The design choice is: do we keep the flat cache rewritten or not?
-                             -- For now I say we don't keep it fully rewritten.
-                            do { (rhs_xi,co) <- flatten f ctev rhs_ty
-                               ; let final_co = evTermCoercion (ctEvTerm ctev)
-                                                `mkTcTransCo` mkTcSymCo co
-                               ; traceTcS "flatten/flat-cache hit" $ (ppr ctev $$ ppr rhs_xi $$ ppr final_co)
-                               ; return (final_co, rhs_xi) }
+         ; (rhs_xi, ret_co) <- flattenNestedFamApp f ctxt tc xi_args
 
-                        _ -> do { (ctev, rhs_xi) <- newFlattenSkolem ctxt fam_ty
-                                ; let ct = CFunEqCan { cc_ev     = ctev
-                                                     , cc_fun    = tc
-                                                     , cc_tyargs = xi_args
-                                                     , cc_rhs    = rhs_xi }
-                                ; updWorkListTcS $ extendWorkListFunEq ct
-                                ; traceTcS "flatten/flat-cache miss" $ (ppr fam_ty $$ ppr rhs_xi $$ ppr ctev)
-                                ; return (evTermCoercion (ctEvTerm ctev), rhs_xi) }
-                    }
                   -- Emit the flat constraints
          ; return ( mkAppTys rhs_xi xi_rest -- NB mkAppTys: rhs_xi might not be a type variable
                                             --    cf Trac #5655
@@ -598,6 +567,50 @@ to     (a ~ forall b.fsk, F a b ~ fsk)
 because now the 'b' has escaped its scope.  We'd have to flatten to
        (a ~ forall b. fsk b, forall b. F a b ~ fsk b)
 and we have not begun to think about how to make that work!
+
+\begin{code}
+flattenNestedFamApp :: FlattenMode -> CtEvidence
+                    -> TyCon -> [TcType]   -- Exactly-saturated type function application
+                    -> TcS (Xi, TcCoercion)
+flattenNestedFamApp FMSubstOnly _ tc xi_args
+  = do { let fam_ty = mkTyConApp tc xi_args
+       ; return (fam_ty, mkTcNomReflCo fam_ty) }
+
+flattenNestedFamApp FMFullFlatten ctxt tc xi_args  -- Eactly saturated
+  = do { let fam_ty = mkTyConApp tc xi_args
+       ; mb_ct <- lookupFlatEqn tc xi_args
+       ; case mb_ct of
+           Just (ctev, rhs_ty)
+             | ctev `canRewriteOrSame `ctxt    -- Must allow [W]/[W]
+             -> -- You may think that we can just return (cc_rhs ct) but not so.
+                --            return (mkTcCoVarCo (ctId ct), cc_rhs ct, [])
+                -- The cached constraint resides in the cache so we have to flatten
+                -- the rhs to make sure we have applied any inert substitution to it.
+                -- Alternatively we could be applying the inert substitution to the
+                -- cache as well when we interact an equality with the inert.
+                -- The design choice is: do we keep the flat cache rewritten or not?
+                -- For now I say we don't keep it fully rewritten.
+               do { (rhs_xi,co) <- flatten FMFullFlatten ctev rhs_ty
+                  ; let final_co = evTermCoercion (ctEvTerm ctev)
+                                   `mkTcTransCo` mkTcSymCo co
+                  ; traceTcS "flatten/flat-cache hit" $ (ppr ctev $$ ppr rhs_xi $$ ppr final_co)
+                  ; return (rhs_xi, final_co) }
+
+           _ -> do { (ctev, rhs_xi) <- newFlattenSkolem ctxt fam_ty
+                   ; extendFlatCache tc xi_args ctev rhs_xi
+
+                   -- The new constraint (F xi_args ~ rhs_xi) is not necessarily inert
+                   -- (e.g. the LHS may be a redex) so we must put it in the work list
+                   ; let ct = CFunEqCan { cc_ev     = ctev
+                                        , cc_fun    = tc
+                                        , cc_tyargs = xi_args
+                                        , cc_rhs    = rhs_xi }
+                   ; updWorkListTcS $ extendWorkListFunEq ct
+
+                   ; traceTcS "flatten/flat-cache miss" $ (ppr fam_ty $$ ppr rhs_xi $$ ppr ctev)
+                   ; return (rhs_xi, evTermCoercion (ctEvTerm ctev)) }
+       }
+\end{code}
 
 \begin{code}
 flattenTyVar :: FlattenMode -> CtEvidence -> TcTyVar -> TcS (Xi, TcCoercion)
@@ -862,7 +875,7 @@ can_eq_flat_app ev swapped s1 t1 ps_ty1 ty2 ps_ty2
                  xevdecomp x = let xco = evTermCoercion x
                                in [ EvCoercion (mkTcLRCo CLeft xco)
                                   , EvCoercion (mkTcLRCo CRight xco)]
-           ; ctevs <- xCtFlavor ev (XEvTerm [mkTcEqPred s1 s2, mkTcEqPred t1 t2] xevcomp xevdecomp)
+           ; ctevs <- xCtEvidence ev (XEvTerm [mkTcEqPred s1 s2, mkTcEqPred t1 t2] xevcomp xevdecomp)
            ; canEvVarsCreated ctevs }
 
 
@@ -886,7 +899,7 @@ canDecomposableTyConAppOK ev tc1 tys1 tys2
   = do { let xcomp xs  = EvCoercion (mkTcTyConAppCo Nominal tc1 (map evTermCoercion xs))
              xdecomp x = zipWith (\_ i -> EvCoercion $ mkTcNthCo i (evTermCoercion x)) tys1 [0..]
              xev = XEvTerm (zipWith mkTcEqPred tys1 tys2) xcomp xdecomp
-       ; ctevs <- xCtFlavor ev xev
+       ; ctevs <- xCtEvidence ev xev
        ; canEvVarsCreated ctevs }
 
 canEqFailure :: CtEvidence -> TcType -> TcType -> TcS StopOrContinue

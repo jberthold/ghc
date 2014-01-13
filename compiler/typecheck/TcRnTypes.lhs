@@ -216,6 +216,7 @@ data TcGblEnv
 
         tcg_fix_env   :: FixityEnv,     -- ^ Just for things in this module
         tcg_field_env :: RecFieldEnv,   -- ^ Just for things in this module
+                                        -- See Note [The interactive package] in HscTypes
 
         tcg_type_env :: TypeEnv,
           -- ^ Global type env for the module we are compiling now.  All
@@ -224,6 +225,9 @@ data TcGblEnv
           --
           -- (Ids defined in this module start in the local envt, though they
           --  move to the global envt during zonking)
+          --
+          -- NB: for what "things in this module" means, see
+          -- Note [The interactive package] in HscTypes
 
         tcg_type_env_var :: TcRef TypeEnv,
                 -- Used only to initialise the interface-file
@@ -1269,12 +1273,14 @@ data Implication
       ic_info  :: SkolemInfo,    -- See Note [Skolems in an implication]
                                  -- See Note [Shadowing in a constraint]
 
-      ic_fsks  :: [TcTyVar],   -- Extra flatten-skolems introduced by the flattening
-                               -- done by canonicalisation.
-
       ic_given  :: [EvVar],      -- Given evidence variables
                                  --   (order does not matter)
                                  -- See Invariant (GivenInv) in TcType
+
+      ic_fsks  :: [TcTyVar],     -- Extra flatten-skolems introduced by
+                                 -- by flattening the givens
+      ic_no_eqs :: Bool,         -- True  <=> ic_givens have no equalities, for sure
+                                 -- False <=> ic_givens might have equalities
 
       ic_env   :: TcLclEnv,      -- Gives the source location and error context
                                  -- for the implicatdion, and hence for all the
@@ -1289,13 +1295,14 @@ data Implication
 
 instance Outputable Implication where
   ppr (Implic { ic_untch = untch, ic_skols = skols, ic_fsks = fsks
-              , ic_given = given
+              , ic_given = given, ic_no_eqs = no_eqs
               , ic_wanted = wanted
               , ic_binds = binds, ic_info = info })
    = ptext (sLit "Implic") <+> braces
      (sep [ ptext (sLit "Untouchables =") <+> ppr untch
           , ptext (sLit "Skolems =") <+> pprTvBndrs skols
           , ptext (sLit "Flatten-skolems =") <+> pprTvBndrs fsks
+          , ptext (sLit "No-eqs =") <+> ppr no_eqs
           , ptext (sLit "Given =") <+> pprEvVars given
           , ptext (sLit "Wanted =") <+> ppr wanted
           , ptext (sLit "Binds =") <+> ppr binds
@@ -1753,6 +1760,9 @@ pprSkolInfo UnkSkol = WARN( True, text "pprSkolInfo: UnkSkol" ) ptext (sLit "Unk
 \begin{code}
 data CtOrigin
   = GivenOrigin SkolemInfo
+  | FlatSkolOrigin              -- Flatten-skolems created for Givens
+                                -- Note [When does an implication have given equalities?]
+                                -- in TcSimplify
 
   -- All the others are for *wanted* constraints
   | OccurrenceOf Name           -- Occurrence of an overloaded identifier
@@ -1803,6 +1813,7 @@ data CtOrigin
 
 pprO :: CtOrigin -> SDoc
 pprO (GivenOrigin sk)      = ppr sk
+pprO FlatSkolOrigin        = ptext (sLit "a given flatten-skolem")
 pprO (OccurrenceOf name)   = hsep [ptext (sLit "a use of"), quotes (ppr name)]
 pprO AppOrigin             = ptext (sLit "an application")
 pprO (SpecPragOrigin name) = hsep [ptext (sLit "a specialisation pragma for"), quotes (ppr name)]

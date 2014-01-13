@@ -726,8 +726,7 @@ runOneCommand eh gCmd = do
       st <- lift getGHCiState
       let p = prompt st
       lift $ setGHCiState st{ prompt = prompt2 st }
-      mb_cmd <- collectCommand q ""
-      lift $ getGHCiState >>= \st' -> setGHCiState st'{ prompt = p }
+      mb_cmd <- collectCommand q "" `GHC.gfinally` lift (getGHCiState >>= \st' -> setGHCiState st' { prompt = p })
       return mb_cmd
     -- we can't use removeSpaces for the sublines here, so
     -- multiline commands are somewhat more brittle against
@@ -1375,8 +1374,7 @@ afterLoad ok retain_context = do
   lift discardTickArrays
   loaded_mod_summaries <- getLoadedModules
   let loaded_mods = map GHC.ms_mod loaded_mod_summaries
-      loaded_mod_names = map GHC.moduleName loaded_mods
-  modulesLoadedMsg ok loaded_mod_names
+  modulesLoadedMsg ok loaded_mods
   lift $ setContextAfterLoad retain_context loaded_mod_summaries
 
 
@@ -1449,20 +1447,22 @@ keepPackageImports = filterM is_pkg_import
           mod_name = unLoc (ideclName d)
 
 
-modulesLoadedMsg :: SuccessFlag -> [ModuleName] -> InputT GHCi ()
+modulesLoadedMsg :: SuccessFlag -> [Module] -> InputT GHCi ()
 modulesLoadedMsg ok mods = do
   dflags <- getDynFlags
-  when (verbosity dflags > 0) $ do
-   let mod_commas
+  unqual <- GHC.getPrintUnqual
+  let mod_commas
         | null mods = text "none."
         | otherwise = hsep (
             punctuate comma (map ppr mods)) <> text "."
-   case ok of
-    Failed ->
-       liftIO $ putStrLn $ showSDoc dflags (text "Failed, modules loaded: " <> mod_commas)
-    Succeeded  ->
-       liftIO $ putStrLn $ showSDoc dflags (text "Ok, modules loaded: " <> mod_commas)
+      status = case ok of
+                   Failed    -> text "Failed"
+                   Succeeded -> text "Ok"
 
+      msg = status <> text ", modules loaded:" <+> mod_commas
+
+  when (verbosity dflags > 0) $
+     liftIO $ putStrLn $ showSDocForUser dflags unqual msg
 
 -----------------------------------------------------------------------------
 -- :type
@@ -2229,6 +2229,7 @@ showImports = do
 
       prel_imp
         | any isPreludeImport (rem_ctx ++ trans_ctx) = []
+        | not (xopt Opt_ImplicitPrelude dflags)      = []
         | otherwise = ["import Prelude -- implicit"]
 
       trans_comment s = s ++ " -- added automatically"

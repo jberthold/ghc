@@ -46,7 +46,7 @@ module RnEnv (
 
 #include "HsVersions.h"
 
-import LoadIface        ( loadInterfaceForName, loadSrcInterface )
+import LoadIface        ( loadInterfaceForName, loadSrcInterface_maybe )
 import IfaceEnv
 import HsSyn
 import RdrName
@@ -64,7 +64,7 @@ import DataCon          ( dataConFieldLabels, dataConTyCon )
 import TyCon            ( isTupleTyCon, tyConArity )
 import PrelNames        ( mkUnboundName, isUnboundName, rOOT_MAIN, forall_tv_RDR )
 import ErrUtils         ( MsgDoc )
-import BasicTypes       ( Fixity(..), FixityDirection(..), minPrecedence )
+import BasicTypes       ( Fixity(..), FixityDirection(..), minPrecedence, defaultFixity )
 import SrcLoc
 import Outputable
 import Util
@@ -645,23 +645,10 @@ lookupOccRn_maybe rdr_name
        ; case mb_name of {
                 Just name  -> return (Just name) ;
                 Nothing -> do
-       { -- We allow qualified names on the command line to refer to
-         --  *any* name exported by any module in scope, just as if there
-         -- was an "import qualified M" declaration for every module.
-         -- But we DONT allow it under Safe Haskell as we need to check
-         -- imports. We can and should instead check the qualified import
-         -- but at the moment this requires some refactoring so leave as a TODO
-       ; dflags <- getDynFlags
-       ; let allow_qual = gopt Opt_ImplicitImportQualified dflags &&
-                          not (safeDirectImpsReq dflags)
-       ; is_ghci <- getIsGHCi
-               -- This test is not expensive,
-               -- and only happens for failed lookups
-       ; if isQual rdr_name && allow_qual && is_ghci
-         then lookupQualifiedName rdr_name
-         else do { traceRn (text "lookupOccRn failed" <+> ppr rdr_name)
-                 ; return Nothing } } } } } }
-
+       { dflags  <- getDynFlags
+       ; is_ghci <- getIsGHCi   -- This test is not expensive,
+                                -- and only happens for failed lookups
+       ; lookupQualifiedNameGHCi dflags is_ghci rdr_name } } } } }
 
 lookupGlobalOccRn :: RdrName -> RnM Name
 -- lookupGlobalOccRn is like lookupOccRn, except that it looks in the global
@@ -836,26 +823,46 @@ this is, after all, wired-in stuff.
 %*                                                      *
 %*********************************************************
 
-\begin{code}
--- A qualified name on the command line can refer to any module at all: we
--- try to load the interface if we don't already have it.
-lookupQualifiedName :: RdrName -> RnM (Maybe Name)
-lookupQualifiedName rdr_name
-  | Just (mod,occ) <- isQual_maybe rdr_name
-   -- Note: we want to behave as we would for a source file import here,
-   -- and respect hiddenness of modules/packages, hence loadSrcInterface.
-   = do iface <- loadSrcInterface doc mod False Nothing
+A qualified name on the command line can refer to any module at
+all: we try to load the interface if we don't already have it, just
+as if there was an "import qualified M" declaration for every
+module.
 
-        case  [ name
-              | avail <- mi_exports iface,
-                name  <- availNames avail,
-                nameOccName name == occ ] of
-           (n:ns) -> ASSERT(null ns) return (Just n)
-           _ -> do { traceRn (text "lookupQualified" <+> ppr rdr_name)
-                   ; return Nothing }
+If we fail we just return Nothing, rather than bleating
+about "attempting to use module ‛D’ (./D.hs) which is not loaded"
+which is what loadSrcInterface does.
+
+Note [Safe Haskell and GHCi]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We DONT do this Safe Haskell as we need to check imports. We can
+and should instead check the qualified import but at the moment
+this requires some refactoring so leave as a TODO
+
+\begin{code}
+lookupQualifiedNameGHCi :: DynFlags -> Bool -> RdrName -> RnM (Maybe Name)
+lookupQualifiedNameGHCi dflags is_ghci rdr_name
+  | Just (mod,occ) <- isQual_maybe rdr_name
+  , is_ghci
+  , gopt Opt_ImplicitImportQualified dflags   -- Enables this GHCi behaviour
+  , not (safeDirectImpsReq dflags)            -- See Note [Safe Haskell and GHCi]
+  = -- We want to behave as we would for a source file import here,
+    -- and respect hiddenness of modules/packages, hence loadSrcInterface.
+    do { res <- loadSrcInterface_maybe doc mod False Nothing
+       ; case res of
+           Succeeded iface
+             | (n:ns) <- [ name
+                         | avail <- mi_exports iface
+                         , name  <- availNames avail
+                         , nameOccName name == occ ]
+             -> ASSERT(null ns) return (Just n)
+
+           _ -> -- Either we couldn't load the interface, or
+                -- we could but we didn't find the name in it
+                do { traceRn (text "lookupQualifiedNameGHCi" <+> ppr rdr_name)
+                   ; return Nothing } }
 
   | otherwise
-  = pprPanic "RnEnv.lookupQualifiedName" (ppr rdr_name)
+  = return Nothing
   where
     doc = ptext (sLit "Need to find") <+> ppr rdr_name
 \end{code}
@@ -1129,17 +1136,18 @@ lookupFixityRn name
     -- where 'foo' is not in scope, should not give an error (Trac #7937)
 
   | otherwise
-  = do { this_mod <- getModule
-       ; if nameIsLocalOrFrom this_mod name
-         then lookup_local
-         else lookup_imported }
-  where
-    lookup_local   -- It's defined in this module
-      = do { local_fix_env <- getFixityEnv
-           ; traceRn (text "lookupFixityRn: looking up name in local environment:" <+>
-                     vcat [ppr name, ppr local_fix_env])
-           ; return (lookupFixity local_fix_env name) }
+  = do { local_fix_env <- getFixityEnv
+       ; case lookupNameEnv local_fix_env name of {
+           Just (FixItem _ fix) -> return fix ;
+           Nothing ->
 
+    do { this_mod <- getModule
+       ; if nameIsLocalOrFrom this_mod name || isInteractiveModule (nameModule name)
+               -- Interactive modules are all in the fixity env,
+               -- and don't have entries in the HPT
+         then return defaultFixity
+         else lookup_imported } } }
+  where
     lookup_imported
       -- For imported names, we have to get their fixities by doing a
       -- loadInterfaceForName, and consulting the Ifaces that comes back

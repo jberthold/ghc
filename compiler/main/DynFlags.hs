@@ -1516,16 +1516,13 @@ defaultLogAction dflags severity srcSpan style msg
           putStrSDoc = defaultLogActionHPutStrDoc dflags stdout
 
 defaultLogActionHPrintDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
-defaultLogActionHPrintDoc dflags h d sty
-    = do let doc = runSDoc d (initSDocContext dflags sty)
-         Pretty.printDoc Pretty.PageMode (pprCols dflags) h doc
-         hFlush h
+defaultLogActionHPrintDoc = defaultLogActionHPutStrDoc
 
 defaultLogActionHPutStrDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
 defaultLogActionHPutStrDoc dflags h d sty
-    = do let doc = runSDoc d (initSDocContext dflags sty)
-         hPutStr h (Pretty.render doc)
-         hFlush h
+    = Pretty.printDoc Pretty.PageMode (pprCols dflags) h doc
+    where
+      doc = runSDoc d (initSDocContext dflags sty)
 
 newtype FlushOut = FlushOut (IO ())
 
@@ -1995,36 +1992,41 @@ parseDynamicFlagsFull activeFlags cmdline dflags0 args = do
       throwGhcExceptionIO (CmdLineError ("combination not supported: " ++
                                intercalate "/" (map wayDesc theWays)))
 
-  whenGeneratingDynamicToo dflags3 $
-      unless (isJust (outputFile dflags3) == isJust (dynOutputFile dflags3)) $
-          liftIO $ throwGhcExceptionIO $ CmdLineError
-              "With -dynamic-too, must give -dyno iff giving -o"
+  let chooseOutput
+        | isJust (outputFile dflags3)          -- Only iff user specified -o ...
+        , not (isJust (dynOutputFile dflags3)) -- but not -dyno
+        = return $ dflags3 { dynOutputFile = Just $ dynOut (fromJust $ outputFile dflags3) }
+        | otherwise
+        = return dflags3
+        where
+          dynOut = flip addExtension (dynObjectSuf dflags3) . dropExtension
+  dflags4 <- ifGeneratingDynamicToo dflags3 chooseOutput (return dflags3)
 
-  let (dflags4, consistency_warnings) = makeDynFlagsConsistent dflags3
+  let (dflags5, consistency_warnings) = makeDynFlagsConsistent dflags4
 
-  dflags5 <- case dllSplitFile dflags4 of
-             Nothing -> return (dflags4 { dllSplit = Nothing })
+  dflags6 <- case dllSplitFile dflags5 of
+             Nothing -> return (dflags5 { dllSplit = Nothing })
              Just f ->
-                 case dllSplit dflags4 of
+                 case dllSplit dflags5 of
                  Just _ ->
                      -- If dllSplit is out of date then it would have
                      -- been set to Nothing. As it's a Just, it must be
                      -- up-to-date.
-                     return dflags4
+                     return dflags5
                  Nothing ->
                      do xs <- liftIO $ readFile f
                         let ss = map (Set.fromList . words) (lines xs)
-                        return $ dflags4 { dllSplit = Just ss }
+                        return $ dflags5 { dllSplit = Just ss }
 
   -- Set timer stats & heap size
-  when (enableTimeStats dflags5) $ liftIO enableTimingStats
-  case (ghcHeapSize dflags5) of
+  when (enableTimeStats dflags6) $ liftIO enableTimingStats
+  case (ghcHeapSize dflags6) of
     Just x -> liftIO (setHeapSize x)
     _      -> return ()
 
-  liftIO $ setUnsafeGlobalDynFlags dflags5
+  liftIO $ setUnsafeGlobalDynFlags dflags6
 
-  return (dflags5, leftover, consistency_warnings ++ sh_warns ++ warns)
+  return (dflags6, leftover, consistency_warnings ++ sh_warns ++ warns)
 
 updateWays :: DynFlags -> DynFlags
 updateWays dflags
@@ -3601,7 +3603,7 @@ compilerInfo dflags
        ("Support SMP",                 cGhcWithSMP),
        ("Tables next to code",         cGhcEnableTablesNextToCode),
        ("RTS ways",                    cGhcRTSWays),
-       ("Support dynamic-too",         "YES"),
+       ("Support dynamic-too",         if isWindows then "NO" else "YES"),
        ("Support parallel --make",     "YES"),
        ("Dynamic by default",          if dYNAMIC_BY_DEFAULT dflags
                                        then "YES" else "NO"),
@@ -3612,6 +3614,8 @@ compilerInfo dflags
        ("LibDir",                      topDir dflags),
        ("Global Package DB",           systemPackageConfig dflags)
       ]
+  where
+    isWindows = platformOS (targetPlatform dflags) == OSMinGW32
 
 #include "../includes/dist-derivedconstants/header/GHCConstantsHaskellWrappers.hs"
 

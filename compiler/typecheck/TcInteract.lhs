@@ -58,9 +58,8 @@ import Util
 
 Note [Basic Simplifier Plan]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 1. Pick an element from the WorkList if there exists one with depth
-   less thanour context-stack depth.
+   less than our context-stack depth.
 
 2. Run it down the 'stage' pipeline. Stages are:
       - canonicalization
@@ -79,20 +78,23 @@ Note [Basic Simplifier Plan]
 
 If in Step 1 no such element exists, we have exceeded our context-stack
 depth and will simply fail.
+
 \begin{code}
-solveInteractGiven :: CtLoc -> [TcTyVar] -> [EvVar] -> TcS ()
--- In principle the givens can kick out some wanteds from the inert
--- resulting in solving some more wanted goals here which could emit
--- implications. That's why I return a bag of implications. Not sure
--- if this can happen in practice though.
-solveInteractGiven loc fsks givens
-  = do { implics <- solveInteract (fsk_bag `unionBags` given_bag)
-       ; ASSERT( isEmptyBag implics )
-         return () }  -- We do not decompose *given* polymorphic equalities
-                      --    (forall a. t1 ~ forall a. t2)
-                      -- What would the evidence look like?!
-                      -- See Note [Do not decompose given polytype equalities]
-                      -- in TcCanonical
+solveInteractGiven :: CtLoc -> [TcTyVar] -> [EvVar] -> TcS (Bool, [TcTyVar])
+solveInteractGiven loc old_fsks givens
+  | null givens  -- Shortcut for common case
+  = return (True, old_fsks)
+  | otherwise
+  = do { implics1 <- solveInteract fsk_bag
+
+       ; (no_eqs, more_fsks, implics2) <- getGivenInfo (solveInteract given_bag)
+       ; MASSERT( isEmptyBag implics1 && isEmptyBag implics2 )
+           -- empty implics because we discard Given equalities between
+           -- foralls (see Note [Do not decompose given polytype equalities]
+           -- in TcCanonical), and those are the ones that can give
+           -- rise to new implications
+
+       ; return (no_eqs, more_fsks ++ old_fsks) }
   where
     given_bag = listToBag [ mkNonCanonical $ CtGiven { ctev_evtm = EvId ev_id
                                                      , ctev_pred = evVarPred ev_id
@@ -102,7 +104,7 @@ solveInteractGiven loc fsks givens
     fsk_bag = listToBag [ mkNonCanonical $ CtGiven { ctev_evtm = EvCoercion (mkTcNomReflCo tv_ty)
                                                    , ctev_pred = pred
                                                    , ctev_loc = loc }
-                        | tv <- fsks
+                        | tv <- old_fsks
                         , let FlatSkol fam_ty = tcTyVarDetails tv
                               tv_ty = mkTyVarTy tv
                               pred  = mkTcEqPred fam_ty tv_ty
@@ -278,7 +280,7 @@ interactWithInertsStage wi
                 -- CNonCanonical have been canonicalised
        ; case mb_ics' of
            Just ics' -> setTcSInerts (inerts { inert_cans = ics' })
-           Nothing          -> return ()
+           Nothing   -> return ()
        ; case stop of
             True  -> return Stop
             False -> return (ContinueWith wi) }
@@ -553,7 +555,7 @@ solveFunEq :: CtEvidence    -- From this  :: F tys ~ xi1
            -> Type
            -> TcS ()
 solveFunEq from_this xi1 solve_this xi2
-  = do { ctevs <- xCtFlavor solve_this xev
+  = do { ctevs <- xCtEvidence solve_this xev
              -- No caching!  See Note [Cache-caused loops]
              -- Why not (mkTcEqPred xi1 xi2)? See Note [Efficient orientation]
 
@@ -576,7 +578,7 @@ solveFunEq from_this xi1 solve_this xi2
 Note [Cache-caused loops]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 It is very dangerous to cache a rewritten wanted family equation as 'solved' in our
-solved cache (which is the default behaviour or xCtFlavor), because the interaction
+solved cache (which is the default behaviour or xCtEvidence), because the interaction
 may not be contributing towards a solution. Here is an example:
 
 Initial inert set:
@@ -752,7 +754,8 @@ kickOutRewritable new_ev new_tv
                       , inert_dicts  = dictmap
                       , inert_funeqs = funeqmap
                       , inert_irreds = irreds
-                      , inert_insols = insols })
+                      , inert_insols = insols
+                      , inert_no_eqs = no_eqs })
   = do { traceTcS "kickOutRewritable" $
             vcat [ text "tv = " <+> ppr new_tv
                  , ptext (sLit "Kicked out =") <+> ppr kicked_out]
@@ -767,7 +770,8 @@ kickOutRewritable new_ev new_tv
                        , inert_dicts = dicts_in
                        , inert_funeqs = feqs_in
                        , inert_irreds = irs_in
-                       , inert_insols = insols_in }
+                       , inert_insols = insols_in
+                       , inert_no_eqs = no_eqs }
 
     kicked_out = WorkList { wl_eqs    = tv_eqs_out
                           , wl_funeqs = foldrBag insertDeque emptyDeque feqs_out
@@ -1427,7 +1431,7 @@ doTopReactDict inerts fl cls xis
   | not (isWanted fl)   -- Never use instances for Given or Derived constraints
   = try_fundeps_and_return
 
-  | Just ev <- lookupSolvedDict inerts pred   -- Cached
+  | Just ev <- lookupSolvedDict inerts cls xis   -- Cached
   , ctEvCheckDepth (ctLocDepth (ctev_loc fl)) ev
   = do { setEvBind dict_id (ctEvTerm ev);
        ; return $ SomeTopInt { tir_rule = "Dict/Top (cached)"
@@ -1436,7 +1440,7 @@ doTopReactDict inerts fl cls xis
   | otherwise  -- Not cached
    = do { lkup_inst_res <- matchClassInst inerts cls xis loc
          ; case lkup_inst_res of
-               GenInst wtvs ev_term -> do { addSolvedDict fl
+               GenInst wtvs ev_term -> do { addSolvedDict fl cls xis
                                           ; solve_from_instance wtvs ev_term }
                NoInstance -> try_fundeps_and_return }
    where
@@ -1484,7 +1488,7 @@ doTopReactFunEq _ct fl fun_tc args xi
                                      -- reached this far
     -- Look in the cache of solved funeqs
     do { fun_eq_cache <- getTcSInerts >>= (return . inert_solved_funeqs)
-       ; case lookupFamHead fun_eq_cache fam_ty of {
+       ; case findFunEq fun_eq_cache fun_tc args of {
            Just (ctev, rhs_ty)
              | ctev `canRewriteOrSame` fl  -- See Note [Cached solved FunEqs]
              -> ASSERT( not (isDerived ctev) )
@@ -1499,11 +1503,10 @@ doTopReactFunEq _ct fl fun_tc args xi
 
     -- Found a top-level instance
     do {    -- Add it to the solved goals
-         unless (isDerived fl) (addSolvedFunEq fam_ty fl xi)
+         unless (isDerived fl) (addSolvedFunEq fun_tc args fl xi)
 
        ; succeed_with "Fun/Top" co ty } } } } }
   where
-    fam_ty = mkTyConApp fun_tc args
     loc = ctev_loc fl
 
     try_improvement
@@ -1517,7 +1520,7 @@ doTopReactFunEq _ct fl fun_tc args xi
 
     succeed_with :: String -> TcCoercion -> TcType -> TcS TopInteractResult
     succeed_with str co rhs_ty    -- co :: fun_tc args ~ rhs_ty
-      = do { ctevs <- xCtFlavor fl xev
+      = do { ctevs <- xCtEvidence fl xev
            ; traceTcS ("doTopReactFunEq " ++ str) (ppr ctevs)
            ; case ctevs of
                [ctev] -> updWorkListTcS $ extendWorkListEq $
@@ -2066,10 +2069,10 @@ air, in getCoercibleInst. The following “instances” are present:
 
  4. instance Coercible r b => Coercible (NT t1 t2 ...) b
     instance Coercible a r => Coercible a (NT t1 t2 ...)
-    for a newtype constructor NT (nor data family instance that resolves to a
+    for a newtype constructor NT (or data family instance that resolves to a
     newtype) where
      * r is the concrete type of NT, instantiated with the arguments t1 t2 ...
-     * the data constructors of NT are in scope.
+     * the constructor of NT are in scope.
 
     Again, the newtype TyCon can appear undersaturated, but only if it has
     enough arguments to apply the newtype coercion (which is eta-reduced). Examples:
@@ -2084,8 +2087,7 @@ TcCoercion therein has role Representational,  which are turned into Core
 coercions by dsEvTerm in DsBinds.
 
 The evidence for the first three instance is generated here by
-getCoercibleInst, the forth instance is implemented in the canonicalization
-stage using deferTcSForAllEq.
+getCoercibleInst, for the second instance deferTcSForAllEq is used.
 
 When the constraint cannot be solved, it is treated as any other unsolved
 constraint, i.e. it can turn up in an inferred type signature, or reported to
