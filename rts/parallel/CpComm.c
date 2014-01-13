@@ -1617,7 +1617,7 @@ rtsBool MP_sync(void){
   }
   else {
     GetEnvironmentVariable("SHMHandle", buffer, 256);
-    sscanf(buffer, "%lu", (DWORD*) &shared_memory.hShm);
+    sscanf(buffer, "%" FMT_Word, (StgWord*) &shared_memory.hShm);
 
     if (cpw_shm_init() != CPW_NOERROR) {
       /* avoid calling back in here, this PE cannot send/receive msg.s */
