@@ -1594,7 +1594,7 @@ rtsBool MP_sync(void){
     GetStartupInfo(&si);
     PROCESS_INFORMATION *pi = malloc(sizeof(PROCESS_INFORMATION) *(nPEs -1));
     int i;
-    sprintf(buffer, "%lu", (DWORD) shared_memory.hShm);
+    sprintf(buffer, "%" FMT_Word, (StgWord) shared_memory.hShm);
     SetEnvironmentVariable("SHMHandle", buffer);
     for (i = 2; i <= (int)nPEs; i++) {
 			
@@ -1966,7 +1966,7 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
              "      - wSems[1] (@%p): %p\n"
              "      - rSems[1] (@%p): %p\n"
 		 
-	     "      - free_slots (@%p): %i\n"
+	     "      - free_slots (@%p): %zi\n"
 	     "      - msgs_read@%p:\n"
 	     "      - msgs_write@%p:\n"
 	     "\n", 
@@ -1984,7 +1984,7 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
              shm->hW_sems, shm->hW_sems->semaphore,
              shm->hR_sems, shm->hR_sems->semaphore,
 
-	     shm->free_slots, *shm->free_slots,
+	   shm->free_slots, (int) *shm->free_slots,
 	     shm->msgs_read,
 	     shm->msgs_write);
   debugBelch(msg);
@@ -1997,9 +1997,9 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
   while (next_slot_off != 0) {
       cpw_msg_off_t *msg = (cpw_msg_off_t *) ((size_t) shared_memory.base + shared_memory.msgs_start + next_slot->addr);
     num++;
-    debugBelch("- %i (@%p) (offset: %i)\n"
-	       "      +-> points to message @%i\n"
-	       "        +-> points to data @%i\n", 
+    debugBelch("- %i (@%p) (offset: %zi)\n"
+	       "      +-> points to message @%zi\n"
+	       "        +-> points to data @%zi\n", 
 	       num, next_slot, next_slot_off,
                next_slot->addr, msg->data);
 
@@ -2023,7 +2023,7 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
     slot_off = shm->msgs_read[i];
     slot = (cpw_shm_slot_off_t *) ((size_t) shared_memory.base + shared_memory.slots_start + slot_off);
     debugBelch("- msgs_read[%i] (@%p)\n"
-               "      +-> points to slot @%i\n"
+               "      +-> points to slot @%zi\n"
                "      | +-> is hole = %i\n"
                "      +-> has %i message linked\n\n",
                i,&shm->msgs_read[i],
@@ -2033,11 +2033,13 @@ static void cpw_shm_debug_info(cpw_shm_t *shm) {
     slot_off = shm->msgs_write[i];
     slot = (cpw_shm_slot_off_t *) ((size_t) shared_memory.base + shared_memory.slots_start + slot_off);
     debugBelch("- msgs_write[%i] (@%p)\n"
-               "      +-> points to slot @%i\n"
+               "      +-> points to slot @%zi\n"
                "        +-> is hole = %i\n",
                i,&shm->msgs_write[i],
                shm->msgs_write[i],slot->is_hole);
   }
+#else
+  shm = shm; /* avoid compiler warning */
 #endif
 }
 
