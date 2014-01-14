@@ -139,10 +139,10 @@ compileOne' m_tc_result mHscMessage
        input_fnpp  = ms_hspp_file summary
        mod_graph   = hsc_mod_graph hsc_env0
        needsTH     = any (xopt Opt_TemplateHaskell . ms_hspp_opts) mod_graph
-
+       isDynWay    = any (== WayDyn) (ways dflags0)
    -- #8180 - when using TemplateHaskell, switch on -dynamic-too so
    -- the linker can correctly load the object files.
-   let dflags1 = if needsTH
+   let dflags1 = if needsTH && dynamicGhc && not isDynWay
                   then gopt_set dflags0 Opt_BuildDynamicToo
                   else dflags0
 
@@ -596,14 +596,16 @@ runPipeline stop_phase hsc_env0 (input_fn, mb_phase)
          -- -dynamic-too, but couldn't do the -dynamic-too fast
          -- path, then rerun the pipeline for the dyn way
          let dflags = extractDynFlags hsc_env
-         when isHaskellishFile $ whenCannotGenerateDynamicToo dflags $ do
-             debugTraceMsg dflags 4
-                 (text "Running the pipeline again for -dynamic-too")
-             let dflags' = dynamicTooMkDynamicDynFlags dflags
-             hsc_env' <- newHscEnv dflags'
-             _ <- runPipeline' start_phase hsc_env' env input_fn
-                               maybe_loc maybe_stub_o
-             return ()
+         -- NB: Currently disabled on Windows (ref #7134, #8228, and #5987)
+         when (not $ platformOS (targetPlatform dflags) == OSMinGW32) $ do
+           when isHaskellishFile $ whenCannotGenerateDynamicToo dflags $ do
+               debugTraceMsg dflags 4
+                   (text "Running the pipeline again for -dynamic-too")
+               let dflags' = dynamicTooMkDynamicDynFlags dflags
+               hsc_env' <- newHscEnv dflags'
+               _ <- runPipeline' start_phase hsc_env' env input_fn
+                                 maybe_loc maybe_stub_o
+               return ()
          return r
 
 runPipeline'
@@ -1930,7 +1932,16 @@ linkBinary' staticLink dflags o_files dep_packages = do
                                  -- HS packages, because libtool doesn't accept other options.
                                  -- In the case of iOS these need to be added by hand to the
                                  -- final link in Xcode.
-            else package_hs_libs ++ extra_libs ++ other_flags
+            else other_flags ++ package_hs_libs ++ extra_libs -- -Wl,-u,<sym> contained in other_flags
+                                                              -- needs to be put before -l<package>,
+                                                              -- otherwise Solaris linker fails linking
+                                                              -- a binary with unresolved symbols in RTS
+                                                              -- which are defined in base package
+                                                              -- the reason for this is a note in ld(1) about
+                                                              -- '-u' option: "The placement of this option
+                                                              -- on the command line is significant.
+                                                              -- This option must be placed before the library
+                                                              -- that defines the symbol."
 
     pkg_framework_path_opts <-
         if platformUsesFrameworks platform
