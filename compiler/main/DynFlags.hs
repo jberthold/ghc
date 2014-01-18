@@ -138,8 +138,9 @@ module DynFlags (
         isAvx512fEnabled,
         isAvx512pfEnabled,
 
-        -- * Linker information
+        -- * Linker/compiler information
         LinkerInfo(..),
+        CompilerInfo(..),
   ) where
 
 #include "HsVersions.h"
@@ -464,6 +465,7 @@ data WarningFlag =
    | Opt_WarnUnsupportedCallingConventions
    | Opt_WarnUnsupportedLlvmVersion
    | Opt_WarnInlineRuleShadowing
+   | Opt_WarnTypedHoles
    deriving (Eq, Show, Enum)
 
 data Language = Haskell98 | Haskell2010
@@ -577,7 +579,6 @@ data ExtensionFlag
    | Opt_TraditionalRecordSyntax
    | Opt_LambdaCase
    | Opt_MultiWayIf
-   | Opt_TypeHoles
    | Opt_NegativeLiterals
    | Opt_EmptyCase
    deriving (Eq, Enum, Show)
@@ -792,7 +793,10 @@ data DynFlags = DynFlags {
   avx512pf              :: Bool, -- Enable AVX-512 PreFetch Instructions.
 
   -- | Run-time linker information (what options we need, etc.)
-  rtldFlags             :: IORef (Maybe LinkerInfo)
+  rtldInfo              :: IORef (Maybe LinkerInfo),
+
+  -- | Run-time compiler information
+  rtccInfo              :: IORef (Maybe CompilerInfo)
  }
 
 class HasDynFlags m where
@@ -1306,7 +1310,8 @@ initDynFlags dflags = do
  refFilesToNotIntermediateClean <- newIORef []
  refGeneratedDumps <- newIORef Set.empty
  refLlvmVersion <- newIORef 28
- refRtldFlags <- newIORef Nothing
+ refRtldInfo <- newIORef Nothing
+ refRtccInfo <- newIORef Nothing
  wrapperNum <- newIORef emptyModuleEnv
  canUseUnicodeQuotes <- do let enc = localeEncoding
                                str = "‛’"
@@ -1324,7 +1329,8 @@ initDynFlags dflags = do
         llvmVersion    = refLlvmVersion,
         nextWrapperNum = wrapperNum,
         useUnicodeQuotes = canUseUnicodeQuotes,
-        rtldFlags      = refRtldFlags
+        rtldInfo      = refRtldInfo,
+        rtccInfo      = refRtccInfo
         }
 
 -- | The normal 'DynFlags'. Note that they is not suitable for use in this form
@@ -1474,7 +1480,8 @@ defaultDynFlags mySettings =
         avx512er = False,
         avx512f = False,
         avx512pf = False,
-        rtldFlags = panic "defaultDynFlags: no rtldFlags"
+        rtldInfo = panic "defaultDynFlags: no rtldInfo",
+        rtccInfo = panic "defaultDynFlags: no rtccInfo"
       }
 
 defaultWays :: Settings -> [Way]
@@ -1514,13 +1521,16 @@ defaultLogAction dflags severity srcSpan style msg
           putStrSDoc = defaultLogActionHPutStrDoc dflags stdout
 
 defaultLogActionHPrintDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
-defaultLogActionHPrintDoc = defaultLogActionHPutStrDoc
+defaultLogActionHPrintDoc dflags h d sty
+ = defaultLogActionHPutStrDoc dflags h (d $$ text "") sty
+      -- Adds a newline
 
 defaultLogActionHPutStrDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
 defaultLogActionHPutStrDoc dflags h d sty
-    = Pretty.printDoc Pretty.PageMode (pprCols dflags) h doc
-    where
-      doc = runSDoc d (initSDocContext dflags sty)
+  = Pretty.printDoc_ Pretty.PageMode (pprCols dflags) h doc
+  where   -- Don't add a newline at the end, so that successive
+          -- calls to this log-action can output all on the same line
+    doc = runSDoc d (initSDocContext dflags sty)
 
 newtype FlushOut = FlushOut (IO ())
 
@@ -2615,6 +2625,7 @@ fWarningFlags = [
   ( "warn-identities",                  Opt_WarnIdentities, nop ),
   ( "warn-auto-orphans",                Opt_WarnAutoOrphans, nop ),
   ( "warn-tabs",                        Opt_WarnTabs, nop ),
+  ( "warn-typed-holes",                 Opt_WarnTypedHoles, nop ),
   ( "warn-unrecognised-pragmas",        Opt_WarnUnrecognisedPragmas, nop ),
   ( "warn-lazy-unlifted-bindings",      Opt_WarnLazyUnliftedBindings,
     \_ -> deprecate "it has no effect, and will be removed in GHC 7.10" ),
@@ -2889,7 +2900,6 @@ xFlags = [
   ( "UndecidableInstances",             Opt_UndecidableInstances, nop ),
   ( "IncoherentInstances",              Opt_IncoherentInstances, nop ),
   ( "PackageImports",                   Opt_PackageImports, nop ),
-  ( "TypeHoles",                        Opt_TypeHoles, nop ),
   ( "NegativeLiterals",                 Opt_NegativeLiterals, nop ),
   ( "EmptyCase",                        Opt_EmptyCase, nop )
   ]
@@ -3030,6 +3040,7 @@ standardWarnings
         Opt_WarnWarningsDeprecations,
         Opt_WarnDeprecatedFlags,
         Opt_WarnAMP,
+        Opt_WarnTypedHoles,
         Opt_WarnUnrecognisedPragmas,
         Opt_WarnPointlessPragmas,
         Opt_WarnDuplicateConstraints,
@@ -3676,7 +3687,7 @@ makeDynFlagsConsistent dflags
             warn = "No native code generator, so using LLVM"
         in loop dflags' warn
  | hscTarget dflags == HscLlvm &&
-   not ((arch == ArchX86_64) && (os == OSLinux || os == OSDarwin)) &&
+   not ((arch == ArchX86_64) && (os == OSLinux || os == OSDarwin || os == OSFreeBSD)) &&
    not ((isARM arch) && (os == OSLinux)) &&
    (not (gopt Opt_Static dflags) || gopt Opt_PIC dflags)
     = if cGhcWithNativeCodeGen == "YES"
@@ -3761,7 +3772,7 @@ isAvx512pfEnabled :: DynFlags -> Bool
 isAvx512pfEnabled dflags = avx512pf dflags
 
 -- -----------------------------------------------------------------------------
--- Linker information
+-- Linker/compiler information
 
 -- LinkerInfo contains any extra options needed by the system linker.
 data LinkerInfo
@@ -3771,6 +3782,13 @@ data LinkerInfo
   | SolarisLD [Option]
   | UnknownLD
   deriving Eq
+
+-- CompilerInfo tells us which C compiler we're using
+data CompilerInfo
+   = GCC
+   | Clang
+   | UnknownCC
+   deriving Eq
 
 -- -----------------------------------------------------------------------------
 -- RTS hooks

@@ -30,7 +30,7 @@ module Demand (
         isBotRes, isTopRes,
         topRes, botRes, cprProdRes, vanillaCprProdRes, cprSumRes,
         appIsBottom, isBottomingSig, pprIfaceStrictSig, 
-        trimCPRInfo, returnsCPR, returnsCPR_maybe,
+        trimCPRInfo, returnsCPR_maybe,
         StrictSig(..), mkStrictSig, mkClosedStrictSig, nopSig, botSig, cprProdSig,
         isNopSig, splitStrictSig, increaseStrictSigArity,
 
@@ -47,8 +47,6 @@ module Demand (
 
         isSingleUsed, reuseEnv, zapDemand, zapStrictSig,
 
-        worthSplittingArgDmd, worthSplittingThunkDmd,
-
         strictifyDictDmd
 
      ) where
@@ -64,7 +62,7 @@ import UniqFM
 import Util
 import BasicTypes
 import Binary
-import Maybes           ( isJust, orElse )
+import Maybes           ( orElse )
 
 import Type            ( Type )
 import TyCon           ( isNewTyCon, isClassTyCon )
@@ -807,9 +805,6 @@ trimCPRInfo trim_all trim_sums res
                        | otherwise = RetProd
     trimC NoCPR = NoCPR
 
-returnsCPR :: DmdResult -> Bool
-returnsCPR dr = isJust (returnsCPR_maybe dr)
-
 returnsCPR_maybe :: DmdResult -> Maybe ConTag
 returnsCPR_maybe (Dunno c)     = retCPR_maybe c
 returnsCPR_maybe Diverges      = Nothing
@@ -844,46 +839,6 @@ different:
  * Variables not mentioned in the free variables environment are definitely
    unused, so we can use absDmd there.
  * Further arguments *can* be used, of course. Hence topDmd is used.
-
-
-%************************************************************************
-%*                                                                      *
-            Whether a demand justifies a w/w split
-%*                                                                      *
-%************************************************************************
-
-\begin{code}
-worthSplittingArgDmd :: Demand    -- Demand on a function argument
-                     -> Bool
-worthSplittingArgDmd dmd
-  = go dmd
-  where
-    go (JD {absd=Abs}) = True      -- Absent arg
-
-    -- See Note [Worker-wrapper for bottoming functions]
-    go (JD {strd=Str HyperStr, absd=Use _ (UProd _)}) = True
-
-    -- See Note [Worthy functions for Worker-Wrapper split]
-    go (JD {strd=Str (SProd {})})                    = True  -- Product arg to evaluate
-    go (JD {strd=Str HeadStr, absd=Use _ (UProd _)}) = True  -- Strictly used product arg
-    go (JD {strd=Str HeadStr, absd=Use _ UHead})     = True
-
-    go _ = False
-
-worthSplittingThunkDmd :: Demand         -- Demand on the thunk
-                       -> Bool
-worthSplittingThunkDmd dmd
-  = go dmd
-  where
-        -- Split if the thing is unpacked
-    go (JD {strd=Str (SProd {}), absd=Use _ a})     = some_comp_used a
-    go (JD {strd=Str HeadStr, absd=Use _ UProd {}}) = True
-    go _                                            = False
-
-    some_comp_used Used       = True
-    some_comp_used (UProd _ ) = True
-    some_comp_used _          = False
-\end{code}
 
 Note [Worthy functions for Worker-Wrapper split]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
