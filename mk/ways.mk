@@ -22,7 +22,7 @@
 #
 # The ways currently defined.
 #
-ALL_WAYS=v p t l s mp mg debug dyn thr thr_l p_dyn debug_dyn thr_dyn thr_p_dyn thr_debug_dyn thr_p thr_debug debug_p thr_debug_p l_dyn thr_l_dyn  pp debug_pp pm debug_pm pc debug_pc l_pp l_pm l_pc
+ALL_WAYS=v p t l s mp mg debug dyn thr thr_l p_dyn debug_dyn thr_dyn thr_p_dyn thr_debug_dyn thr_p thr_debug debug_p thr_debug_p l_dyn thr_l_dyn  pp debug_pp pm debug_pm pc debug_pc ms debug_ms l_pp l_pm l_pc l_ms
 
 #
 # The following ways currently have treated specially, p t mg,
@@ -128,6 +128,10 @@ WAY_pm_HC_OPTS=-parmpi
 WAY_pc_NAME=mcore parallel (copy)
 WAY_pc_HC_OPTS=-parcp
 
+# Way 'ms':
+WAY_ms_NAME=mcore parallel(mailslots)
+WAY_ms_HC_OPTS=-parms
+
 # Way 'debug_pp':
 WAY_debug_pp_NAME=debug for parallel (pvm)
 WAY_debug_pp_HC_OPTS=-optc-DDEBUG -parpvm
@@ -139,6 +143,10 @@ WAY_debug_pm_HC_OPTS=-optc-DDEBUG -parmpi
 # Way 'debug_pc':
 WAY_debug_pc_NAME=debug for mcore parallel (copy)
 WAY_debug_pc_HC_OPTS=-optc-DDEBUG -parcp
+
+# Way 'debug_ms':
+WAY_debug_ms_NAME=debug for mcore parallel (mailslots)
+WAY_debug_ms_HC_OPTS=-optc-DDEBUG -parms
 
 # combined with logging (not for -debug, which always implies it)
 # Way 'l_pp':
@@ -152,3 +160,7 @@ WAY_l_pm_HC_OPTS=-parmpi -eventlog
 # Way 'l_pc':
 WAY_l_pc_NAME=parallel (copy) with event logging
 WAY_l_pc_HC_OPTS=-parcp -eventlog
+
+# Way 'l_ms':
+WAY_l_ms_NAME=parallel (mailslots) with event logging
+WAY_l_ms_HC_OPTS=-parms -eventlog

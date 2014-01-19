@@ -1067,6 +1067,7 @@ data Way
   | WayParPvm 
   | WayParMPI
   | WayParCp
+  | WayParMSlot
   | WayPar
   | WayGran
   | WayNDP
@@ -1096,6 +1097,7 @@ allowed_combination way = and [ x `allowedWith` y
 	WayEventLog `allowedWith` WayParPvm	= True
 	WayEventLog `allowedWith` WayParMPI	= True
 	WayEventLog `allowedWith` WayParCp	= True
+	WayEventLog `allowedWith` WayParMSlot	= True
         _ `allowedWith` _                       = False
 
 mkBuildTag :: [Way] -> String
@@ -1111,6 +1113,7 @@ wayTag WayEventLog = "l"
 wayTag WayParPvm   = "pp"
 wayTag WayParMPI   = "pm"
 wayTag WayParCp    = "pc"
+wayTag WayParMSlot = "ms"
 wayTag WayPar      = "mp"
 wayTag WayGran     = "mg"
 wayTag WayNDP      = "ndp"
@@ -1125,6 +1128,7 @@ wayRTSOnly WayEventLog = True
 wayRTSOnly WayParPvm   = True
 wayRTSOnly WayParMPI   = True
 wayRTSOnly WayParCp    = True
+wayRTSOnly WayParMSlot = True
 wayRTSOnly WayPar      = False
 wayRTSOnly WayGran     = False
 wayRTSOnly WayNDP      = False
@@ -1139,6 +1143,7 @@ wayDesc WayEventLog = "RTS Event Logging"
 wayDesc WayParPvm   = "Parallel RTS (PVM)"
 wayDesc WayParMPI   = "Parallel RTS (MPI)"
 wayDesc WayParCp    = "Parallel RTS (SharedMem)"
+wayDesc WayParMSlot = "Parallel RTS (Mailslots)"
 wayDesc WayPar      = "Parallel"
 wayDesc WayGran     = "GranSim"
 wayDesc WayNDP      = "Nested data parallelism"
@@ -1161,6 +1166,7 @@ wayGeneralFlags _ WayEventLog = []
 wayGeneralFlags _ WayParPvm   = []
 wayGeneralFlags _ WayParMPI   = []
 wayGeneralFlags _ WayParCp    = []
+wayGeneralFlags _ WayParMSlot = []
 wayGeneralFlags _ WayPar      = [Opt_Parallel]
 wayGeneralFlags _ WayGran     = [Opt_GranMacros]
 wayGeneralFlags _ WayNDP      = []
@@ -1180,6 +1186,7 @@ wayUnsetGeneralFlags _ WayEventLog = []
 wayUnsetGeneralFlags _ WayParPvm   = []
 wayUnsetGeneralFlags _ WayParMPI   = []
 wayUnsetGeneralFlags _ WayParCp    = []
+wayUnsetGeneralFlags _ WayParMSlot = []
 wayUnsetGeneralFlags _ WayPar      = []
 wayUnsetGeneralFlags _ WayGran     = []
 wayUnsetGeneralFlags _ WayNDP      = []
@@ -1194,6 +1201,7 @@ wayExtras _ WayEventLog dflags = dflags
 wayExtras _ WayParPvm   dflags = dflags
 wayExtras _ WayParMPI   dflags = dflags
 wayExtras _ WayParCp    dflags = dflags
+wayExtras _ WayParMSlot dflags = dflags
 wayExtras _ WayPar      dflags = exposePackage' "concurrent" dflags
 wayExtras _ WayGran     dflags = exposePackage' "concurrent" dflags
 wayExtras _ WayNDP      dflags = setExtensionFlag' Opt_ParallelArrays
@@ -1212,6 +1220,7 @@ wayOptc _ WayEventLog   = ["-DTRACING"]
 wayOptc _ WayParPvm     = ["-DPARALLEL_RTS", "-DUSE_PVM"]
 wayOptc _ WayParMPI     = ["-DPARALLEL_RTS", "-DUSE_MPI"]
 wayOptc _ WayParCp      = ["-DPARALLEL_RTS", "-DUSE_COPY"]
+wayOptc _ WayParMSlot   = ["-DPARALLEL_RTS", "-DUSE_SLOTS"]
 wayOptc _ WayPar        = ["-DPAR", "-w"]
 wayOptc _ WayGran       = ["-DGRAN"]
 wayOptc _ WayNDP        = []
@@ -1239,6 +1248,7 @@ wayOptl _ WayEventLog   = []
 wayOptl _ WayParPvm     = []
 wayOptl _ WayParMPI     = []
 wayOptl _ WayParCp      = []
+wayOptl _ WayParMSlot   = []
 wayOptl _ WayPar        = ["-L${PVM_ROOT}/lib/${PVM_ARCH}",
                            "-lpvm3",
                            "-lgpvm3"]
@@ -1255,6 +1265,7 @@ wayOptP _ WayEventLog = ["-DTRACING"]
 wayOptP _ WayParPvm   = ["-D__PARALLEL_HASKELL__"]
 wayOptP _ WayParMPI   = ["-D__PARALLEL_HASKELL__"]
 wayOptP _ WayParCp    = ["-D__PARALLEL_HASKELL__"]
+wayOptP _ WayParMSlot = ["-D__PARALLEL_HASKELL__"]
 wayOptP _ WayPar      = ["-D__PARALLEL_HASKELL__"]
 wayOptP _ WayGran     = ["-D__GRANSIM__"]
 wayOptP _ WayNDP      = []
@@ -2168,6 +2179,7 @@ dynamic_flags = [
   , Flag "parpvm"         (NoArg (addWay WayParPvm) )
   , Flag "parmpi"         (NoArg (addWay WayParMPI) )
   , Flag "parcp"          (NoArg (addWay WayParCp) )
+  , Flag "parms"          (NoArg (addWay WayParMSlot) )
 
         ----- Linker --------------------------------------------------------
   , Flag "static"         (NoArg removeWayDyn)
