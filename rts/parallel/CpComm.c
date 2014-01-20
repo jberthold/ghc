@@ -1771,7 +1771,7 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
   cpw_shm_check_errors();
 
   /* check length */
-  ASSERT(length <= (int)DATASPACEWORDS);
+  ASSERT(length <= (int)DATASPACEWORDS * sizeof(StgWord));
   
   /* send */
   switch (cpw_shm_send_msg(node, tag, length, data)) {
