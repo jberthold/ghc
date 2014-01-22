@@ -1689,7 +1689,7 @@ StgClosure* UnpackGraph_(StgWord *buffer, StgInt size, Capability* cap) {
     LocateNextParent(&parent, &pptr, &pptrs, &pvhs);
     
     // stop when buffer size has been reached or end of graph
-  } while ((parent != NULL) && (size > (nat) (bufptr-buffer)));
+  } while ((parent != NULL) && (size > (bufptr-buffer)));
 
   if (parent != NULL) {
     // this case is valid when one graph can stretch across several
