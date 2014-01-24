@@ -18,6 +18,42 @@
     <itemizedlist>
         <listitem>
             <para>
+                OS X Mavericks with XCode 5 is now properly supported
+                by GHC. As a result of this, GHC now uses Clang to
+                preprocess Haskell code by default for Mavericks
+                builds.
+           </para>
+
+            <para>
+                Note that normally, GHC used <literal>gcc</literal> as
+                the preprocessor for Haskell code (as it was the
+                default everywhere,) which implements
+                <literal>-traditional</literal> behavior. However,
+                Clang is not 100% compatible with GCC's
+                <literal>-traditional</literal> as it is rather
+                implementation specified and does not match any
+                specification. Clang is also more strict.
+           </para>
+
+            <para>
+                As a result of this, when using Clang as the
+                preprocessor, some programs which previously used
+                <literal>-XCPP</literal> and the preprocessor will now
+                fail to compile. Users who wish to retain the previous
+                behavior are better off using cpphs as an external
+                preprocessor for the time being.
+           </para>
+
+            <para>
+                In the future, we hope to fix this by adopting a
+                better preprocessor implementation independent of the
+                C compiler (perhaps cpphs itself,) and ship that
+                instead.
+           </para>
+       </listitem>
+
+        <listitem>
+            <para>
                 By default, GHC has a new warning enabled,
                 <literal>-fwarn-typed-holes</literal>, which causes the
                 compiler to respond with the types of unbound
@@ -58,7 +94,7 @@
                 instances created other than the ones in its
                 definition.
 
-                TODO FIXME: reference.
+                For more information, see <xref linkend="closed-type-families"/>.
            </para>
        </listitem>
 
@@ -70,7 +106,7 @@
                 increases the type safety of GHC, it is possible that some code
                 that previously compiled will no longer work.
 
-                TODO FIXME: reference.
+                For more information, see <xref linkend="roles"/>.
            </para>
        </listitem>
 
@@ -79,16 +115,26 @@
                 GHC now supports overloading list literals using the new
                 <literal>OverloadedLists</literal> extension.
 
-                TODO FIXME: reference.
+                For more information, see <xref linkend="overloaded-lists"/>.
            </para>
        </listitem>
 
         <listitem>
             <para>
-                There has been significant overhaul of the type inference engine and
-                constraint solver.
+                GHC now supports pattern synonyms, enabled by the
+                <literal>-XPatternSynonyms</literal> extension,
+                allowing you to name and abstract over patterns more
+                easily.
 
-                TODO FIXME: reference.
+                For more information, see TODO FIXME.
+           </para>
+       </listitem>
+
+        <listitem>
+            <para>
+                There has been significant overhaul of the type
+                inference engine and constraint solver, meaning it
+                should be faster and use less memory.
            </para>
        </listitem>
 
@@ -116,11 +162,11 @@
             <para>
                 The LLVM backend now supports 128- and 256-bit SIMD
                 operations.
-
-                TODO FIXME: reference.
            </para>
             <para>
-                This is only available with the LLVM backend.
+                Note carefully: this is <emphasis>only</emphasis> available with
+                the LLVM backend, and should be considered
+                experimental.
            </para>
        </listitem>
 
@@ -144,8 +190,6 @@
                 compilation. In particular, GHC now has all the
                 necessary patches to support cross compilation to
                 Apple iOS, using the LLVM backend.
-
-                TODO FIXME: reference.
            </para>
        </listitem>
 
@@ -174,7 +218,38 @@
 
         <listitem>
             <para>
-                TODO: mention dynamic changes
+                On Linux, FreeBSD and Mac OS X, GHCi now uses the
+                system dynamic linker by default, instead of its built
+                in (static) object linker. This is more robust
+                cross-platform, and fixes many long-standing bugs (for
+                example: constructors and destructors, weak symbols,
+                etc work correctly, and several edge cases in the RTS
+                are fixed.)
+           </para>
+
+            <para>
+                As a result of this, GHCi (and Template Haskell) must
+                now load <emphasis>dynamic</emphasis> object files, not static
+                ones. To assist this, there is a new compilation flag,
+                <literal>-dynamic-too</literal>, which when used
+                during compilation causes GHC to emit both static and
+                dynamic object files at the same time. GHC itself
+                still defaults to static linking.
+            </para>
+
+            <para>
+                Note that Cabal will correctly handle
+                <literal>-dynamic-too</literal> for you automatically,
+                especially when <literal>-XTemplateHaskell</literal>
+                is needed - but you <emphasis>must</emphasis> tell Cabal you are
+                using the <literal>TemplateHaskell</literal>
+                extension.
+           </para>
+
+            <para>
+                Currently, Dynamic GHCi and
+                <literal>-dynamic-too</literal> are not supported on
+                Windows (32bit or 64bit.)
            </para>
        </listitem>
 
@@ -217,10 +292,12 @@
 
         <listitem>
             <para>
-                GHC now generates warnings when definitions conflict with the
-                Applicative-Monad Proposal (AMP).
-
-                TODO FIXME: reference.
+                In GHC 7.10, <literal>Applicative</literal> will
+                become a superclass of <literal>Monad</literal>,
+                potentially breaking a lot of user code. To ease this
+                transition, GHC now generates warnings when
+                definitions conflict with the Applicative-Monad
+                Proposal (AMP).
            </para>
 
             <para>
@@ -239,6 +316,29 @@
                 using the new flag <literal>-f[no-]warn-amp</literal>.
            </para>
        </listitem>
+
+        <listitem>
+            <para>
+                Using the new <literal>InterruptibleFFI</literal>
+                extension, it's possible to now declare a foreign
+                import as <literal>interruptible</literal>, as opposed
+                to only <literal>safe</literal> or
+                <literal>unsafe</literal>. An
+                <literal>interruptible</literal> foreign call is the
+                same as a <literal>safe</literal> call, but may be
+                interrupted by asynchronous <emphasis>Haskell
+                exceptions</emphasis>, such as those generated by
+                <literal>throwTo</literal> or
+                <literal>timeout</literal>.
+           </para>
+
+            <para>
+                For more information (including the exact details on
+                how the foreign thread is interrupted,) see <xref
+                linkend="ffi-interruptible"/>.
+           </para>
+       </listitem>
+
         <listitem>
             <para>
                 GHC's internal compiler pipeline is now exposed
@@ -388,8 +488,9 @@
            </listitem>
             <listitem>
                 <para>
-                    GHC now supports a <literal>--show-options</literal> flag,
-                    which will dump all of the flags it supports to standard out.
+                    GHC now supports a
+                    <literal>--show-options</literal> flag, which will
+                    dump all of the flags it supports to standard out.
                </para>
            </listitem>
             <listitem>
@@ -397,7 +498,7 @@
                     GHC now supports warning about overflow of integer
                     literals, enabled by
                     <literal>-fwarn-overflowed-literals</literal>. It
-                    is enabled by default
+                    is enabled by default.
                </para>
            </listitem>
             <listitem>
@@ -450,7 +551,7 @@
                     setting, which allows you to customize the
                     continuation prompt of multi-line input.
 
-                    TODO FIXME: reference.
+                    For more information, see <xref linkend="ghci-commands"/>.
                </para>
            </listitem>
            <listitem>
@@ -488,7 +589,7 @@
         <itemizedlist>
             <listitem>
                 <para>
-                    Template Haskell now supports Roles (TODO FIXME: elaborate?)
+                    Template Haskell now supports Roles.
                </para>
            </listitem>
             <listitem>
@@ -563,9 +664,28 @@
            </listitem>
             <listitem>
                 <para>
-                    GHC can now be built with Clang, and use Clang as the
-                    preprocessor for Haskell code. Only Clang version 3.4svn is
+                    GHC can now be built with Clang, and use Clang as
+                    the preprocessor for Haskell code. Only Clang
+                    version 3.4 (or Apple LLVM Clang 5.0) or beyond is
                     reliably supported.
+               </para>
+
+                <para>
+                    Note that normally, GHC uses
+                    <literal>gcc</literal> as the preprocessor for
+                    Haskell code, which implements
+                    <literal>-traditional</literal> behavior. However,
+                    Clang is not 100% compatible with GCC's
+                    <literal>-traditional</literal> as it is rather
+                    implementation specified, and is more strict.
+               </para>
+
+                <para>
+                    As a result of this, when using Clang as the
+                    preprocessor, some programs which previously used
+                    <literal>-XCPP</literal> and the preprocessor will
+                    now fail to compile. Users who wish to retain the
+                    previous behavior are better off using cpphs.
                </para>
            </listitem>
        </itemizedlist>
@@ -588,32 +708,12 @@
         </listitem>
     </itemizedlist>
 
-    <para>
-        The following libraries have been removed from the GHC tree:
-    </para>
-
-     <itemizedlist>
-         <listitem>
-             <para>TODO FIXME</para>
-        </listitem>
-    </itemizedlist>
-
-    <para>
-        The following libraries have been added to the GHC tree:
-    </para>
-
-     <itemizedlist>
-         <listitem>
-             <para>TODO FIXME</para>
-        </listitem>
-    </itemizedlist>
-
     <sect3>
         <title>array</title>
         <itemizedlist>
             <listitem>
                 <para>
-                    Version number XXXX (was XXXX)
+                    Version number 0.5.0.0 (was 0.4.0.1)
                </para>
            </listitem>
        </itemizedlist>
@@ -768,7 +868,7 @@
         <itemizedlist>
             <listitem>
                 <para>
-                    Version number 0.10.3.0 (was 0.10.0.0)
+                    Version number 0.10.4.0 (was 0.10.0.0)
                </para>
            </listitem>
        </itemizedlist>
@@ -779,7 +879,7 @@
         <itemizedlist>
             <listitem>
                 <para>
-                    Version number 1.18.1.2 (was 1.16.0)
+                    Version number 1.18.1.3 (was 1.16.0)
               </para>
           </listitem>
       </itemizedlist>
@@ -790,7 +890,7 @@
         <itemizedlist>
             <listitem>
                 <para>
-                    Version number 0.5.3.1 (was 0.5.0.0)
+                    Version number 0.5.4.0 (was 0.5.0.0)
                </para>
            </listitem>
        </itemizedlist>
@@ -981,6 +1081,18 @@
            </listitem>
             <listitem>
                 <para>
+                    Typed Template Haskell expressions are now
+                    supported. See <xref linkend="template-haskell"/>
+                    for more details.
+               </para>
+           </listitem>
+            <listitem>
+                <para>
+                    There is now support for roles.
+               </para>
+           </listitem>
+            <listitem>
+                <para>
                     There is now support for annotation pragmas.
                </para>
            </listitem>
@@ -1036,5 +1148,50 @@
            </listitem>
        </itemizedlist>
     </sect3>
+  </sect2>
+
+  <sect2>
+    <title>Known bugs</title>
+    <itemizedlist>
+        <listitem>
+            <para>
+                On OS X 10.7 and beyond, with default build settings,
+                the runtime system currently suffers from a fairly
+                large (30%) performance regression in the parallel
+                garbage collector when using
+                <literal>-threaded</literal> impacting its thoroughput
+                and overall scalability.
+           </para>
+            <para>
+                This is due to the fact that the OS X 10.7+ toolchain
+                does not (by default) support register variables, or a
+                fast <literal>__thread</literal> implementation. Note
+                that this can be worked around by building GHC using
+                GCC instead on OS X platforms, but the binary
+                distribution then requires GCC later.
+           </para>
+       </listitem>
+
+        <listitem>
+            <para>
+                On Windows, <literal>-dynamic-too</literal> is unsupported.
+           </para>
+       </listitem>
+
+        <listitem>
+            <para>
+                On Windows, we currently don't ship dynamic libraries
+                or use a dynamic GHCi, unlike Linux, FreeBSD or OS X.
+           </para>
+       </listitem>
+
+        <listitem>
+            <para>
+                On 64bit Windows, the static linker currently suffers
+                from some rather large bugs, which we hope to have
+                some fixes for soon.
+           </para>
+       </listitem>
+   </itemizedlist>
   </sect2>
 </sect1>
