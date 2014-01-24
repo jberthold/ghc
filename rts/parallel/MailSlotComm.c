@@ -67,6 +67,9 @@ SlotMsg* msg;
 /* Helper to re-assemble a cmd line from argv, for CreateProcess */
 static char* mkCmdLineString(int argc, char ** argv);
 
+/* process argv to detect and remove the -N<num> argument */
+nat setnPEsArg(int *argc, char **argv[]);
+
 /**************************************************************
  * Startup and Shutdown routines (used inside ParInit.c only) */
 
@@ -96,35 +99,8 @@ rtsBool MP_start(int* argc, char** argv[]}) {
    * The main node creates its slot, spawns all children, and returns.
    * Children just set thisPE, create their slots and return.
    */
-  char slotName[256], slotkey[9], buffer[9];
+  char slotName[256], slotkey[9], buffer[9], *cmdLine;
   int ret;
-
-  /* Future: parse args to find out how many procs (+debug mode)
-   * If we want to do anything here, we need to parse the arguments
-   * (parseRtsFlags did not run yet). We extract the -N<count> or
-   * -qp<count> flag(s), replace them by a harmless value (empty?) and
-   * spawn as many children as given by the number. if no number is
-   * given, we run with one process. */
-
-  // Present: we just use the first argument as nPEs, like other ways
-
-  if (*argc < 2) {
-    errorBelch("Need argument to specify number of PEs\n");
-    exit(EXIT_FAILURE);
-  }
-
-  // start in debug mode if negative number (or "-0")
-  if ((*argv)[1][0] == '-') {
-    RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
-    IF_PAR_DEBUG(mpcomm,
-		 debugBelch("Mailslot debug mode, MP_start\n"));
-    nPEs = (nat)atoi((*argv)[1]+1);
-  } else {
-    nPEs = (nat)atoi((*argv)[1]);
-  }
-
-  if (nPEs == (nat)0)
-    nPEs = 1;
 
   /* is Environment Var set? then we are a child */
   buffer[0] = '0';
@@ -159,7 +135,7 @@ rtsBool MP_start(int* argc, char** argv[]}) {
   ret=snprintf(slotPrefix, 252, "\\\\.\\mailslot\\%s\\%s\\", 
 	       (*argv)[0], slotkey);
   if (ret < 0 || ret == 252-1 || !(mkSlotName(slotName, thisPE))) {
-    nPEs=0; barf("Failure during startup: failed to init slotPrefix");
+    barf("Failure during startup: failed to init slotPrefix");
   }
 
   // create own mail slot
@@ -171,23 +147,35 @@ rtsBool MP_start(int* argc, char** argv[]}) {
  
   if (mySlot == INVALID_HANDLE_VALUE) { 
     sysErrorBelch("CreateMailslot failed\n");
-    nPEs=0; // cannot communicate, so do not try clean shutdown
     barf("Comm.system malfunction during startup, aborting");
   }
+
+  if (IAmMainThread) {
+    // main thread needs to store arguments before removing -N<num> (see below)
+    // this is done in the helper function (incl. malloc.ing the string)
+    cmdLine = mkCmdLineString(*argc, *argv);
+  }
+
+  /* parse args to find out how many procs (+debug mode).
+   *  We need to parse the arguments ourselves (parseRtsFlags did not
+   * run yet). The helper function extracts -N<count> flag(s) and removes
+   * them from the argv array, reducing argc appropriately.
+   * If no number is given, we run with one process. */
+  if (!(nPEs = setnPEsArg(argc, *argv)))
+    nPEs = 1;
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("Using %u processes\n", nPEs));
 
   /* if main: spawn the other processes */
   if (IAmMainThread) {
     STARTUPINFO si;
     PROCESS_INFORMATION *pi;
     int i;
-    char* cmdLine;
 
     GetStartupInfo(&si);
     pi = stgMallocBytes(sizeof(PROCESS_INFORMATION) *(nPEs -1), "PI");
 
     SetEnvironmentVariable("EdenSlot", slotkey);
-
-    cmdLine = mkCmdLineString(*argc, *argv);
 
     for (i = 2; i <= (int)nPEs; i++) {
       /* start other processes */
@@ -209,10 +197,6 @@ rtsBool MP_start(int* argc, char** argv[]}) {
     stgFree(cmdLine);
     stgFree(pi);
   }
-
-  // adjust args (ignoring nPEs argument)
-  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
-  (*argv)++; (*argc)--;
 
   return rtsTrue;
 }
@@ -671,6 +655,58 @@ rtsBool mkSlotName(char slotName[], nat proc) {
   strncat(slotName, procStr, 3);
 
   return rtsTrue;
+}
+
+/* scans argv to find an argument "-N<num>", and sets nPEs to the
+ * given num value. If the value is negative, mpcomm debug flag is set
+ * (not documented). Furthermore, the -N argument is removed from
+ * argv, and argc reduced.
+ * Returns the nPEs value found, 0 if nothing found.
+ */
+nat setnPEsArg(int *argc, char **argv) {
+  char **currArg, **lastArg;
+  rtsBool inRTS, finishedRTS;
+  int i;
+  nat pes;
+
+  /* useless, as this routine is the place where we first set the debug flag..
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("parsing flags, arg.count %d\n", *argc));
+  */
+  inRTS = finishedRTS = rtsFalse;
+  pes = 0;
+  i = *argc;
+  currArg = argv;
+  lastArg = argv;
+
+  while (i-- > 0) {
+    if ( !finishedRTS && inRTS && (*currArg)[0]=='-' && (*currArg)[1]=='N') {
+      // the PE flag we want. Parse it and only advance currArg, decrease argc
+      if ((*currArg)[2]=='-') { // negative number, debug mode
+        RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
+        pes = (nat)atoi((*currArg)+3);
+      } else {
+        pes = (nat)atoi((*currArg)+2);
+      }
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("parsing flag %s, setting nPE=%u\n",
+                              *currArg, pes));
+      currArg++;
+      (*argc)--;
+    } else {
+      // check for interesting flags
+      if      (strcmp(*currArg, "--RTS") == 0) finishedRTS=rtsTrue;
+      else if (strcmp(*currArg, "--") == 0) finishedRTS=rtsTrue;
+      else if (strcmp(*currArg, "+RTS") == 0) inRTS=rtsTrue;
+      else if (strcmp(*currArg, "-RTS") == 0) inRTS=rtsFalse;
+      // copy argument to its new place
+      *lastArg++ = *currArg++;
+    }
+  }
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("finished parsing arg.s, arg.count %d, pes=%u\n",
+                          *argc, pes));
+  return pes;
 }
 
 #else /* not windows... */
