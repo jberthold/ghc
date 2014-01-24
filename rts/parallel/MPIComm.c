@@ -87,12 +87,12 @@ MPI_Comm sysComm;
  *   nodes are spawned by startup script calling mpirun
  *   This function only connects to MPI and determines the main PE.
  */
-rtsBool MP_start(int* argc, char** argv) {
+rtsBool MP_start(int* argc, char** argv[]) {
 
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch("MPI_Init: starting MPI-Comm...\n"));
 
-  MPI_Init(argc, &argv); // MPI sez: can modify args
+  MPI_Init(argc, argv); // MPI sez: can modify args
   
   MPI_Comm_rank(MPI_COMM_WORLD, &mpiMyRank);
   IF_PAR_DEBUG(mpcomm,
@@ -104,8 +104,8 @@ rtsBool MP_start(int* argc, char** argv) {
   MPI_Comm_size(MPI_COMM_WORLD, &mpiWorldSize);
 
   // we should have a correct argument...
-  ASSERT(argv && argv[1]);
-  nPEs = atoi(argv[1]);
+  ASSERT(argv && (*argv)[1]);
+  nPEs = atoi((*argv)[1]);
 
   if (nPEs) { // we have been given a size, so check it:
     IF_PAR_DEBUG(mpcomm,
@@ -124,7 +124,11 @@ rtsBool MP_start(int* argc, char** argv) {
   // System communicator sysComm is duplicated from COMM_WORLD
   // but has its own context
   MPI_Comm_dup(MPI_COMM_WORLD, &sysComm); 
-  
+
+  // adjust args (ignoring nPEs argument added by the start script)
+  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
+  (*argv)++; (*argc)--;
+
   return rtsTrue;
 }
 

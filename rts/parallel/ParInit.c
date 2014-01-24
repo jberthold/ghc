@@ -150,11 +150,10 @@ startupParallelSystem(int* argc, char **argv[]) {
   }
 #endif //TRACING
   // possibly starts other PEs (first argv is number) 
-  // sets IAmMainThread, nPEs
-  MP_start(argc, *argv); 
+  // sets IAmMainThread, nPEs.
+  // strips argv of first argument, adjusts argc
+  MP_start(argc, argv);
   
-  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
-  (*argv)++; (*argc)--;
   if (IAmMainThread){
 	/* Only in debug mode? */
 	fprintf(stderr, "==== Starting parallel execution on %d processors ...\n", 

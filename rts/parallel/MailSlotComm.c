@@ -79,10 +79,12 @@ static char* mkCmdLineString(int argc, char ** argv);
  *      nPEs          - int: no. of PEs to expect/start
  *      IAmMainThread - rtsBool: whether this node is main PE
  * Parameters: 
- *     IN    argv  - char**: program arguments
+ *     IN/OUT    argc  - int*   : program arg.count
+ *     IN/OUT    argv  - char***: program arguments
+ *   (at the moment, argc and argv are modified. TODO)
  * Returns: Bool: success or failure
  */
-rtsBool MP_start(int* argc, char** argv) {
+rtsBool MP_start(int* argc, char** argv[]}) {
   /* Child processes are created here, and the mailslots are reserved,
    * but not used yet. Later, in MP_sync, we know DATASPACEWORDS and
    * limit the max. msg. size to it.
@@ -104,8 +106,7 @@ rtsBool MP_start(int* argc, char** argv) {
    * spawn as many children as given by the number. if no number is
    * given, we run with one process. */
 
-  // Present: we just use the first argument as nPEs
-  // (ParInit::startupParallelSystem cuts away the first arg.)
+  // Present: we just use the first argument as nPEs, like other ways
 
   if (*argc < 2) {
     errorBelch("Need argument to specify number of PEs\n");
@@ -113,13 +114,13 @@ rtsBool MP_start(int* argc, char** argv) {
   }
 
   // start in debug mode if negative number (or "-0")
-  if (argv[1][0] == '-') {
+  if ((*argv)[1][0] == '-') {
     RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
     IF_PAR_DEBUG(mpcomm,
 		 debugBelch("Mailslot debug mode, MP_start\n"));
-    nPEs = (nat)atoi(argv[1]+1);
+    nPEs = (nat)atoi((*argv)[1]+1);
   } else {
-    nPEs = (nat)atoi(argv[1]);
+    nPEs = (nat)atoi((*argv)[1]);
   }
 
   if (nPEs == (nat)0)
@@ -156,7 +157,7 @@ rtsBool MP_start(int* argc, char** argv) {
 
   // initialise slotPrefix (used in mkSlotName)
   ret=snprintf(slotPrefix, 252, "\\\\.\\mailslot\\%s\\%s\\", 
-	       argv[0], slotkey);
+	       (*argv)[0], slotkey);
   if (ret < 0 || ret == 252-1 || !(mkSlotName(slotName, thisPE))) {
     nPEs=0; barf("Failure during startup: failed to init slotPrefix");
   }
@@ -186,7 +187,7 @@ rtsBool MP_start(int* argc, char** argv) {
 
     SetEnvironmentVariable("EdenSlot", slotkey);
 
-    cmdLine = mkCmdLineString(*argc, argv);
+    cmdLine = mkCmdLineString(*argc, *argv);
 
     for (i = 2; i <= (int)nPEs; i++) {
       /* start other processes */
@@ -208,6 +209,10 @@ rtsBool MP_start(int* argc, char** argv) {
     stgFree(cmdLine);
     stgFree(pi);
   }
+
+  // adjust args (ignoring nPEs argument)
+  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
+  (*argv)++; (*argc)--;
 
   return rtsTrue;
 }

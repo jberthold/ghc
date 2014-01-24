@@ -188,7 +188,9 @@ static void MPMsgHandle(OpCode code, int buffer) {
  *   nPEs (main only)- int: no. of PEs
  *   IAmMainThread - Bool: wether this node is main PE
  * Parameters: 
- *     IN    argv  - char**: program arguments (for pvm-spawn/mpi-init)
+ *     IN/OUT    argc  - int*   : prog. arg. count
+ *     IN/OUT    argv  - char***: program arguments (for pvm-spawn/mpi-init)
+ *      (first argument added by a start script, removed here)
  * Returns: Bool: success (1) or failure (0)
  *
  * For PVM: 
@@ -203,7 +205,7 @@ static void MPMsgHandle(OpCode code, int buffer) {
  * JB 01/2007: start in debug mode when nPEs parameter starts with '-'
  *
  */
-rtsBool MP_start(int* argc, char* argv[]) {
+rtsBool MP_start(int* argc, char** argv[]) {
   
   if (*argc < 2) {
     debugBelch("Need argument to specify number of PEs");
@@ -211,7 +213,7 @@ rtsBool MP_start(int* argc, char* argv[]) {
   }
 
   // start in debug mode if negative number (or "-0")
-  if (argv[1][0] == '-') {
+  if ((*argv)[1][0] == '-') {
     RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
     IF_PAR_DEBUG(mpcomm,
 		 debugBelch("PVM debug mode! Starting\n"));
@@ -246,21 +248,22 @@ rtsBool MP_start(int* argc, char* argv[]) {
 	       "PVM -- get config: ");
 
     // we should have a correct argument...
-    ASSERT(argv && argv[1]);
+    ASSERT(argv && (*argv)[1]);
 
     // correct argument if PVM debugging
-    if (argv[1][0] == '-') {
+    if ((*argv)[1][0] == '-') {
       taskTag = taskTag | PvmTaskDebug;
-      nPEs = atoi(argv[1]+1);
+      nPEs = atoi((*argv)[1]+1);
     } else {
-      nPEs = atoi(argv[1]);
+      nPEs = atoi((*argv)[1]);
     }
 
 
     // determine number of nodes, if not given
     if (!(nPEs)) {
       IF_PAR_DEBUG(mpcomm, 
-		   debugBelch("nPEs not set explicitly (arg is %s)\n",argv[1]));
+		   debugBelch("nPEs not set explicitly (arg is %s)\n",
+                              (*argv)[1]));
       nPEs = nHost;
     }
     IF_PAR_DEBUG(mpcomm, 
@@ -283,7 +286,7 @@ rtsBool MP_start(int* argc, char* argv[]) {
 
       // determine program name. This dance with tmp is necessary
       // since basename likes to modify its argument.
-      tmp = strdup(argv[0]);
+      tmp = strdup((*argv)[0]);
       progname = basename(tmp);
 
       IF_PAR_DEBUG(mpcomm, 
@@ -294,7 +297,8 @@ rtsBool MP_start(int* argc, char* argv[]) {
       myHost = pvm_tidtohost(pvmMyself);
       for(tasks=1, i=0; tasks < nPEs && i < nHost; i++) {
 	if(hostp[i].hi_tid != myHost) {
-	  checkComms(-1+pvm_spawn(progname, &(argv[1]), taskTag | PvmTaskHost,
+	  checkComms(-1+pvm_spawn(progname, &((*argv)[1]),
+                                  taskTag | PvmTaskHost,
 			          hostp[i].hi_name, 1, allPEs+tasks),
 		     "PVM -- task startup");
 	  tasks++;
@@ -303,7 +307,7 @@ rtsBool MP_start(int* argc, char* argv[]) {
       // rest anywhere pvm likes. If this fails, error code is in
       // allPEs array (at offset)
       if (tasks < nPEs) {
-	tasks += pvm_spawn(progname, &(argv[1]), taskTag, 
+	tasks += pvm_spawn(progname, &((*argv)[1]), taskTag, 
 			       (char*)NULL, nPEs-tasks, allPEs+tasks);
       }
       i = nPEs - tasks;
@@ -357,6 +361,10 @@ rtsBool MP_start(int* argc, char* argv[]) {
 		 debugBelch("Sent sync message.\n"));
 
   }
+
+  // adjust args (ignoring nPEs argument added by the start script)
+  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
+  (*argv)++; (*argc)--;
 
   return rtsTrue;
 }

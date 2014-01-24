@@ -48,10 +48,12 @@
  *      nPEs          - int: no. of PEs to expect/start
  *      IAmMainThread - rtsBool: whether this node is main PE
  * Parameters: 
- *     IN    argv  - char**: program arguments
+ *     IN/OUT argc  - int*: program argument count ptr
+ *     IN/OUT argv  - char***: program arguments ptr
+ *       (argc and argv may be modified if a start script is used)
  * Returns: Bool: success or failure
  */
-rtsBool MP_start(int* argc, char** argv);
+rtsBool MP_start(int* argc, char** argv[]);
 
 /* MP_sync synchronises all nodes in a parallel computation:
  *  sets global var.: 

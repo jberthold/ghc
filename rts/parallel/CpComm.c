@@ -205,10 +205,12 @@ cpw_sem_t  *w_sems, *r_sems;     /* synchronize msg queues */
  *      nPEs          - int: no. of PEs to expect/start
  *      IAmMainThread - rtsBool: whether this node is main PE
  * Parameters: 
- *     IN    argv  - char**: program arguments
+ *     IN/OUT argc - int*    : prog. arg. count
+ *     IN/OUT argv  - char***: program arguments
+ *   (first arg. added by start script, removed here)
  * Returns: Bool: success or failure
  */
-rtsBool MP_start(int* argc, char** argv) {
+rtsBool MP_start(int* argc, char** argv[]) {
 
   /* first argument is number of PEs
      (handled by startup script in compiler/main/DriverPipeline.hs */
@@ -216,14 +218,16 @@ rtsBool MP_start(int* argc, char** argv) {
     debugBelch("Need argument to specify number of PEs");
     exit(EXIT_FAILURE);
   }
-  ASSERT(argv && argv[1]);
+  ASSERT(*argv && (*argv)[1]);
 
   // start in debug mode if negative number (or "-0")
-  if (argv[1][0] == '-') {
+  if ((*argv)[1][0] == '-') {
     RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
     IF_PAR_DEBUG(mpcomm,
 		 debugBelch("CP Way debug mode! Starting\n"));
-    argv[1][0]='+';
+    nPEs = (nat)atoi((*argv)[1]+1);
+  } else {
+    nPEs = (nat)atoi((*argv)[1]);
   }
 
   /* HACK:
@@ -232,9 +236,8 @@ rtsBool MP_start(int* argc, char** argv) {
      Either move the startup entirely to MP_sync() or move the parsing.
      For now just do an additional parse...
   */
-  parse_rts_flags(argc,argv);
+  parse_rts_flags(argc,*argv);
 
-  nPEs = (nat)atoi(argv[1]);
   if (nPEs == (nat)0)
     nPEs = 1;
 
@@ -295,6 +298,10 @@ rtsBool MP_start(int* argc, char** argv) {
       break;
     }
   }
+
+  // adjust args (ignoring nPEs argument added by the start script)
+  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
+  (*argv)++; (*argc)--;
 
   return rtsTrue;
 }
@@ -1521,10 +1528,12 @@ char buffer[256];
  *      nPEs          - int: no. of PEs to expect/start
  *      IAmMainThread - rtsBool: whether this node is main PE
  * Parameters: 
- *     IN    argv  - char**: program arguments
+ *     IN/OUT argc - int*    : prog. arg. count
+ *     IN/OUT argv  - char***: program arguments
+ *   (first arg. added by start script, removed here)
  * Returns: Bool: success or failure
  */
-rtsBool MP_start(int* argc, char** argv) {
+rtsBool MP_start(int* argc, char** argv[]) {
 	//printf("MP_Start: Starting CopyWay system... :)\n");
 
   if (*argc < 2) {
@@ -1534,21 +1543,22 @@ rtsBool MP_start(int* argc, char** argv) {
 
   /* first argument is number of PEs
      (handled by startup script in compiler/main/DriverPipeline.hs */
-  ASSERT(argv && argv[1]);
+  ASSERT(*argv && (*argv)[1]);
 
   // start in debug mode if negative number (or "-0")
-  if (argv[1][0] == '-') {
+  if ((*argv)[1][0] == '-') {
     RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
     IF_PAR_DEBUG(mpcomm,
 		 debugBelch("CP Way debug mode! Starting\n"));
-    argv[1][0] = '+';
+    nPEs = (nat)atoi((*argv)[1]+1);
+  } else {
+    nPEs = (nat)atoi((*argv)[1]);
   }
 
-  nPEs = (nat)atoi(argv[1]);
   if (nPEs == (nat)0)
     nPEs = 1;
 
-  args = cpw_mk_argv_string(*argc, argv);
+  args = cpw_mk_argv_string(*argc, *argv);
  
   /* is Environment Var set? then we are a child */
   buffer[0] = '0';
@@ -1562,6 +1572,10 @@ rtsBool MP_start(int* argc, char** argv) {
     thisPE = 1;
     IAmMainThread = rtsTrue;
   }
+
+  // adjust args (ignoring nPEs argument added by the start script)
+  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
+  (*argv)++; (*argc)--;
 
   return rtsTrue;
 }
