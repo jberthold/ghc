@@ -68,7 +68,7 @@ SlotMsg* msg;
 static char* mkCmdLineString(int argc, char ** argv);
 
 /* process argv to detect and remove the -N<num> argument */
-nat setnPEsArg(int *argc, char **argv[]);
+nat setnPEsArg(int *argc, char **argv);
 
 /**************************************************************
  * Startup and Shutdown routines (used inside ParInit.c only) */
@@ -87,7 +87,7 @@ nat setnPEsArg(int *argc, char **argv[]);
  *   (at the moment, argc and argv are modified. TODO)
  * Returns: Bool: success or failure
  */
-rtsBool MP_start(int* argc, char** argv[]}) {
+rtsBool MP_start(int* argc, char** argv[]) {
   /* Child processes are created here, and the mailslots are reserved,
    * but not used yet. Later, in MP_sync, we know DATASPACEWORDS and
    * limit the max. msg. size to it.
