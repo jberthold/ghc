@@ -183,7 +183,6 @@ Library
         CmmOpt
         CmmParse
         CmmProcPoint
-        CmmRewriteAssignments
         CmmSink
         CmmType
         CmmUtils
@@ -351,6 +350,7 @@ Library
         CoreToStg
         StgLint
         StgSyn
+        CallArity
         DmdAnal
         WorkWrap
         WwLib

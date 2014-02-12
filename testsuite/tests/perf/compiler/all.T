@@ -69,7 +69,7 @@ test('T1969',
              # 2012-10-08 303930948 (x86/Linux, new codegen)
              # 2013-02-10 322937684 (x86/OSX)
              # 2014-01-22 316103268 (x86/Linux)
-           (wordsize(64), 698612512, 5)]),
+           (wordsize(64), 660922376, 5)]),
              # 17/11/2009 434845560 (amd64/Linux)
              # 08/12/2009 459776680 (amd64/Linux)
              # 17/05/2010 519377728 (amd64/Linux)
@@ -77,19 +77,14 @@ test('T1969',
              # 16/07/2012 589168872 (amd64/Linux)
              # 20/07/2012 595936240 (amd64/Linux)
              # 23/08/2012 606230880 (amd64/Linux)
-             # 29/08/2012 633334184 (amd64/Linux)
-             #            (^ new codegen)
+             # 29/08/2012 633334184 (amd64/Linux) new codegen
              # 18/09/2012 641959976 (amd64/Linux)
-             # 19/10/2012 661832592 (amd64/Linux)
-             #            (^ -fPIC turned on)
-             # 23/10/2012 642594312 (amd64/Linux)
-             #            (^ -fPIC turned off again)
-             # 12/11/2012 658786936 (amd64/Linux)
-             #            (^ UNKNOWN REASON )
-             # 17/1/13:   667160192 (x86_64/Linux)
-             #            (^ new demand analyser)
-             # 18/10/2013 698612512 (x86_64/Linux)
-             #            (fix for #8456)
+             # 19/10/2012 661832592 (amd64/Linux) -fPIC turned on
+             # 23/10/2012 642594312 (amd64/Linux) -fPIC turned off again
+             # 12/11/2012 658786936 (amd64/Linux) UNKNOWN REASON
+             # 17/1/13:   667160192 (x86_64/Linux) new demand analyser
+             # 18/10/2013 698612512 (x86_64/Linux) fix for #8456
+             # 10/02/2014 660922376 (x86_64/Linux) call artiy analysis
       only_ways(['normal']),
 
       extra_hc_opts('-dcore-lint -static')
@@ -227,13 +222,14 @@ test('T3064',
             # 2012-10-30: 111189536 (x86/Windows)
             # 2013-11-13: 146626504 (x86/Windows, 64bit machine)
             # 2014-01-22: 162457940 (x86/Linux)
-           (wordsize(64), 329795912, 5)]),
+           (wordsize(64), 308422280, 5)]),
             # (amd64/Linux) (28/06/2011):  73259544
             # (amd64/Linux) (07/02/2013): 224798696
             # (amd64/Linux) (02/08/2013): 236404384, increase from roles
             # (amd64/Linux) (11/09/2013): 290165632, increase from AMP warnings
             # (amd64/Linux) (22/11/2013): 308300448, GND via Coercible and counters for constraints solving
-	    # (amd64/Linux) (02/12/2013): 329795912, Coercible refactor
+	        # (amd64/Linux) (02/12/2013): 329795912, Coercible refactor
+            # (amd64/Linux) (11/02/2014): 308422280, optimize Coercions in simpleOptExpr
 
       compiler_stats_num_field('max_bytes_used',
           [(wordsize(32), 7218200 , 20),
