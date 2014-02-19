@@ -453,6 +453,12 @@ hs_exit_(rtsBool wait_foreign)
     freeTracing();
 #endif
 
+#if defined(PARALLEL_RTS) && (defined(USE_SLOTS) /* || defined(USE_CP) */ )
+    // call this only if the way does not use a start script
+    // (see DriverPipeline.hs)
+    zipTraceFiles();
+#endif
+
 /* free hash table storage */
     exitHashTable();
 
