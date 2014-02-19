@@ -138,6 +138,8 @@ void zipTraceFiles(void) {
 
   if (RtsFlags.TraceFlags.tracing != TRACE_EVENTLOG) { return; }
 
+  if (!IAmMainThread) { return; } 
+
   // see rts/eventlog/EventLog.c, must match naming convention there
     prog = stgMallocBytes(strlen(prog_name) + 1, "initEventLogging");
     strcpy(prog, prog_name);
