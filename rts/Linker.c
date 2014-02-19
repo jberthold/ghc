@@ -211,9 +211,7 @@ static int ocAllocateSymbolExtras_ELF ( ObjectCode* oc );
 static int ocVerifyImage_PEi386 ( ObjectCode* oc );
 static int ocGetNames_PEi386    ( ObjectCode* oc );
 static int ocResolve_PEi386     ( ObjectCode* oc );
-#if !defined(x86_64_HOST_ARCH)
 static int ocRunInit_PEi386     ( ObjectCode* oc );
-#endif
 static void *lookupSymbolInDLLs ( unsigned char *lbl );
 static void zapTrailingAtSign   ( unsigned char *sym );
 static char *allocateImageAndTrampolines (
@@ -2888,10 +2886,7 @@ resolveObjs( void )
 #if defined(OBJFORMAT_ELF)
             r = ocRunInit_ELF ( oc );
 #elif defined(OBJFORMAT_PEi386)
-#if !defined(x86_64_HOST_ARCH)
-            /* It does not work on x86_64 yet. #8698. */
             r = ocRunInit_PEi386 ( oc );
-#endif
 #elif defined(OBJFORMAT_MACHO)
             r = ocRunInit_MachO ( oc );
 #else
@@ -3504,8 +3499,8 @@ allocateImageAndTrampolines (
    /* For 32-bit case we don't need this, hence we use macro PEi386_IMAGE_OFFSET,
       which equals to 4 for 64-bit case and 0 for 32-bit case. */
    /* We allocate trampolines area for all symbols right behind
-      image data, aligned on 16. */
-   size = ((PEi386_IMAGE_OFFSET + size + 0xf) & ~0xf)
+      image data, aligned on 8. */
+   size = ((PEi386_IMAGE_OFFSET + size + 0x7) & ~0x7)
               + hdr.NumberOfSymbols * sizeof(SymbolExtra);
 #endif
    image = VirtualAlloc(NULL, size,
@@ -3621,9 +3616,10 @@ cstring_from_section_name (UChar* name, UChar* strtab)
 
 /* Just compares the short names (first 8 chars) */
 static COFF_section *
-findPEi386SectionCalled ( ObjectCode* oc,  UChar* name )
+findPEi386SectionCalled ( ObjectCode* oc,  UChar* name, UChar* strtab )
 {
    int i;
+   rtsBool long_name = rtsFalse;
    COFF_header* hdr
       = (COFF_header*)(oc->image);
    COFF_section* sectab
@@ -3631,6 +3627,14 @@ findPEi386SectionCalled ( ObjectCode* oc,  UChar* name )
            ((UChar*)(oc->image))
            + sizeof_COFF_header + hdr->SizeOfOptionalHeader
         );
+   // String is longer than 8 bytes, swap in the proper
+   // (NULL-terminated) version, and make a note that this
+   // is a long name.
+   if (name[0]==0 && name[1]==0 && name[2]==0 && name[3]==0) {
+      UInt32 strtab_offset = * (UInt32*)(name+4);
+      name = ((UChar*)strtab) + strtab_offset;
+      long_name = rtsTrue;
+   }
    for (i = 0; i < hdr->NumberOfSections; i++) {
       UChar* n1;
       UChar* n2;
@@ -3639,10 +3643,28 @@ findPEi386SectionCalled ( ObjectCode* oc,  UChar* name )
            myindex ( sizeof_COFF_section, sectab, i );
       n1 = (UChar*) &(section_i->Name);
       n2 = name;
-      if (n1[0]==n2[0] && n1[1]==n2[1] && n1[2]==n2[2] &&
-          n1[3]==n2[3] && n1[4]==n2[4] && n1[5]==n2[5] &&
-          n1[6]==n2[6] && n1[7]==n2[7])
-         return section_i;
+      // Long section names are prefixed with a slash, see
+      // also cstring_from_section_name
+      if (n1[0] == '/' && long_name) {
+         // Long name check
+         // We don't really want to make an assumption that the string
+         // table indexes are the same, so we'll do a proper check.
+         int n1_strtab_offset = strtol((char*)n1+1,NULL,10);
+         n1 = (UChar*) (((char*)strtab) + n1_strtab_offset);
+         if (0==strcmp((const char*)n1, (const char*)n2)) {
+            return section_i;
+         }
+      } else if (n1[0] != '/' && !long_name) {
+         // Short name check
+         if (n1[0]==n2[0] && n1[1]==n2[1] && n1[2]==n2[2] &&
+             n1[3]==n2[3] && n1[4]==n2[4] && n1[5]==n2[5] &&
+             n1[6]==n2[6] && n1[7]==n2[7]) {
+            return section_i;
+         }
+      } else {
+         // guaranteed to mismatch, because we never attempt to link
+         // in an executable where the section name may be truncated
+      }
    }
 
    return NULL;
@@ -4160,7 +4182,7 @@ static int
 ocAllocateSymbolExtras_PEi386 ( ObjectCode* oc )
 {
    oc->symbol_extras = (SymbolExtra*)(oc->image - PEi386_IMAGE_OFFSET
-                                      + ((PEi386_IMAGE_OFFSET + oc->fileSize + 0xf) & ~0xf));
+                                      + ((PEi386_IMAGE_OFFSET + oc->fileSize + 0x7) & ~0x7));
    oc->first_symbol_extra = 0;
    oc->n_symbol_extras = ((COFF_header*)oc->image)->NumberOfSymbols;
 
@@ -4174,7 +4196,7 @@ makeSymbolExtra_PEi386( ObjectCode* oc, size_t s, char* symbol )
     SymbolExtra *extra;
 
     curr_thunk = oc->first_symbol_extra;
-    if (curr_thunk > oc->n_symbol_extras) {
+    if (curr_thunk >= oc->n_symbol_extras) {
       barf("Can't allocate thunk for %s", symbol);
     }
 
@@ -4184,14 +4206,6 @@ makeSymbolExtra_PEi386( ObjectCode* oc, size_t s, char* symbol )
     static uint8_t jmp[] = { 0xFF, 0x25, 0xF2, 0xFF, 0xFF, 0xFF };
     extra->addr = (uint64_t)s;
     memcpy(extra->jumpIsland, jmp, 6);
-
-    /* DLL-imported symbols are inserted here.
-       Others are inserted in ocGetNames_PEi386.
-     */
-    if(lookupStrHashTable(symhash, symbol) == NULL) {
-       ghciInsertSymbolTable(oc->fileName, symhash, symbol, extra->jumpIsland,
-               HS_BOOL_FALSE, oc);
-    }
 
     oc->first_symbol_extra++;
 
@@ -4256,14 +4270,6 @@ ocResolve_PEi386 ( ObjectCode* oc )
           continue;
       }
 
-#if defined(x86_64_HOST_ARCH)
-      /* It does not work on x86_64 yet. #8698. */
-      if (0 == strcmp(".ctors", (char*)secname)) {
-          stgFree(secname);
-          continue;
-      }
-#endif
-
       stgFree(secname);
 
       if ( sectab_i->Characteristics & MYIMAGE_SCN_LNK_NRELOC_OVFL ) {
@@ -4325,9 +4331,11 @@ ocResolve_PEi386 ( ObjectCode* oc )
 
          if (sym->StorageClass == MYIMAGE_SYM_CLASS_STATIC) {
             COFF_section* section_sym
-               = findPEi386SectionCalled ( oc, sym->Name );
+               = findPEi386SectionCalled ( oc, sym->Name, strtab );
             if (!section_sym) {
-               errorBelch("%" PATH_FMT ": can't find section `%s' in %s", oc->fileName, sym->Name, secname);
+               errorBelch("%" PATH_FMT ": can't find section named: ", oc->fileName);
+               printName(sym->Name, strtab);
+               errorBelch(" in %s", secname);
                return 0;
             }
             S = ((size_t)(oc->image))
@@ -4435,8 +4443,6 @@ ocResolve_PEi386 ( ObjectCode* oc )
    return 1;
 }
 
-/* It does not work on x86_64 yet. #8698. */
-#if !defined(x86_64_HOST_ARCH)
 static int
 ocRunInit_PEi386 ( ObjectCode *oc )
 {
@@ -4479,7 +4485,6 @@ ocRunInit_PEi386 ( ObjectCode *oc )
     freeProgEnvv(envc, envv);
     return 1;
 }
-#endif
 
 #endif /* defined(OBJFORMAT_PEi386) */
 

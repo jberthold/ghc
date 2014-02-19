@@ -6652,6 +6652,18 @@ See also <ulink url="http://ghc.haskell.org/trac/ghc/ticket/7347">Trac #7347</ul
 </para>
 </sect2>
 
+<sect2>
+<title>Promoting type operators</title>
+<para>
+Type operators are <emphasis>not</emphasis> promoted to the kind level. Why not? Because
+<literal>*</literal> is a kind, parsed the way identifiers are. Thus, if a programmer
+tried to write <literal>Either * Bool</literal>, would it be <literal>Either</literal>
+applied to <literal>*</literal> and <literal>Bool</literal>? Or would it be
+<literal>*</literal> applied to <literal>Either</literal> and <literal>Bool</literal>.
+To avoid this quagmire, we simply forbid promoting type operators to the kind level.
+</para>
+</sect2>
+
 
 </sect1>
 
@@ -7862,7 +7874,8 @@ scope over the methods defined in the <literal>where</literal> part.  For exampl
 4.5.5</ulink>
 of the Haskell Report)
 can be completely switched off by
-<option>-XNoMonomorphismRestriction</option>.
+<option>-XNoMonomorphismRestriction</option>. Since GHC 7.8.1, the monomorphism
+restriction is switched off by default in GHCi.
 </para>
 </sect3>
 
@@ -7978,21 +7991,20 @@ with <option>-XNoMonoLocalBinds</option> but type inference becomes less predica
 <option>-fwarn-typed-holes</option>, which is enabled by default.</para>
 
 <para>
-The goal of the typed holes warning is not to change the type system, but to help with writing Haskell
-code. Type holes can be used to obtain extra information from the type checker, which might otherwise be hard
-to get.
-Normally, the type checker is used to decide if a module is well typed or not. Using GHCi,
-users can inspect the (inferred) type signatures of all top-level bindings. However, determining the
-type of a single term is still hard. Yet while writing code, it could be helpful to know the type of
-the term you're about to write.
-</para>
-
-<para>
-This extension allows special placeholders, written with a leading underscore (e.g. "<literal>_</literal>",
+This option allows special placeholders, written with a leading underscore (e.g. "<literal>_</literal>",
 "<literal>_foo</literal>", "<literal>_bar</literal>"), to be used as an expression.
 During compilation these holes will generate an error message describing what type is expected there,
 information about the origin of any free type variables, and a list of local bindings
 that might help fill the hole with actual code.
+</para>
+
+<para>
+The goal of the typed holes warning is not to change the type system, but to help with writing Haskell
+code. Typed holes can be used to obtain extra information from the type checker, which might otherwise be hard
+to get.
+Normally, using GHCi, users can inspect the (inferred) type signatures of all top-level bindings.
+However, this method is less convenient with terms which are not defined on top-level or
+inside complex expressions. Holes allow to check the type of the term you're about to write.
 </para>
 
 <para>
@@ -8023,15 +8035,15 @@ hole.hs:2:7:
 </para>
 
 <para>
-Multiple type holes can be used to find common type variables between expressions. For example:
+Multiple typed holes can be used to find common type variables between expressions. For example:
 <programlisting>
 sum :: [Int] -> Int
-sum xx = foldr _f _z xs
+sum xs = foldr _f _z xs
 </programlisting>
 Shows:
 <programlisting>
 holes.hs:2:15:
-    Found hole `_f' with type: Int-> Int -> Int
+    Found hole `_f' with type: Int -> Int -> Int
     In the first argument of `foldr', namely `_'
     In the expression: foldr _a _b _c
     In an equation for `sum': sum x = foldr _a _b _c
@@ -8070,7 +8082,6 @@ unbound.hs:1:13:
     In the second argument of `(:)', namely `_x'
     In the expression: _x : _x
     In an equation for `cons': cons = _x : _x
-Failed, modules loaded: none.
 </programlisting>
 This ensures that an unbound identifier is never reported with a too polymorphic type, like
 <literal>forall a. a</literal>, when used multiple times for types that can not be unified.
