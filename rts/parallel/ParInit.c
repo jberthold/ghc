@@ -22,6 +22,7 @@
 #include <string.h>
 #include "Stats.h"
 
+#include "ZipFile.h"
 
 #include <sys/time.h>
 
@@ -37,6 +38,7 @@ StgWord64 startupTicks;
 char *argvsave;
 struct timeval startupTime;
 struct timezone startupTimeZone;
+nat pes; // remember nPEs after shutdown
 #endif //TRACING
 /* For flag handling see RtsFlags.h */
 
@@ -109,9 +111,100 @@ void emitStartupEvents(void){
   traceVersion(ProjectVersion);
   //edentrace:  traceProgramInvocation
   traceProgramInvocation(argvsave);
+
+#ifdef TRACING
+  pes = nPEs; // and remember nPEs (shutdown will zero it)
+#endif
 }
 
+/* zipTraceFiles creates a zip file (using a utility module)
+ * containing the eventlog files of all PEs (for their names see
+ * EventLog.c). argvsave is used as a comment string for the archive,
+ * so it can be identified by unzip -l.
+ *
+ * The archive name will be <prog_name>.parevents, overwriting an
+ * older file of the same name if there was one.
+ *
+ * This method should be used by all parallel ways which do not use a
+ * run script. It must be called after shutdownParallelSystem and
+ * endTracing (see RtsStartup). shutDownParallelSystem sets nPEs to 0,
+ * so the value is remembered in variable "pes" for this method.
+ */
+void zipTraceFiles(void) {
+#ifdef TRACING
+  char **files, *archive, *prog;
+  int i;
+  rtsBool res;
 
+  if (RtsFlags.TraceFlags.tracing != TRACE_EVENTLOG) { return; }
+
+  // see rts/eventlog/EventLog.c, must match naming convention there
+    prog = stgMallocBytes(strlen(prog_name) + 1, "initEventLogging");
+    strcpy(prog, prog_name);
+#ifdef mingw32_HOST_OS
+    // on Windows, drop the .exe suffix if there is one
+    {
+        char *suff;
+        suff = strrchr(prog,'.');
+        if (suff != NULL && !strcmp(suff,".exe")) {
+            *suff = '\0';
+        }
+    }
+#endif
+
+  // archive == prog_name ++ ".parevents" (overwriting)
+  archive = stgMallocBytes(strlen(prog) + 10 + 1, "archive");
+  sprintf(archive, "%s.parevents", prog);
+
+  files = stgMallocBytes(sizeof(char*) * pes, "file array");
+
+  if (pes == 1) {
+    // mv $prog#1.eventlog $prog.parevents; return;
+    files[0] = stgMallocBytes(strlen(prog) + 10 + 1 + 1, "fname");
+    sprintf(files[0], "%s#1.eventlog", prog);
+    if (rename(files[0], archive) != 0) {
+      sysErrorBelch("Failed to rename trace file");
+      errorBelch("(trying to rename %s to %s)", files[0], archive);
+    }
+    free(files[0]);
+  } else {
+    for (i=0; i < (int)pes; i++) {
+      FILE *f;
+      // file[i] = "$prog#$i.eventlog". Assume $i requires < 5 char
+      files[i] = stgMallocBytes(strlen(prog) + 5 + 10 + 1, "fname");
+      sprintf(files[i], "%s#%d.eventlog", prog, i+1);
+      // check that file actually exists. This method should be portable
+      if ((f = fopen(files[i], "r")) == NULL) {
+        free(files[i]); i--; pes--; // error, skip this file
+      } else {
+        fclose(f);
+      }
+    }
+    // did we end up having only one trace file (or none)?
+    if (pes <= 1) {
+      if (rename(files[0], archive) != 0) {
+        sysErrorBelch("Failed to rename trace file");
+        errorBelch("(trying to rename %s to %s)", files[0], archive);
+      }
+    } else {
+      res = compressFiles(archive, pes, files, argvsave);
+      
+      // and remove the files if this worked
+      for (i=0; i < (int)pes; i++) {
+        if (res == rtsTrue) { 
+          if (remove(files[i]) < 0) {
+            sysErrorBelch("Failed to remove file");
+            errorBelch("(when removing file %s)\n", files[i]);
+          }
+        }
+        free(files[i]);
+      }
+    } 
+  }
+  free(files);
+  free(archive);
+#endif
+}
 
 
 /* 

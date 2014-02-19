@@ -136,8 +136,9 @@ void          shutdownParallelSystem(StgInt errorcode);
 
 // defined in ParInit.c, called in RtsStartup.c
 void          emitStartupEvents(void);
+// defined in ParInit.c, called in RtsStartup.c (after shutdown when tracing)
+void          zipTraceFiles(void);
 
- 
 // resides in Schedule.c:
 // init on demand
 void freeRecvBuffer(void);
