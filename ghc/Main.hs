@@ -77,7 +77,7 @@ import Data.Maybe
 
 main :: IO ()
 main = do
-   defaultsHook -- See Note [-Bsymbolic and hooks]
+   initGCStatistics -- See Note [-Bsymbolic and hooks]
    hSetBuffering stdout LineBuffering
    hSetBuffering stderr LineBuffering
    GHC.defaultErrorHandler defaultFatalMessager defaultFlushOut $ do
@@ -840,4 +840,6 @@ X when dynamically linking. But this probably doesn't affect most
 people since we're linking GHC dynamically, but most things themselves
 link statically.
 -}
-foreign import ccall safe "defaultsHook" defaultsHook :: IO ()
+
+foreign import ccall safe "initGCStatistics"
+  initGCStatistics :: IO ()
