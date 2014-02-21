@@ -36,6 +36,7 @@
 // Data types and definitions for zip files
 // magic zip numbers
 #define ZIP_FILE_HEADER 0x04034b50
+#define ZIP_DATA_DESCR 0x08074b50
 #define ZIP_CENTRAL_FILE_HEADER 0x02014b50
 #define ZIP_CENTRAL_DIR_END 0x06054b50
 
@@ -125,9 +126,12 @@ int writeFH(FILE *fd, FileHeader *f) {
 }
 
 // write DataDescr avoiding alignment padding
+//  many libraries require a marker ZIP_DATA_DESCR
 int writeDD(FILE *fd, DataDescr dd) {
+  uint32_t marker = ZIP_DATA_DESCR; // std. sez "common, but not std."
   int res;
   int total=0;
+  chkWrite(&marker,4);  // std. sez "common, but not std."
   chkWrite(&dd.crc32,4); chkWrite(&dd.csize,4); chkWrite(&dd.usize,4);
   return total;
 }
