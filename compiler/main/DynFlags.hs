@@ -1326,7 +1326,7 @@ initDynFlags dflags = do
  refRtccInfo <- newIORef Nothing
  wrapperNum <- newIORef emptyModuleEnv
  canUseUnicodeQuotes <- do let enc = localeEncoding
-                               str = "‛’"
+                               str = "‘’"
                            (withCString enc str $ \cstr ->
                                 do str' <- peekCString enc cstr
                                    return (str == str'))
