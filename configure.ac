@@ -1053,6 +1053,16 @@ AC_SUBST(MPIOpts)
 
 AC_MSG_RESULT([MPI: $HaveMPI, Options: $MPIOpts])
 
+dnl zlib support is useful (but not required) to produce a zip file
+dnl containing eventlogs of several runtime system instance
+AC_CHECK_LIB(z, deflate,
+ [AC_CHECK_HEADER(zlib.h,
+  [AC_DEFINE([HAVE_ZLIB], [1], [Define to 1 if you have zlib])],
+  [AC_MSG_WARN([Cannot find zlib header, not using compression for parevents files])],
+  [])],
+ [AC_MSG_WARN([Cannot find zlib, not using compression for parevents files])],
+ [])
+
 fi;
 ###########################################
 
