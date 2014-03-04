@@ -20,16 +20,18 @@
 #ifdef STANDALONE
 #include <stdio.h>
 #include <errno.h>
-#define sysErrorBelch(x) perror(x)
-#define errorBelch(x, ...) fprintf(stderr, x, __VA_ARGS__)
+#define sysErrorBelch(x) perror(x "\n")
+#define errorBelch(x, ...) fprintf(stderr, x "\n", __VA_ARGS__)
 #define stgMallocBytes(sz,msg) malloc(sz)
 #define stgFree(p) free(p)
 #define FLEXIBLE_ARRAY 0
+#define ASSERT(x) if (!(x)) fprintf(stderr,"Assertion failed: %s",#x)
 #else
 #include "RtsUtils.h"
 #endif
 
 #ifdef HAVE_ZLIB
+#error "Do not use ZLib, this code produces invalid zip files"
 #include "zlib.h"
 #endif
 
@@ -326,7 +328,7 @@ void runCRC(StgWord32 *crc, StgWord8 *buf, int count) {
  * (archive) containing the files in the list of names (names,
  * variable count gives its length), and the given comment (comment,
  * or NULL if none).
-
+ *
  * Returns: Indication of success or failure.
  * Upon failures, the function behaves as follows:
  *   - failing to create or access archive: abort operation, return false
@@ -336,6 +338,10 @@ void runCRC(StgWord32 *crc, StgWord8 *buf, int count) {
  *   - no files given for archiving: return rtsFalse
  * Rationale: rtsTrue iff a valid zip file was created.
  */
+
+// buffer size for filecopy and compression
+#define BUFSIZE 1024
+
 rtsBool compressFiles(char const* archive, 
                       int count, char* names[],
                       char const* comment) {
@@ -345,8 +351,15 @@ rtsBool compressFiles(char const* archive,
   CentralDirEnd *de;
   int size;
   FILE *fd, *fdIn;
-  StgWord8 buffer[1024]; // edit here to change buffer size
+  StgWord8 buffer[BUFSIZE];
   int i;
+
+#ifdef HAVE_ZLIB
+  z_stream strm;
+  StgWord8 outbuf[BUFSIZE];
+  int ret;
+  int flush;
+#endif
 
   if (count == 0) return rtsFalse;
 
@@ -380,45 +393,98 @@ rtsBool compressFiles(char const* archive,
     f = mkFileHeader(names[i]);
     
     // write FileHeader
-#if HAVE_ZLIB
-#error "ZLib code not ready"
+#ifdef HAVE_ZLIB
+    f->compres=8; // zlib deflate compression
 #else
     f->compres=0; // no compression
+#endif
     de->cdOff += writeFH(fd, f);
     stgFree(f);
 
     // compress and write file data here, collecting crc and usize
-    dd.usize=0; dd.crc32=0xffffffff; // "preconditioning"
-    
+    dd.usize=0; dd.csize = 0;
+    dd.crc32=0xffffffff; // "preconditioning"
+
+#ifdef HAVE_ZLIB
+    strm.zalloc = Z_NULL;
+    strm.zfree = Z_NULL;
+    strm.opaque = Z_NULL;
+    ret = deflateInit(&strm, Z_DEFAULT_COMPRESSION);
+    if (ret != Z_OK) {
+      // failed to initialise, abort operation
+      errorBelch("Failed to init zlib, aborting archiving (code %d)", ret);
+      fclose(fdIn); fclose(fd); return rtsFalse;
+    }
+
+    do {
+      // read next chunk, abort if any errors occur
+      size = fread(buffer, 1, BUFSIZE, fdIn);
+      if (size < 0) {
+        sysErrorBelch("Could not read input file (skipping remainder of file)");
+        break;
+      }
+      dd.usize += size;
+      runCRC(&dd.crc32, buffer, size);
+      strm.avail_in = size;
+      flush = feof(fdIn) ? Z_FINISH : Z_NO_FLUSH; // flush at EOF
+      strm.next_in = buffer;
+
+      // run deflate() on input until output buffer not completely
+      // filled; finish compression if all input read (EOF)
+      do {
+        strm.avail_out = BUFSIZE;
+        strm.next_out = outbuf;
+        ret = deflate(&strm, flush);
+        ASSERT(ret != Z_STREAM_ERROR); // state not clobbered
+
+        size = BUFSIZE - strm.avail_out; // how much outbuf used?
+        // update crc and compressed size
+        dd.csize += size;
+        // write output
+        if (size != (int) fwrite(outbuf, 1, size, fd)) {
+          sysErrorBelch("Could not write to output file (aborting archiving)");
+          (void) deflateEnd(&strm);
+          fclose (fdIn); fclose(fd); return rtsFalse;
+        }
+      } while (strm.avail_out == 0); // outbuf not utilised => compression ends
+      ASSERT(strm.avail_in == 0); // all read data from input file consumed
+
+      // loop continues until EOF in fdIn reached
+    } while (flush != Z_FINISH);
+
+    ASSERT(ret == Z_STREAM_END); // stream cleanly ended
+    (void) deflateEnd(&strm);
+
+#else
     if ((size = fread(buffer, 1, sizeof(buffer), fdIn)) < 0) {
-      perror("Could not read input file (skipping remainder of file)");
+      sysErrorBelch("Could not read input file (skipping remainder of file)");
     }
     while (size > 0) { // copy the file (no compression)
       if (size != (int)fwrite(buffer, 1, size, fd)) {
-        perror("Could not write to output file (aborting archiving)");
+        sysErrorBelch("Could not write to output file (aborting archiving)");
         fclose (fdIn); fclose(fd); return rtsFalse;
       }
       dd.usize += size;
       runCRC(&dd.crc32, buffer, size);
       if ((size = fread(buffer, 1, sizeof(buffer), fdIn)) < 0) {
-        perror("Could not read input file (skipping remainder of file)");
+        sysErrorBelch("Could not read input file (skipping remainder of file)");
         break; // anyway not size > 0, but to be clear here...
       }
     }
-    fclose(fdIn);
     dd.csize=dd.usize; // no compression, so same size
 #endif
+    fclose(fdIn);
 
     dd.crc32 ^= 0xffffffff; // ones-complement of crc32
     de->cdOff += dd.csize; // add size to offset
-    
-    // write data descriptor
-    de->cdOff += writeDD(fd, dd);
     
     // set sizes and crc
     ds[i]->crc32=dd.crc32;
     ds[i]->csize=dd.csize;
     ds[i]->usize=dd.usize;
+    
+    // write data descriptor
+    de->cdOff += writeDD(fd, dd);
     
     // update count
     de->nFiles++; de->nHere++;
@@ -437,3 +503,4 @@ rtsBool compressFiles(char const* archive,
   fclose(fd);
   return rtsTrue;
 }
+
