@@ -30,7 +30,7 @@
 #include "RtsUtils.h"
 #endif
 
-#ifdef HAVE_LIBZ
+#ifdef HAVE_ZLIB
 #include "zlib.h"
 #endif
 
@@ -353,7 +353,7 @@ rtsBool compressFiles(char const* archive,
   StgWord8 buffer[BUFSIZE];
   int i;
 
-#ifdef HAVE_LIBZ
+#ifdef HAVE_ZLIB
   z_stream strm;
   StgWord8 outbuf[BUFSIZE];
   int ret;
@@ -392,7 +392,7 @@ rtsBool compressFiles(char const* archive,
     f = mkFileHeader(names[i]);
     
     // write FileHeader
-#ifdef HAVE_LIBZ
+#ifdef HAVE_ZLIB
     f->compres=9; // zlib deflate compression
 #else
     f->compres=0; // no compression
@@ -403,7 +403,7 @@ rtsBool compressFiles(char const* archive,
     // compress and write file data here, collecting crc and usize
     dd.usize=0; dd.crc32=0xffffffff; // "preconditioning"
     
-#ifdef HAVE_LIBZ
+#ifdef HAVE_ZLIB
     strm.zalloc = Z_NULL;
     strm.zfree = Z_NULL;
     strm.opaque = Z_NULL;
@@ -439,7 +439,7 @@ rtsBool compressFiles(char const* archive,
         dd.usize += size;
         runCRC(&dd.crc32, buffer, size);
         // write output
-        if (size != fwrite(outbuf, 1, size, fd)) {
+        if (size != (int) fwrite(outbuf, 1, size, fd)) {
           sysErrorBelch("Could not write to output file (aborting archiving)");
           (void) deflateEnd(&strm);
           fclose (fdIn); fclose(fd); return rtsFalse;
@@ -501,3 +501,4 @@ rtsBool compressFiles(char const* archive,
   fclose(fd);
   return rtsTrue;
 }
+

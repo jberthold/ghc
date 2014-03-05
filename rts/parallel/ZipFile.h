@@ -28,6 +28,9 @@ typedef uint64_t StgWord64;
 #define rtsFalse 0
 #else
 #include "Rts.h"
+
+#undef HAVE_ZLIB /* deactivate zlib support for now */
+
 #endif
 
 /* Public Interface: create zip archive with given name (archive)
@@ -45,4 +48,4 @@ rtsBool compressFiles(char const* archive,
                       int count, char* names[],
                       char const* comment);
 
-#endif
+#endif /* ZIPFILE_H */

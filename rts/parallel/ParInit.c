@@ -131,14 +131,14 @@ void emitStartupEvents(void){
  * so the value is remembered in variable "pes" for this method.
  */
 void zipTraceFiles(void) {
+
 #ifdef TRACING
+
   char **files, *archive, *prog;
   int i;
   rtsBool res;
 
-  if (RtsFlags.TraceFlags.tracing != TRACE_EVENTLOG) { return; }
-
-  if (!IAmMainThread) { return; } 
+  if (!IAmMainThread || RtsFlags.TraceFlags.tracing != TRACE_EVENTLOG) { return; }
 
   // see rts/eventlog/EventLog.c, must match naming convention there
     prog = stgMallocBytes(strlen(prog_name) + 1, "initEventLogging");
