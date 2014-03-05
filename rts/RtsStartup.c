@@ -451,12 +451,13 @@ hs_exit_(rtsBool wait_foreign)
 #ifdef TRACING
     endTracing();
     freeTracing();
-#endif
 
-#if defined(PARALLEL_RTS) && (defined(USE_SLOTS) /* || defined(USE_CP) */ )
-    // call this only if the way does not use a start script
-    // (see DriverPipeline.hs)
+#if defined(PARALLEL_RTS) && (defined(USE_SLOTS) || defined(USE_COPY))
+    // for parallel ways which do not use a start script, create an
+    // archive (i.e. WayParCp and WayParMSlot, see DriverPipeline.hs)
+
     zipTraceFiles();
+#endif
 #endif
 
 /* free hash table storage */
