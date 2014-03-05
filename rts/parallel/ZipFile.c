@@ -31,6 +31,7 @@
 #endif
 
 #ifdef HAVE_ZLIB
+#error "Do not use ZLib, this code produces invalid zip files"
 #include "zlib.h"
 #endif
 
@@ -393,7 +394,7 @@ rtsBool compressFiles(char const* archive,
     
     // write FileHeader
 #ifdef HAVE_ZLIB
-    f->compres=9; // zlib deflate compression
+    f->compres=8; // zlib deflate compression
 #else
     f->compres=0; // no compression
 #endif
@@ -401,8 +402,9 @@ rtsBool compressFiles(char const* archive,
     stgFree(f);
 
     // compress and write file data here, collecting crc and usize
-    dd.usize=0; dd.crc32=0xffffffff; // "preconditioning"
-    
+    dd.usize=0; dd.csize = 0;
+    dd.crc32=0xffffffff; // "preconditioning"
+
 #ifdef HAVE_ZLIB
     strm.zalloc = Z_NULL;
     strm.zfree = Z_NULL;
@@ -422,8 +424,9 @@ rtsBool compressFiles(char const* archive,
         break;
       }
       dd.usize += size;
+      runCRC(&dd.crc32, buffer, size);
       strm.avail_in = size;
-      flush = (size == 0) ? Z_FINISH : Z_NO_FLUSH; // flush at EOF
+      flush = feof(fdIn) ? Z_FINISH : Z_NO_FLUSH; // flush at EOF
       strm.next_in = buffer;
 
       // run deflate() on input until output buffer not completely
@@ -436,8 +439,7 @@ rtsBool compressFiles(char const* archive,
 
         size = BUFSIZE - strm.avail_out; // how much outbuf used?
         // update crc and compressed size
-        dd.usize += size;
-        runCRC(&dd.crc32, buffer, size);
+        dd.csize += size;
         // write output
         if (size != (int) fwrite(outbuf, 1, size, fd)) {
           sysErrorBelch("Could not write to output file (aborting archiving)");
@@ -469,20 +471,20 @@ rtsBool compressFiles(char const* archive,
         break; // anyway not size > 0, but to be clear here...
       }
     }
-    fclose(fdIn);
     dd.csize=dd.usize; // no compression, so same size
 #endif
+    fclose(fdIn);
 
     dd.crc32 ^= 0xffffffff; // ones-complement of crc32
     de->cdOff += dd.csize; // add size to offset
-    
-    // write data descriptor
-    de->cdOff += writeDD(fd, dd);
     
     // set sizes and crc
     ds[i]->crc32=dd.crc32;
     ds[i]->csize=dd.csize;
     ds[i]->usize=dd.usize;
+    
+    // write data descriptor
+    de->cdOff += writeDD(fd, dd);
     
     // update count
     de->nFiles++; de->nHere++;
