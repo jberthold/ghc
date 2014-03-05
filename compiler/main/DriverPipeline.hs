@@ -2004,13 +2004,24 @@ linkBinary' staticLink dflags o_files dep_packages = do
                else ["-lpthread"]
          | otherwise               = []
 
---  include message-passing libraries by the back door:
---  TODO could this be done by dummy packages (pvm and mpi, and the above)?
+--  flags for the message passing implementation
     let mp_opts | WayParPvm `elem` ways dflags
                    = ["-L"++ cPVM_Root ++ "/lib/"++ cPVM_Arch, "-lpvm3"]
                 | WayParMPI `elem` ways dflags = words cMPI_Opts
+                | WayParCp `elem` ways dflags =
+                    -- Copy way POSIX implementation uses semaphores
+                    -- and ShMem. Flag(s) for threaded way should do
+                    -- in POSIX case (code replicated for clarity)
+                    let os = platformOS (targetPlatform dflags)
+                    in if os == OSOsf3 then ["-lpthread", "-lexc"]
+                       else if os `elem` [OSMinGW32, OSFreeBSD, OSOpenBSD,
+                                          OSNetBSD, OSHaiku, OSQNXNTO, OSiOS]
+                       then []
+                       else ["-lpthread"]
+                | WayParMSlots `elem` ways dflags =
+                    -- nothing so far; POSIX version might add some
+                    []
                 | otherwise = []-- not parallel at all
--- end of "backdoor"
 
     rc_objs <- maybeCreateManifest dflags output_fn
 
