@@ -1537,7 +1537,7 @@ runPhase_MoveBinary dflags input_fn
 -- Parallel Haskell Support, Eden group Marburg
 --  PVM: move to $PVM_ROOT, generate start script 
 --  MPI: rename program, generate start script (using mpirun)
-    | isParallel =   do
+    | needsScript = do
         user <- getEnv uservar
 	current <- getCurrentDirectory
         let (subdir,basename) = splitFileName input_fn
@@ -1566,9 +1566,8 @@ runPhase_MoveBinary dflags input_fn
                             ("Cannot generate start script " 
                              ++ input_fn ++ ": " ++ show e)))
     | otherwise = return ()
-  where isParallel = WayParPvm `elem` (ways dflags)
+  where needsScript = WayParPvm `elem` (ways dflags)
                      || WayParMPI `elem` (ways dflags)
-                     || WayParCp `elem` (ways dflags)
         os = platformOS (targetPlatform dflags)
         (uservar, script_name) 
             = case os of
@@ -1766,8 +1765,6 @@ mkWrapperScript _ ways executable executable_base
 		 | WayParMPI `elem` ways  = 
 		 -- currently not very extensive. Assuming shared directory!
 		     "mpirun $npstring $machinefile $executable $nprocessors @nonPVM_args"
-                 | WayParCp `elem` ways  =
-                   "$executable $nprocessors @nonPVM_args"
 		 | otherwise = panic "Something wrong with compiler ways"
            trace_processing | not (WayEventLog `elem` ways) = []
                             | otherwise = 

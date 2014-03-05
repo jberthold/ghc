@@ -1,14 +1,10 @@
 /* 
  * Generalised RTE for parallel Haskells.
  *
- * File: ghc/rts/parallel/CpComm.h
+ * File: ghc/rts/parallel/CpComm.c
  *
- *
- * 
- *
- *
- * Purpose: map generalised Comm.functions to processes 
- * communicating via the shared memory on a single machine.
+ * Implement message passing layer by means of shared memory regions
+ * and synchronise via semaphores (for both POSIX and Windows systems).
  */
 
 
@@ -167,8 +163,8 @@ static int cpw_sync_close(cpw_sync_t *syn);
  * Utiliy Functions *
  *==================*/
 static int cpw_mk_name(char *res);
-static void parse_rts_flags(int* argc, char** argv);
-
+nat setnPEsArg(int *argc, char **argv);
+// these are shared between POSIX and Windows versions
 
 /*=================*
  * <MAIN> MPSystem *
@@ -212,37 +208,44 @@ cpw_sem_t  *w_sems, *r_sems;     /* synchronize msg queues */
  */
 rtsBool MP_start(int* argc, char** argv[]) {
 
-  /* first argument is number of PEs
-     (handled by startup script in compiler/main/DriverPipeline.hs */
-  if (*argc < 2) {
-    debugBelch("Need argument to specify number of PEs");
-    exit(EXIT_FAILURE);
-  }
-  ASSERT(*argv && (*argv)[1]);
+  /* HACK: We cannot fork child processes before RtsFlags have been
+     parsed, since shared memory sizes can be configured in them.
+     Therefore, the actual startup is moved to MP_sync where all
+     information is available.
 
-  // start in debug mode if negative number (or "-0")
-  if ((*argv)[1][0] == '-') {
-    RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
-    IF_PAR_DEBUG(mpcomm,
-		 debugBelch("CP Way debug mode! Starting\n"));
-    nPEs = (nat)atoi((*argv)[1]+1);
-  } else {
-    nPEs = (nat)atoi((*argv)[1]);
-  }
-
-  /* HACK:
-     RtsFlags are parsed between calls to MP_start() and MP_sync(),
-     but needed here!
-     Either move the startup entirely to MP_sync() or move the parsing.
-     For now just do an additional parse...
+     We can however determine the total number of PEs (to be used by
+     all child processes later.
   */
-  parse_rts_flags(argc,*argv);
 
-  if (nPEs == (nat)0)
+  /* parse args to find out how many procs (+debug mode).
+   *  We need to parse the arguments ourselves (parseRtsFlags did not
+   * run yet). The helper function extracts -N<count> flag(s) and removes
+   * them from the argv array, reducing argc appropriately.
+   * If no number is given, we run with one process. */
+  if (!(nPEs = setnPEsArg(argc, *argv)))
     nPEs = 1;
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("Using %u processes\n", nPEs));
 
+  // for now, there is only one...
   thisPE = 1;
   IAmMainThread = rtsTrue;
+
+  // actual startup/fork done in MP_sync
+  return rtsTrue;
+}
+
+/* MP_sync synchronises all nodes in a parallel computation:
+ *  sets global var.: 
+ *    thisPE - GlobalTaskId: node's own task Id 
+ *             (logical node address for messages)
+ * Returns: Bool: success (1) or failure (0)
+ */
+rtsBool MP_sync(void){
+  IF_PAR_DEBUG(mpcomm,
+	       debugBelch("MP_sync()\n"));
+
+  /* now that sizes are known, create shared memory buffers and init */
 
   /* set buffer sizes */
   num_msgs = RtsFlags.ParFlags.sendBufferSize * (int)nPEs;
@@ -259,6 +262,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
 
   /* create shared memory*/
   if (cpw_shm_create() != CPW_NOERROR) {
+    nPEs=0; // no children to shut down, avoid calling back in here
     barf(" MPSystem CpWay: error creating shared memory!\n");
   }
   IF_PAR_DEBUG(mpcomm, cpw_shm_debug_info(&shared_memory));
@@ -282,39 +286,26 @@ rtsBool MP_start(int* argc, char** argv[]) {
   int child;
   for (i = 2; i <= (int)nPEs; i++) {
     child = fork();
-		
+
     switch (child) {
     case -1:
       /* error while forking! */
       *shared_memory.status = CPW_FORK_FAIL;
+      nPEs=0; // avoid shutdown problems (cannot shut down child processes)
       barf(" MPSystem CpWay: error starting other processes!\n");
       break;
     case 0:
       /* we are the child */
       thisPE = i;
       IAmMainThread = rtsFalse;
-      return rtsTrue;
+      break;
     default:
+      // TODO should save pids for shutdown (also for the error case
+      // above, to shut down already-started children
       break;
     }
+    if (!IAmMainThread) break; // no recursive fork
   }
-
-  // adjust args (ignoring nPEs argument added by the start script)
-  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
-  (*argv)++; (*argc)--;
-
-  return rtsTrue;
-}
-
-/* MP_sync synchronises all nodes in a parallel computation:
- *  sets global var.: 
- *    thisPE - GlobalTaskId: node's own task Id 
- *             (logical node address for messages)
- * Returns: Bool: success (1) or failure (0)
- */
-rtsBool MP_sync(void){
-  IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MP_sync()\n"));
 
   /* check for fork errors */
   cpw_shm_check_errors();
@@ -1217,15 +1208,15 @@ static void cpw_shm_check_errors() {
   case CPW_NOERROR:
     return;
   case CPW_FILENAME_FAIL:
-    barf("MPSystem CpWay: unique filename error!\n");
+    nPEs=0; barf("MPSystem CpWay: unique filename error!\n");
   case CPW_SHM_FAIL:
-    barf("MPSystem CpWay: shared memory error!\n");
+    nPEs=0; barf("MPSystem CpWay: shared memory error!\n");
   case CPW_SEM_FAIL:
-    barf("MPSystem CpWay: semaphore error!\n");
+    nPEs=0; barf("MPSystem CpWay: semaphore error!\n");
   case CPW_SYNC_FAIL:
-    barf("MPSystem CpWay: barrier error!\n");
+    nPEs=0; barf("MPSystem CpWay: barrier error!\n");
   case CPW_FORK_FAIL:
-    barf("MPSystem CpWay: fork error!\n");
+    nPEs=0; barf("MPSystem CpWay: fork error!\n");
   default:
     return;
   }
@@ -1299,46 +1290,7 @@ static int cpw_sync_close(cpw_sync_t *syn) {
   return CPW_NOERROR;
 }
 
-/*==================*
- * Utiliy Functions *
- *==================*/
-
-/* 
- * Make unique name to be used in shm_open or _named_ semaphores.
- * Returns pointer to unique name which has to be freed!       
- */
-static int cpw_mk_name(char *res) {
-  static unsigned int next_unique = 0;
-	
-  char *s_magic = "eden"; /* TODO use executable name here? */
-	
-  ASSERT(1 + strlen(s_magic) + 12 + 1 <= CPW_MAX_FILENAME_LENGTH);
-	
-  if (sprintf(res, "/%s%08x%04x", s_magic, getpid(), next_unique++) < 0) {
-    return CPW_FILENAME_FAIL;
-  }
-	
-  return CPW_NOERROR;
-}
-
-static void parse_rts_flags(int* argc, char** argv) {
-  int my_argc = (*argc)-1;
-  char *my_argv[my_argc];
-  my_argv[0] = stgMallocBytes(strlen(argv[0])+1, "argv0");
-  strcpy(my_argv[0], argv[0]);
-  int k;
-  for (k=2; k < *argc; k++) {
-    my_argv[k-1] = stgMallocBytes(strlen(argv[k])+1, "argv");
-    strcpy(my_argv[k-1], argv[k]); 
-  }
-  initRtsFlagsDefaults();
-
-  setupRtsFlags(&my_argc, my_argv, &rts_argc, rts_argv);
-
-  for (k=0; k < my_argc; k++) stgFree(my_argv[k]);
-}
-
-#else  /* not win32 */
+#else  /* win32 code follows */
 
 #include <Windows.h>
 #include <string.h>    /* strlen(), strcat(), ... */
@@ -1487,8 +1439,9 @@ static int cpw_self_probe_sys(void);
  * Utiliy Functions *
  *==================*/
 static int cpw_mk_name(char *res);
-static void parse_rts_flags(int* argc, char** argv);
+nat setnPEsArg(int *argc, char **argv);
 static char* cpw_mk_argv_string(int argc, char ** argv);
+// first two shared between POSIX and Windows versions
 
 
 /*=================*
@@ -1536,30 +1489,6 @@ char buffer[256];
 rtsBool MP_start(int* argc, char** argv[]) {
 	//printf("MP_Start: Starting CopyWay system... :)\n");
 
-  if (*argc < 2) {
-    debugBelch("Need argument to specify number of PEs");
-    exit(EXIT_FAILURE);
-  }
-
-  /* first argument is number of PEs
-     (handled by startup script in compiler/main/DriverPipeline.hs */
-  ASSERT(*argv && (*argv)[1]);
-
-  // start in debug mode if negative number (or "-0")
-  if ((*argv)[1][0] == '-') {
-    RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
-    IF_PAR_DEBUG(mpcomm,
-		 debugBelch("CP Way debug mode! Starting\n"));
-    nPEs = (nat)atoi((*argv)[1]+1);
-  } else {
-    nPEs = (nat)atoi((*argv)[1]);
-  }
-
-  if (nPEs == (nat)0)
-    nPEs = 1;
-
-  args = cpw_mk_argv_string(*argc, *argv);
- 
   /* is Environment Var set? then we are a child */
   buffer[0] = '0';
   buffer[1] = '\0';
@@ -1568,14 +1497,29 @@ rtsBool MP_start(int* argc, char** argv[]) {
 
   IF_PAR_DEBUG(mpcomm,
                debugBelch("IsEdenChild = %i\n", thisPE));
- if(thisPE == 0) {
+  if(thisPE == 0) {
     thisPE = 1;
     IAmMainThread = rtsTrue;
+  } else {
+    IAmMainThread = rtsFalse;
   }
 
-  // adjust args (ignoring nPEs argument added by the start script)
-  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
-  (*argv)++; (*argc)--;
+  if (IAmMainThread)
+    // main thread stores arguments to spawn children
+    args = cpw_mk_argv_string(*argc, *argv);
+
+  /* parse args to find out how many procs (+debug mode).
+   *  We need to parse the arguments ourselves (parseRtsFlags did not
+   * run yet). The helper function extracts -N<count> flag(s) and removes
+   * them from the argv array, reducing argc appropriately.
+   * If no number is given, we run with one process. */
+  if (!(nPEs = setnPEsArg(argc, *argv)))
+    nPEs = 1;
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("CpWay: Starting with %u processes\n", nPEs));
+
+  // rest (actually starting child processes) done in MP_sync after
+  // parsing RTS flags
 
   return rtsTrue;
 }
@@ -1599,7 +1543,7 @@ rtsBool MP_sync(void){
      init process
   */
 
-  if(thisPE == 1) {
+  if(IAmMainThread) {
     if (cpw_shm_create() != CPW_NOERROR) {
       nPEs = 0; // avoid calling MP_quit from stg_exit
       barf(" MPSystem CpWay: error creating shared memory!\n");
@@ -1851,8 +1795,9 @@ int MP_recv(STG_UNUSED int maxlength, StgWord8 *destination, // IN
  * (unspecified sender, no receive buffers any more) 
  */
 rtsBool MP_probe(void) {
-  IF_PAR_DEBUG(mpcomm,
-               debugBelch("MP_probe()"));
+  // IF_PAR_DEBUG(mpcomm,
+  //             debugBelch("MP_probe()"));
+
   /* check for errors */
   cpw_shm_check_errors();
 
@@ -2657,15 +2602,15 @@ static void cpw_shm_check_errors() {
   case CPW_NOERROR:
     return;
   case CPW_FILENAME_FAIL:
-    barf("MPSystem CpWay: unique filename error!\n");
+    nPEs=0; barf("MPSystem CpWay: unique filename error!\n");
   case CPW_SHM_FAIL:
-    barf("MPSystem CpWay: shared memory error!\n");
+    nPEs=0; barf("MPSystem CpWay: shared memory error!\n");
   case CPW_SEM_FAIL:
-    barf("MPSystem CpWay: semaphore error!\n");
+    nPEs=0; barf("MPSystem CpWay: semaphore error!\n");
   case CPW_SYNC_FAIL:
-    barf("MPSystem CpWay: barrier error!\n");
+    nPEs=0; barf("MPSystem CpWay: barrier error!\n");
   case CPW_FORK_FAIL:
-    barf("MPSystem CpWay: fork error!\n");
+    nPEs=0; barf("MPSystem CpWay: fork error!\n");
   default:
     return;
   }
@@ -2729,41 +2674,6 @@ static int cpw_sync_close(cpw_sync_t *syn) {
  * Utiliy Functions *
  *==================*/
 
-/* 
- * Make unique name to be used in shm_open or _named_ semaphores.
- * Returns pointer to unique name which has to be freed!       
- */
-static int cpw_mk_name(char *res) {
-  static unsigned int next_unique = 0;
-	
-  char *s_magic = "eden"; /* TODO use executable name here? */
-	
-  ASSERT(1 + strlen(s_magic) + 12 + 1 <= CPW_MAX_FILENAME_LENGTH);
-	
-  if (sprintf(res, "/%s%08x%04x", s_magic, 1234, next_unique++) < 0) {
-    return CPW_FILENAME_FAIL;
-  }
-	
-  return CPW_NOERROR;
-}
-
-static void parse_rts_flags(int* argc, char** argv) {
-  int my_argc = (*argc)-1;
-  char *my_argv[my_argc];
-  my_argv[0] = stgMallocBytes(strlen(argv[0])+1, "argv0");
-  strcpy(my_argv[0], argv[0]);
-  int k;
-  for (k=2; k < *argc; k++) {
-    my_argv[k-1] = stgMallocBytes(strlen(argv[k])+1, "argv");
-    strcpy(my_argv[k-1], argv[k]); 
-  }
-  initRtsFlagsDefaults();
-
-  setupRtsFlags(&my_argc, my_argv, &rts_argc, rts_argv);
-
-  for (k=0; k < my_argc; k++) stgFree(my_argv[k]);
-}
-
 static char* cpw_mk_argv_string(int argc, char ** argv) {
   int len = argc*3;
   int i;
@@ -2783,6 +2693,83 @@ static char* cpw_mk_argv_string(int argc, char ** argv) {
   return result;
 }
 #endif /* win32 */
+
+// shared code follows
+
+/*==================*
+ * Utiliy Functions *
+ *==================*/
+
+/* 
+ * Make unique name to be used in shm_open or _named_ semaphores.
+ * Returns pointer to unique name which has to be freed!       
+ */
+static int cpw_mk_name(char *res) {
+  static unsigned int next_unique = 0;
+	
+  char *s_magic = "eden"; /* TODO use executable name here? */
+	
+  ASSERT(1 + strlen(s_magic) + 12 + 1 <= CPW_MAX_FILENAME_LENGTH);
+	
+  if (sprintf(res, "/%s%08x%04x", s_magic, getpid(), next_unique++) < 0) {
+    return CPW_FILENAME_FAIL;
+  }
+	
+  return CPW_NOERROR;
+}
+
+/* scans argv to find an argument "-N<num>", and sets nPEs to the
+ * given num value. If the value is negative, mpcomm debug flag is set
+ * (not documented). Furthermore, the -N argument is removed from
+ * argv, and argc reduced.
+ * Returns the nPEs value found, 0 if nothing found.
+ */
+nat setnPEsArg(int *argc, char **argv) {
+  char **currArg, **lastArg;
+  rtsBool inRTS, finishedRTS;
+  int i;
+  nat pes;
+
+  /* useless, as this routine is the place where we first set the debug flag..
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("parsing flags, arg.count %d\n", *argc));
+  */
+  inRTS = finishedRTS = rtsFalse;
+  pes = 0;
+  i = *argc;
+  currArg = argv;
+  lastArg = argv;
+
+  while (i-- > 0) {
+    if ( !finishedRTS && inRTS && (*currArg)[0]=='-' && (*currArg)[1]=='N') {
+      // the PE flag we want. Parse it and only advance currArg, decrease argc
+      if ((*currArg)[2]=='-') { // negative number, debug mode
+        RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
+        pes = (nat)atoi((*currArg)+3);
+      } else {
+        pes = (nat)atoi((*currArg)+2);
+      }
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("parsing flag %s, setting nPE=%u\n",
+                              *currArg, pes));
+      currArg++;
+      (*argc)--;
+    } else {
+      // check for interesting flags
+      if      (strcmp(*currArg, "--RTS") == 0) finishedRTS=rtsTrue;
+      else if (strcmp(*currArg, "--") == 0) finishedRTS=rtsTrue;
+      else if (strcmp(*currArg, "+RTS") == 0) inRTS=rtsTrue;
+      else if (strcmp(*currArg, "-RTS") == 0) inRTS=rtsFalse;
+      // copy argument to its new place
+      *lastArg++ = *currArg++;
+    }
+  }
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("finished parsing arg.s, arg.count %d, pes=%u\n",
+                          *argc, pes));
+  return pes;
+}
+
 
 #endif /* whole file */
 
