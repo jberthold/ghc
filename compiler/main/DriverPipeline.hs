@@ -2018,7 +2018,7 @@ linkBinary' staticLink dflags o_files dep_packages = do
                                           OSNetBSD, OSHaiku, OSQNXNTO, OSiOS]
                        then []
                        else ["-lpthread"]
-                | WayParMSlots `elem` ways dflags =
+                | WayParMSlot `elem` ways dflags =
                     -- nothing so far; POSIX version might add some
                     []
                 | otherwise = []-- not parallel at all
