@@ -1489,30 +1489,6 @@ char buffer[256];
 rtsBool MP_start(int* argc, char** argv[]) {
 	//printf("MP_Start: Starting CopyWay system... :)\n");
 
-  if (*argc < 2) {
-    debugBelch("Need argument to specify number of PEs");
-    exit(EXIT_FAILURE);
-  }
-
-  /* first argument is number of PEs
-     (handled by startup script in compiler/main/DriverPipeline.hs */
-  ASSERT(*argv && (*argv)[1]);
-
-  // start in debug mode if negative number (or "-0")
-  if ((*argv)[1][0] == '-') {
-    RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
-    IF_PAR_DEBUG(mpcomm,
-		 debugBelch("CP Way debug mode! Starting\n"));
-    nPEs = (nat)atoi((*argv)[1]+1);
-  } else {
-    nPEs = (nat)atoi((*argv)[1]);
-  }
-
-  if (nPEs == (nat)0)
-    nPEs = 1;
-
-  args = cpw_mk_argv_string(*argc, *argv);
- 
   /* is Environment Var set? then we are a child */
   buffer[0] = '0';
   buffer[1] = '\0';
@@ -1521,14 +1497,29 @@ rtsBool MP_start(int* argc, char** argv[]) {
 
   IF_PAR_DEBUG(mpcomm,
                debugBelch("IsEdenChild = %i\n", thisPE));
- if(thisPE == 0) {
+  if(thisPE == 0) {
     thisPE = 1;
     IAmMainThread = rtsTrue;
+  } else {
+    IAmMainThread = rtsFalse;
   }
 
-  // adjust args (ignoring nPEs argument added by the start script)
-  (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
-  (*argv)++; (*argc)--;
+  if (IAmMainThread)
+    // main thread stores arguments to spawn children
+    args = cpw_mk_argv_string(*argc, *argv);
+
+  /* parse args to find out how many procs (+debug mode).
+   *  We need to parse the arguments ourselves (parseRtsFlags did not
+   * run yet). The helper function extracts -N<count> flag(s) and removes
+   * them from the argv array, reducing argc appropriately.
+   * If no number is given, we run with one process. */
+  if (!(nPEs = setnPEsArg(argc, *argv)))
+    nPEs = 1;
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("CpWay: Starting with %u processes\n", nPEs));
+
+  // rest (actually starting child processes) done in MP_sync after
+  // parsing RTS flags
 
   return rtsTrue;
 }
@@ -1552,7 +1543,7 @@ rtsBool MP_sync(void){
      init process
   */
 
-  if(thisPE == 1) {
+  if(IAmMainThread) {
     if (cpw_shm_create() != CPW_NOERROR) {
       nPEs = 0; // avoid calling MP_quit from stg_exit
       barf(" MPSystem CpWay: error creating shared memory!\n");
@@ -1804,8 +1795,9 @@ int MP_recv(STG_UNUSED int maxlength, StgWord8 *destination, // IN
  * (unspecified sender, no receive buffers any more) 
  */
 rtsBool MP_probe(void) {
-  IF_PAR_DEBUG(mpcomm,
-               debugBelch("MP_probe()"));
+  // IF_PAR_DEBUG(mpcomm,
+  //             debugBelch("MP_probe()"));
+
   /* check for errors */
   cpw_shm_check_errors();
 

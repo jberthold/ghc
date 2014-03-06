@@ -1568,7 +1568,6 @@ runPhase_MoveBinary dflags input_fn
     | otherwise = return ()
   where needsScript = WayParPvm `elem` (ways dflags)
                      || WayParMPI `elem` (ways dflags)
-                     || WayParCp `elem` (ways dflags) && os == OSMinGW32
         os = platformOS (targetPlatform dflags)
         (uservar, script_name) 
             = case os of
