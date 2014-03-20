@@ -20,6 +20,8 @@ module TysWiredIn (
         ltDataCon, ltDataConId,
         eqDataCon, eqDataConId,
         gtDataCon, gtDataConId,
+        promotedOrderingTyCon,
+        promotedLTDataCon, promotedEQDataCon, promotedGTDataCon,
 
         -- * Char
         charTyCon, charDataCon, charTyCon_RDR,
@@ -174,10 +176,12 @@ mkWiredInDataConName built_in modu fs unique datacon
                   (AConLike (RealDataCon datacon))    -- Relevant DataCon
                   built_in
 
+-- See Note [Kind-changing of (~) and Coercible]
 eqTyConName, eqBoxDataConName :: Name
 eqTyConName      = mkWiredInTyConName   BuiltInSyntax gHC_TYPES (fsLit "~")   eqTyConKey      eqTyCon
 eqBoxDataConName = mkWiredInDataConName UserSyntax    gHC_TYPES (fsLit "Eq#") eqBoxDataConKey eqBoxDataCon
 
+-- See Note [Kind-changing of (~) and Coercible]
 coercibleTyConName, coercibleDataConName :: Name
 coercibleTyConName   = mkWiredInTyConName   UserSyntax gHC_TYPES (fsLit "Coercible")  coercibleTyConKey   coercibleTyCon
 coercibleDataConName = mkWiredInDataConName UserSyntax gHC_TYPES (fsLit "MkCoercible") coercibleDataConKey coercibleDataCon
@@ -829,6 +833,20 @@ promotedBoolTyCon, promotedFalseDataCon, promotedTrueDataCon :: TyCon
 promotedBoolTyCon     = promoteTyCon boolTyCon
 promotedTrueDataCon   = promoteDataCon trueDataCon
 promotedFalseDataCon  = promoteDataCon falseDataCon
+\end{code}
+
+Promoted Ordering
+
+\begin{code}
+promotedOrderingTyCon
+  , promotedLTDataCon
+  , promotedEQDataCon
+  , promotedGTDataCon
+  :: TyCon
+promotedOrderingTyCon = promoteTyCon orderingTyCon
+promotedLTDataCon     = promoteDataCon ltDataCon
+promotedEQDataCon     = promoteDataCon eqDataCon
+promotedGTDataCon     = promoteDataCon gtDataCon
 \end{code}
 
 

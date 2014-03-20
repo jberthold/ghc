@@ -95,10 +95,11 @@ TargetElf = YES
 endif
 
 # Some platforms don't support shared libraries
-NoSharedLibsPlatformList = arm-unknown-linux \
-	powerpc-unknown-linux \
+NoSharedLibsPlatformList = powerpc-unknown-linux \
 	x86_64-unknown-mingw32 \
-	i386-unknown-mingw32
+	i386-unknown-mingw32 \
+	sparc-sun-solaris2 \
+	sparc-unknown-linux
 
 ifeq "$(SOLARIS_BROKEN_SHLD)" "YES"
 NoSharedLibsPlatformList += i386-unknown-solaris2
@@ -677,7 +678,7 @@ PIC			= pic
 RANLIB_CMD = @RANLIB_CMD@
 REAL_RANLIB_CMD = @REAL_RANLIB_CMD@
 SED			= @SedCmd@
-SHELL			= /bin/sh
+SHELL			= @SHELL@
 
 HaveDtrace		= @HaveDtrace@
 USE_DTRACE = $(HaveDtrace)

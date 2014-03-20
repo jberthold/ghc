@@ -186,7 +186,7 @@ tcPatSynWrapper lname lpat dir args univ_tvs ex_tvs theta pat_ty
            (Unidirectional, _) ->
                return Nothing
            (ImplicitBidirectional, Nothing) ->
-               cannotInvertPatSynErr (unLoc lpat)
+               cannotInvertPatSynErr lpat
            (ImplicitBidirectional, Just lexpr) ->
                fmap Just $ tc_pat_syn_wrapper_from_expr lname lexpr args univ_tvs ex_tvs theta pat_ty }
 
@@ -199,7 +199,7 @@ tc_pat_syn_wrapper_from_expr :: Located Name
                              -> TcM (Id, LHsBinds Id)
 tc_pat_syn_wrapper_from_expr (L loc name) lexpr args univ_tvs ex_tvs theta pat_ty
   = do { let qtvs = univ_tvs ++ ex_tvs
-       ; (subst, qtvs') <- tcInstSigTyVars qtvs
+       ; (subst, qtvs') <- tcInstSkolTyVars qtvs
        ; let theta' = substTheta subst theta
              pat_ty' = substTy subst pat_ty
              args' = map (\arg -> setVarType arg $ substTy subst (varType arg)) args
@@ -281,10 +281,9 @@ asPatInPatSynErr pat
     hang (ptext (sLit "Pattern synonym definition cannot contain as-patterns (@):"))
        2 (ppr pat)
 
--- TODO: Highlight sub-pattern that causes the problem
-cannotInvertPatSynErr :: OutputableBndr name => Pat name -> TcM a
-cannotInvertPatSynErr pat
-  = failWithTc $
+cannotInvertPatSynErr :: OutputableBndr name => LPat name -> TcM a
+cannotInvertPatSynErr (L loc pat)
+  = setSrcSpan loc $ failWithTc $
     hang (ptext (sLit "Right-hand side of bidirectional pattern synonym cannot be used as an expression"))
        2 (ppr pat)
 

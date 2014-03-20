@@ -10,11 +10,13 @@ Storage manager representation of closures
 
 module SMRep (
         -- * Words and bytes
+        WordOff, ByteOff,
+        wordsToBytes, bytesToWordsRoundUp,
+        roundUpToWords,
+
         StgWord, fromStgWord, toStgWord,
         StgHalfWord, fromStgHalfWord, toStgHalfWord,
         hALF_WORD_SIZE, hALF_WORD_SIZE_IN_BITS,
-        WordOff, ByteOff,
-        roundUpToWords,
 
         -- * Closure repesentation
         SMRep(..), -- CmmInfo sees the rep; no one else does
@@ -23,20 +25,24 @@ module SMRep (
         ConstrDescription,
 
         -- ** Construction
-        mkHeapRep, blackHoleRep, indStaticRep, mkStackRep, mkRTSRep,
+        mkHeapRep, blackHoleRep, indStaticRep, mkStackRep, mkRTSRep, arrPtrsRep,
+        arrWordsRep,
 
         -- ** Predicates
         isStaticRep, isConRep, isThunkRep, isFunRep, isStaticNoCafCon,
         isStackRep,
 
         -- ** Size-related things
-        heapClosureSize,
-        fixedHdrSize, arrWordsHdrSize, arrPtrsHdrSize,
-        profHdrSize, thunkHdrSize, nonHdrSize,
+        heapClosureSizeW,
+        fixedHdrSize, arrWordsHdrSize, arrWordsHdrSizeW, arrPtrsHdrSize,
+        arrPtrsHdrSizeW, profHdrSize, thunkHdrSize, nonHdrSize, nonHdrSizeW,
 
         -- ** RTS closure types
         rtsClosureType, rET_SMALL, rET_BIG,
         aRG_GEN, aRG_GEN_BIG,
+
+        -- ** Arrays
+        card, cardRoundUp, cardTableSizeB, cardTableSizeW,
 
         -- * Operations over [Word8] strings that don't belong here
         pprWord8String, stringToWord8s
@@ -67,7 +73,15 @@ type WordOff = Int -- Word offset, or word count
 type ByteOff = Int -- Byte offset, or byte count
 
 roundUpToWords :: DynFlags -> ByteOff -> ByteOff
-roundUpToWords dflags n = (n + (wORD_SIZE dflags - 1)) .&. (complement (wORD_SIZE dflags - 1))
+roundUpToWords dflags n =
+  (n + (wORD_SIZE dflags - 1)) .&. (complement (wORD_SIZE dflags - 1))
+
+wordsToBytes :: DynFlags -> WordOff -> ByteOff
+wordsToBytes dflags n = wORD_SIZE dflags * n
+
+bytesToWordsRoundUp :: DynFlags -> ByteOff -> WordOff
+bytesToWordsRoundUp dflags n = (n + word_size - 1) `quot` word_size
+ where word_size = wORD_SIZE dflags
 \end{code}
 
 StgWord is a type representing an StgWord on the target platform.
@@ -139,6 +153,13 @@ data SMRep
         !WordOff         --  # ptr words
         !WordOff         --  # non-ptr words INCLUDING SLOP (see mkHeapRep below)
         ClosureTypeInfo  -- type-specific info
+
+  | ArrayPtrsRep
+        !WordOff        -- # ptr words
+        !WordOff        -- # card table words
+
+  | ArrayWordsRep
+        !WordOff        -- # bytes expressed in words, rounded up
 
   | StackRep            -- Stack frame (RET_SMALL or RET_BIG)
         Liveness
@@ -221,13 +242,19 @@ blackHoleRep = HeapRep False 0 0 BlackHole
 indStaticRep :: SMRep
 indStaticRep = HeapRep True 1 0 IndStatic
 
+arrPtrsRep :: DynFlags -> WordOff -> SMRep
+arrPtrsRep dflags elems = ArrayPtrsRep elems (cardTableSizeW dflags elems)
+
+arrWordsRep :: DynFlags -> ByteOff -> SMRep
+arrWordsRep dflags bytes = ArrayWordsRep (bytesToWordsRoundUp dflags bytes)
+
 -----------------------------------------------------------------------------
 -- Predicates
 
 isStaticRep :: SMRep -> IsStatic
 isStaticRep (HeapRep is_static _ _ _) = is_static
-isStaticRep (StackRep {})             = False
 isStaticRep (RTSRep _ rep)            = isStaticRep rep
+isStaticRep _                         = False
 
 isStackRep :: SMRep -> Bool
 isStackRep StackRep{}     = True
@@ -279,9 +306,19 @@ arrWordsHdrSize :: DynFlags -> ByteOff
 arrWordsHdrSize dflags
  = fixedHdrSize dflags * wORD_SIZE dflags + sIZEOF_StgArrWords_NoHdr dflags
 
+arrWordsHdrSizeW :: DynFlags -> WordOff
+arrWordsHdrSizeW dflags =
+    fixedHdrSize dflags +
+    (sIZEOF_StgArrWords_NoHdr dflags `quot` wORD_SIZE dflags)
+
 arrPtrsHdrSize :: DynFlags -> ByteOff
 arrPtrsHdrSize dflags
  = fixedHdrSize dflags * wORD_SIZE dflags + sIZEOF_StgMutArrPtrs_NoHdr dflags
+
+arrPtrsHdrSizeW :: DynFlags -> WordOff
+arrPtrsHdrSizeW dflags =
+    fixedHdrSize dflags +
+    (sIZEOF_StgMutArrPtrs_NoHdr dflags `quot` wORD_SIZE dflags)
 
 -- Thunks have an extra header word on SMP, so the update doesn't
 -- splat the payload.
@@ -289,16 +326,25 @@ thunkHdrSize :: DynFlags -> WordOff
 thunkHdrSize dflags = fixedHdrSize dflags + smp_hdr
         where smp_hdr = sIZEOF_StgSMPThunkHeader dflags `quot` wORD_SIZE dflags
 
+nonHdrSize :: DynFlags -> SMRep -> ByteOff
+nonHdrSize dflags rep = wordsToBytes dflags (nonHdrSizeW rep)
 
-nonHdrSize :: SMRep -> WordOff
-nonHdrSize (HeapRep _ p np _) = p + np
-nonHdrSize (StackRep bs)      = length bs
-nonHdrSize (RTSRep _ rep)     = nonHdrSize rep
+nonHdrSizeW :: SMRep -> WordOff
+nonHdrSizeW (HeapRep _ p np _) = p + np
+nonHdrSizeW (ArrayPtrsRep elems ct) = elems + ct
+nonHdrSizeW (ArrayWordsRep words) = words
+nonHdrSizeW (StackRep bs)      = length bs
+nonHdrSizeW (RTSRep _ rep)     = nonHdrSizeW rep
 
-heapClosureSize :: DynFlags -> SMRep -> WordOff
-heapClosureSize dflags (HeapRep _ p np ty)
+-- | The total size of the closure, in words.
+heapClosureSizeW :: DynFlags -> SMRep -> WordOff
+heapClosureSizeW dflags (HeapRep _ p np ty)
  = closureTypeHdrSize dflags ty + p + np
-heapClosureSize _ _ = panic "SMRep.heapClosureSize"
+heapClosureSizeW dflags (ArrayPtrsRep elems ct)
+ = arrPtrsHdrSizeW dflags + elems + ct
+heapClosureSizeW dflags (ArrayWordsRep words)
+ = arrWordsHdrSizeW dflags + words
+heapClosureSizeW _ _ = panic "SMRep.heapClosureSize"
 
 closureTypeHdrSize :: DynFlags -> ClosureTypeInfo -> WordOff
 closureTypeHdrSize dflags ty = case ty of
@@ -312,6 +358,27 @@ closureTypeHdrSize dflags ty = case ty of
         -- updatable vs. non-updatable thunks, so the GC can't tell the
         -- difference.  If we ever have significant numbers of non-
         -- updatable thunks, it might be worth fixing this.
+
+-- ---------------------------------------------------------------------------
+-- Arrays
+
+-- | The byte offset into the card table of the card for a given element
+card :: DynFlags -> Int -> Int
+card dflags i = i `shiftR` mUT_ARR_PTRS_CARD_BITS dflags
+
+-- | Convert a number of elements to a number of cards, rounding up
+cardRoundUp :: DynFlags -> Int -> Int
+cardRoundUp dflags i =
+  card dflags (i + ((1 `shiftL` mUT_ARR_PTRS_CARD_BITS dflags) - 1))
+
+-- | The size of a card table, in bytes
+cardTableSizeB :: DynFlags -> Int -> ByteOff
+cardTableSizeB dflags elems = cardRoundUp dflags elems
+
+-- | The size of a card table, in words
+cardTableSizeW :: DynFlags -> Int -> WordOff
+cardTableSizeW dflags elems =
+  bytesToWordsRoundUp dflags (cardTableSizeB dflags elems)
 
 -----------------------------------------------------------------------------
 -- deriving the RTS closure type from an SMRep
@@ -402,6 +469,10 @@ instance Outputable SMRep where
        pp_n :: String -> Int -> SDoc
        pp_n _ 0 = empty
        pp_n s n = int n <+> text s
+
+   ppr (ArrayPtrsRep size _) = ptext (sLit "ArrayPtrsRep") <+> ppr size
+
+   ppr (ArrayWordsRep words) = ptext (sLit "ArrayWordsRep") <+> ppr words
 
    ppr (StackRep bs) = ptext (sLit "StackRep") <+> ppr bs
 

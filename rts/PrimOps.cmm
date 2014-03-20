@@ -142,8 +142,7 @@ stg_newAlignedPinnedByteArrayzh ( W_ n, W_ alignment )
 stg_casIntArrayzh( gcptr arr, W_ ind, W_ old, W_ new )
 /* MutableByteArray# s -> Int# -> Int# -> Int# -> State# s -> (# State# s, Int# #) */
 {
-    gcptr p;
-    W_ h;
+    W_ p, h;
 
     p = arr + SIZEOF_StgArrWords + WDS(ind);
     (h) = ccall cas(p, old, new);
@@ -155,8 +154,7 @@ stg_casIntArrayzh( gcptr arr, W_ ind, W_ old, W_ new )
 stg_fetchAddIntArrayzh( gcptr arr, W_ ind, W_ incr )
 /* MutableByteArray# s -> Int# -> Int# -> State# s -> (# State# s, Int# #) */
 {
-    gcptr p;
-    W_ h;
+    W_ p, h;
 
     p = arr + SIZEOF_StgArrWords + WDS(ind);
     (h) = ccall atomic_inc(p, incr);
@@ -167,8 +165,8 @@ stg_fetchAddIntArrayzh( gcptr arr, W_ ind, W_ incr )
 
 stg_newArrayzh ( W_ n /* words */, gcptr init )
 {
-    W_ words, size;
-    gcptr p, arr;
+    W_ words, size, p;
+    gcptr arr;
 
     again: MAYBE_GC(again);
 
@@ -178,7 +176,7 @@ stg_newArrayzh ( W_ n /* words */, gcptr init )
     size = n + mutArrPtrsCardWords(n);
     words = BYTES_TO_WDS(SIZEOF_StgMutArrPtrs) + size;
     ("ptr" arr) = ccall allocate(MyCapability() "ptr",words);
-    TICK_ALLOC_PRIM(SIZEOF_StgMutArrPtrs, WDS(n), 0);
+    TICK_ALLOC_PRIM(SIZEOF_StgMutArrPtrs, WDS(size), 0);
 
     SET_HDR(arr, stg_MUT_ARR_PTRS_DIRTY_info, CCCS);
     StgMutArrPtrs_ptrs(arr) = n;
@@ -187,17 +185,10 @@ stg_newArrayzh ( W_ n /* words */, gcptr init )
     // Initialise all elements of the the array with the value in R2
     p = arr + SIZEOF_StgMutArrPtrs;
   for:
-    if (p < arr + WDS(words)) {
+    if (p < arr + SIZEOF_StgMutArrPtrs + WDS(n)) {
         W_[p] = init;
         p = p + WDS(1);
         goto for;
-    }
-    // Initialise the mark bits with 0
-  for2:
-    if (p < arr + WDS(size)) {
-        W_[p] = 0;
-        p = p + WDS(1);
-        goto for2;
     }
 
     return (arr);
@@ -238,8 +229,8 @@ stg_unsafeThawArrayzh ( gcptr arr )
 stg_casArrayzh ( gcptr arr, W_ ind, gcptr old, gcptr new )
 /* MutableArray# s a -> Int# -> a -> a -> State# s -> (# State# s, Int#, Any a #) */
 {
-    gcptr p, h;
-    W_ len;
+    gcptr h;
+    W_ p, len;
 
     p = arr + SIZEOF_StgMutArrPtrs + WDS(ind);
     (h) = ccall cas(p, old, new);
@@ -259,8 +250,8 @@ stg_casArrayzh ( gcptr arr, W_ ind, gcptr old, gcptr new )
 
 stg_newArrayArrayzh ( W_ n /* words */ )
 {
-    W_ words, size;
-    gcptr p, arr;
+    W_ words, size, p;
+    gcptr arr;
 
     MAYBE_GC_N(stg_newArrayArrayzh, n);
 
@@ -270,7 +261,7 @@ stg_newArrayArrayzh ( W_ n /* words */ )
     size = n + mutArrPtrsCardWords(n);
     words = BYTES_TO_WDS(SIZEOF_StgMutArrPtrs) + size;
     ("ptr" arr) = ccall allocate(MyCapability() "ptr",words);
-    TICK_ALLOC_PRIM(SIZEOF_StgMutArrPtrs, WDS(n), 0);
+    TICK_ALLOC_PRIM(SIZEOF_StgMutArrPtrs, WDS(size), 0);
 
     SET_HDR(arr, stg_MUT_ARR_PTRS_DIRTY_info, W_[CCCS]);
     StgMutArrPtrs_ptrs(arr) = n;
@@ -279,17 +270,10 @@ stg_newArrayArrayzh ( W_ n /* words */ )
     // Initialise all elements of the array with a pointer to the new array
     p = arr + SIZEOF_StgMutArrPtrs;
   for:
-    if (p < arr + WDS(words)) {
+    if (p < arr + SIZEOF_StgMutArrPtrs + WDS(n)) {
         W_[p] = arr;
         p = p + WDS(1);
         goto for;
-    }
-    // Initialise the mark bits with 0
-  for2:
-    if (p < arr + WDS(size)) {
-        W_[p] = 0;
-        p = p + WDS(1);
-        goto for2;
     }
 
     return (arr);
