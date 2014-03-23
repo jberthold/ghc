@@ -686,6 +686,7 @@ DTRACE			= @DtraceCmd@
 
 LD = @LdCmd@
 NM = @NmCmd@
+AR = @ArCmd@
 OBJDUMP = @ObjdumpCmd@
 
 LLC = @LlcCmd@
