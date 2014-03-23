@@ -18,6 +18,15 @@
 #include <stdlib.h>
 #include <unistd.h> // getpid, for random seed
 
+/* System state, used for shutting down the system, especially in case
+ * of errors. When instances are unable to communicate, a shutdown
+ * should not be attempted */
+#define MP_NOT_STARTED 0 /* not started */
+#define MP_STARTING    1 /* not ready yet */
+#define MP_RUNNING     2 /* normal operation */
+#define MP_STOPPING    3 /* shutdown initiated */
+#define MP_STOPPED     4 /* shutdown complete */
+
 /* global constants, declared in Parallel.h:
  *
  * nPEs   - nat: number of PEs in the parallel system
@@ -30,6 +39,9 @@ rtsBool IAmMainThread = rtsFalse;
 
 /* shutdown counter */
 nat finishRecvd = 0;
+
+/* system state, to avoid shutdown problems in case of errors */
+nat mp_state = MP_NOT_STARTED;
 
 /* All processes create their input mail slots when going through
  * here. All slots use the following name pattern:
@@ -166,6 +178,8 @@ rtsBool MP_start(int* argc, char** argv[]) {
   IF_PAR_DEBUG(mpcomm,
                debugBelch("Using %u processes\n", nPEs));
 
+  mp_state = MP_STARTING;
+
   /* if main: spawn the other processes */
   if (IAmMainThread) {
     STARTUPINFO si;
@@ -253,7 +267,7 @@ rtsBool MP_sync(void) {
 			  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 
 			  (HANDLE) NULL); 
     if (writeEnd == INVALID_HANDLE_VALUE) { 
-      nPEs = 0; barf("MP_sync error: cannot create local mailslot");
+      barf("MP_sync error: cannot create local mailslot");
     }
     mailslot[ 0 ] = writeEnd;
 
@@ -266,11 +280,11 @@ rtsBool MP_sync(void) {
       if (!fRes || msg->tag != PP_READY ) {
 	sysErrorBelch("MP_sync: failed to read sync msg (%i of %i).",
 		      i, nPEs-1);
-	nPEs = 0; barf("aborting");
+	barf("aborting");
       }
       proc = msg->proc;
       if (proc < 2 || proc > nPEs) {
-	nPEs = 0; barf("Inconsistent sync message (proc = %i)", proc);
+	barf("Inconsistent sync message (proc = %i)", proc);
       }
       IF_PAR_DEBUG(mpcomm, debugBelch("Received from proc %i\n", proc));
 
@@ -280,8 +294,8 @@ rtsBool MP_sync(void) {
 			    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 
 			    (HANDLE) NULL); 
       if (writeEnd == INVALID_HANDLE_VALUE) { 
-	nPEs = 0; barf("MP_sync error: cannot create mailslot for %i (%i of %i)",
-		       proc, i, nPEs);
+	barf("MP_sync error: cannot create mailslot for %i (%i of %i)",
+             proc, i, nPEs);
       }
       mailslot[ proc-1 ] = writeEnd;
     }
@@ -295,13 +309,13 @@ rtsBool MP_sync(void) {
       fRes = WriteFile(mailslot[i-1], (char*)msg, sizeof(SlotMsg),
 		       &rwCount, (LPOVERLAPPED) NULL);
       if (!fRes) {
-	nPEs = 0; barf("MP_sync error: cannot reach main node");
+	barf("MP_sync error: cannot reach child node %d", i);
       }
     }
   } else {
     // open main node slot(1), send PP_READY
     if (!(mkSlotName(slotName, 1))) {
-      nPEs = 0; barf("MP_sync error: cannot create mailslot name");
+      barf("MP_sync error: cannot create mailslot name");
     }
 
     writeEnd = CreateFile(slotName, GENERIC_WRITE, FILE_SHARE_READ,
@@ -309,7 +323,7 @@ rtsBool MP_sync(void) {
 			  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 
 			  (HANDLE) NULL); 
     if (writeEnd == INVALID_HANDLE_VALUE) { 
-      nPEs = 0; barf("MP_sync error: cannot create mailslot write end 1");
+      barf("MP_sync error: cannot create mailslot write end 1");
     }
     mailslot[0] = writeEnd;
 
@@ -319,7 +333,7 @@ rtsBool MP_sync(void) {
     fRes = WriteFile(mailslot[0], (char*)msg, sizeof(SlotMsg),
 		     &rwCount, (LPOVERLAPPED) NULL);
     if (!fRes) {
-      nPEs = 0; barf("MP_sync error: cannot reach main node");
+      barf("MP_sync error: cannot reach main node");
     }
 
     // receive PP_PETIDS (blocking until available)
@@ -327,7 +341,7 @@ rtsBool MP_sync(void) {
 		    &rwCount, NULL);
     if (!fRes || msg->tag != PP_PETIDS || msg->proc != 1 ) {
       sysErrorBelch("MP_sync: failed to read sync msg.");
-      nPEs = 0; barf("aborting");
+      barf("aborting");
     }
 
     // then open all other slots
@@ -338,14 +352,15 @@ rtsBool MP_sync(void) {
 			    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 
 			    (HANDLE) NULL); 
       if (writeEnd == INVALID_HANDLE_VALUE) { 
-	nPEs = 0; barf("MP_sync error: cannot create mailslots (%i of %i)",
-		       i, nPEs);
+	barf("MP_sync error: cannot create mailslots (%i of %i)",
+             i, nPEs);
       }
       mailslot[i-1] = writeEnd;
     }
   }
 
   IF_PAR_DEBUG(mpcomm, debugBelch("MP_sync.ed PE %i\n", thisPE));
+  mp_state = MP_RUNNING;
   return rtsTrue;
 }
 
@@ -376,6 +391,17 @@ rtsBool MP_quit(int isError) {
 
   IF_PAR_DEBUG(mpcomm, debugBelch("MP_quit (%i%s)\n",
 				  isError, isError?": ERROR!":"" ));
+
+  // skip the entire shutdown protocol if not properly started or
+  // already shutting duwn
+  if (MP_state != MP_RUNNING) {
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("MP_quit: wasn't started, skipping."));
+    mp_state = MP_STOPPED;
+    nPEs = 0;
+    return rtsFalse;
+  }
+  mp_state = MP_STOPPING;
 
   msg->proc = thisPE;
   msg->tag  = PP_FINISH;
@@ -426,7 +452,7 @@ rtsBool MP_quit(int isError) {
 		     &rwCount, (LPOVERLAPPED) NULL);
     if (!fRes) {
       errorBelch("MP_quit: cannot PP_FINISH to main node");
-      nPEs = 0; barf("aborting clean shutdown!");
+      barf("aborting clean shutdown!");
     }
 
     /* child must stay alive until answer arrives if error shutdown */
@@ -459,6 +485,7 @@ rtsBool MP_quit(int isError) {
   /* close mySlot read handle ... but how? no API */
 
   nPEs=0; // indicate shutdown has completed
+  mp_state = MP_STOPPED;
 
   return rtsTrue;
 }

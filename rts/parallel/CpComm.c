@@ -56,6 +56,18 @@
 #define CPW_FORK_FAIL       6
 #define CPW_SEND_FAIL       7
 
+/*==============*
+ * System state *
+ *==============*/
+// this is used for shutting down the system, especially in case of
+// errors. When instances are unable to communicate, a shutdown should
+// not be attempted.
+#define CPW_NOT_STARTED 0 /* not started */
+#define CPW_STARTING    1 /* not ready yet */
+#define CPW_RUNNING     2 /* normal operation */
+#define CPW_STOPPING    3 /* shutdown initiated */
+#define CPW_STOPPED     4 /* shutdown complete */
+
 /*============*
  * Semaphores *
  *============*/
@@ -180,6 +192,9 @@ nat nPEs = 0;
 nat thisPE = 0;
 rtsBool IAmMainThread = rtsFalse;
 
+int cpw_state = CPW_NOT_STARTED; /* keep track of state, to avoid
+                                    double-faults on error shutdown */
+
 int num_msgs = 0; /* How many messages can be stored in buffer */
 
 cpw_shm_slot_t *stored_msgs = NULL; /* Linked List used to free buffer */
@@ -262,7 +277,6 @@ rtsBool MP_sync(void){
 
   /* create shared memory*/
   if (cpw_shm_create() != CPW_NOERROR) {
-    nPEs=0; // no children to shut down, avoid calling back in here
     barf(" MPSystem CpWay: error creating shared memory!\n");
   }
   IF_PAR_DEBUG(mpcomm, cpw_shm_debug_info(&shared_memory));
@@ -282,6 +296,8 @@ rtsBool MP_sync(void){
   /* check errors before forking */
   cpw_shm_check_errors();
 
+  cpw_state = CPW_STARTING;
+
   /* start other processes */
   int child;
   for (i = 2; i <= (int)nPEs; i++) {
@@ -291,7 +307,6 @@ rtsBool MP_sync(void){
     case -1:
       /* error while forking! */
       *shared_memory.status = CPW_FORK_FAIL;
-      nPEs=0; // avoid shutdown problems (cannot shut down child processes)
       barf(" MPSystem CpWay: error starting other processes!\n");
       break;
     case 0:
@@ -311,6 +326,7 @@ rtsBool MP_sync(void){
   cpw_shm_check_errors();
   /* wait until all nodes ready */
   cpw_sync_synchronize(&sync_point); /* Fails after CPW_SYNC_TIMEOUT seconds */
+  cpw_state = CPW_RUNNING;
   /* GO */
   return rtsTrue;
 }
@@ -326,6 +342,17 @@ rtsBool MP_quit(int isError){
 	       debugBelch(" MP_quit()\n"));
 
   StgWord data[1] = {isError};
+
+  // skip the entire shutdown protocol if not properly started or
+  // already shutting duwn
+  if (cpw_state != CPW_RUNNING) {
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("MP_quit: wasn't started, skipping."));
+    cpw_state = CPW_STOPPED;
+    nPEs = 0;
+    return rtsFalse;
+  }
+  cpw_state = CPW_STOPPING;
 
   if (IAmMainThread) {
     /* send FINISH to other PEs */
@@ -402,6 +429,10 @@ rtsBool MP_quit(int isError){
 
   /* indicate that quit has been executed */
   nPEs = 0;
+
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MP_quit: stopped"));
+  cpw_state = CPW_STOPPED;
 	
   return rtsTrue;
 }
@@ -1208,15 +1239,15 @@ static void cpw_shm_check_errors() {
   case CPW_NOERROR:
     return;
   case CPW_FILENAME_FAIL:
-    nPEs=0; barf("MPSystem CpWay: unique filename error!\n");
+    barf("MPSystem CpWay: unique filename error!\n");
   case CPW_SHM_FAIL:
-    nPEs=0; barf("MPSystem CpWay: shared memory error!\n");
+    barf("MPSystem CpWay: shared memory error!\n");
   case CPW_SEM_FAIL:
-    nPEs=0; barf("MPSystem CpWay: semaphore error!\n");
+    barf("MPSystem CpWay: semaphore error!\n");
   case CPW_SYNC_FAIL:
-    nPEs=0; barf("MPSystem CpWay: barrier error!\n");
+    barf("MPSystem CpWay: barrier error!\n");
   case CPW_FORK_FAIL:
-    nPEs=0; barf("MPSystem CpWay: fork error!\n");
+    barf("MPSystem CpWay: fork error!\n");
   default:
     return;
   }
@@ -1315,6 +1346,18 @@ static int cpw_sync_close(cpw_sync_t *syn) {
 #define CPW_SYNC_FAIL       5
 #define CPW_FORK_FAIL       6
 #define CPW_SEND_FAIL       7
+
+/*==============*
+ * System state *
+ *==============*/
+// this is used for shutting down the system, especially in case of
+// errors. When instances are unable to communicate, a shutdown should
+// not be attempted.
+#define CPW_NOT_STARTED 0 /* not started */
+#define CPW_STARTING    1 /* not ready yet */
+#define CPW_RUNNING     2 /* normal operation */
+#define CPW_STOPPING    3 /* shutdown initiated */
+#define CPW_STOPPED     4 /* shutdown complete */
 
 /*============*
  * Semaphores *
@@ -1458,6 +1501,9 @@ nat nPEs = 0;
 nat thisPE = 0;
 rtsBool IAmMainThread = rtsFalse;
 
+int cpw_state = CPW_NOT_STARTED; /* keep track of state, to avoid
+                                    double-faults on error shutdown */
+
 int finishRecvd = 0; /* master counts finish messages from children */
 
 int num_msgs = 0; /* How many messages can be stored in buffer */
@@ -1543,9 +1589,10 @@ rtsBool MP_sync(void){
      init process
   */
 
+  cpw_state = CPW_STARTING;
+
   if(IAmMainThread) {
     if (cpw_shm_create() != CPW_NOERROR) {
-      nPEs = 0; // avoid calling MP_quit from stg_exit
       barf(" MPSystem CpWay: error creating shared memory!\n");
     }
     STARTUPINFO si;
@@ -1578,9 +1625,6 @@ rtsBool MP_sync(void){
     sscanf(buffer, "%" FMT_Word, (StgWord*) &shared_memory.hShm);
 
     if (cpw_shm_init() != CPW_NOERROR) {
-      /* avoid calling back in here, this PE cannot send/receive msg.s */
-      /* barf would otherwise call MP_quit, which sends messages */
-      nPEs=0;
       barf(" MPSystem CpWay: error init shared memory!\n");
     }
   }
@@ -1595,6 +1639,7 @@ rtsBool MP_sync(void){
   cpw_sync_synchronize(shared_memory.hSync); /* Fails after CPW_SYNC_TIMEOUT seconds */
 
   IF_PAR_DEBUG(mpcomm, debugBelch("%d ready to go", thisPE));
+  cpw_state = CPW_RUNNING;
   return rtsTrue;
 }
 
@@ -1613,6 +1658,17 @@ rtsBool MP_quit(int isError){
 
   IF_PAR_DEBUG(mpcomm,
                debugBelch(" MP_quit(%d)", isError));
+
+  // skip the entire shutdown protocol if not properly started or
+  // already shutting duwn
+  if (cpw_state != CPW_RUNNING) {
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("MP_quit: wasn't started, skipping."));
+    cpw_state = CPW_STOPPED;
+    nPEs = 0;
+    return rtsFalse;
+  }
+  cpw_state = CPW_STOPPING;
 
   if (IAmMainThread) {
     /* send FINISH to other PEs */
@@ -1688,12 +1744,13 @@ rtsBool MP_quit(int isError){
   /* close shared memory*/
   cpw_shm_close(&shared_memory);
 
-  IF_PAR_DEBUG(mpcomm,
-               debugBelch("MP_quit: Finished."));
-
   /* indicate that quit has been executed */
   nPEs = 0;
 	
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MP_quit: Finished."));
+  cpw_state = CPW_STOPPED;
+
   return rtsTrue;
 }
 
@@ -2602,15 +2659,15 @@ static void cpw_shm_check_errors() {
   case CPW_NOERROR:
     return;
   case CPW_FILENAME_FAIL:
-    nPEs=0; barf("MPSystem CpWay: unique filename error!\n");
+    barf("MPSystem CpWay: unique filename error!\n");
   case CPW_SHM_FAIL:
-    nPEs=0; barf("MPSystem CpWay: shared memory error!\n");
+    barf("MPSystem CpWay: shared memory error!\n");
   case CPW_SEM_FAIL:
-    nPEs=0; barf("MPSystem CpWay: semaphore error!\n");
+    barf("MPSystem CpWay: semaphore error!\n");
   case CPW_SYNC_FAIL:
-    nPEs=0; barf("MPSystem CpWay: barrier error!\n");
+    barf("MPSystem CpWay: barrier error!\n");
   case CPW_FORK_FAIL:
-    nPEs=0; barf("MPSystem CpWay: fork error!\n");
+    barf("MPSystem CpWay: fork error!\n");
   default:
     return;
   }
