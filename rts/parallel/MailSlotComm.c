@@ -394,7 +394,7 @@ rtsBool MP_quit(int isError) {
 
   // skip the entire shutdown protocol if not properly started or
   // already shutting duwn
-  if (MP_state != MP_RUNNING) {
+  if (mp_state != MP_RUNNING) {
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("MP_quit: wasn't started, skipping."));
     mp_state = MP_STOPPED;
