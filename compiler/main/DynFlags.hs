@@ -799,7 +799,12 @@ data DynFlags = DynFlags {
   rtldInfo              :: IORef (Maybe LinkerInfo),
 
   -- | Run-time compiler information
-  rtccInfo              :: IORef (Maybe CompilerInfo)
+  rtccInfo              :: IORef (Maybe CompilerInfo),
+
+  -- Constants used to control the amount of optimization done.
+
+  -- ^ Max size, in bytes, of inline array allocations.
+  maxInlineAllocSize    :: Int
  }
 
 class HasDynFlags m where
@@ -1495,7 +1500,9 @@ defaultDynFlags mySettings =
         avx512f = False,
         avx512pf = False,
         rtldInfo = panic "defaultDynFlags: no rtldInfo",
-        rtccInfo = panic "defaultDynFlags: no rtccInfo"
+        rtccInfo = panic "defaultDynFlags: no rtccInfo",
+
+        maxInlineAllocSize = 128
       }
 
 defaultWays :: Settings -> [Way]
@@ -1781,7 +1788,10 @@ combineSafeFlags a b | a == Sf_SafeInferred = return b
 --     * function to test if the flag is on
 --     * function to turn the flag off
 unsafeFlags :: [(String, DynFlags -> SrcSpan, DynFlags -> Bool, DynFlags -> DynFlags)]
-unsafeFlags = [("-XTemplateHaskell", thOnLoc,
+unsafeFlags = [("-XGeneralizedNewtypeDeriving", newDerivOnLoc,
+                   xopt Opt_GeneralizedNewtypeDeriving,
+                   flip xopt_unset Opt_GeneralizedNewtypeDeriving),
+               ("-XTemplateHaskell", thOnLoc,
                    xopt Opt_TemplateHaskell,
                    flip xopt_unset Opt_TemplateHaskell)]
 
@@ -2480,6 +2490,7 @@ dynamic_flags = [
   , Flag "fmax-worker-args" (intSuffix (\n d -> d {maxWorkerArgs = n}))
 
   , Flag "fghci-hist-size" (intSuffix (\n d -> d {ghciHistSize = n}))
+  , Flag "fmax-inline-alloc-size"      (intSuffix (\n d -> d{ maxInlineAllocSize = n }))
 
         ------ Profiling ----------------------------------------------------
 
