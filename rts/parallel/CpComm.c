@@ -533,8 +533,9 @@ int MP_recv(STG_UNUSED int maxlength, StgWord8 *destination, // IN
  * (unspecified sender, no receive buffers any more) 
  */
 rtsBool MP_probe(void) {
-  IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MP_probe()\n"));
+  // IF_PAR_DEBUG(mpcomm,
+  //              debugBelch("MP_probe()\n"));
+
   /* check for errors */
   cpw_shm_check_errors();
 
