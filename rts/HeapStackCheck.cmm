@@ -698,7 +698,7 @@ stg_block_stmwait
 /* this code is executed when resuming the thread.
  * R1<-unused1=mode(int), R2<-unused2=graphroot(ptr)
  */
-INFO_TABLE_RET( stg_block_pack, RET_SMALL, W_ mode, P_ graphroot )
+INFO_TABLE_RET( stg_block_pack, RET_SMALL, W_ info, W_ mode, P_ graphroot )
     return ()
 {
     jump stg_sendDatazh(mode, graphroot);
@@ -716,7 +716,7 @@ stg_block_pack(W_ mode, P_ graphroot)
 /* this code is executed when resuming the thread.
  * R1<-unused1=graphroot(ptr)
  */
-INFO_TABLE_RET( stg_block_serializze, RET_SMALL, P_ graphroot )
+INFO_TABLE_RET( stg_block_serializze, RET_SMALL, W_ info, P_ graphroot )
   return ()
 {
   jump stg_serializzezh (graphroot);
@@ -735,7 +735,7 @@ stg_block_serializze (P_ graphroot)
 /* this code is executed when resuming the thread.
  * R1<-unused1=mode(int), R2<-unused2=graphroot(ptr)
  */
-INFO_TABLE_RET( stg_yield_send, RET_SMALL, W_ mode, P_ graphroot )
+INFO_TABLE_RET( stg_yield_send, RET_SMALL, W_ info, W_ mode, P_ graphroot )
    return ()
 {
   jump stg_sendDatazh(mode, graphroot);
