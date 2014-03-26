@@ -1910,7 +1910,7 @@ UnpackClosure (StgWord **bufptrP, Capability* cap) {
       IF_PAR_DEBUG(packet,
 		   debugBelch("Allocating %d heap words for %s-closure:\n"
 			      "(%d ptrs, %d non-ptrs, vhs = %d)\n"
-			      , size, info_type_by_ip(ip),
+			      , size, info_type_by_ip(INFO_PTR_TO_STRUCT(ip)),
 			      ptrs, nonptrs, vhs));
 
       closure = (StgClosure*) allocate(cap, size);
@@ -1953,9 +1953,9 @@ UnpackClosure (StgWord **bufptrP, Capability* cap) {
       // other cases are unsupported/unexpected, and caught here
     default:
       errorBelch("Found unexpected closure type (%x) in packet when unpacking",
-		 ip->type);
+		 INFO_PTR_TO_STRUCT(ip)->type);
       return (StgClosure *) NULL;
-    } // switch(ip->type)
+    } // switch(INFO_PTR_TO_STRUCT(ip)->type)
     break;
 
   default: 

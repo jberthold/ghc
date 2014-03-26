@@ -338,6 +338,8 @@ rtsBool MP_sync(void){
  */
 
 rtsBool MP_quit(int isError){
+  int retryCount;
+
   IF_PAR_DEBUG(mpcomm,
 	       debugBelch(" MP_quit()\n"));
 
@@ -358,10 +360,13 @@ rtsBool MP_quit(int isError){
     /* send FINISH to other PEs */
     int i;
     for (i=2; i<=(int)nPEs; i++) {
+      retryCount = 100;
       while (cpw_shm_send_msg(i, PP_FINISH, sizeof(StgWord), (StgWord8*) data)
-             != CPW_NOERROR)
+             != CPW_NOERROR && retryCount > 0) {
         IF_PAR_DEBUG(mpcomm,
                      debugBelch("sending FINISH failed, retry"));
+        retryCount--;
+      }
     }
 
     /* wait for children to return */
@@ -379,12 +384,15 @@ rtsBool MP_quit(int isError){
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("child finishing (code %d),"
                             "sending FINISH", isError));
+    retryCount = 100;
     while (cpw_shm_send_msg(1,PP_FINISH, sizeof(StgWord), (StgWord8*) data)
-           != CPW_NOERROR)
+           != CPW_NOERROR && retryCount > 0) {
       IF_PAR_DEBUG(mpcomm,
                    debugBelch("sending FINISH failed, retry"));
+      retryCount--;
+    }
     /* child must stay alive until answer arrives if error shutdown */
-    if (isError != 0) {
+    if (retryCount != 0 && isError != 0) {
       nat sender;
       int length;
       OpCode code = PP_READY; // something != FINISH
@@ -1656,6 +1664,7 @@ rtsBool MP_quit(int isError){
     nat sender;
     int length;
     OpCode code;
+    int retryCount;
 
   IF_PAR_DEBUG(mpcomm,
                debugBelch(" MP_quit(%d)", isError));
@@ -1675,10 +1684,13 @@ rtsBool MP_quit(int isError){
     /* send FINISH to other PEs */
     int i;
     for (i=2; i<=(int)nPEs; i++) {
+      retryCount = 100;
       while (cpw_shm_send_msg(i, PP_FINISH, sizeof(StgWord), (StgWord8*) data) 
-             != CPW_NOERROR)
+             != CPW_NOERROR && retryCount > 0) {
         IF_PAR_DEBUG(mpcomm,
                      debugBelch("sending FINISH failed, retry"));
+        retryCount--;
+      }
     }
 
     IF_PAR_DEBUG(mpcomm,
@@ -1701,10 +1713,13 @@ rtsBool MP_quit(int isError){
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("child finishing (code %d),"
                             "sending FINISH", isError));
+    retryCount = 100;
     while (cpw_shm_send_msg(1,PP_FINISH, sizeof(StgWord), (StgWord8*) data)
-           != CPW_NOERROR)
+           != CPW_NOERROR && retryCount > 0) {
       IF_PAR_DEBUG(mpcomm,
                    debugBelch("sending FINISH failed, retry"));
+      retryCount--;
+    }
     /* child must stay alive until answer arrives if error shutdown */
     if (isError != 0) {
       code = PP_READY; // something != FINISH
