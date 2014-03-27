@@ -281,6 +281,10 @@ ifeq "$(ParallelRts)" "YES"
 # should always work: multicore version based on copying between OS
 # processes
   GhcRTSWays+=pc debug_pc l_pc
+# under Windows, also build the mailslot way (-parms)
+  ifeq "$(TargetOS_CPP)" "mingw32"
+    GhcRTSWays+=ms debug_ms l_ms
+  endif
 endif
 
 # Usually want the debug version
