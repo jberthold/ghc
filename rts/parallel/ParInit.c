@@ -36,6 +36,7 @@ nat thisPE = 1;
 #ifdef TRACING
 StgWord64 startupTicks;
 char *argvsave;
+int len;
 struct timeval startupTime;
 struct timezone startupTimeZone;
 nat pes; // remember nPEs after shutdown
@@ -154,9 +155,9 @@ void zipTraceFiles(void) {
     }
 #endif
 
-  // archive == prog_name ++ ".parevents" (overwriting)
-  archive = stgMallocBytes(strlen(prog) + 10 + 1, "archive");
-  sprintf(archive, "%s.parevents", prog);
+  // archive == prog_name ++ "_" ++ arguments ++ ".parevents" (overwriting)
+  archive = stgMallocBytes(strlen(prog) + 10 + 1 + len+1, "archive");
+  sprintf(archive, "%s_%s.parevents", prog, argvsave);
 
   files = stgMallocBytes(sizeof(char*) * pes, "file array");
 
@@ -230,7 +231,7 @@ startupParallelSystem(int* argc, char **argv[]) {
   startupTicks = stat_getElapsedTime(); // see Stats.c, elapsed time from init
   gettimeofday(&startupTime,&startupTimeZone);
   //MD: copy argument list to string for traceProgramInvocation
-  int len = 0;
+  len = 0;
   int i=0;
   while (i < *argc){
     len+=strlen((*argv)[i])+1;
