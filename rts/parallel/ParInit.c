@@ -36,7 +36,7 @@ nat thisPE = 1;
 #ifdef TRACING
 StgWord64 startupTicks;
 char *argvsave;
-int len;
+char *pareventsName;
 struct timeval startupTime;
 struct timezone startupTimeZone;
 nat pes; // remember nPEs after shutdown
@@ -128,7 +128,7 @@ void emitStartupEvents(void){
  * EventLog.c). argvsave is used as a comment string for the archive,
  * so it can be identified by unzip -l.
  *
- * The archive name will be <prog_name>.parevents, overwriting an
+ * The archive name will be <argv>.parevents, overwriting an
  * older file of the same name if there was one.
  *
  * This method should be used by all parallel ways which do not use a
@@ -140,7 +140,7 @@ void zipTraceFiles(void) {
 
 #ifdef TRACING
 
-  char **files, *archive, *prog;
+  char **files, *prog;
   int i;
   rtsBool res;
 
@@ -162,19 +162,15 @@ void zipTraceFiles(void) {
     }
 #endif
 
-  // archive == prog_name ++ "_" ++ arguments ++ ".parevents" (overwriting)
-  archive = stgMallocBytes(strlen(prog) + 10 + 1 + len+1, "archive");
-  sprintf(archive, "%s_%s.parevents", prog, argvsave);
-
   files = stgMallocBytes(sizeof(char*) * pes, "file array");
 
   if (pes == 1) {
     // mv $prog#1.eventlog $prog.parevents; return;
     files[0] = stgMallocBytes(strlen(prog) + 10 + 1 + 1, "fname");
     sprintf(files[0], "%s#1.eventlog", prog);
-    if (rename(files[0], archive) != 0) {
+    if (rename(files[0], pareventsName) != 0) {
       sysErrorBelch("Failed to rename trace file");
-      errorBelch("(trying to rename %s to %s)", files[0], archive);
+      errorBelch("(trying to rename %s to %s)", files[0], pareventsName);
     }
     free(files[0]);
   } else {
@@ -192,13 +188,13 @@ void zipTraceFiles(void) {
     }
     // did we end up having only one trace file (or none)?
     if (pes <= 1) {
-      if (rename(files[0], archive) != 0) {
+      if (rename(files[0], pareventsName) != 0) {
         sysErrorBelch("Failed to rename trace file");
-        errorBelch("(trying to rename %s to %s)", files[0], archive);
+        errorBelch("(trying to rename %s to %s)", files[0], pareventsName);
       }
     } else {
-      res = compressFiles(archive, pes, files, argvsave);
-
+      res = compressFiles(pareventsName, pes, files, argvsave);
+      
       // and remove the files if this worked
       for (i=0; i < (int)pes; i++) {
         if (res == rtsTrue) {
@@ -212,7 +208,6 @@ void zipTraceFiles(void) {
     }
   }
   free(files);
-  free(archive);
 #endif
 }
 
@@ -238,19 +233,39 @@ startupParallelSystem(int* argc, char **argv[]) {
   startupTicks = stat_getElapsedTime(); // see Stats.c, elapsed time from init
   gettimeofday(&startupTime,&startupTimeZone);
   //MD: copy argument list to string for traceProgramInvocation
-  len = 0;
+  int len = 0;
   int i=0;
   while (i < *argc){
     len+=strlen((*argv)[i])+1;
     i++;
   }
-  argvsave = (char *)calloc(len + 1, sizeof(char));
-  i=0;
+  len--;
+  argvsave = stgMallocBytes( len + 1, "argvsave");
+  pareventsName = stgMallocBytes( len + 10 + 1, "pareventsName");
+
+
+    strcat(argvsave,(*argv)[0]);
+    strcat(pareventsName,(*argv)[0]);
+#ifdef mingw32_HOST_OS
+    // on Windows, drop the .exe suffix if there is one
+    {
+        char *suff;
+        suff = strrchr(pareventsName,'.');
+        if (suff != NULL && !strcmp(suff,".exe")) {
+            *suff = '\0';
+        }
+    }
+#endif
+
+  i=1;
   while (i < *argc){
-  strcat(argvsave,(*argv)[i]);
-  strcat(argvsave," ");
+    strcat(argvsave," ");
+    strcat(pareventsName,"_");
+    strcat(argvsave,(*argv)[i]);
+    strcat(pareventsName,(*argv)[i]);
     i++;
   }
+  strcat(pareventsName,".parevents");
 #endif //TRACING
   // possibly starts other PEs (first argv is number)
   // sets IAmMainThread, nPEs.
