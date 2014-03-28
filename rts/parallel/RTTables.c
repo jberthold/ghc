@@ -187,8 +187,9 @@ ProcessData* findProcess(StgWord processId) {
     p = p->next;
   }
   if (p == NULL) 
-    debugBelch("findProcess: non-existent process %d\n", 
-	       (int)processId);
+    IF_PAR_DEBUG(procs,
+                 debugBelch("findProcess: non-existent process %d\n",
+                            (int)processId));
   return p; 
 
 }
