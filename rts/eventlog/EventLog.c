@@ -232,17 +232,12 @@ static inline void postEventHeaderTime(EventsBuf *eb, EventTypeNum type, StgWord
     postEventTypeNum(eb, type);
     postWord64(eb, time);
 }  
+
 static inline void postInt8(EventsBuf *eb, StgInt8 i)
 { postWord8(eb, (StgWord8)i); }
 
-static inline void postInt16(EventsBuf *eb, StgInt16 i)
-{ postWord16(eb, (StgWord16)i); }
-
 static inline void postInt32(EventsBuf *eb, StgInt32 i)
 { postWord32(eb, (StgWord32)i); }
-
-static inline void postInt64(EventsBuf *eb, StgInt64 i)
-{ postWord64(eb, (StgWord64)i); }
 
 
 void
@@ -1322,7 +1317,7 @@ void postCreateMachineEvent(EventMachineID pe, StgWord64 time,StgWord64 ticks, E
     }
     postEventHeaderTime(eb, tag, ticks);	
     postMachineID(eb, pe); 
-    postInt64(eb, time);
+    postWord64(eb, time);
 }
 
 void postKillMachineEvent(EventMachineID pe, EventTypeNum tag)

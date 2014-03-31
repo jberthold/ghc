@@ -1165,12 +1165,25 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_myThreadIdzh)                                   \
       SymI_HasProto(stg_labelThreadzh)                                  \
       SymI_HasProto(stg_newArrayzh)                                     \
+      SymI_HasProto(stg_copyArrayzh)                                    \
+      SymI_HasProto(stg_copyMutableArrayzh)                             \
+      SymI_HasProto(stg_copyArrayArrayzh)                               \
+      SymI_HasProto(stg_copyMutableArrayArrayzh)                        \
       SymI_HasProto(stg_cloneArrayzh)                                   \
       SymI_HasProto(stg_cloneMutableArrayzh)                            \
-      SymI_HasProto(stg_freezzeArrayzh)                                  \
+      SymI_HasProto(stg_freezzeArrayzh)                                 \
       SymI_HasProto(stg_thawArrayzh)                                    \
       SymI_HasProto(stg_newArrayArrayzh)                                \
       SymI_HasProto(stg_casArrayzh)                                     \
+      SymI_HasProto(stg_newSmallArrayzh)                                \
+      SymI_HasProto(stg_unsafeThawSmallArrayzh)                         \
+      SymI_HasProto(stg_cloneSmallArrayzh)                              \
+      SymI_HasProto(stg_cloneSmallMutableArrayzh)                       \
+      SymI_HasProto(stg_freezzeSmallArrayzh)                            \
+      SymI_HasProto(stg_thawSmallArrayzh)                               \
+      SymI_HasProto(stg_copySmallArrayzh)                               \
+      SymI_HasProto(stg_copySmallMutableArrayzh)                        \
+      SymI_HasProto(stg_casSmallArrayzh)                                \
       SymI_HasProto(stg_newBCOzh)                                       \
       SymI_HasProto(stg_newByteArrayzh)                                 \
       SymI_HasProto(stg_casIntArrayzh)                                  \
@@ -1269,6 +1282,9 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(stg_MUT_ARR_PTRS_DIRTY_info)                        \
       SymI_HasProto(stg_MUT_ARR_PTRS_FROZEN_info)                       \
       SymI_HasProto(stg_MUT_ARR_PTRS_FROZEN0_info)                      \
+      SymI_HasProto(stg_SMALL_MUT_ARR_PTRS_DIRTY_info)                  \
+      SymI_HasProto(stg_SMALL_MUT_ARR_PTRS_FROZEN_info)                 \
+      SymI_HasProto(stg_SMALL_MUT_ARR_PTRS_FROZEN0_info)                \
       SymI_HasProto(stg_MUT_VAR_CLEAN_info)                             \
       SymI_HasProto(stg_MUT_VAR_DIRTY_info)                             \
       SymI_HasProto(stg_WEAK_info)                                      \
