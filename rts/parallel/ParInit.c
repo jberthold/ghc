@@ -234,11 +234,12 @@ startupParallelSystem(int* argc, char **argv[]) {
   }
   len--;
   argvsave = stgMallocBytes( len + 1, "argvsave");
+  memset(argvsave, 0, len + 1);
   pareventsName = stgMallocBytes( len + 10 + 1, "pareventsName");
+  memset(pareventsName, 0, len + 10 + 1);
 
-
-    strcat(argvsave,(*argv)[0]);
-    strcat(pareventsName,(*argv)[0]);
+  strcat(argvsave,(*argv)[0]);
+  strcat(pareventsName,(*argv)[0]);
 #ifdef mingw32_HOST_OS
     // on Windows, drop the .exe suffix if there is one
     {
