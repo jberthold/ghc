@@ -13,10 +13,10 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Parallel Haskell Compilation System], [7.8.0], [eden@mathematik.uni-marburg.de], [ghc])
+AC_INIT([The Parallel Haskell Compilation System], [7.8.1], [eden@mathematik.uni-marburg.de], [ghc])
 
 # Set this to YES for a released version, otherwise NO
-: ${RELEASE=NO}
+: ${RELEASE=YES}
 
 # The primary version (e.g. 7.5, 7.4.1) is set in the AC_INIT line
 # above.  If this is not a released version, then we will append the
