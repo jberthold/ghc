@@ -378,12 +378,24 @@ loop:
 
     else if (info == &stg_TSO_info)
     {
+#if defined(PARALLEL_RTS)
+      // In case of a system-created blackhole, return NULL
+      if (p == (StgClosure*) &stg_system_tso) 
+        return NULL;
+      else 
+#endif
         return (StgTSO*)p;
     }
     else if (info == &stg_BLOCKING_QUEUE_CLEAN_info || 
              info == &stg_BLOCKING_QUEUE_DIRTY_info)
     {
         StgBlockingQueue *bq = (StgBlockingQueue *)p;
+#if defined(PARALLEL_RTS)
+      // In case of a system-created blackhole, return NULL
+	if (bq->owner == (StgTSO*) &stg_system_tso)
+          return NULL;
+        else 
+#endif
         return bq->owner;
     }
     
