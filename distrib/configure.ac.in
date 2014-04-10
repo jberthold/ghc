@@ -4,7 +4,10 @@ dnl
 #!/bin/sh
 #
 
-AC_INIT([The Glorious Glasgow Haskell Compilation System], [@ProjectVersion@], [glasgow-haskell-bugs@haskell.org], [ghc])
+AC_INIT([The Parallel Haskell Compilation System], [@ProjectVersion@], [eden@mathematik.uni-marburg.de], [ghc])
+
+dnl This source bundle uses ParallelRts by default
+ParallelRts=YES
 
 FP_BINDIST_GHC_PWD
 FP_FIND_ROOT
