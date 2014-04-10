@@ -8,6 +8,7 @@ AC_INIT([The Parallel Haskell Compilation System], [@ProjectVersion@], [eden@mat
 
 dnl This source bundle uses ParallelRts by default
 ParallelRts=YES
+AC_SUBST(ParallelRts)
 
 FP_BINDIST_GHC_PWD
 FP_FIND_ROOT
