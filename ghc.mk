@@ -1120,7 +1120,7 @@ define sdist_ghc_file
 endef
 
 # Extra packages which shouldn't be in the source distribution: see #8801
-EXTRA_PACKAGES=parallel stm random primitive vector dph
+EXTRA_PACKAGES= random dph
 
 .PHONY: sdist-ghc-prep
 sdist-ghc-prep :
