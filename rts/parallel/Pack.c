@@ -445,6 +445,16 @@ STATIC_INLINE StgInfoTable*
     // NB nonptrs field for array closures is only used in checkPacket
     break;
 
+    /* Small arrays do not have card tables, straightforward. */
+  case SMALL_MUT_ARR_PTRS_CLEAN:
+  case SMALL_MUT_ARR_PTRS_DIRTY:
+  case SMALL_MUT_ARR_PTRS_FROZEN0:
+  case SMALL_MUT_ARR_PTRS_FROZEN:
+    *vhs = 1; // ptrs field
+    *ptrs = ((StgSmallMutArrPtrs*) node)->ptrs;
+    *nonptrs = 0;
+    break;
+
     /* we do not want to see these here (until thread migration) */
   case CATCH_STM_FRAME:
   case CATCH_RETRY_FRAME:
@@ -1130,6 +1140,17 @@ static StgWord PackClosure(StgClosure* closure) {
     barf("Pack: found WHITEHOLE while packing");
 #endif
 
+  case SMALL_MUT_ARR_PTRS_CLEAN:
+  case SMALL_MUT_ARR_PTRS_DIRTY:
+  case SMALL_MUT_ARR_PTRS_FROZEN:
+  case SMALL_MUT_ARR_PTRS_FROZEN0:
+    /* unlike the standard arrays, small arrays do not have a card table.
+     * Layout is thus: +------------------------------+
+     *                 | hdr | #ptrs | payload (ptrs) |
+     *                 +------------------------------+
+     * No problem with using PackGeneric and vhs=1 in get_closure_info. */
+    return PackGeneric(closure);
+
   unsupported:
     errorBelch("Pack: packing type %s (%p) not implemented", 
                info_type_by_ip(info), closure);
@@ -1467,11 +1488,11 @@ PackArray(StgClosure *closure) {
 
   if (info->type == ARR_WORDS) {
     payloadsize = arr_words_words((StgArrWords *)closure);
-    packsize = payloadsize + 2; // size in words in buffer, for check only
+    packsize = payloadsize + HEADERSIZE + 1; // words in buffer
   } else {
-    // MUT_ARR_PTRS_* {info,(no. of)ptrs,size(total incl.card table)}
+    // MUT_ARR_PTRS_* {HDR,(no. of)ptrs,size(total incl.card table)}
     // Only pack header, not card table which follows the data.
-    packsize = 3;
+    packsize = HEADERSIZE + 2;
     payloadsize = ((StgMutArrPtrs *)closure)->ptrs;
   }
 
@@ -1498,24 +1519,25 @@ PackArray(StgClosure *closure) {
   */
     Pack((StgWord) CLOSURE);  // marker for unglobalised closure
 
-  /* Pack the header (2 words: info ptr and the number of bytes to follow) 
-     First word (info pointer) is tagged and offset
-   */
+  /* Pack the header and the number of bytes/ptrs that follow) 
+     First word (info pointer) is tagged and offset */
   Pack((StgWord) (P_OFFSET(TAG_CLOSURE(tag, (StgClosure*) *((StgPtr) closure )))));
-  Pack((StgWord) ((StgArrWords *)closure)->bytes);
+  /* pack the rest of the header (variable header) */
+  for (i = 1; i < HEADERSIZE; ++i)
+    Pack((StgWord)*(((StgPtr)closure)+i));
 
   if (info->type == ARR_WORDS) {
-    /* pack the payload of the closure (all non-ptrs) */
-/*    for (i=0; i<payloadsize; i++)
-        Pack((StgWord)((StgArrWords *)closure)->payload[i]);
-*/
-     memcpy((globalPackBuffer->buffer) + pack_locn,
-	    ((StgArrWords *)closure)->payload,
- 	   payloadsize * sizeof(StgWord));
-       pack_locn += payloadsize; 
+    /* pack no. of bytes to follow */
+    Pack((StgWord) ((StgArrWords *)closure)->bytes);
+    /* pack payload of the closure (all non-ptrs) */
+    memcpy((globalPackBuffer->buffer) + pack_locn,
+           ((StgArrWords *)closure)->payload,
+           payloadsize * sizeof(StgWord));
+    pack_locn += payloadsize; 
 
   } else {
-    // MUT_ARR_PTRS_*: pack total size, enqueue pointers
+    /* MUT_ARR_PTRS_*: pack no. of ptrs and total size, enqueue pointers */
+    Pack((StgWord) ((StgMutArrPtrs *)closure)->ptrs);
     Pack((StgWord) ((StgMutArrPtrs*)closure)->size);
     for (i=0; i<payloadsize; i++)
       QueueClosure(((StgMutArrPtrs *) closure)->payload[i]);
@@ -1906,6 +1928,10 @@ UnpackClosure (StgWord **bufptrP, Capability* cap) {
     case THUNK_1_1:
     case THUNK_0_2:
     case THUNK_SELECTOR:
+    case SMALL_MUT_ARR_PTRS_CLEAN:
+    case SMALL_MUT_ARR_PTRS_DIRTY:
+    case SMALL_MUT_ARR_PTRS_FROZEN0:
+    case SMALL_MUT_ARR_PTRS_FROZEN:
 
       IF_PAR_DEBUG(packet,
 		   debugBelch("Allocating %d heap words for %s-closure:\n"
@@ -2396,7 +2422,7 @@ StgClosure* UnpackGraphWrapper(StgArrWords* packBufferArray,
 */
 
 /* this array has to be kept in sync with includes/ClosureTypes.h */
-#if !(N_CLOSURE_TYPES == 61 )
+#if !(N_CLOSURE_TYPES == 65 )
 #error Wrong closure type count in fingerprint array. Check code.
 #endif
 static char* fingerPrintChar = 
@@ -2407,7 +2433,7 @@ static char* fingerPrintChar =
   "RRRRFFFF"     /* RETs FRAMEs (32-39) */
   "*@MMT"        /* BQ BLACKHOLE MVARs TVAR (40-43) */
   "aAAAAmmwppXS" /* ARRAYs MUT_VARs WEAK PRIM MUT_PRIM TSO STACK (44-55) */
-  "&FFFW"        /* TREC (STM-)FRAMEs WHITEHOLE (56-60) */
+  "&FFFWZZZZ"    /* TREC (STM-)FRAMEs WHITEHOLE SmallArr (56-64) */
   ;
 
 
@@ -2731,6 +2757,22 @@ static void GraphFingerPrint_(StgClosure *p) {
   case CATCH_STM_FRAME:
   case WHITEHOLE:
     break;
+
+  case SMALL_MUT_ARR_PTRS_CLEAN:
+  case SMALL_MUT_ARR_PTRS_DIRTY:
+  case SMALL_MUT_ARR_PTRS_FROZEN0:
+  case SMALL_MUT_ARR_PTRS_FROZEN:
+    {
+	char str[6];
+	sprintf(str,"%ld",(long)((StgSmallMutArrPtrs*)p)->ptrs);
+	strcat(fingerPrintStr,str); 
+  	nat i;
+  	for (i = 0; i < ((StgSmallMutArrPtrs*)p)->ptrs; i++) {
+	  //contains closures... follow
+	  GraphFingerPrint_(((StgSmallMutArrPtrs*)p)->payload[i]);
+  	}
+  	break;
+    }
 
   default:
     barf("GraphFingerPrint_: unknown closure %d",
