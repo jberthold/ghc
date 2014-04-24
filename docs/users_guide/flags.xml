@@ -745,7 +745,7 @@
           </row>
           <row>
             <entry><option>-XAutoDeriveTypeable</option></entry>
-            <entry>Automatically <link linkend="auto-derive-typeable">derive Typeable instances for every datatype and type class declaration</link>.
+            <entry>Automatically <link linkend="deriving-typeable">derive Typeable instances for every datatype and type class declaration</link>.
             Implies <option>-XDeriveDataTypeable</option>.</entry>
             <entry>dynamic</entry>
             <entry><option>-XNoAutoDeriveTypeable</option></entry>
@@ -1513,7 +1513,7 @@
 
           <row>
             <entry><option>-fwarn-amp</option></entry>
-            <entry>warn on definitions conflicting with the Applicative-Monad Proposal (AMP)</entry>
+            <entry><emphasis>(deprecated)</emphasis> warn on definitions conflicting with the Applicative-Monad Proposal (AMP)</entry>
             <entry>dynamic</entry>
             <entry><option>-fno-warn-amp</option></entry>
           </row>
@@ -2550,12 +2550,6 @@
             <entry>-</entry>
           </row>
           <row>
-            <entry><option>-optm</option> <replaceable>option</replaceable></entry>
-            <entry>pass <replaceable>option</replaceable> to the mangler</entry>
-            <entry>dynamic</entry>
-            <entry>-</entry>
-          </row>
-          <row>
             <entry><option>-opta</option> <replaceable>option</replaceable></entry>
             <entry>pass <replaceable>option</replaceable> to the assembler</entry>
             <entry>dynamic</entry>
@@ -2603,14 +2597,6 @@
           <row>
             <entry><option>-msse2</option></entry>
             <entry>(x86 only) Use SSE2 for floating point</entry>
-            <entry>dynamic</entry>
-            <entry>-</entry>
-          </row>
-        </tbody>
-        <tbody>
-          <row>
-            <entry><option>-monly-[432]-regs</option></entry>
-            <entry>(x86 only) give some registers back to the C compiler</entry>
             <entry>dynamic</entry>
             <entry>-</entry>
           </row>

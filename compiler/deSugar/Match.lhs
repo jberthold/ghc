@@ -40,7 +40,7 @@ import Maybes
 import Util
 import Name
 import Outputable
-import BasicTypes ( boxityNormalTupleSort )
+import BasicTypes ( boxityNormalTupleSort, isGenerated )
 import FastString
 
 import Control.Monad( when )
@@ -586,8 +586,6 @@ tidy1 _ non_interesting_pat
 
 --------------------
 tidy_bang_pat :: Id -> SrcSpan -> Pat Id -> DsM (DsWrapper, Pat Id)
--- BangPatterns: Pattern matching is already strict in constructors,
--- tuples etc, so the last case strips off the bang for those patterns.
 
 -- Discard bang around strict pattern
 tidy_bang_pat v _ p@(ListPat {})   = tidy1 v p
@@ -596,8 +594,7 @@ tidy_bang_pat v _ p@(PArrPat {})   = tidy1 v p
 tidy_bang_pat v _ p@(ConPatOut {}) = tidy1 v p
 tidy_bang_pat v _ p@(LitPat {})    = tidy1 v p
 
--- Discard lazy/par/sig under a bang
-tidy_bang_pat v _ (LazyPat (L l p))     = tidy_bang_pat v l p
+-- Discard par/sig under a bang
 tidy_bang_pat v _ (ParPat (L l p))      = tidy_bang_pat v l p
 tidy_bang_pat v _ (SigPatOut (L l p) _) = tidy_bang_pat v l p
 
@@ -607,7 +604,10 @@ tidy_bang_pat v l (AsPat v' p)  = tidy1 v (AsPat v' (L l (BangPat p)))
 tidy_bang_pat v l (CoPat w p t) = tidy1 v (CoPat w (BangPat (L l p)) t)
 
 -- Default case, leave the bang there:
--- VarPat, WildPat, ViewPat, NPat, NPlusKPat
+-- VarPat, LazyPat, WildPat, ViewPat, NPat, NPlusKPat
+-- For LazyPat, remember that it's semantically like a VarPat
+--  i.e.  !(~p) is not like ~p, or p!  (Trac #8952)
+
 tidy_bang_pat _ l p = return (idDsWrapper, BangPat (L l p))
   -- NB: SigPatIn, ConPatIn should not happen
 \end{code}
@@ -752,18 +752,24 @@ JJQC 30-Nov-1997
 \begin{code}
 matchWrapper ctxt (MG { mg_alts = matches
                       , mg_arg_tys = arg_tys
-                      , mg_res_ty = rhs_ty })
+                      , mg_res_ty = rhs_ty
+                      , mg_origin = origin })
   = do  { eqns_info   <- mapM mk_eqn_info matches
         ; new_vars    <- case matches of
                            []    -> mapM newSysLocalDs arg_tys
                            (m:_) -> selectMatchVars (map unLoc (hsLMatchPats m))
-        ; result_expr <- matchEquations ctxt new_vars eqns_info rhs_ty
+        ; result_expr <- handleWarnings $
+                         matchEquations ctxt new_vars eqns_info rhs_ty
         ; return (new_vars, result_expr) }
   where
     mk_eqn_info (L _ (Match pats _ grhss))
       = do { let upats = map unLoc pats
            ; match_result <- dsGRHSs ctxt upats grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
+
+    handleWarnings = if isGenerated origin
+                     then discardWarningsDs
+                     else id
 
 
 matchEquations  :: HsMatchContext Name

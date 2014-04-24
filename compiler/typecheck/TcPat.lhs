@@ -733,10 +733,11 @@ tcDataConPat penv (L con_span con_name) data_con pat_ty arg_pats thing_inside
         ; let pat_ty' = mkTyConApp tycon ctxt_res_tys
 	      -- pat_ty' is type of the actual constructor application
               -- pat_ty' /= pat_ty iff coi /= IdCo
-              
+
 	      arg_tys' = substTys tenv arg_tys
 
-        ; traceTc "tcConPat" (ppr con_name $$ ppr ex_tvs' $$ ppr pat_ty' $$ ppr arg_tys')
+        ; traceTc "tcConPat" (vcat [ ppr con_name, ppr univ_tvs, ppr ex_tvs, ppr eq_spec
+                                   , ppr ex_tvs', ppr pat_ty', ppr arg_tys' ])
 	; if null ex_tvs && null eq_spec && null theta
 	  then do { -- The common case; no class bindings etc 
                     -- (see Note [Arrows and patterns])
@@ -813,14 +814,12 @@ tcPatSynPat penv (L con_span _) pat_syn pat_ty arg_pats thing_inside
 
         ; prov_dicts' <- newEvVars prov_theta'
 
-          {-
+        -- Using a pattern synonym requires the PatternSynonyms
+        -- language flag to keep consistent with #2905
         ; patsyns_on <- xoptM Opt_PatternSynonyms
 	; checkTc patsyns_on
                   (ptext (sLit "A pattern match on a pattern synonym requires PatternSynonyms"))
-		  -- Trac #2905 decided that a *pattern-match* of a GADT
-		  -- should require the GADT language flag.
-                  -- Re TypeFamilies see also #7156
--}
+
         ; let skol_info = case pe_ctxt penv of
                             LamPat mc -> PatSkol (PatSynCon pat_syn) mc
                             LetPat {} -> UnkSkol -- Doesn't matter
