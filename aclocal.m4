@@ -206,7 +206,7 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         mipsel)
             test -z "[$]2" || eval "[$]2=ArchMipsel"
             ;;
-        hppa|hppa1_1|ia64|m68k|rs6000|s390|s390x|sparc64|vax)
+        hppa|hppa1_1|ia64|m68k|powerpc64le|rs6000|s390|s390x|sparc64|vax)
             test -z "[$]2" || eval "[$]2=ArchUnknown"
             ;;
         *)
@@ -643,6 +643,10 @@ AC_ARG_WITH($2,
     else
         $1=$withval
     fi
+
+    # Remember that we set this manually.  Used to override CC_STAGE0
+    # and friends later, if we are not cross-compiling.
+    With_$2=$withval
 ],
 [
     if test "$HostOS" != "mingw32"
@@ -685,6 +689,10 @@ AC_ARG_WITH($2,
     else
         $1=$withval
     fi
+
+    # Remember that we set this manually.  Used to override CC_STAGE0
+    # and friends later, if we are not cross-compiling.
+    With_$2=$withval
 ],
 [
     if test "$HostOS" != "mingw32"
@@ -1798,7 +1806,12 @@ AC_MSG_NOTICE(Building in-tree ghc-pwd)
     dnl except we don't want to have to know what make is called. Sigh.
     rm -rf utils/ghc-pwd/dist-boot
     mkdir  utils/ghc-pwd/dist-boot
-    if ! "$WithGhc" -v0 -no-user-$GHC_PACKAGE_DB_FLAG -hidir utils/ghc-pwd/dist-boot -odir utils/ghc-pwd/dist-boot -stubdir utils/ghc-pwd/dist-boot --make utils/ghc-pwd/Main.hs -o utils/ghc-pwd/dist-boot/ghc-pwd
+    dnl If special linker flags are needed to build things, then allow
+    dnl the user to pass them in via LDFLAGS.
+    changequote(, )dnl
+    GHC_LDFLAGS=`echo $LDFLAGS | sed 's/\(^\| \)\([^ ]\)/\1-optl\2/g'`
+    changequote([, ])dnl
+    if ! "$WithGhc" $GHC_LDFLAGS -v0 -no-user-$GHC_PACKAGE_DB_FLAG -hidir utils/ghc-pwd/dist-boot -odir utils/ghc-pwd/dist-boot -stubdir utils/ghc-pwd/dist-boot --make utils/ghc-pwd/Main.hs -o utils/ghc-pwd/dist-boot/ghc-pwd
     then
         AC_MSG_ERROR([Building ghc-pwd failed])
     fi
@@ -1870,6 +1883,9 @@ case "$1" in
     ;;
   mips*)
     $2="mips"
+    ;;
+  powerpc64le*)
+    $2="powerpc64le"
     ;;
   powerpc64*)
     $2="powerpc64"
@@ -2058,7 +2074,8 @@ AC_DEFUN([FIND_GCC],[
         $1="$CC"
     else
         FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [$2], [$3])
-        # From Xcode 5 on, OS X command line tools do not include gcc anymore. Use clang.
+        # From Xcode 5 on, OS X command line tools do not include gcc
+        # anymore. Use clang.
         if test -z "$$1"
         then
             FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [clang], [clang])
@@ -2069,6 +2086,13 @@ AC_DEFUN([FIND_GCC],[
         fi
     fi
     AC_SUBST($1)
+])
+
+AC_DEFUN([MAYBE_OVERRIDE_STAGE0],[
+  if test ! -z "$With_$1" -a "$CrossCompiling" != "YES"; then
+      AC_MSG_NOTICE([Not cross-compiling, so --with-$1 also sets $2])
+      $2=$With_$1
+  fi
 ])
 
 # LocalWords:  fi
