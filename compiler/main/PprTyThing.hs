@@ -6,7 +6,7 @@
 --
 -----------------------------------------------------------------------------
 
-{-# OPTIONS -fno-warn-tabs #-}
+{-# OPTIONS_GHC -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
@@ -32,14 +32,13 @@ import CoAxiom( CoAxiom(..), brListMap )
 import HscTypes( tyThingParent_maybe )
 import Type( tidyTopType, tidyOpenType, splitForAllTys, funResultTy )
 import Kind( synTyConResKind )
-import TypeRep( pprTvBndrs, pprForAll, suppressKinds )
+import TypeRep( pprTvBndrs, pprUserForAll, suppressKinds )
 import TysPrim( alphaTyVars )
 import MkIface ( tyThingToIfaceDecl )
 import TcType
 import Name
 import VarEnv( emptyTidyEnv )
 import StaticFlags( opt_PprStyle_Debug )
-import DynFlags
 import Outputable
 import FastString
 
@@ -127,7 +126,7 @@ pprTyConHdr tyCon
 
     keyword | isSynTyCon tyCon = sLit "type"
             | isNewTyCon tyCon = sLit "newtype"
-            | otherwise            = sLit "data"
+            | otherwise        = sLit "data"
 
     opt_family
       | isFamilyTyCon tyCon = ptext (sLit "family")
@@ -156,19 +155,16 @@ pprId ident
 pprTypeForUser :: Type -> SDoc
 -- We do two things here.
 -- a) We tidy the type, regardless
--- b) If Opt_PrintExplicitForAlls is True, we discard the foralls
--- 	but we do so `deeply'
+-- b) Swizzle the foralls to the top, so that without
+--    -fprint-explicit-foralls we'll suppress all the foralls
 -- Prime example: a class op might have type
 --	forall a. C a => forall b. Ord b => stuff
 -- Then we want to display
 --	(C a, Ord b) => stuff
 pprTypeForUser ty
-  = sdocWithDynFlags $ \ dflags ->
-    if gopt Opt_PrintExplicitForalls dflags
-    then ppr tidy_ty
-    else ppr (mkPhiTy ctxt ty')
+  = pprSigmaType (mkSigmaTy tvs ctxt tau)
   where
-    (_, ctxt, ty') = tcSplitSigmaTy tidy_ty
+    (tvs, ctxt, tau) = tcSplitSigmaTy tidy_ty
     (_, tidy_ty)   = tidyOpenType emptyTidyEnv ty
      -- Often the types/kinds we print in ghci are fully generalised
      -- and have no free variables, but it turns out that we sometimes
@@ -237,7 +233,7 @@ pprDataConDecl :: ShowSub -> Bool -> DataCon -> SDoc
 pprDataConDecl ss gadt_style dataCon
   | not gadt_style = ppr_fields tys_w_strs
   | otherwise      = ppr_bndr dataCon <+> dcolon <+>
-			sep [ pp_foralls, pprThetaArrowTy theta, pp_tau ]
+			sep [ pprUserForAll forall_tvs, pprThetaArrowTy theta, pp_tau ]
 	-- Printing out the dataCon as a type signature, in GADT style
   where
     (forall_tvs, theta, tau) = tcSplitSigmaTy (dataConUserType dataCon)
@@ -245,9 +241,6 @@ pprDataConDecl ss gadt_style dataCon
     labels     = dataConFieldLabels dataCon
     stricts    = dataConStrictMarks dataCon
     tys_w_strs = zip (map user_ify stricts) arg_tys
-    pp_foralls = sdocWithDynFlags $ \dflags ->
-                 ppWhen (gopt Opt_PrintExplicitForalls dflags)
-                        (pprForAll forall_tvs)
 
     pp_tau = foldr add (ppr res_ty) tys_w_strs
     add str_ty pp_ty = pprParendBangTy str_ty <+> arrow <+> pp_ty

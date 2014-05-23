@@ -6,7 +6,8 @@
 TcInstDecls: Typechecking instance declarations
 
 \begin{code}
-{-# OPTIONS -fno-warn-tabs #-}
+{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
@@ -37,6 +38,7 @@ import TcDeriv
 import TcEnv
 import TcHsType
 import TcUnify
+import Coercion   ( pprCoAxiom, pprCoAxBranch )
 import MkCore     ( nO_METHOD_BINDING_ERROR_ID )
 import Type
 import TcEvidence
@@ -545,13 +547,16 @@ tcClsInstDecl (L loc (ClsInstDecl { cid_poly_ty = poly_ty, cid_binds = binds
                  --            instance C [x]
                  -- Then we want to generate the decl:   type F [x] b = ()
                 | otherwise 
-                = forM defs $ \(CoAxBranch { cab_lhs = pat_tys, cab_rhs = rhs }) ->
+                = forM defs $ \br@(CoAxBranch { cab_lhs = pat_tys, cab_rhs = rhs }) ->
                   do { let pat_tys' = substTys mini_subst pat_tys
                            rhs'     = substTy  mini_subst rhs
                            tv_set'  = tyVarsOfTypes pat_tys'
-                           tvs'     = varSetElems tv_set'
+                           tvs'     = varSetElemsKvsFirst tv_set'
                      ; rep_tc_name <- newFamInstTyConName (noLoc (tyConName fam_tc)) pat_tys'
                      ; let axiom = mkSingleCoAxiom rep_tc_name tvs' fam_tc pat_tys' rhs'
+                     ; traceTc "mk_deflt_at_instance" (vcat [ ppr (tyvars, theta, clas, inst_tys)
+                                                            , pprCoAxBranch fam_tc br
+                                                            , pprCoAxiom axiom ])
                      ; ASSERT( tyVarsOfType rhs' `subVarSet` tv_set' ) 
                        newFamInst SynFamilyInst axiom }
 
@@ -629,10 +634,9 @@ tcTyFamInstDecl mb_clsinfo (L loc decl@(TyFamInstDecl { tfid_eqn = eqn }))
        ; fam_tc <- tcFamInstDeclCombined mb_clsinfo fam_lname
 
          -- (0) Check it's an open type family
-       ; checkTc (isFamilyTyCon fam_tc) (notFamily fam_tc)
-       ; checkTc (isSynTyCon fam_tc) (wrongKindOfFamily fam_tc)
-       ; checkTc (isOpenSynFamilyTyCon fam_tc)
-                 (notOpenFamily fam_tc)
+       ; checkTc (isFamilyTyCon fam_tc)        (notFamily fam_tc)
+       ; checkTc (isSynFamilyTyCon fam_tc)     (wrongKindOfFamily fam_tc)
+       ; checkTc (isOpenSynFamilyTyCon fam_tc) (notOpenFamily fam_tc)
 
          -- (1) do the work of verifying the synonym group
        ; co_ax_branch <- tcSynFamInstDecl fam_tc decl

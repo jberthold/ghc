@@ -6,7 +6,7 @@
 TcTyClsDecls: Typecheck type and class declarations
 
 \begin{code}
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE CPP, TupleSections #-}
 
 module TcTyClsDecls (
         tcTyAndClassDecls, tcAddImplicits,
@@ -638,7 +638,7 @@ tcTyClDecl1 _parent rec_info
                ; (sig_stuff, gen_dm_env) <- tcClassSigs class_name sigs meths
                ; at_stuff <- tcClassATs class_name (AssocFamilyTyCon clas) ats at_defs
                ; mindef <- tcClassMinimalDef class_name sigs sig_stuff
-               ; clas <- buildClass False {- Must include unfoldings for selectors -}
+               ; clas <- buildClass
                             class_name tvs' roles ctxt' fds' at_stuff
                             sig_stuff mindef tc_isrec
                ; traceTc "tcClassDecl" (ppr fundeps $$ ppr tvs' $$ ppr fds')
@@ -878,7 +878,7 @@ tcSynFamInstDecl :: TyCon -> TyFamInstDecl Name -> TcM CoAxBranch
 -- Placed here because type family instances appear as
 -- default decls in class declarations
 tcSynFamInstDecl fam_tc (TyFamInstDecl { tfid_eqn = eqn })
-  = do { checkTc (isSynTyCon fam_tc) (wrongKindOfFamily fam_tc)
+  = do { checkTc (isSynFamilyTyCon fam_tc) (wrongKindOfFamily fam_tc)
        ; tcTyFamInstEqn (tyConName fam_tc) (tyConKind fam_tc) eqn }
 
 -- Checks to make sure that all the names in an instance group are the same
@@ -1672,9 +1672,9 @@ checkValidRoleAnnots :: RoleAnnots -> TyThing -> TcM ()
 checkValidRoleAnnots role_annots thing
   = case thing of
     { ATyCon tc
-        | isSynTyCon tc    -> check_no_roles
-        | isFamilyTyCon tc -> check_no_roles
-        | isAlgTyCon tc    -> check_roles
+        | isTypeSynonymTyCon tc -> check_no_roles
+        | isFamilyTyCon tc      -> check_no_roles
+        | isAlgTyCon tc         -> check_roles
         where
           name                   = tyConName tc
 
@@ -2206,12 +2206,12 @@ addTyThingCtxt thing
     name = getName thing
     flav = case thing of
              ATyCon tc
-                | isClassTyCon tc      -> ptext (sLit "class")
-                | isSynFamilyTyCon tc  -> ptext (sLit "type family")
-                | isDataFamilyTyCon tc -> ptext (sLit "data family")
-                | isSynTyCon tc        -> ptext (sLit "type")
-                | isNewTyCon tc        -> ptext (sLit "newtype")
-                | isDataTyCon tc       -> ptext (sLit "data")
+                | isClassTyCon tc       -> ptext (sLit "class")
+                | isSynFamilyTyCon tc   -> ptext (sLit "type family")
+                | isDataFamilyTyCon tc  -> ptext (sLit "data family")
+                | isTypeSynonymTyCon tc -> ptext (sLit "type")
+                | isNewTyCon tc         -> ptext (sLit "newtype")
+                | isDataTyCon tc        -> ptext (sLit "data")
 
              _ -> pprTrace "addTyThingCtxt strange" (ppr thing)
                   empty

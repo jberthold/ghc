@@ -3,7 +3,8 @@
 %
 
 \begin{code}
-{-# OPTIONS -fno-warn-tabs #-}
+{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
@@ -501,7 +502,7 @@ wrapRole :: Maybe Role   -- desired
          -> Role         -- current
          -> Coercion -> Coercion
 wrapRole Nothing        _       = id
-wrapRole (Just desired) current = maybeSubCo2 desired current
+wrapRole (Just desired) current = downgradeRole desired current
 
 -----------
 -- takes two tyvars and builds env'ts to map them to the same tyvar

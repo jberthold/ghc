@@ -1,4 +1,4 @@
-{-# OPTIONS -cpp #-}
+{-# LANGUAGE CPP, MagicHash, UnboxedTuples #-}
 {-# OPTIONS_GHC -O -funbox-strict-fields #-}
 -- We always optimise this, otherwise performance of a non-optimised
 -- compiler is severely affected
@@ -707,14 +707,13 @@ getBS bh = do
   l <- get bh
   fp <- mallocForeignPtrBytes l
   withForeignPtr fp $ \ptr -> do
-  let
-        go n | n == l = return $ BS.fromForeignPtr fp 0 l
+    let go n | n == l = return $ BS.fromForeignPtr fp 0 l
              | otherwise = do
                 b <- getByte bh
                 pokeElemOff ptr n b
                 go (n+1)
-  --
-  go 0
+    --
+    go 0
 
 instance Binary ByteString where
   put_ bh f = putBS bh f

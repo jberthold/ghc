@@ -15,16 +15,16 @@ Note [The Type-related module hierarchy]
   Coercion imports Type
 
 \begin{code}
-{-# OPTIONS -fno-warn-tabs #-}
+{-# LANGUAGE CPP, DeriveDataTypeable, DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
+{-# OPTIONS_GHC -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
 --     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
 -- for details
-
--- We expose the relevant stuff from this module via the Type module
 {-# OPTIONS_HADDOCK hide #-}
-{-# LANGUAGE DeriveDataTypeable, DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
+-- We expose the relevant stuff from this module via the Type module
+
 module TypeRep (
 	TyThing(..),
 	Type(..),
@@ -39,7 +39,8 @@ module TypeRep (
         -- Pretty-printing
 	pprType, pprParendType, pprTypeApp, pprTvBndr, pprTvBndrs,
 	pprTyThing, pprTyThingCategory, pprSigmaType,
-	pprEqPred, pprTheta, pprForAll, pprThetaArrowTy, pprClassPred,
+	pprEqPred, pprTheta, pprForAll, pprUserForAll,
+        pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind, pprTyLit, suppressKinds,
 	Prec(..), maybeParen, pprTcApp, 
         pprPrefixApp, pprArrowChain, ppr_type,
@@ -603,6 +604,8 @@ ppr_type p fun_ty@(FunTy ty1 ty2)
 ppr_forall_type :: Prec -> Type -> SDoc
 ppr_forall_type p ty
   = maybeParen p FunPrec $ ppr_sigma_type True ty
+    -- True <=> we always print the foralls on *nested* quantifiers
+    -- Opt_PrintExplicitForalls only affects top-level quantifiers
 
 ppr_tvar :: TyVar -> SDoc
 ppr_tvar tv  -- Note [Infix type variables]
@@ -616,30 +619,34 @@ ppr_tylit _ tl =
 
 -------------------
 ppr_sigma_type :: Bool -> Type -> SDoc
--- Bool <=> Show the foralls
-ppr_sigma_type show_foralls ty
-  = sdocWithDynFlags $ \ dflags -> 
-    let filtered_tvs | gopt Opt_PrintExplicitKinds dflags 
-                     = tvs
-                     | otherwise
-                     = filterOut isKindVar tvs
-    in sep [ ppWhen show_foralls (pprForAll filtered_tvs)
-           , pprThetaArrowTy ctxt
-           , pprType tau ]
+-- Bool <=> Show the foralls unconditionally
+ppr_sigma_type show_foralls_unconditionally ty
+  = sep [ if   show_foralls_unconditionally
+          then pprForAll tvs
+          else pprUserForAll tvs
+        , pprThetaArrowTy ctxt
+        , pprType tau ]
   where
     (tvs,  rho) = split1 [] ty
     (ctxt, tau) = split2 [] rho
 
     split1 tvs (ForAllTy tv ty) = split1 (tv:tvs) ty
-    split1 tvs ty          = (reverse tvs, ty)
- 
+    split1 tvs ty               = (reverse tvs, ty)
+
     split2 ps (ty1 `FunTy` ty2) | isPredTy ty1 = split2 (ty1:ps) ty2
     split2 ps ty                               = (reverse ps, ty)
 
-
 pprSigmaType :: Type -> SDoc
-pprSigmaType ty = sdocWithDynFlags $ \dflags ->
-                  ppr_sigma_type (gopt Opt_PrintExplicitForalls dflags) ty
+pprSigmaType ty = ppr_sigma_type False ty
+
+pprUserForAll :: [TyVar] -> SDoc
+-- Print a user-level forall; see Note [WHen to print foralls]
+pprUserForAll tvs
+  = sdocWithDynFlags $ \dflags ->
+    ppWhen (any tv_has_kind_var tvs || gopt Opt_PrintExplicitForalls dflags) $
+    pprForAll tvs
+  where
+    tv_has_kind_var tv = not (isEmptyVarSet (tyVarsOfType (tyVarKind tv)))
 
 pprForAll :: [TyVar] -> SDoc
 pprForAll []  = empty
@@ -655,6 +662,24 @@ pprTvBndr tv
 	     where
 	       kind = tyVarKind tv
 \end{code}
+
+Note [When to print foralls]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Mostly we want to print top-level foralls when (and only when) the user specifies
+-fprint-explicit-foralls.  But when kind polymorphism is at work, that suppresses
+too much information; see Trac #9018.
+
+So I'm trying out this rule: print explicit foralls if
+  a) User specifies -fprint-explicit-foralls, or
+  b) Any of the quantified type variables has a kind 
+     that mentions a kind variable
+
+This catches common situations, such as a type siguature
+     f :: m a
+which means
+      f :: forall k. forall (m :: k->*) (a :: k). m a
+We really want to see both the "forall k" and the kind signatures
+on m and a.  The latter comes from pprTvBndr.
 
 Note [Infix type variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~

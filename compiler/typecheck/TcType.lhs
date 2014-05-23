@@ -15,6 +15,8 @@ The "tc" prefix is for "TypeChecker", because the type checker
 is the principal client.
 
 \begin{code}
+{-# LANGUAGE CPP #-}
+
 module TcType (
   --------------------------------
   -- Types
@@ -961,7 +963,7 @@ tcInstHeadTyNotSynonym :: Type -> Bool
 -- are transparent, so we need a special function here
 tcInstHeadTyNotSynonym ty
   = case ty of
-        TyConApp tc _ -> not (isSynTyCon tc)
+        TyConApp tc _ -> not (isTypeSynonymTyCon tc)
         _ -> True
 
 tcInstHeadTyAppAllTyVars :: Type -> Bool

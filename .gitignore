@@ -171,6 +171,7 @@ _darcs/
 /utils/runghc/runghc.cabal
 
 /extra-gcc-opts
+/sdistprep
 
 .tm_properties
 # JB: would rather keep this one under version control

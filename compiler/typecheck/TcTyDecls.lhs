@@ -9,7 +9,8 @@ This stuff is only used for source-code decls; it's recorded in interface
 files for imported data types.
 
 \begin{code}
-{-# OPTIONS -fno-warn-tabs #-}
+{-# LANGUAGE CPP #-}
+{-# OPTIONS_GHC -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
@@ -672,10 +673,10 @@ initialRoleEnv is_boot annots = extendNameEnvList emptyNameEnv .
 
 initialRoleEnv1 :: Bool -> RoleAnnots -> TyCon -> (Name, [Role])
 initialRoleEnv1 is_boot annots_env tc
-  | isFamilyTyCon tc = (name, map (const Nominal) tyvars)
-  |  isAlgTyCon tc
-  || isSynTyCon tc   = (name, default_roles)
-  | otherwise        = pprPanic "initialRoleEnv1" (ppr tc)
+  | isFamilyTyCon tc      = (name, map (const Nominal) tyvars)
+  | isAlgTyCon tc         = (name, default_roles)
+  | isTypeSynonymTyCon tc = (name, default_roles)
+  | otherwise             = pprPanic "initialRoleEnv1" (ppr tc)
   where name         = tyConName tc
         tyvars       = tyConTyVars tc
         (kvs, tvs)   = span isKindVar tyvars

@@ -6,14 +6,15 @@
 Type checking of type signatures in interface files
 
 \begin{code}
+{-# LANGUAGE CPP #-}
+
 module TcIface (
         tcLookupImported_maybe,
         importDecl, checkWiredInTyCon, tcHiBootIface, typecheckIface,
         tcIfaceDecl, tcIfaceInst, tcIfaceFamInst, tcIfaceRules,
         tcIfaceVectInfo, tcIfaceAnnotations,
         tcIfaceExpr,    -- Desired by HERMIT (Trac #7683)
-        tcIfaceGlobal,
-        tcExtCoreBindings
+        tcIfaceGlobal
  ) where
 
 #include "HsVersions.h"
@@ -528,7 +529,7 @@ tc_iface_decl _parent ignore_prags
     ; cls  <- fixM $ \ cls -> do
               { ats  <- mapM (tc_at cls) rdr_ats
               ; traceIf (text "tc-iface-class4" <+> ppr tc_occ)
-              ; buildClass ignore_prags tc_name tyvars roles ctxt fds ats sigs mindef tc_isrec }
+              ; buildClass tc_name tyvars roles ctxt fds ats sigs mindef tc_isrec }
     ; return (ATyCon (classTyCon cls)) }
   where
    tc_sc pred = forkM (mk_sc_doc pred) (tcIfaceType pred)
@@ -1251,30 +1252,6 @@ tcIfaceDataAlt con inst_tys arg_strs rhs
 \end{code}
 
 
-\begin{code}
-tcExtCoreBindings :: [IfaceBinding] -> IfL CoreProgram  -- Used for external core
-tcExtCoreBindings []     = return []
-tcExtCoreBindings (b:bs) = do_one b (tcExtCoreBindings bs)
-
-do_one :: IfaceBinding -> IfL [CoreBind] -> IfL [CoreBind]
-do_one (IfaceNonRec bndr rhs) thing_inside
-  = do  { rhs' <- tcIfaceExpr rhs
-        ; bndr' <- newExtCoreBndr bndr
-        ; extendIfaceIdEnv [bndr'] $ do
-        { core_binds <- thing_inside
-        ; return (NonRec bndr' rhs' : core_binds) }}
-
-do_one (IfaceRec pairs) thing_inside
-  = do  { bndrs' <- mapM newExtCoreBndr bndrs
-        ; extendIfaceIdEnv bndrs' $ do
-        { rhss' <- mapM tcIfaceExpr rhss
-        ; core_binds <- thing_inside
-        ; return (Rec (bndrs' `zip` rhss') : core_binds) }}
-  where
-    (bndrs,rhss) = unzip pairs
-\end{code}
-
-
 %************************************************************************
 %*                                                                      *
                 IdInfo
@@ -1517,14 +1494,6 @@ bindIfaceBndrs (b:bs) thing_inside
   = bindIfaceBndr b     $ \ b' ->
     bindIfaceBndrs bs   $ \ bs' ->
     thing_inside (b':bs')
-
------------------------
-newExtCoreBndr :: IfaceLetBndr -> IfL Id
-newExtCoreBndr (IfLetBndr var ty _)    -- Ignoring IdInfo for now
-  = do  { mod <- getIfModule
-        ; name <- newGlobalBinder mod (mkVarOccFS var) noSrcSpan
-        ; ty' <- tcIfaceType ty
-        ; return (mkLocalId name ty') }
 
 -----------------------
 bindIfaceTyVar :: IfaceTvBndr -> (TyVar -> IfL a) -> IfL a

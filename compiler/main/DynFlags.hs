@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 -------------------------------------------------------------------------------
 --
 -- | Dynamic flags
@@ -11,7 +13,7 @@
 --
 -------------------------------------------------------------------------------
 
-{-# OPTIONS -fno-cse #-}
+{-# OPTIONS_GHC -fno-cse #-}
 -- -fno-cse is needed for GLOBAL_VAR's to behave properly
 
 module DynFlags (
@@ -2737,7 +2739,8 @@ fFlags = [
   ( "fun-to-thunk",                     Opt_FunToThunk, nop ),
   ( "gen-manifest",                     Opt_GenManifest, nop ),
   ( "embed-manifest",                   Opt_EmbedManifest, nop ),
-  ( "ext-core",                         Opt_EmitExternalCore, nop ),
+  ( "ext-core",                         Opt_EmitExternalCore,
+    \_ -> deprecate "it has no effect, and will be removed in GHC 7.12" ),
   ( "shared-implib",                    Opt_SharedImplib, nop ),
   ( "ghci-sandbox",                     Opt_GhciSandbox, nop ),
   ( "ghci-history",                     Opt_GhciHistory, nop ),

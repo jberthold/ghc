@@ -1,9 +1,8 @@
-{-# OPTIONS -fno-warn-type-defaults #-}
+{-# LANGUAGE CPP, GADTs #-}
+{-# OPTIONS_GHC -fno-warn-type-defaults #-}
 -- ----------------------------------------------------------------------------
 -- | Handle conversion of CmmProc to LLVM code.
 --
-
-{-# LANGUAGE GADTs #-}
 module LlvmCodeGen.CodeGen ( genLlvmProc ) where
 
 #include "HsVersions.h"
@@ -1002,8 +1001,8 @@ genMachOp _ op [x] = case op of
         sameConv from ty reduce expand = do
             x'@(vx, stmts, top) <- exprToVar x
             let sameConv' op = do
-                (v1, s1) <- doExpr ty $ Cast op vx ty
-                return (v1, stmts `snocOL` s1, top)
+                    (v1, s1) <- doExpr ty $ Cast op vx ty
+                    return (v1, stmts `snocOL` s1, top)
             dflags <- getDynFlags
             let toWidth = llvmWidthInBits dflags ty
             -- LLVM doesn't like trying to convert to same width, so

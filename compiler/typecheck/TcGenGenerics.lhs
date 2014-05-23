@@ -6,8 +6,8 @@ The deriving code for the Generic class
 (equivalent to the code in TcGenDeriv, for other classes)
 
 \begin{code}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# OPTIONS -fno-warn-tabs #-}
+{-# LANGUAGE CPP, ScopedTypeVariables #-}
+{-# OPTIONS_GHC -fno-warn-tabs #-}
 -- The above warning supression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and
 -- detab the module (please do the detabbing in a separate patch). See
@@ -189,14 +189,13 @@ metaTyConsToDerivStuff tc metaDts =
 %************************************************************************
 
 \begin{code}
-get_gen1_constrained_tys :: TyVar -> [Type] -> [Type]
+get_gen1_constrained_tys :: TyVar -> Type -> [Type]
 -- called by TcDeriv.inferConstraints; generates a list of types, each of which
 -- must be a Functor in order for the Generic1 instance to work.
-get_gen1_constrained_tys argVar =
-  concatMap $ argTyFold argVar $ ArgTyAlg {
-    ata_rec0 = const [],
-    ata_par1 = [], ata_rec1 = const [],
-    ata_comp = (:)}
+get_gen1_constrained_tys argVar
+  = argTyFold argVar $ ArgTyAlg { ata_rec0 = const []
+                                , ata_par1 = [], ata_rec1 = const []
+                                , ata_comp = (:) }
 
 {-
 
