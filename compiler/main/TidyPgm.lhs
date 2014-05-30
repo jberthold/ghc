@@ -520,7 +520,7 @@ of exceptions, and finally I gave up the battle:
 
 Note [Injecting implicit bindings]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We inject the implict bindings right at the end, in CoreTidy.
+We inject the implicit bindings right at the end, in CoreTidy.
 Some of these bindings, notably record selectors, are not
 constructed in an optimised form.  E.g. record selector for
         data T = MkT { x :: {-# UNPACK #-} !Int }
@@ -562,7 +562,7 @@ Oh: two other reasons for injecting them late:
 There is one sort of implicit binding that is injected still later,
 namely those for data constructor workers. Reason (I think): it's
 really just a code generation trick.... binding itself makes no sense.
-See CorePrep Note [Data constructor workers].
+See Note [Data constructor workers] in CorePrep.
 
 \begin{code}
 getTyConImplicitBinds :: TyCon -> [CoreBind]
