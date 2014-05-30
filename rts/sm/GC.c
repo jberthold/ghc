@@ -1639,7 +1639,8 @@ resize_generations (void)
 static void
 resize_nursery (void)
 {
-    const StgWord min_nursery = RtsFlags.GcFlags.minAllocAreaSize * n_capabilities;
+    const StgWord min_nursery =
+      RtsFlags.GcFlags.minAllocAreaSize * (StgWord)n_capabilities;
 
     if (RtsFlags.GcFlags.generations == 1)
     {   // Two-space collector:
