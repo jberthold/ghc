@@ -72,7 +72,7 @@ module HscTypes (
         TypeEnv, lookupType, lookupTypeHscEnv, mkTypeEnv, emptyTypeEnv,
         typeEnvFromEntities, mkTypeEnvWithImplicits,
         extendTypeEnv, extendTypeEnvList,
-        extendTypeEnvWithIds, extendTypeEnvWithPatSyns,
+        extendTypeEnvWithIds, 
         lookupTypeEnv,
         typeEnvElts, typeEnvTyCons, typeEnvIds, typeEnvPatSyns,
         typeEnvDataCons, typeEnvCoAxioms, typeEnvClasses,
@@ -952,7 +952,8 @@ data ModDetails
         -- The next two fields are created by the typechecker
         md_exports   :: [AvailInfo],
         md_types     :: !TypeEnv,       -- ^ Local type environment for this particular module
-        md_insts     :: ![ClsInst],    -- ^ 'DFunId's for the instances in this module
+                                        -- Includes Ids, TyCons, PatSyns
+        md_insts     :: ![ClsInst],     -- ^ 'DFunId's for the instances in this module
         md_fam_insts :: ![FamInst],
         md_rules     :: ![CoreRule],    -- ^ Domain may include 'Id's from other modules
         md_anns      :: ![Annotation],  -- ^ Annotations present in this module: currently
@@ -1564,8 +1565,8 @@ implicitCoTyCon tc
 -- other declaration.
 isImplicitTyThing :: TyThing -> Bool
 isImplicitTyThing (AConLike cl) = case cl of
-    RealDataCon{}  -> True
-    PatSynCon ps   -> isImplicitId (patSynId ps)
+                                    RealDataCon {} -> True
+                                    PatSynCon {}   -> False
 isImplicitTyThing (AnId id)     = isImplicitId id
 isImplicitTyThing (ATyCon tc)   = isImplicitTyCon tc
 isImplicitTyThing (ACoAxiom ax) = isImplicitCoAxiom ax
@@ -1681,17 +1682,6 @@ extendTypeEnvList env things = foldl extendTypeEnv env things
 extendTypeEnvWithIds :: TypeEnv -> [Id] -> TypeEnv
 extendTypeEnvWithIds env ids
   = extendNameEnvList env [(getName id, AnId id) | id <- ids]
-
-extendTypeEnvWithPatSyns :: TypeEnv -> [PatSyn] -> TypeEnv
-extendTypeEnvWithPatSyns env patsyns
-  = extendNameEnvList env $ concatMap pat_syn_things patsyns
-  where
-    pat_syn_things :: PatSyn -> [(Name, TyThing)]
-    pat_syn_things ps = (getName ps, AConLike (PatSynCon ps)):
-                        case patSynWrapper ps of
-                            Just wrap_id -> [(getName wrap_id, AnId wrap_id)]
-                            Nothing -> []
-
 \end{code}
 
 \begin{code}
@@ -2210,37 +2200,50 @@ type ModuleGraph = [ModSummary]
 emptyMG :: ModuleGraph
 emptyMG = []
 
--- | A single node in a 'ModuleGraph. The nodes of the module graph are one of:
+-- | A single node in a 'ModuleGraph'. The nodes of the module graph
+-- are one of:
 --
 -- * A regular Haskell source module
---
 -- * A hi-boot source module
---
 -- * An external-core source module
+--
 data ModSummary
    = ModSummary {
-        ms_mod          :: Module,              -- ^ Identity of the module
-        ms_hsc_src      :: HscSource,           -- ^ The module source either plain Haskell, hs-boot or external core
-        ms_location     :: ModLocation,         -- ^ Location of the various files belonging to the module
-        ms_hs_date      :: UTCTime,             -- ^ Timestamp of source file
-        ms_obj_date     :: Maybe UTCTime,       -- ^ Timestamp of object, if we have one
-        ms_srcimps      :: [Located (ImportDecl RdrName)],      -- ^ Source imports of the module
-        ms_textual_imps :: [Located (ImportDecl RdrName)],      -- ^ Non-source imports of the module from the module *text*
-        ms_hspp_file    :: FilePath,            -- ^ Filename of preprocessed source file
-        ms_hspp_opts    :: DynFlags,            -- ^ Cached flags from @OPTIONS@, @INCLUDE@
-                                                -- and @LANGUAGE@ pragmas in the modules source code
-        ms_hspp_buf     :: Maybe StringBuffer   -- ^ The actual preprocessed source, if we have it
+        ms_mod          :: Module,
+          -- ^ Identity of the module
+        ms_hsc_src      :: HscSource,
+          -- ^ The module source either plain Haskell, hs-boot or external core
+        ms_location     :: ModLocation,
+          -- ^ Location of the various files belonging to the module
+        ms_hs_date      :: UTCTime,
+          -- ^ Timestamp of source file
+        ms_obj_date     :: Maybe UTCTime,
+          -- ^ Timestamp of object, if we have one
+        ms_srcimps      :: [Located (ImportDecl RdrName)],
+          -- ^ Source imports of the module
+        ms_textual_imps :: [Located (ImportDecl RdrName)],
+          -- ^ Non-source imports of the module from the module *text*
+        ms_hspp_file    :: FilePath,
+          -- ^ Filename of preprocessed source file
+        ms_hspp_opts    :: DynFlags,
+          -- ^ Cached flags from @OPTIONS@, @INCLUDE@ and @LANGUAGE@
+          -- pragmas in the modules source code
+        ms_hspp_buf     :: Maybe StringBuffer
+          -- ^ The actual preprocessed source, if we have it
      }
 
 ms_mod_name :: ModSummary -> ModuleName
 ms_mod_name = moduleName . ms_mod
 
 ms_imps :: ModSummary -> [Located (ImportDecl RdrName)]
-ms_imps ms = ms_textual_imps ms ++ map mk_additional_import (dynFlagDependencies (ms_hspp_opts ms))
+ms_imps ms =
+  ms_textual_imps ms ++
+  map mk_additional_import (dynFlagDependencies (ms_hspp_opts ms))
   where
-    -- This is a not-entirely-satisfactory means of creating an import that corresponds to an
-    -- import that did not occur in the program text, such as those induced by the use of
-    -- plugins (the -plgFoo flag)
+    -- This is a not-entirely-satisfactory means of creating an import
+    -- that corresponds to an import that did not occur in the program
+    -- text, such as those induced by the use of plugins (the -plgFoo
+    -- flag)
     mk_additional_import mod_nm = noLoc $ ImportDecl {
       ideclName      = noLoc mod_nm,
       ideclPkgQual   = Nothing,

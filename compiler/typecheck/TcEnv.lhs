@@ -68,6 +68,7 @@ import TcIface
 import PrelNames
 import TysWiredIn
 import Id
+import IdInfo( IdDetails(VanillaId) )
 import Var
 import VarSet
 import RdrName
@@ -803,7 +804,7 @@ mkStableIdFromString str sig_ty loc occ_wrapper = do
     name <- mkWrapperName "stable" str
     let occ = mkVarOccFS name :: OccName
         gnm = mkExternalName uniq mod (occ_wrapper occ) loc :: Name
-        id  = mkExportedLocalId gnm sig_ty :: Id
+        id  = mkExportedLocalId VanillaId gnm sig_ty :: Id
     return id
 
 mkStableIdFromName :: Name -> Type -> SrcSpan -> (OccName -> OccName) -> TcM TcId
@@ -873,6 +874,9 @@ notFound name
        }
 
 wrongThingErr :: String -> TcTyThing -> Name -> TcM a
+-- It's important that this only calls pprTcTyThingCategory, which in 
+-- turn does not look at the details of the TcTyThing.
+-- See Note [Placeholder PatSyn kinds] in TcBinds
 wrongThingErr expected thing name
   = failWithTc (pprTcTyThingCategory thing <+> quotes (ppr name) <+> 
                 ptext (sLit "used as a") <+> text expected)

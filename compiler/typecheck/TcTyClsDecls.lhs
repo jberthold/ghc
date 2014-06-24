@@ -644,7 +644,7 @@ tcTyClDecl1 _parent rec_info
                ; traceTc "tcClassDecl" (ppr fundeps $$ ppr tvs' $$ ppr fds')
                ; return (clas, tvs', gen_dm_env) }
 
-       ; let { gen_dm_ids = [ AnId (mkExportedLocalId gen_dm_name gen_dm_ty)
+       ; let { gen_dm_ids = [ AnId (mkExportedLocalId VanillaId gen_dm_name gen_dm_ty)
                             | (sel_id, GenDefMeth gen_dm_name) <- classOpItems clas
                             , let gen_dm_tau = expectJust "tcTyClDecl1" $
                                                lookupNameEnv gen_dm_env (idName sel_id)
@@ -793,7 +793,7 @@ tcDataDefn rec_info tc_name tvs kind
                            ; checkKind kind tc_kind
                            ; return () }
 
-       ; h98_syntax <- dataDeclChecks tc_name new_or_data stupid_theta cons
+       ; gadt_syntax <- dataDeclChecks tc_name new_or_data stupid_theta cons
 
        ; tycon <- fixM $ \ tycon -> do
              { let res_ty = mkTyConApp tycon (mkTyVarTys final_tvs)
@@ -808,7 +808,7 @@ tcDataDefn rec_info tc_name tvs kind
              ; return (buildAlgTyCon tc_name final_tvs roles cType stupid_theta tc_rhs
                                      (rti_is_rec rec_info tc_name)
                                      (rti_promotable rec_info)
-                                     (not h98_syntax) NoParentTyCon) }
+                                     gadt_syntax NoParentTyCon) }
        ; return [ATyCon tycon] }
 \end{code}
 
@@ -1101,11 +1101,11 @@ dataDeclChecks :: Name -> NewOrData -> ThetaType -> [LConDecl Name] -> TcM Bool
 dataDeclChecks tc_name new_or_data stupid_theta cons
   = do {   -- Check that we don't use GADT syntax in H98 world
          gadtSyntax_ok <- xoptM Opt_GADTSyntax
-       ; let h98_syntax = consUseH98Syntax cons
-       ; checkTc (gadtSyntax_ok || h98_syntax) (badGadtDecl tc_name)
+       ; let gadt_syntax = consUseGadtSyntax cons
+       ; checkTc (gadtSyntax_ok || not gadt_syntax) (badGadtDecl tc_name)
 
            -- Check that the stupid theta is empty for a GADT-style declaration
-       ; checkTc (null stupid_theta || h98_syntax) (badStupidTheta tc_name)
+       ; checkTc (null stupid_theta || not gadt_syntax) (badStupidTheta tc_name)
 
          -- Check that a newtype has exactly one constructor
          -- Do this before checking for empty data decls, so that
@@ -1119,13 +1119,13 @@ dataDeclChecks tc_name new_or_data stupid_theta cons
        ; is_boot <- tcIsHsBoot  -- Are we compiling an hs-boot file?
        ; checkTc (not (null cons) || empty_data_decls || is_boot)
                  (emptyConDeclsErr tc_name)
-       ; return h98_syntax }
+       ; return gadt_syntax }
 
 
 -----------------------------------
-consUseH98Syntax :: [LConDecl a] -> Bool
-consUseH98Syntax (L _ (ConDecl { con_res = ResTyGADT _ }) : _) = False
-consUseH98Syntax _                                             = True
+consUseGadtSyntax :: [LConDecl a] -> Bool
+consUseGadtSyntax (L _ (ConDecl { con_res = ResTyGADT _ }) : _) = True
+consUseGadtSyntax _                                             = False
                  -- All constructors have same shape
 
 -----------------------------------
@@ -1466,8 +1466,8 @@ checkValidClosedCoAxiom (CoAxiom { co_ax_branches = branches, co_ax_tc = tc })
                -- ones and hence is inaccessible
      check_accessibility prev_branches cur_branch
        = do { when (cur_branch `isDominatedBy` prev_branches) $
-              setSrcSpan (coAxBranchSpan cur_branch) $
-              addErrTc $ inaccessibleCoAxBranch tc cur_branch
+              addWarnAt (coAxBranchSpan cur_branch) $
+              inaccessibleCoAxBranch tc cur_branch
             ; return (cur_branch : prev_branches) }
 
 checkFieldCompat :: Name -> DataCon -> DataCon -> TyVarSet
@@ -1578,13 +1578,12 @@ checkValidClass :: Class -> TcM ()
 checkValidClass cls
   = do  { constrained_class_methods <- xoptM Opt_ConstrainedClassMethods
         ; multi_param_type_classes <- xoptM Opt_MultiParamTypeClasses
-        ; nullary_type_classes <- xoptM Opt_NullaryTypeClasses
         ; fundep_classes <- xoptM Opt_FunctionalDependencies
 
-        -- Check that the class is unary, unless multiparameter or
-        -- nullary type classes are enabled
-        ; checkTc (nullary_type_classes || notNull tyvars) (nullaryClassErr cls)
-        ; checkTc (multi_param_type_classes || arity <= 1) (classArityErr cls)
+        -- Check that the class is unary, unless multiparameter type classes
+        -- are enabled (which allows nullary type classes)
+        ; checkTc (multi_param_type_classes || arity == 1)
+                  (classArityErr arity cls)
         ; checkTc (fundep_classes || null fundeps) (classFunDepsErr cls)
 
         -- Check the super-classes
@@ -1621,7 +1620,7 @@ checkValidClass cls
                 -- since there is no possible ambiguity
         ; let grown_tyvars = growThetaTyVars theta (mkVarSet tyvars)
         ; checkTc (arity == 0 || tyVarsOfType tau `intersectsVarSet` grown_tyvars)
-                  (noClassTyVarErr cls sel_id)
+                  (noClassTyVarErr cls (ptext (sLit "class method") <+> quotes (ppr sel_id)))
 
         ; case dm of
             GenDefMeth dm_name -> do { dm_id <- tcLookupId dm_name
@@ -1644,8 +1643,12 @@ checkValidClass cls
                 -- type variable.  What a mess!
 
     check_at_defs (fam_tc, defs)
-      = tcAddDefaultAssocDeclCtxt (tyConName fam_tc) $
-        mapM_ (checkValidTyFamInst mb_clsinfo fam_tc) defs
+      = do { traceTc "check-at" (ppr fam_tc $$ ppr (tyConTyVars fam_tc) $$ ppr tyvars)
+           ; checkTc (any (`elem` tyvars) (tyConTyVars fam_tc)) 
+                     (noClassTyVarErr cls (ptext (sLit "associated type") <+> quotes (ppr fam_tc)))
+                     
+           ; tcAddDefaultAssocDeclCtxt (tyConName fam_tc) $
+             mapM_ (checkValidTyFamInst mb_clsinfo fam_tc) defs }
 
     mb_clsinfo = Just (cls, mkVarEnv [ (tv, mkTyVarTy tv) | tv <- tyvars ])
 
@@ -1798,7 +1801,7 @@ checkValidRoles tc
 mkDefaultMethodIds :: [TyThing] -> [Id]
 -- See Note [Default method Ids and Template Haskell]
 mkDefaultMethodIds things
-  = [ mkExportedLocalId dm_name (idType sel_id)
+  = [ mkExportedLocalId VanillaId dm_name (idType sel_id)
     | ATyCon tc <- things
     , Just cls <- [tyConClass_maybe tc]
     , (sel_id, DefMeth dm_name) <- classOpItems cls ]
@@ -1838,8 +1841,7 @@ mkRecSelBind (tycon, sel_name)
   = (L loc (IdSig sel_id), unitBag (L loc sel_bind))
   where
     loc    = getSrcSpan sel_name
-    sel_id = Var.mkExportedLocalVar rec_details sel_name
-                                    sel_ty vanillaIdInfo
+    sel_id = mkExportedLocalId rec_details sel_name sel_ty
     rec_details = RecSelId { sel_tycon = tycon, sel_naughty = is_naughty }
 
     -- Find a representative constructor, con1
@@ -2054,26 +2056,26 @@ classOpCtxt :: Var -> Type -> SDoc
 classOpCtxt sel_id tau = sep [ptext (sLit "When checking the class method:"),
                               nest 2 (pprPrefixOcc sel_id <+> dcolon <+> ppr tau)]
 
-nullaryClassErr :: Class -> SDoc
-nullaryClassErr cls
-  = vcat [ptext (sLit "No parameters for class") <+> quotes (ppr cls),
-          parens (ptext (sLit "Use NullaryTypeClasses to allow no-parameter classes"))]
-
-classArityErr :: Class -> SDoc
-classArityErr cls
-  = vcat [ptext (sLit "Too many parameters for class") <+> quotes (ppr cls),
-          parens (ptext (sLit "Use MultiParamTypeClasses to allow multi-parameter classes"))]
+classArityErr :: Int -> Class -> SDoc
+classArityErr n cls
+    | n == 0 = mkErr "No" "no-parameter"
+    | otherwise = mkErr "Too many" "multi-parameter"
+  where
+    mkErr howMany allowWhat =
+        vcat [ptext (sLit $ howMany ++ " parameters for class") <+> quotes (ppr cls),
+              parens (ptext (sLit $ "Use MultiParamTypeClasses to allow "
+                                    ++ allowWhat ++ " classes"))]
 
 classFunDepsErr :: Class -> SDoc
 classFunDepsErr cls
   = vcat [ptext (sLit "Fundeps in class") <+> quotes (ppr cls),
           parens (ptext (sLit "Use FunctionalDependencies to allow fundeps"))]
 
-noClassTyVarErr :: Class -> Var -> SDoc
-noClassTyVarErr clas op
-  = sep [ptext (sLit "The class method") <+> quotes (ppr op),
-         ptext (sLit "mentions none of the type variables of the class") <+>
-                ppr clas <+> hsep (map ppr (classTyVars clas))]
+noClassTyVarErr :: Class -> SDoc -> SDoc
+noClassTyVarErr clas what
+  = sep [ptext (sLit "The") <+> what,
+         ptext (sLit "mentions none of the type or kind variables of the class") <+>
+                quotes (ppr clas <+> hsep (map ppr (classTyVars clas)))]
 
 recSynErr :: [LTyClDecl Name] -> TcRn ()
 recSynErr syn_decls
@@ -2165,7 +2167,7 @@ wrongNamesInInstGroup first cur
 
 inaccessibleCoAxBranch :: TyCon -> CoAxBranch -> SDoc
 inaccessibleCoAxBranch tc fi
-  = ptext (sLit "Inaccessible family instance equation:") $$
+  = ptext (sLit "Overlapped type family instance equation:") $$
       (pprCoAxBranch tc fi)
 
 badRoleAnnot :: Name -> Role -> Role -> SDoc
