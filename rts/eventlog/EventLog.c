@@ -112,6 +112,7 @@ char *EventDesc[] = {
   [EVENT_TASK_CREATE]         = "Task create",
   [EVENT_TASK_MIGRATE]        = "Task migrate",
   [EVENT_TASK_DELETE]         = "Task delete",
+  [EVENT_HACK_BUG_T9003]      = "Empty event for bug #9003",
   [EVENT_VERSION]             = "Version",
   [EVENT_PROGRAM_INVOCATION]  = "Program invocation",
   [EVENT_EDEN_START_RECEIVE]  = "Starting message receival",
@@ -507,6 +508,10 @@ initEventLogging(void)
         	eventTypes[t].size = sizeof(StgWord8) + sizeof(EventThreadID) 
         	                     + 2 * sizeof(EventProcessID) + sizeof(EventPortID);
         	break;
+
+        case EVENT_HACK_BUG_T9003:
+            eventTypes[t].size = 0;
+            break;
 
         default:
             continue; /* ignore deprecated events */
