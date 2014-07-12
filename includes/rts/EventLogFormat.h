@@ -162,6 +162,8 @@
 #define EVENT_TASK_MIGRATE        56 /* (taskID, cap, new_cap)   */
 #define EVENT_TASK_DELETE         57 /* (taskID)                 */
 #define EVENT_USER_MARKER         58 /* (marker_name) */
+#define EVENT_HACK_BUG_T9003      59 /* Hack: see trac #9003 */
+
 /* Range 59 - 59 is available for new GHC and common events. */
 
 /* Range 60 - 80 is used by eden for parallel tracing

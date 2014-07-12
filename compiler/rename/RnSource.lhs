@@ -445,12 +445,14 @@ rnSrcInstDecl (ClsInstD { cid_inst = cid })
 rnClsInstDecl :: ClsInstDecl RdrName -> RnM (ClsInstDecl Name, FreeVars)
 rnClsInstDecl (ClsInstDecl { cid_poly_ty = inst_ty, cid_binds = mbinds
                            , cid_sigs = uprags, cid_tyfam_insts = ats
+                           , cid_overlap_mode = oflag
                            , cid_datafam_insts = adts })
         -- Used for both source and interface file decls
   = do { (inst_ty', inst_fvs) <- rnLHsInstType (text "In an instance declaration") inst_ty
        ; case splitLHsInstDeclTy_maybe inst_ty' of {
            Nothing -> return (ClsInstDecl { cid_poly_ty = inst_ty', cid_binds = emptyLHsBinds
                                           , cid_sigs = [], cid_tyfam_insts = []
+                                          , cid_overlap_mode = oflag
                                           , cid_datafam_insts = [] }
                              , inst_fvs) ;
            Just (inst_tyvars, _, L _ cls,_) ->
@@ -493,6 +495,7 @@ rnClsInstDecl (ClsInstDecl { cid_poly_ty = inst_ty, cid_binds = mbinds
                           `plusFV` inst_fvs
        ; return (ClsInstDecl { cid_poly_ty = inst_ty', cid_binds = mbinds'
                              , cid_sigs = uprags', cid_tyfam_insts = ats'
+                             , cid_overlap_mode = oflag
                              , cid_datafam_insts = adts' },
                  all_fvs) } } }
              -- We return the renamed associated data type declarations so
@@ -637,11 +640,11 @@ extendTyVarEnvForMethodBinds ktv_names thing_inside
 
 \begin{code}
 rnSrcDerivDecl :: DerivDecl RdrName -> RnM (DerivDecl Name, FreeVars)
-rnSrcDerivDecl (DerivDecl ty)
+rnSrcDerivDecl (DerivDecl ty overlap)
   = do { standalone_deriv_ok <- xoptM Opt_StandaloneDeriving
        ; unless standalone_deriv_ok (addErr standaloneDerivErr)
        ; (ty', fvs) <- rnLHsInstType (text "In a deriving declaration") ty
-       ; return (DerivDecl ty', fvs) }
+       ; return (DerivDecl ty' overlap, fvs) }
 
 standaloneDerivErr :: SDoc
 standaloneDerivErr
@@ -967,7 +970,7 @@ rnTyClDecl (ClassDecl {tcdCtxt = context, tcdLName = lcls,
             <- bindHsTyVars cls_doc Nothing kvs tyvars $ \ tyvars' -> do
                   -- Checks for distinct tyvars
              { (context', cxt_fvs) <- rnContext cls_doc context
-             ; fds'  <- rnFds (docOfHsDocContext cls_doc) fds
+             ; fds'  <- rnFds fds
                          -- The fundeps have no free variables
              ; (ats',     fv_ats)     <- rnATDecls cls' ats
              ; (at_defs', fv_at_defs) <- rnATInstDecls rnTyFamInstDecl cls' tyvars' at_defs
@@ -1406,21 +1409,20 @@ extendRecordFieldEnv tycl_decls inst_decls
 %*********************************************************
 
 \begin{code}
-rnFds :: SDoc -> [Located (FunDep RdrName)] -> RnM [Located (FunDep Name)]
-
-rnFds doc fds
+rnFds :: [Located (FunDep RdrName)] -> RnM [Located (FunDep Name)]
+rnFds fds
   = mapM (wrapLocM rn_fds) fds
   where
     rn_fds (tys1, tys2)
-      = do { tys1' <- rnHsTyVars doc tys1
-           ; tys2' <- rnHsTyVars doc tys2
+      = do { tys1' <- rnHsTyVars tys1
+           ; tys2' <- rnHsTyVars tys2
            ; return (tys1', tys2') }
 
-rnHsTyVars :: SDoc -> [RdrName] -> RnM [Name]
-rnHsTyVars doc tvs  = mapM (rnHsTyVar doc) tvs
+rnHsTyVars :: [RdrName] -> RnM [Name]
+rnHsTyVars tvs  = mapM rnHsTyVar tvs
 
-rnHsTyVar :: SDoc -> RdrName -> RnM Name
-rnHsTyVar _doc tyvar = lookupOccRn tyvar
+rnHsTyVar :: RdrName -> RnM Name
+rnHsTyVar tyvar = lookupOccRn tyvar
 \end{code}
 
 

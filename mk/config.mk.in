@@ -819,6 +819,9 @@ else
 HSCOLOUR_SRCS = YES
 endif
 
+# Build DPH?
+BUILD_DPH = YES
+
 ################################################################################
 #
 #    Library configure arguments

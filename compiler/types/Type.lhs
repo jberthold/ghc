@@ -36,7 +36,7 @@ module Type (
 
         mkForAllTy, mkForAllTys, splitForAllTy_maybe, splitForAllTys,
         mkPiKinds, mkPiType, mkPiTypes,
-        applyTy, applyTys, applyTysD, isForAllTy, dropForAlls,
+        applyTy, applyTys, applyTysD, dropForAlls,
 
         mkNumLitTy, isNumLitTy,
         mkStrLitTy, isStrLitTy,
@@ -63,7 +63,7 @@ module Type (
         funTyCon,
 
         -- ** Predicates on types
-        isTypeVar, isKindVar,
+        isTypeVar, isKindVar, allDistinctTyVars, isForAllTy,
         isTyVarTy, isFunTy, isDictTy, isPredTy, isVoidTy,
 
         -- (Lifting and boxity)
@@ -323,6 +323,15 @@ getTyVar_maybe ty | Just ty' <- coreView ty = getTyVar_maybe ty'
 getTyVar_maybe (TyVarTy tv)                 = Just tv
 getTyVar_maybe _                            = Nothing
 
+allDistinctTyVars :: [KindOrType] -> Bool
+allDistinctTyVars tkvs = go emptyVarSet tkvs
+  where
+    go _      [] = True
+    go so_far (ty : tys)
+       = case getTyVar_maybe ty of
+             Nothing -> False
+             Just tv | tv `elemVarSet` so_far -> False
+                     | otherwise -> go (so_far `extendVarSet` tv) tys
 \end{code}
 
 
@@ -815,7 +824,7 @@ applyTysD doc orig_fun_ty arg_tys
   = substTyWith (take n_args tvs) arg_tys
                 (mkForAllTys (drop n_args tvs) rho_ty)
   | otherwise           -- Too many type args
-  = ASSERT2( n_tvs > 0, doc $$ ppr orig_fun_ty )        -- Zero case gives infnite loop!
+  = ASSERT2( n_tvs > 0, doc $$ ppr orig_fun_ty )        -- Zero case gives infinite loop!
     applyTysD doc (substTyWith tvs (take n_tvs arg_tys) rho_ty)
                   (drop n_tvs arg_tys)
   where
