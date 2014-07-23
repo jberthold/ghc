@@ -526,6 +526,12 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
     esac
 
     case $$1 in
+    i386-unknown-mingw32)
+        $2="$$2 -march=i686"
+        ;;
+    i386-portbld-freebsd*)
+        $2="$$2 -march=i686"
+        ;;
     i386-apple-darwin)
         $2="$$2 -m32"
         $3="$$3 -m32"
@@ -536,6 +542,12 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         $2="$$2 -m64"
         $3="$$3 -m64"
         $4="$$4 -arch x86_64"
+        $5="$$5 -m64"
+        ;;
+    x86_64-unknown-solaris2)
+        $2="$$2 -m64"
+        $3="$$3 -m64"
+        $4="$$4 -m64"
         $5="$$5 -m64"
         ;;
     alpha-*)

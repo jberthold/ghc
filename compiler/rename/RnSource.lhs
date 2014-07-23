@@ -384,8 +384,8 @@ rnHsForeignDecl (ForeignImport name ty _ spec)
        ; (ty', fvs) <- rnLHsType (ForeignDeclCtx name) ty
 
         -- Mark any PackageTarget style imports as coming from the current package
-       ; let packageId = thisPackage $ hsc_dflags topEnv
-             spec'     = patchForeignImport packageId spec
+       ; let packageKey = thisPackage $ hsc_dflags topEnv
+             spec'      = patchForeignImport packageKey spec
 
        ; return (ForeignImport name' ty' noForeignImportCoercionYet spec', fvs) }
 
@@ -402,20 +402,20 @@ rnHsForeignDecl (ForeignExport name ty _ spec)
 --      package, so if they get inlined across a package boundry we'll still
 --      know where they're from.
 --
-patchForeignImport :: PackageId -> ForeignImport -> ForeignImport
-patchForeignImport packageId (CImport cconv safety fs spec)
-        = CImport cconv safety fs (patchCImportSpec packageId spec)
+patchForeignImport :: PackageKey -> ForeignImport -> ForeignImport
+patchForeignImport packageKey (CImport cconv safety fs spec)
+        = CImport cconv safety fs (patchCImportSpec packageKey spec)
 
-patchCImportSpec :: PackageId -> CImportSpec -> CImportSpec
-patchCImportSpec packageId spec
+patchCImportSpec :: PackageKey -> CImportSpec -> CImportSpec
+patchCImportSpec packageKey spec
  = case spec of
-        CFunction callTarget    -> CFunction $ patchCCallTarget packageId callTarget
+        CFunction callTarget    -> CFunction $ patchCCallTarget packageKey callTarget
         _                       -> spec
 
-patchCCallTarget :: PackageId -> CCallTarget -> CCallTarget
-patchCCallTarget packageId callTarget =
+patchCCallTarget :: PackageKey -> CCallTarget -> CCallTarget
+patchCCallTarget packageKey callTarget =
   case callTarget of
-  StaticTarget label Nothing isFun -> StaticTarget label (Just packageId) isFun
+  StaticTarget label Nothing isFun -> StaticTarget label (Just packageKey) isFun
   _                                -> callTarget
 
 
@@ -465,7 +465,7 @@ rnClsInstDecl (ClsInstDecl { cid_poly_ty = inst_ty, cid_binds = mbinds
        ; traceRn (text "rnSrcInstDecl"  <+> ppr inst_ty' $$ ppr inst_tyvars $$ ppr ktv_names)
        ; ((ats', adts', other_sigs'), more_fvs) 
              <- extendTyVarEnvFVRn ktv_names $
-                do { (ats', at_fvs) <- rnATInstDecls rnTyFamInstDecl cls inst_tyvars ats
+                do { (ats',  at_fvs)  <- rnATInstDecls rnTyFamInstDecl cls inst_tyvars ats
                    ; (adts', adt_fvs) <- rnATInstDecls rnDataFamInstDecl cls inst_tyvars adts
                    ; (other_sigs', sig_fvs) <- renameSigs (InstDeclCtxt cls) other_sigs
                    ; return ( (ats', adts', other_sigs')
@@ -564,14 +564,29 @@ rnTyFamInstDecl mb_cls (TyFamInstDecl { tfid_eqn = L loc eqn })
 rnTyFamInstEqn :: Maybe (Name, [Name])
                -> TyFamInstEqn RdrName
                -> RnM (TyFamInstEqn Name, FreeVars)
-rnTyFamInstEqn mb_cls (TyFamInstEqn { tfie_tycon = tycon
-                                    , tfie_pats  = HsWB { hswb_cts = pats }
-                                    , tfie_rhs   = rhs })
+rnTyFamInstEqn mb_cls (TyFamEqn { tfe_tycon = tycon
+                                , tfe_pats  = HsWB { hswb_cts = pats }
+                                , tfe_rhs   = rhs })
   = do { (tycon', pats', rhs', fvs) <-
            rnFamInstDecl (TySynCtx tycon) mb_cls tycon pats rhs rnTySyn
-       ; return (TyFamInstEqn { tfie_tycon = tycon'
-                              , tfie_pats  = pats'
-                              , tfie_rhs   = rhs' }, fvs) }
+       ; return (TyFamEqn { tfe_tycon = tycon'
+                          , tfe_pats  = pats'
+                          , tfe_rhs   = rhs' }, fvs) }
+
+rnTyFamDefltEqn :: Name
+                -> TyFamDefltEqn RdrName
+                -> RnM (TyFamDefltEqn Name, FreeVars)
+rnTyFamDefltEqn cls (TyFamEqn { tfe_tycon = tycon
+                              , tfe_pats  = tyvars
+                              , tfe_rhs   = rhs })
+  = bindHsTyVars ctx (Just cls) [] tyvars $ \ tyvars' ->
+    do { tycon'      <- lookupFamInstName (Just cls) tycon
+       ; (rhs', fvs) <- rnLHsType ctx rhs
+       ; return (TyFamEqn { tfe_tycon = tycon'
+                          , tfe_pats  = tyvars'
+                          , tfe_rhs   = rhs' }, fvs) }
+  where
+    ctx = TyFamilyCtx tycon
 
 rnDataFamInstDecl :: Maybe (Name, [Name])
                   -> DataFamInstDecl RdrName
@@ -590,7 +605,7 @@ rnDataFamInstDecl mb_cls (DataFamInstDecl { dfid_tycon = tycon
 Renaming of the associated types in instances.
 
 \begin{code}
--- rename associated type family decl in class
+-- Rename associated type family decl in class
 rnATDecls :: Name      -- Class
           -> [LFamilyDecl RdrName] 
           -> RnM ([LFamilyDecl Name], FreeVars)
@@ -868,10 +883,10 @@ packages, it is safe not to add the dependencies on the .hs-boot stuff to B2.
 See also Note [Grouping of type and class declarations] in TcTyClsDecls.
 
 \begin{code}
-isInPackage :: PackageId -> Name -> Bool
+isInPackage :: PackageKey -> Name -> Bool
 isInPackage pkgId nm = case nameModule_maybe nm of
                          Nothing -> False
-                         Just m  -> pkgId == modulePackageId m
+                         Just m  -> pkgId == modulePackageKey m
 -- We use nameModule_maybe because we might be in a TH splice, in which case
 -- there is no module name. In that case we cannot have mutual dependencies,
 -- so it's fine to return False here.
@@ -941,7 +956,7 @@ rnTyClDecl (SynDecl { tcdLName = tycon, tcdTyVars = tyvars, tcdRhs = rhs })
                                     do { (rhs', fvs) <- rnTySyn doc rhs
                                        ; return ((tyvars', rhs'), fvs) }
        ; return (SynDecl { tcdLName = tycon', tcdTyVars = tyvars'
-                        , tcdRhs = rhs', tcdFVs = fvs }, fvs) }
+                         , tcdRhs = rhs', tcdFVs = fvs }, fvs) }
 
 -- "data", "newtype" declarations
 -- both top level and (for an associated type) in an instance decl
@@ -966,20 +981,20 @@ rnTyClDecl (ClassDecl {tcdCtxt = context, tcdLName = lcls,
                         -- kind signatures on the tyvars
 
         -- Tyvars scope over superclass context and method signatures
-        ; ((tyvars', context', fds', ats', at_defs', sigs'), stuff_fvs)
+        ; ((tyvars', context', fds', ats', sigs'), stuff_fvs)
             <- bindHsTyVars cls_doc Nothing kvs tyvars $ \ tyvars' -> do
                   -- Checks for distinct tyvars
              { (context', cxt_fvs) <- rnContext cls_doc context
              ; fds'  <- rnFds fds
                          -- The fundeps have no free variables
              ; (ats',     fv_ats)     <- rnATDecls cls' ats
-             ; (at_defs', fv_at_defs) <- rnATInstDecls rnTyFamInstDecl cls' tyvars' at_defs
              ; (sigs', sig_fvs) <- renameSigs (ClsDeclCtxt cls') sigs
              ; let fvs = cxt_fvs     `plusFV`
                          sig_fvs     `plusFV`
-                         fv_ats      `plusFV`
-                         fv_at_defs
-             ; return ((tyvars', context', fds', ats', at_defs', sigs'), fvs) }
+                         fv_ats
+             ; return ((tyvars', context', fds', ats', sigs'), fvs) }
+
+        ; (at_defs', fv_at_defs) <- rnList (rnTyFamDefltEqn cls') at_defs
 
         -- No need to check for duplicate associated type decls
         -- since that is done by RnNames.extendGlobalRdrEnvRn
@@ -1011,7 +1026,7 @@ rnTyClDecl (ClassDecl {tcdCtxt = context, tcdLName = lcls,
   -- Haddock docs
         ; docs' <- mapM (wrapLocM rnDocDecl) docs
 
-        ; let all_fvs = meth_fvs `plusFV` stuff_fvs
+        ; let all_fvs = meth_fvs `plusFV` stuff_fvs `plusFV` fv_at_defs
         ; return (ClassDecl { tcdCtxt = context', tcdLName = lcls',
                               tcdTyVars = tyvars', tcdFDs = fds', tcdSigs = sigs',
                               tcdMeths = mbinds', tcdATs = ats', tcdATDefs = at_defs',

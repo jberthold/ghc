@@ -155,6 +155,3 @@ _darcs/
 .tm_properties
 # JB: would rather keep this one under version control
 # VERSION
-
-/libraries/integer-gmp/gmp/gmp.h
-/libraries/integer-gmp/gmp/gmpbuild/

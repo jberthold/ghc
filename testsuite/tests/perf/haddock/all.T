@@ -60,7 +60,7 @@ test('haddock.base',
 test('haddock.Cabal',
      [unless(in_tree_compiler(), skip)
      ,stats_num_field('peak_megabytes_allocated',
-          [(wordsize(64), 278, 10)
+          [(wordsize(64), 309, 10)
             # 2012-08-14: 202 (amd64/Linux)
             # 2012-08-29: 211 (amd64/Linux, new codegen)
             # 2012-09-20: 227 (amd64/Linux)
@@ -68,6 +68,7 @@ test('haddock.Cabal',
             # 2013-06-07: 246 (amd64/Linux) (reason unknown)
             # 2013-11-21: 269
             # 2013-11-22: 278 (amd64/Linux) (TH refactoring; weird)
+	    # 2014-07-14: 309 (amd64/Linux)
           ,(platform('i386-unknown-mingw32'), 144, 10)
             # 2012-10-30:                      83 (x86/Windows)
             # 2013-02-10:                     116 (x86/Windows)
@@ -80,12 +81,13 @@ test('haddock.Cabal',
            # 2014-01-22: 139 (x86/Linux - new haddock, but out of date before)
            # 2014-06-29: 147 (x86/Linux)
      ,stats_num_field('max_bytes_used',
-          [(wordsize(64), 95356616, 15)
-            # 2012-08-14: 74119424 (amd64/Linux)
-            # 2012-08-29: 77992512 (amd64/Linux, new codegen)
-            # 2012-10-02: 91341568 (amd64/Linux)
-            # 2012-10-08: 80590280 (amd64/Linux)
-            # 2013-03-13: 95356616 (amd64/Linux) Cabal updated
+          [(wordsize(64), 113232208, 15)
+            # 2012-08-14:  74119424 (amd64/Linux)
+            # 2012-08-29:  77992512 (amd64/Linux, new codegen)
+            # 2012-10-02:  91341568 (amd64/Linux)
+            # 2012-10-08:  80590280 (amd64/Linux)
+            # 2013-03-13:  95356616 (amd64/Linux) Cabal updated
+            # 2014-07-14: 113232208 (amd64/Linux)
           ,(platform('i386-unknown-mingw32'), 63493200, 15)
             # 2012-10-30: 44224896 (x86/Windows)
             # 2013-11-13: 49391436 (x86/Windows, 64bit machine)
@@ -162,11 +164,12 @@ test('haddock.compiler',
             # 2014-01-22: 278124612 (x86/Linux - new haddock)
             # 2014-06-29: 284082916 (x86/Linux)
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 28708374824, 10)
+          [(wordsize(64), 29809571376, 10)
             # 2012-08-14: 26070600504 (amd64/Linux)
             # 2012-08-29: 26353100288 (amd64/Linux, new CG)
             # 2012-09-18: 26882813032 (amd64/Linux)
             # 2012-11-12: 25990254632 (amd64/Linux)
+            # 2014-07-17: 29809571376 (amd64/Linux) general round of updates
 	    # 2012-11-27: 28708374824 (amd64/Linux)
           ,(platform('i386-unknown-mingw32'), 14328363592, 10)
             # 2012-10-30:                     13773051312 (x86/Windows)
