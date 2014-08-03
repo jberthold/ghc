@@ -995,8 +995,8 @@ data ModGuts
         mg_rdr_env   :: !GlobalRdrEnv,   -- ^ Top-level lexical environment
 
         -- These fields all describe the things **declared in this module**
-        mg_fix_env   :: !FixityEnv,      -- ^ Fixities declared in this module
-                                         -- ToDo: I'm unconvinced this is actually used anywhere
+        mg_fix_env   :: !FixityEnv,      -- ^ Fixities declared in this module.
+                                         -- Used for creating interface files.
         mg_tcs       :: ![TyCon],        -- ^ TyCons declared in this module
                                          -- (includes TyCons for classes)
         mg_insts     :: ![ClsInst],      -- ^ Class instances declared in this module
@@ -1100,8 +1100,8 @@ appendStubC (ForeignStubs h c) c_code = ForeignStubs h (c $$ c_code)
 
 Note [The interactive package]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Type and class declarations at the command prompt are treated as if
-they were defined in modules
+Type, class, and value declarations at the command prompt are treated 
+as if they were defined in modules
    interactive:Ghci1
    interactive:Ghci2
    ...etc...
@@ -1151,11 +1151,12 @@ The details are a bit tricky though:
    The 'thisPackage' field stays as 'main' (or whatever -package-name says.
 
  * The main trickiness is that the type environment (tcg_type_env and
-   fixity envt (tcg_fix_env) now contains entities from all the
-   GhciN modules together, rather than just a single module as is usually
-   the case.  So you can't use "nameIsLocalOrFrom" to decide whether
-   to look in the TcGblEnv vs the HPT/PTE.  This is a change, but not
-   a problem provided you know.
+   fixity envt (tcg_fix_env), and instances (tcg_insts, tcg_fam_insts)
+   now contains entities from all the interactive-package modules
+   (Ghci1, Ghci2, ...) together, rather than just a single module as
+   is usually the case.  So you can't use "nameIsLocalOrFrom" to
+   decide whether to look in the TcGblEnv vs the HPT/PTE.  This is a
+   change, but not a problem provided you know.
 
 
 Note [Interactively-bound Ids in GHCi]
@@ -1448,15 +1449,15 @@ mkPrintUnqualified dflags env = (qual_name, qual_mod)
   qual_mod mod
      | modulePackageKey mod == thisPackage dflags = False
 
-     | [pkgconfig] <- [pkg | (pkg,exposed_module) <- lookup,
-                             exposed pkg && exposed_module],
+     | [pkgconfig] <- [modConfPkg m | m <- lookup
+                                    , modConfVisible m ],
        packageConfigId pkgconfig == modulePackageKey mod
         -- this says: we are given a module P:M, is there just one exposed package
         -- that exposes a module M, and is it package P?
      = False
 
      | otherwise = True
-     where lookup = lookupModuleInAllPackages dflags (moduleName mod)
+     where lookup = eltsUFM $ lookupModuleInAllPackages dflags (moduleName mod)
 \end{code}
 
 
@@ -2493,14 +2494,15 @@ trustInfoToNum it
             Sf_Unsafe       -> 1
             Sf_Trustworthy  -> 2
             Sf_Safe         -> 3
-            Sf_SafeInferred -> 4
 
 numToTrustInfo :: Word8 -> IfaceTrustInfo
 numToTrustInfo 0 = setSafeMode Sf_None
 numToTrustInfo 1 = setSafeMode Sf_Unsafe
 numToTrustInfo 2 = setSafeMode Sf_Trustworthy
 numToTrustInfo 3 = setSafeMode Sf_Safe
-numToTrustInfo 4 = setSafeMode Sf_SafeInferred
+numToTrustInfo 4 = setSafeMode Sf_Safe -- retained for backwards compat, used
+                                       -- to be Sf_SafeInfered but we no longer
+                                       -- differentiate.
 numToTrustInfo n = error $ "numToTrustInfo: bad input number! (" ++ show n ++ ")"
 
 instance Outputable IfaceTrustInfo where
@@ -2508,7 +2510,6 @@ instance Outputable IfaceTrustInfo where
     ppr (TrustInfo Sf_Unsafe)        = ptext $ sLit "unsafe"
     ppr (TrustInfo Sf_Trustworthy)   = ptext $ sLit "trustworthy"
     ppr (TrustInfo Sf_Safe)          = ptext $ sLit "safe"
-    ppr (TrustInfo Sf_SafeInferred)  = ptext $ sLit "safe-inferred"
 
 instance Binary IfaceTrustInfo where
     put_ bh iftrust = putByte bh $ trustInfoToNum iftrust

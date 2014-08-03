@@ -25,7 +25,7 @@ void sendMessage(Capability *from_cap, Capability *to_cap, Message *msg)
 {
     ACQUIRE_LOCK(&to_cap->lock);
 
-#ifdef DEBUG    
+#ifdef DEBUG
     {
         const StgInfoTable *i = msg->header.info;
         if (i != &stg_MSG_THROWTO_info &&
@@ -44,7 +44,7 @@ void sendMessage(Capability *from_cap, Capability *to_cap, Message *msg)
     recordClosureMutated(from_cap,(StgClosure*)msg);
 
     if (to_cap->running_task == NULL) {
-	to_cap->running_task = myTask(); 
+        to_cap->running_task = myTask();
             // precond for releaseCapability_()
         releaseCapability_(to_cap,rtsFalse);
     } else {
@@ -73,7 +73,7 @@ loop:
     if (i == &stg_MSG_TRY_WAKEUP_info)
     {
         StgTSO *tso = ((MessageWakeup *)m)->tso;
-        debugTraceCap(DEBUG_sched, cap, "message: try wakeup thread %ld", 
+        debugTraceCap(DEBUG_sched, cap, "message: try wakeup thread %ld",
                       (W_)tso->id);
         tryWakeupThread(cap, tso);
     }
@@ -89,7 +89,7 @@ loop:
             goto loop;
         }
 
-        debugTraceCap(DEBUG_sched, cap, "message: throwTo %ld -> %ld", 
+        debugTraceCap(DEBUG_sched, cap, "message: throwTo %ld -> %ld",
                       (W_)t->source->id, (W_)t->target->id);
 
         ASSERT(t->source->why_blocked == BlockedOnMsgThrowTo);
@@ -144,10 +144,10 @@ loop:
 
    This is called from two places: either we just entered a BLACKHOLE
    (stg_BLACKHOLE_info), or we received a MSG_BLACKHOLE in our
-   cap->inbox.  
+   cap->inbox.
 
    We need to establish whether the BLACKHOLE belongs to
-   this Capability, and 
+   this Capability, and
      - if so, arrange to block the current thread on it
      - otherwise, forward the message to the right place
 
@@ -166,8 +166,8 @@ nat messageBlackHole(Capability *cap, MessageBlackHole *msg)
     StgClosure *bh = UNTAG_CLOSURE(msg->bh);
     StgTSO *owner;
 
-    debugTraceCap(DEBUG_sched, cap, "message: thread %d blocking on blackhole %p", 
-                  (W_)msg->tso->id, msg->bh);
+    debugTraceCap(DEBUG_sched, cap, "message: thread %d blocking on "
+                  "blackhole %p", (W_)msg->tso->id, msg->bh);
 
     info = bh->header.info;
 
@@ -175,8 +175,8 @@ nat messageBlackHole(Capability *cap, MessageBlackHole *msg)
     // BLACKHOLE has already been updated, and GC has shorted out the
     // indirection, so the pointer no longer points to a BLACKHOLE at
     // all.
-    if (info != &stg_BLACKHOLE_info && 
-        info != &stg_CAF_BLACKHOLE_info && 
+    if (info != &stg_BLACKHOLE_info &&
+        info != &stg_CAF_BLACKHOLE_info &&
         info != &__stg_EAGER_BLACKHOLE_info &&
         info != &stg_WHITEHOLE_info) {
         // if it is a WHITEHOLE, then a thread is in the process of
@@ -206,17 +206,18 @@ loop:
     else if (info == &stg_TSO_info)
     {
 #ifdef PARALLEL_RTS
-      rtsBool is_system = p == (StgClosure*) &stg_system_tso;
-      // In case of a system-created blackhole, most code stays the same as
-      // below: create BQ with first message MSG, change BH pointer. But we
-      // need to enqueue the BQ differently.
+        rtsBool is_system = p == (StgClosure*) &stg_system_tso;
+        // In case of a system-created blackhole, most code stays the same as
+        // below: create BQ with first message MSG, change BH pointer. But we
+        // need to enqueue the BQ differently.
 #endif
         owner = (StgTSO*)p;
 
 #ifdef THREADED_RTS
         if (owner->cap != cap) {
             sendMessage(cap, owner->cap, (Message*)msg);
-            debugTraceCap(DEBUG_sched, cap, "forwarding message to cap %d", owner->cap->no);
+            debugTraceCap(DEBUG_sched, cap, "forwarding message to cap %d",
+                          owner->cap->no);
             return 1;
         }
 #endif
@@ -225,22 +226,23 @@ loop:
         // BLACKHOLE, so we first create a BLOCKING_QUEUE object.
 
         bq = (StgBlockingQueue*)allocate(cap, sizeofW(StgBlockingQueue));
-            
+
         // initialise the BLOCKING_QUEUE object
         SET_HDR(bq, &stg_BLOCKING_QUEUE_DIRTY_info, CCS_SYSTEM);
         bq->bh = bh;
         bq->queue = msg;
         bq->owner = owner;
-        
+
         msg->link = (MessageBlackHole*)END_TSO_QUEUE;
-        
+
 #ifdef PARALLEL_RTS
         if (is_system) {
-	  bq->link = (StgBlockingQueue*) stg_system_tso.indirectee;
-	  stg_system_tso.indirectee = (StgClosure*) bq;
+            bq->link = (StgBlockingQueue*) stg_system_tso.indirectee;
+            stg_system_tso.indirectee = (StgClosure*) bq;
         } else {
-	  // following code will not work with owner==stg_system_tso
+          // following code will not work with owner==stg_system_tso
 #endif
+
         // All BLOCKING_QUEUES are linked in a list on owner->bq, so
         // that we can search through them in the event that there is
         // a collision to update a BLACKHOLE and a BLOCKING_QUEUE
@@ -271,21 +273,21 @@ loop:
         recordClosureMutated(cap,bh); // bh was mutated
 
 #ifdef PARALLEL_RTS
-	// nearby, these are macros, so they need "{..}"
-	if (is_system) {
-	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH", 
-			(W_)msg->tso->id);
-	} else {
-	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d", 
-			(W_)msg->tso->id, (W_)owner->id);
-	}
+        // nearby, these are macros, so they need "{..}"
+        if (is_system) {
+          debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH",
+                        (W_)msg->tso->id);
+        } else {
+          debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
+                        (W_)msg->tso->id, (W_)owner->id);
+        }
 #else
-        debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d", 
+        debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
                       (W_)msg->tso->id, (W_)owner->id);
 #endif
         return 1; // blocked
     }
-    else if (info == &stg_BLOCKING_QUEUE_CLEAN_info || 
+    else if (info == &stg_BLOCKING_QUEUE_CLEAN_info ||
              info == &stg_BLOCKING_QUEUE_DIRTY_info)
     {
         StgBlockingQueue *bq = (StgBlockingQueue *)p;
@@ -293,10 +295,10 @@ loop:
         ASSERT(bq->bh == bh);
 
 #ifdef PARALLEL_RTS
-	rtsBool is_system = bq->owner == (StgTSO*) &stg_system_tso;
-	// In case of a system-created blackhole, most code stays the same as
-	// below: create BQ with first message MSG, change BH pointer. But we
-	// need to enqueue the BQ differently.
+        rtsBool is_system = bq->owner == (StgTSO*) &stg_system_tso;
+        // In case of a system-created blackhole, most code stays the same as
+        // below: create BQ with first message MSG, change BH pointer. But we
+        // need to enqueue the BQ differently.
 #endif
         owner = bq->owner;
 
@@ -305,7 +307,8 @@ loop:
 #ifdef THREADED_RTS
         if (owner->cap != cap) {
             sendMessage(cap, owner->cap, (Message*)msg);
-            debugTraceCap(DEBUG_sched, cap, "forwarding message to cap %d", owner->cap->no);
+            debugTraceCap(DEBUG_sched, cap, "forwarding message to cap %d",
+                          owner->cap->no);
             return 1;
         }
 #endif
@@ -320,22 +323,22 @@ loop:
         }
 
 #ifdef PARALLEL_RTS
-	// nearby, these are macros, so they need "{..}"
-	if (is_system) {
-	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH",
-			(W_)msg->tso->id);
-	} else {
-	  debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
-			(W_)msg->tso->id, (W_)owner->id);
-	}
+        // nearby, these are macros, so they need "{..}"
+        if (is_system) {
+          debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH",
+                        (W_)msg->tso->id);
+        } else {
+          debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
+                        (W_)msg->tso->id, (W_)owner->id);
+        }
 #else
-        debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d", 
+        debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
                       (W_)msg->tso->id, (W_)owner->id);
 #endif
 
 #ifdef PARALLEL_RTS
-	if (!is_system)
-	  // then do the other if statement
+        if (!is_system)
+          // then do the other if statement
 #endif
         // See above, #3838
         if (owner->why_blocked == NotBlocked && owner->id != msg->tso->id) {
@@ -344,7 +347,7 @@ loop:
 
         return 1; // blocked
     }
-    
+
     return 0; // not blocked
 }
 
@@ -360,7 +363,7 @@ StgTSO * blackHoleOwner (StgClosure *bh)
     info = bh->header.info;
 
     if (info != &stg_BLACKHOLE_info &&
-        info != &stg_CAF_BLACKHOLE_info && 
+        info != &stg_CAF_BLACKHOLE_info &&
         info != &__stg_EAGER_BLACKHOLE_info &&
         info != &stg_WHITEHOLE_info) {
         return NULL;
@@ -380,14 +383,20 @@ loop:
     {
         return (StgTSO*)p;
     }
-    else if (info == &stg_BLOCKING_QUEUE_CLEAN_info || 
+    else if (info == &stg_BLOCKING_QUEUE_CLEAN_info ||
              info == &stg_BLOCKING_QUEUE_DIRTY_info)
     {
         StgBlockingQueue *bq = (StgBlockingQueue *)p;
         return bq->owner;
     }
-    
+
     return NULL; // not blocked
 }
 
-
+// Local Variables:
+// mode: C
+// fill-column: 80
+// indent-tabs-mode: nil
+// c-basic-offset: 4
+// buffer-file-coding-system: utf-8-unix
+// End:

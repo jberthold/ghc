@@ -304,6 +304,7 @@ rtsDebugMsgFn(const char *s, va_list ap)
  * 
  * Otherwise, these functions are mostly copies from the above
  * "rts..."  functions. Unnecessary code for non-supported platforms.
+ *   TODO: merge back with normal cases above, using #ifdef'ery
  */
 
 void 
@@ -469,3 +470,11 @@ parDebugMsgFn(const char *s, va_list ap)
   }
 }
 #endif
+
+// Local Variables:
+// mode: C
+// fill-column: 80
+// indent-tabs-mode: nil
+// c-basic-offset: 4
+// buffer-file-coding-system: utf-8-unix
+// End:

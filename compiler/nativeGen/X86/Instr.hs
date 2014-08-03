@@ -327,9 +327,10 @@ data Instr
         | PREFETCH  PrefetchVariant Size Operand -- prefetch Variant, addr size, address to prefetch
                                         -- variant can be NTA, Lvl0, Lvl1, or Lvl2
 
-        | LOCK  -- lock prefix
+        | LOCK        Instr -- lock prefix
         | XADD        Size Operand Operand  -- src (r), dst (r/m)
         | CMPXCHG     Size Operand Operand  -- src (r), dst (r/m), eax implicit
+        | MFENCE
 
 data PrefetchVariant = NTA | Lvl0 | Lvl1 | Lvl2
 
@@ -434,9 +435,10 @@ x86_regUsageOfInstr platform instr
 
     -- note: might be a better way to do this
     PREFETCH _  _ src -> mkRU (use_R src []) []
-    LOCK                -> noUsage
+    LOCK i              -> x86_regUsageOfInstr platform i
     XADD _ src dst      -> usageMM src dst
     CMPXCHG _ src dst   -> usageRMM src dst (OpReg eax)
+    MFENCE -> noUsage
 
     _other              -> panic "regUsage: unrecognised instr"
  where
@@ -603,9 +605,10 @@ x86_patchRegsOfInstr instr env
 
     PREFETCH lvl size src -> PREFETCH lvl size (patchOp src)
 
-    LOCK                -> instr
+    LOCK i              -> LOCK (x86_patchRegsOfInstr i env)
     XADD sz src dst     -> patch2 (XADD sz) src dst
     CMPXCHG sz src dst  -> patch2 (CMPXCHG sz) src dst
+    MFENCE              -> instr
 
     _other              -> panic "patchRegs: unrecognised instr"
 

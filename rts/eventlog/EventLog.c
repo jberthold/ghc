@@ -127,7 +127,7 @@ char *EventDesc[] = {
   [EVENT_SEND_RECEIVE_LOCAL_MESSAGE] = "Sending/Receiving local message"
 };
 
-// Event type. 
+// Event type.
 
 typedef struct _EventType {
   EventTypeNum etNum;  // Event Type number.
@@ -154,7 +154,7 @@ static StgBool hasRoomForVariableEvent(EventsBuf *eb, nat payload_bytes);
 
 static inline void postWord8(EventsBuf *eb, StgWord8 i)
 {
-    *(eb->pos++) = i; 
+    *(eb->pos++) = i;
 }
 
 static inline void postWord16(EventsBuf *eb, StgWord16 i)
@@ -227,12 +227,13 @@ static inline void postEventHeader(EventsBuf *eb, EventTypeNum type)
 {
     postEventTypeNum(eb, type);
     postTimestamp(eb);
-}    
-static inline void postEventHeaderTime(EventsBuf *eb, EventTypeNum type, StgWord64 time)
+}
+static inline void postEventHeaderTime(EventsBuf *eb, EventTypeNum type,
+                                       StgWord64 time)
 {
     postEventTypeNum(eb, type);
     postWord64(eb, time);
-}  
+}
 
 static inline void postInt8(EventsBuf *eb, StgInt8 i)
 { postWord8(eb, (StgWord8)i); }
@@ -261,7 +262,7 @@ initEventLogging(void)
     }
 #endif
 
-#ifdef PARALLEL_RTS   
+#ifdef PARALLEL_RTS
     int thisPESize, peTemp;
     peTemp = thisPE;
     thisPESize = 1;
@@ -283,9 +284,9 @@ initEventLogging(void)
         barf("EventDesc array has the wrong number of elements");
     }
 
-#ifdef PARALLEL_RTS 
+#ifdef PARALLEL_RTS
     sprintf(event_log_filename, "%s#%d.eventlog", prog, thisPE);
-#else //PARALLEL_RTS  
+#else //PARALLEL_RTS
     if (event_log_pid == -1) { // #4512
         // Single process
         sprintf(event_log_filename, "%s.eventlog", prog);
@@ -297,7 +298,8 @@ initEventLogging(void)
         // We don't have a FMT* symbol for pid_t, so we go via Word64
         // to be sure of not losing range. It would be nicer to have a
         // FMT* symbol or similar, though.
-        sprintf(event_log_filename, "%s.%" FMT_Word64 ".eventlog", prog, (StgWord64)event_log_pid);
+        sprintf(event_log_filename, "%s.%" FMT_Word64 ".eventlog",
+                prog, (StgWord64)event_log_pid);
     }
 #endif //else PARALLEL_RTS
     stgFree(prog);
@@ -305,17 +307,17 @@ initEventLogging(void)
     /* Open event log file for writing. */
     if ((event_log_file = fopen(event_log_filename, "wb")) == NULL) {
         sysErrorBelch("initEventLogging: can't open %s", event_log_filename);
-        stg_exit(EXIT_FAILURE);    
+        stg_exit(EXIT_FAILURE);
     }
 
-    /* 
+    /*
      * Allocate buffer(s) to store events.
      * Create buffer large enough for the header begin marker, all event
      * types, and header end marker to prevent checking if buffer has room
      * for each of these steps, and remove the need to flush the buffer to
      * disk during initialization.
      *
-     * Use a single buffer to store the header with event types, then flush 
+     * Use a single buffer to store the header with event types, then flush
      * the buffer so all buffers are empty for writing events.
      */
 #ifdef THREADED_RTS
@@ -353,8 +355,9 @@ initEventLogging(void)
             break;
 
         case EVENT_STOP_THREAD:     // (cap, thread, status)
-            eventTypes[t].size =
-                sizeof(EventThreadID) + sizeof(StgWord16) + sizeof(EventThreadID);
+            eventTypes[t].size = sizeof(EventThreadID)
+                               + sizeof(StgWord16)
+                               + sizeof(EventThreadID);
             break;
 
         case EVENT_STARTUP:         // (cap_count)
@@ -459,8 +462,9 @@ initEventLogging(void)
             break;
 
         case EVENT_TASK_CREATE:   // (taskId, cap, tid)
-            eventTypes[t].size =
-                sizeof(EventTaskId) + sizeof(EventCapNo) + sizeof(EventKernelThreadId);
+            eventTypes[t].size = sizeof(EventTaskId)
+                               + sizeof(EventCapNo)
+                               + sizeof(EventKernelThreadId);
             break;
 
         case EVENT_TASK_MIGRATE:   // (taskId, cap, new_cap)
@@ -473,41 +477,49 @@ initEventLogging(void)
             break;
 
         case EVENT_BLOCK_MARKER:
-            eventTypes[t].size = sizeof(StgWord32) + sizeof(EventTimestamp) + 
+            eventTypes[t].size = sizeof(StgWord32) + sizeof(EventTimestamp) +
                 sizeof(EventCapNo);
             break;
-        
+
         case EVENT_CREATE_PROCESS:  // (process)
         case EVENT_KILL_PROCESS:    // (process)
-        	eventTypes[t].size = sizeof(EventProcessID);
-        	break;
-        	
+            eventTypes[t].size = sizeof(EventProcessID);
+            break;
+
         case EVENT_ASSIGN_THREAD_TO_PROCESS: // (thread, process)
-        	eventTypes[t].size = sizeof(EventThreadID) + sizeof(EventProcessID);
-        	break;
-        
+            eventTypes[t].size = sizeof(EventThreadID) + sizeof(EventProcessID);
+            break;
+
         case EVENT_CREATE_MACHINE: // (machine)
-        	eventTypes[t].size = sizeof(EventMachineID) + sizeof(EventTimestamp);
-        	break;
+            eventTypes[t].size = sizeof(EventMachineID) + sizeof(EventTimestamp);
+            break;
         case EVENT_KILL_MACHINE:   // (machine)
-        	eventTypes[t].size = sizeof(EventMachineID);
-        	break;
-        
-        case EVENT_SEND_MESSAGE: //(msgtag, sender_process, sender_thread, receiver_machine, receiver_process, receiver_inport)
-        	eventTypes[t].size = sizeof(StgWord8) + sizeof(EventThreadID) 
-        	                     + 2 * sizeof(EventProcessID) + sizeof(EventPortID)
-        	                     + sizeof(EventMachineID);
-        	break;
-        	
-        case EVENT_RECEIVE_MESSAGE: // (msgtag, receiver_process, receiver_inport, sender_machine, sender_process, sender_outport, message_size)
-        	eventTypes[t].size = sizeof(StgWord8) + 2 * sizeof(EventProcessID)
-        	                     + 2 * sizeof(EventPortID) + sizeof(EventMachineID)
-        	                     + sizeof(StgInt32);
-        	break;
-        case EVENT_SEND_RECEIVE_LOCAL_MESSAGE: //(msgtag, sender_process, sender_thread, receiver_process, receiver_inport)
-        	eventTypes[t].size = sizeof(StgWord8) + sizeof(EventThreadID) 
-        	                     + 2 * sizeof(EventProcessID) + sizeof(EventPortID);
-        	break;
+            eventTypes[t].size = sizeof(EventMachineID);
+            break;
+
+        case EVENT_SEND_MESSAGE: //(msgtag, sender_process, _thread,
+                                 // receiver_machine, _process, _inport)
+            eventTypes[t].size = sizeof(StgWord8) + sizeof(EventThreadID)
+                                 + 2 * sizeof(EventProcessID)
+                                 + sizeof(EventPortID)
+                                 + sizeof(EventMachineID);
+            break;
+
+        case EVENT_RECEIVE_MESSAGE: // (msgtag, receiver_process, _inport,
+                                    // sender_machine, _process, _outport,
+                                    // message_size)
+            eventTypes[t].size = sizeof(StgWord8)
+                                 + 2 * sizeof(EventProcessID)
+                                 + 2 * sizeof(EventPortID)
+                                 + sizeof(EventMachineID)
+                                 + sizeof(StgInt32);
+            break;
+        case EVENT_SEND_RECEIVE_LOCAL_MESSAGE:
+            //(msgtag, sender_process, _thread, receiver_process, _inport)
+            eventTypes[t].size = sizeof(StgWord8) + sizeof(EventThreadID)
+                                 + 2 * sizeof(EventProcessID)
+                                 + sizeof(EventPortID);
+            break;
 
         case EVENT_HACK_BUG_T9003:
             eventTypes[t].size = 0;
@@ -523,10 +535,10 @@ initEventLogging(void)
 
     // Mark end of event types in the header.
     postInt32(&eventBuf, EVENT_HET_END);
-    
+
     // Write in buffer: the header end marker.
     postInt32(&eventBuf, EVENT_HEADER_END);
-    
+
     // Prepare event buffer for events (data).
     postInt32(&eventBuf, EVENT_DATA_BEGIN);
 
@@ -566,7 +578,7 @@ endEventLogging(void)
 
     if (event_log_file != NULL) {
         fclose(event_log_file);
-    }       
+    }
 }
 
 void
@@ -592,10 +604,10 @@ void
 freeEventLogging(void)
 {
     StgWord8 c;
-    
+
     // Free events buffer.
     for (c = 0; c < n_capabilities; ++c) {
-        if (capEventBuf[c].begin != NULL) 
+        if (capEventBuf[c].begin != NULL)
             stgFree(capEventBuf[c].begin);
     }
     if (capEventBuf != NULL)  {
@@ -606,7 +618,7 @@ freeEventLogging(void)
     }
 }
 
-void 
+void
 flushEventLog(void)
 {
     if (event_log_file != NULL) {
@@ -614,7 +626,7 @@ flushEventLog(void)
     }
 }
 
-void 
+void
 abortEventLogging(void)
 {
     freeEventLogging();
@@ -627,9 +639,9 @@ abortEventLogging(void)
  * If the buffer is full, prints out the buffer and clears it.
  */
 void
-postSchedEvent (Capability *cap, 
-                EventTypeNum tag, 
-                StgThreadID thread, 
+postSchedEvent (Capability *cap,
+                EventTypeNum tag,
+                StgThreadID thread,
                 StgWord info1,
                 StgWord info2)
 {
@@ -641,7 +653,7 @@ postSchedEvent (Capability *cap,
         // Flush event buffer to make room for new event.
         printAndClearEventBuf(eb);
     }
-    
+
     postEventHeader(eb, tag);
 
     switch (tag) {
@@ -725,7 +737,7 @@ postSparkEvent (Capability *cap,
 }
 
 void
-postSparkCountersEvent (Capability *cap, 
+postSparkCountersEvent (Capability *cap,
                         SparkCounters counters,
                         StgWord remaining)
 {
@@ -737,7 +749,7 @@ postSparkCountersEvent (Capability *cap,
         // Flush event buffer to make room for new event.
         printAndClearEventBuf(eb);
     }
-    
+
     postEventHeader(eb, EVENT_SPARK_COUNTERS);
     /* EVENT_SPARK_COUNTERS (crt,dud,ovf,cnv,gcd,fiz,rem) */
     postWord64(eb,counters.created);
@@ -759,7 +771,7 @@ postCapEvent (EventTypeNum  tag,
         // Flush event buffer to make room for new event.
         printAndClearEventBuf(&eventBuf);
     }
-    
+
     postEventHeader(&eventBuf, tag);
 
     switch (tag) {
@@ -895,7 +907,7 @@ void postWallClockTime (EventCapsetID capset)
     StgWord32 nsec;
 
     ACQUIRE_LOCK(&eventBufMutex);
-    
+
     /* The EVENT_WALL_CLOCK_TIME event is intended to allow programs
        reading the eventlog to match up the event timestamps with wall
        clock time. The normal event timestamps measure time since the
@@ -911,7 +923,7 @@ void postWallClockTime (EventCapsetID capset)
        the elapsed time vs the wall clock time. So to minimise the
        difference we just call them very close together.
      */
-    
+
     getUnixEpochTime(&sec, &nsec);  /* Get the wall clock time */
     ts = time_ns();                 /* Get the eventlog timestamp */
 
@@ -925,7 +937,7 @@ void postWallClockTime (EventCapsetID capset)
        timestamp we already generated above. */
     postEventTypeNum(&eventBuf, EVENT_WALL_CLOCK_TIME);
     postWord64(&eventBuf, ts);
-    
+
     /* EVENT_WALL_CLOCK_TIME (capset, unix_epoch_seconds, nanoseconds) */
     postCapsetID(&eventBuf, capset);
     postWord64(&eventBuf, sec);
@@ -950,7 +962,7 @@ void postHeapEvent (Capability    *cap,
         // Flush event buffer to make room for new event.
         printAndClearEventBuf(eb);
     }
-    
+
     postEventHeader(eb, tag);
 
     switch (tag) {
@@ -1014,7 +1026,7 @@ void postEventGcStats  (Capability    *cap,
         // Flush event buffer to make room for new event.
         printAndClearEventBuf(eb);
     }
-    
+
     postEventHeader(eb, EVENT_GC_STATS_GHC);
     /* EVENT_GC_STATS_GHC (heap_capset, generation,
                            copied_bytes, slop_bytes, frag_bytes,
@@ -1142,7 +1154,7 @@ void postLogMsg(EventsBuf *eb, EventTypeNum type, char *msg, va_list ap)
         // Flush event buffer to make room for new event.
         printAndClearEventBuf(eb);
     }
-   
+
     postEventHeader(eb, type);
     postPayloadSize(eb, size);
     postBuf(eb,(StgWord8*)buf,size);
@@ -1163,7 +1175,7 @@ void postCapMsg(Capability *cap, char *msg, va_list ap)
 void postUserMsg(Capability *cap, char *msg, va_list ap)
 {
     postLogMsg(&capEventBuf[cap->no], EVENT_USER_MSG, msg, ap);
-}    
+}
 
 void postEventStartup(EventCapNo n_caps)
 {
@@ -1279,7 +1291,7 @@ void postProgramInvocation(char *commandline)
 void postProcessEvent(EventProcessID pid, EventTypeNum tag)
 {
     ASSERT(tag == EVENT_CREATE_PROCESS || tag == EVENT_KILL_PROCESS);
-    
+
     EventsBuf *eb;
     eb = &eventBuf;
 
@@ -1288,13 +1300,14 @@ void postProcessEvent(EventProcessID pid, EventTypeNum tag)
         printAndClearEventBuf(eb);
     }
 
-    postEventHeader(eb, tag);	
+    postEventHeader(eb, tag);
     postProcessID(eb, pid);
 }
 
-void postAssignThreadToProcessEvent(Capability *cap, EventThreadID tid, EventProcessID pid)
+void postAssignThreadToProcessEvent(Capability *cap, EventThreadID tid,
+                                    EventProcessID pid)
 {
-	EventsBuf *eb;
+    EventsBuf *eb;
 
     eb = &capEventBuf[cap->no];
 
@@ -1308,10 +1321,11 @@ void postAssignThreadToProcessEvent(Capability *cap, EventThreadID tid, EventPro
     postProcessID(eb, pid);
 }
 
-void postCreateMachineEvent(EventMachineID pe, StgWord64 time,StgWord64 ticks, EventTypeNum tag)
+void postCreateMachineEvent(EventMachineID pe, StgWord64 time,
+                            StgWord64 ticks, EventTypeNum tag)
 {
     ASSERT(tag == EVENT_CREATE_MACHINE);
-    
+
     EventsBuf *eb;
 
     eb = &eventBuf;
@@ -1320,15 +1334,15 @@ void postCreateMachineEvent(EventMachineID pe, StgWord64 time,StgWord64 ticks, E
         // Flush event buffer to make room for new event.
         printAndClearEventBuf(eb);
     }
-    postEventHeaderTime(eb, tag, ticks);	
-    postMachineID(eb, pe); 
+    postEventHeaderTime(eb, tag, ticks);
+    postMachineID(eb, pe);
     postWord64(eb, time);
 }
 
 void postKillMachineEvent(EventMachineID pe, EventTypeNum tag)
 {
     ASSERT(tag == EVENT_KILL_MACHINE);
-    
+
     EventsBuf *eb;
 
     eb = &eventBuf;
@@ -1337,13 +1351,13 @@ void postKillMachineEvent(EventMachineID pe, EventTypeNum tag)
         // Flush event buffer to make room for new event.
         printAndClearEventBuf(eb);
     }
-      postEventHeader(eb, tag);	
+      postEventHeader(eb, tag);
     postMachineID(eb, pe);
 }
 
 void postSendMessageEvent(OpCode msgtag, rtsPackBuffer* buf)
 {
-	EventsBuf *eb;
+    EventsBuf *eb;
 
     eb = &eventBuf;
 
@@ -1352,8 +1366,8 @@ void postSendMessageEvent(OpCode msgtag, rtsPackBuffer* buf)
         printAndClearEventBuf(eb);
     }
 
-    postEventHeader(eb, EVENT_SEND_MESSAGE);	
-    postWord8(eb, msgtag); 
+    postEventHeader(eb, EVENT_SEND_MESSAGE);
+    postWord8(eb, msgtag);
     postProcessID(eb, buf->sender.process);
     postThreadID(eb, buf->sender.id);
     postMachineID(eb, buf->receiver.machine);
@@ -1363,7 +1377,7 @@ void postSendMessageEvent(OpCode msgtag, rtsPackBuffer* buf)
 
 void postReceiveMessageEvent(Capability *cap, OpCode msgtag, rtsPackBuffer* buf)
 {
-	EventsBuf *eb;
+    EventsBuf *eb;
 
     eb = &capEventBuf[cap->no];
 
@@ -1372,7 +1386,7 @@ void postReceiveMessageEvent(Capability *cap, OpCode msgtag, rtsPackBuffer* buf)
         printAndClearEventBuf(eb);
     }
 
-    postEventHeader(eb, EVENT_RECEIVE_MESSAGE);	
+    postEventHeader(eb, EVENT_RECEIVE_MESSAGE);
     postWord8(eb, msgtag);
     postProcessID(eb, buf->receiver.process);
     postPortID(eb, buf->receiver.id);
@@ -1382,9 +1396,11 @@ void postReceiveMessageEvent(Capability *cap, OpCode msgtag, rtsPackBuffer* buf)
     postInt32(eb, buf->size);
 }
 
-void postSendReceiveLocalMessageEvent(OpCode msgtag, EventProcessID spid, EventThreadID stid, EventProcessID rpid, EventPortID rpoid)
+void postSendReceiveLocalMessageEvent(OpCode msgtag, EventProcessID spid,
+                                      EventThreadID stid, EventProcessID rpid,
+                                      EventPortID rpoid)
 {
-	EventsBuf *eb;
+    EventsBuf *eb;
 
     eb = &eventBuf;
 
@@ -1393,8 +1409,8 @@ void postSendReceiveLocalMessageEvent(OpCode msgtag, EventProcessID spid, EventT
         printAndClearEventBuf(eb);
     }
 
-    postEventHeader(eb, EVENT_SEND_RECEIVE_LOCAL_MESSAGE);	
-    postWord8(eb, msgtag); 
+    postEventHeader(eb, EVENT_SEND_RECEIVE_LOCAL_MESSAGE);
+    postWord8(eb, msgtag);
     postProcessID(eb, spid);
     postThreadID(eb, stid);
     postProcessID(eb, rpid);
@@ -1407,11 +1423,12 @@ void printAndClearEventBuf (EventsBuf *ebuf)
     StgWord64 numBytes = 0, written = 0;
 
     closeBlockMarker(ebuf);
-    
-    
+
+
     if (ebuf->begin != NULL && ebuf->pos != ebuf->begin)
     {
         numBytes = ebuf->pos - ebuf->begin;
+
         written = fwrite(ebuf->begin, 1, numBytes, event_log_file);
         if (written != numBytes) {
             debugBelch(
@@ -1419,7 +1436,7 @@ void printAndClearEventBuf (EventsBuf *ebuf)
                 " doesn't match numBytes=%" FMT_Word64, written, numBytes);
             return;
         }
-        
+
         resetEventsBuf(ebuf);
         flushCount++;
 
@@ -1466,7 +1483,7 @@ StgBool hasRoomForVariableEvent(EventsBuf *eb, nat payload_bytes)
   } else  {
       return 1; // Buf has enough space for the event.
   }
-}    
+}
 
 void postEventType(EventsBuf *eb, EventType *et)
 {
@@ -1486,3 +1503,11 @@ void postEventType(EventsBuf *eb, EventType *et)
 }
 
 #endif /* TRACING */
+
+// Local Variables:
+// mode: C
+// fill-column: 80
+// indent-tabs-mode: nil
+// c-basic-offset: 4
+// buffer-file-coding-system: utf-8-unix
+// End:

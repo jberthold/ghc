@@ -40,6 +40,9 @@ Thumbs.db
 *.hp
 tests/**/*.ps
 *.stats
+Setup
+dist
+tmp.d
 
 *.dyn_o
 *.dyn_hi
@@ -50,6 +53,7 @@ tests/**/*.ps
 *.so
 *bindisttest_install___dir_bin_ghc.mk
 *bindisttest_install___dir_bin_ghc.exe.mk
+mk/ghcconfig_*_inplace_bin_ghc-stage1.mk
 mk/ghcconfig_*_inplace_bin_ghc-stage2.mk
 mk/ghcconfig_*_inplace_bin_ghc-stage2.exe.mk
 *.imports
@@ -102,17 +106,22 @@ mk/ghcconfig_*_inplace_bin_ghc-stage2.exe.mk
 /tests/cabal/cabal04/Setup
 /tests/cabal/cabal04/dist/
 /tests/cabal/cabal04/err
+/tests/cabal/cabal05/p-0.1.0.0/
+/tests/cabal/cabal05/q-0.1.0.0/
+/tests/cabal/cabal05/r-0.1.0.0/
 /tests/cabal/local01.package.conf/
 /tests/cabal/local03.package.conf/
 /tests/cabal/local04.package.conf/
 /tests/cabal/local05a.package.conf/
 /tests/cabal/local05b.package.conf/
 /tests/cabal/local06.package.conf/
+/tests/cabal/local07.package.conf/
 /tests/cabal/local1750.package.conf/
 /tests/cabal/localT1750.package.conf/
 /tests/cabal/localshadow1.package.conf/
 /tests/cabal/localshadow2.package.conf/
 /tests/cabal/package.conf.*/
+/tests/cabal/recache_reexport_db/package.cache
 /tests/cabal/shadow.hs
 /tests/cabal/shadow1.out
 /tests/cabal/shadow2.out
@@ -351,6 +360,7 @@ mk/ghcconfig_*_inplace_bin_ghc-stage2.exe.mk
 /tests/concurrent/should_run/throwto003
 /tests/concurrent/should_run/tryReadMVar1
 /tests/concurrent/should_run/tryReadMVar2
+/tests/concurrent/should_run/threadstatus-9333
 /tests/cpranal/should_run/CPRRepeat
 /tests/deSugar/should_run/DsLambdaCase
 /tests/deSugar/should_run/DsMultiWayIf
@@ -651,6 +661,7 @@ mk/ghcconfig_*_inplace_bin_ghc-stage2.exe.mk
 /tests/ffi/should_run/fptrfail01
 /tests/gadt/CasePrune
 /tests/gadt/Session
+/tests/gadt/T9380
 /tests/gadt/gadt2
 /tests/gadt/gadt23
 /tests/gadt/gadt4
@@ -1059,6 +1070,8 @@ mk/ghcconfig_*_inplace_bin_ghc-stage2.exe.mk
 /tests/parser/unicode/1744
 /tests/parser/unicode/T1744
 /tests/parser/unicode/utf8_024
+/tests/patsyn/should_run/bidir-explicit
+/tests/patsyn/should_run/bidir-explicit-scope
 /tests/patsyn/should_run/eval
 /tests/patsyn/should_run/ex-prov
 /tests/patsyn/should_run/ex-prov-run
@@ -1130,6 +1143,7 @@ mk/ghcconfig_*_inplace_bin_ghc-stage2.exe.mk
 /tests/perf/should_run/T7954
 /tests/perf/should_run/T876
 /tests/perf/should_run/T9203
+/tests/perf/should_run/T9339
 /tests/perf/should_run/lazy-bs-alloc
 /tests/perf/should_run/lazy-bs-alloc.stats
 /tests/perf/should_run/speed.f32

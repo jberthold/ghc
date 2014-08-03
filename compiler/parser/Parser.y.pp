@@ -286,8 +286,9 @@ incorrect.
  '{-# NOVECTORISE'        { L _ ITnovect_prag }
  '{-# MINIMAL'            { L _ ITminimal_prag }
  '{-# CTYPE'              { L _ ITctype }
- '{-# NO_OVERLAP'         { L _ ITno_overlap_prag }
- '{-# OVERLAP'            { L _ IToverlap_prag }
+ '{-# OVERLAPPING'        { L _ IToverlapping_prag }
+ '{-# OVERLAPPABLE'       { L _ IToverlappable_prag }
+ '{-# OVERLAPS'           { L _ IToverlaps_prag }
  '{-# INCOHERENT'         { L _ ITincoherent_prag }
  '#-}'                                          { L _ ITclose_prag }
 
@@ -707,10 +708,11 @@ inst_decl :: { LInstDecl RdrName }
                                      (unLoc $5) (unLoc $6) (unLoc $7) }
 
 overlap_pragma :: { Maybe OverlapMode }
-  : '{-# OVERLAP'    '#-}'    { Just OverlapOk  }
-  | '{-# INCOHERENT' '#-}'    { Just Incoherent }
-  | '{-# NO_OVERLAP' '#-}'    { Just NoOverlap  }
-  | {- empty -}               { Nothing }
+  : '{-# OVERLAPPABLE'    '#-}' { Just Overlappable }
+  | '{-# OVERLAPPING'     '#-}' { Just Overlapping }
+  | '{-# OVERLAPS'        '#-}' { Just Overlaps }
+  | '{-# INCOHERENT'      '#-}' { Just Incoherent }
+  | {- empty -}                 { Nothing }
 
 
 -- Closed type families
@@ -846,16 +848,28 @@ role : VARID             { L1 $ Just $ getVARID $1 }
 
 -- Glasgow extension: pattern synonyms
 pattern_synonym_decl :: { LHsDecl RdrName }
-        : 'pattern' con vars0 patsyn_token pat { LL . ValD $ mkPatSynBind $2 (PrefixPatSyn $3) $5 $4 }
-        | 'pattern' varid conop varid patsyn_token pat { LL . ValD $ mkPatSynBind $3 (InfixPatSyn $2 $4) $6 $5 }
+        : 'pattern' pat '=' pat
+            {% do { (name, args) <- splitPatSyn $2
+                  ; return $ LL . ValD $ mkPatSynBind name args $4 ImplicitBidirectional
+                  }}
+        | 'pattern' pat '<-' pat
+            {% do { (name, args) <- splitPatSyn $2
+                  ; return $ LL . ValD $ mkPatSynBind name args $4 Unidirectional
+                  }}
+        | 'pattern' pat '<-' pat where_decls
+            {% do { (name, args) <- splitPatSyn $2
+                  ; mg <- toPatSynMatchGroup name $5
+                  ; return $ LL . ValD $
+                    mkPatSynBind name args $4 (ExplicitBidirectional mg)
+                  }}
+
+where_decls :: { Located (OrdList (LHsDecl RdrName)) }
+        : 'where' '{' decls '}'       { $3 }
+        | 'where' vocurly decls close { $3 }
 
 vars0 :: { [Located RdrName] }
         : {- empty -}                 { [] }
         | varid vars0                 { $1 : $2 }
-
-patsyn_token :: { HsPatSynDir RdrName }
-        : '<-' { Unidirectional }
-        | '='  { ImplicitBidirectional }
 
 -----------------------------------------------------------------------------
 -- Nested declarations
