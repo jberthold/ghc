@@ -5,11 +5,11 @@
  *
  * Contains the high-level routines (i.e. communication
  * subsystem independent) used by GUM
- * 
+ *
  * GUM 0.2x: Phil Trinder, Glasgow University, 12 December 1994
  * GUM 3.xx: Phil Trinder, Simon Marlow July 1998
  * GUM 4.xx: H-W. Loidl, Heriot-Watt University, November 1999 -
- * 
+ *
  * GenPar 6.x: J.Berthold, Philipps-Universität Marburg 2006
  *      this file contains routines for *data* communication only
  * ------------------------------------------------------------------------- */
@@ -33,44 +33,44 @@
 
 #include <unistd.h> // getpid, in choosePE
 
-nat targetPE = 0; 
+nat targetPE = 0;
 
 /*
  * ChoosePE selects a PE number between 1 and nPEs, either 'at
  * random' or round-robin, starting with thisPE+1
  */
-static nat 
+static nat
 choosePE(void)
 {
   nat temp;
 
   // initialisation
-  if (targetPE == 0) { 
-    targetPE = (nPEs == thisPE) ? 1 : (thisPE + 1); 
+  if (targetPE == 0) {
+    targetPE = (nPEs == thisPE) ? 1 : (thisPE + 1);
     srand48(getpid());  // seed for random placement
   }
 
   if (RtsFlags.ParFlags.placement & 1) // random
     temp = 1 + (nat) (lrand48() % nPEs);
   else {// round-robin
-    temp = targetPE; 
+    temp = targetPE;
     targetPE = (targetPE >= nPEs) ? 1 : (targetPE + 1);
   }
   if ((RtsFlags.ParFlags.placement & 2) // no local placement
-      && (temp ==  thisPE)) { 
+      && (temp ==  thisPE)) {
     temp = (temp ==  nPEs) ? 1 : (temp + 1);
   }
   IF_PAR_DEBUG(procs,
-	       debugBelch("chosen: %d, new targetPE == %d\n", 
-			  temp,targetPE));
+               debugBelch("chosen: %d, new targetPE == %d\n",
+                          temp,targetPE));
   return temp;
 }
 
 
 /* Communication between machines and processes:
- *   Machines and Processes communicate messages tagged with 
+ *   Machines and Processes communicate messages tagged with
  *   "OpCodes" (defined in PEOpCodes.h) and exchange packed
- *   subgraphs of heap closures. 
+ *   subgraphs of heap closures.
  *   Besides, the MP-System has its own messages, not treated here.
  *
  * Structure of standard (non-MPSystem) messages:
@@ -79,7 +79,7 @@ choosePE(void)
  * | Sender | Receiver | id | tso | nelem | data(length nelem) |
  * -------------------------------------------------------------
  * |<------------- rtsPackBuffer ----------------------------->|
- * 
+ *
  * The rtsPackBuffer is defined to capture exactly this structure
  * (includes the sender and receiver), so we can just send it away
  * as-is and only have to compute the size.
@@ -99,23 +99,23 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
 
   ASSERT(!(isNoPort(dataBuffer->sender)));
   ASSERT(!(isNoPort(dataBuffer->receiver)));
-  
+
   ASSERT(dataBuffer->sender.machine == thisPE);
 
   destinationPE = dataBuffer->receiver.machine;
   ASSERT(destinationPE != 0); // PEs are (1..nPEs), 0 impossible
 
   IF_PAR_DEBUG(ports,
-	       debugBelch("sending message %s (%#0x) to machine %d\n",
-			  getOpName(tag), tag, destinationPE);
-	       debugBelch("Sender: (%d,%" FMT_Word ",%" FMT_Word
+               debugBelch("sending message %s (%#0x) to machine %d\n",
+                          getOpName(tag), tag, destinationPE);
+               debugBelch("Sender: (%d,%" FMT_Word ",%" FMT_Word
                           "), Receiver (%d,%" FMT_Word ",%" FMT_Word ")\n",
-			  dataBuffer->sender.machine, 
-			  dataBuffer->sender.process, 
-			  dataBuffer->sender.id,
-			  dataBuffer->receiver.machine, 
-			  dataBuffer->receiver.process, 
-			  dataBuffer->receiver.id));
+                          dataBuffer->sender.machine,
+                          dataBuffer->sender.process,
+                          dataBuffer->sender.id,
+                          dataBuffer->receiver.machine,
+                          dataBuffer->receiver.process,
+                          dataBuffer->receiver.id));
 
   if (dataBuffer->size != 0) {
     size = sizeof(rtsPackBuffer) + sizeof(StgWord)*dataBuffer->size;
@@ -124,12 +124,12 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
   }
 
   if (MP_send(destinationPE, tag, (StgWord8*) dataBuffer, size)) {
-    
+
     // edentrace: emit event sendMessage(tag,dataBuffer)
     traceSendMessageEvent(tag,dataBuffer);
     IF_PAR_DEBUG(ports,
-	       debugBelch("finished sending message to %d\n",
-			  destinationPE));
+                 debugBelch("finished sending message to %d\n",
+                            destinationPE));
     return rtsTrue;
   } else {
     return rtsFalse;
@@ -137,13 +137,13 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
 }
 
 
-// fwd declaration 
-int fakeDataMsg(StgClosure *graph, Port sender, Port receiver, 
-		Capability * cap, OpCode tag);
+// fwd declaration
+int fakeDataMsg(StgClosure *graph, Port sender, Port receiver,
+                Capability * cap, OpCode tag);
 
 int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data);
 /* sendWrapper
- * 
+ *
  * This function is intended as a lean interface for primitive
  * operations. From the RTS, we should use sendMsg above instead of
  * bloating this place with even more functionality. However, we may
@@ -167,11 +167,11 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data);
  *        and received on the RtsPort       (target ,  0    , 0 )
  */
 int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
-  
+
   rtsPackBuffer *packedData = (rtsPackBuffer*) NULL;
   rtsPackBuffer dummyBuffer;
   OpCode sendTag = 0;
-  int success=MSG_OK; // indicates successful packing, becomes return value 
+  int success=MSG_OK; // indicates successful packing, becomes return value
                       // codes defined in includes/rts/Constants.h
 
   int m; // mode 0..7
@@ -194,8 +194,8 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
   m = mode & 007;
   d = mode >> 3;
   IF_PAR_DEBUG(ports,
-	       debugBelch("sendWrapper: mode %d = ( %d | %d )\n", 
-			  mode, d, m));
+               debugBelch("sendWrapper: mode %d = ( %d | %d )\n",
+                          mode, d, m));
   switch (m) {
   case 1: // connection message, could be part of "connectToPort#"
     sendTag = PP_CONNECT;
@@ -227,7 +227,7 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
   case 4: // rFork: single data, different tag, d is target
     sendTag = PP_RFORK;
 
-    // d might be an explicit target PE... 
+    // d might be an explicit target PE...
     if (d == 0) { // select by RTS placement policy
       d = choosePE();
     } else {      // gets adjusted to 1..nPEs
@@ -239,23 +239,23 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     receiver = &rtsPort;
     receiver->machine = d; // other machine's RtsPort
     goto packData; // brrr..
-    
+
     /* insert new modes here, document them above and in
-     * primops.txt.pp. 
-     * 
+     * primops.txt.pp.
+     *
      * Possible free modes are 0,5,6,7 (see PLACEMENT HACK)
      * and may carry payload data in higher bits.
      */
 
   packData:
     // shortcut if sender and receiver share the same heap
-    if ( (sender.machine == receiver->machine) 
-	 //   conceptually OK if same process, in practice, same machine is enough
+    if ( (sender.machine == receiver->machine)
+       // conceptually OK if same process, in practice, same machine is enough
 #ifdef PEDANTIC
-	 && (sender.process == receiver->process)
+         && (sender.process == receiver->process)
 #endif
-	 //   we do this only for DATA and HEAD messages, tags 2 and 3
-	 && (m & 2)) {
+         //   we do this only for DATA and HEAD messages, tags 2 and 3
+         && (m & 2)) {
       // do processDataMsg() directly w/o unpacking, defined at the bottom
       return fakeDataMsg(data, sender, *receiver, sendingtso->cap, sendTag);
     }
@@ -269,15 +269,15 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
 
     packedData = PackNearbyGraph(data, sendingtso);
 
-    // graph might contain blackholes, in which case sendingtso 
+    // graph might contain blackholes, in which case sendingtso
     // blocks (state set in PackNearbyGraph, blocked when returning
     // success == MSG_BLOCKED to the calling primop sendData# )
     if (isPackError(packedData)) {
       switch ((StgWord)packedData) {
-      case P_BLACKHOLE: 
+      case P_BLACKHOLE:
         success = MSG_BLOCKED;
         break;
-      case P_NOBUFFER: 
+      case P_NOBUFFER:
         stg_exit(EXIT_FAILURE);
       default:
         stg_exit(EXIT_FAILURE);
@@ -304,7 +304,9 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     }
     RELEASE_LOCK(&pack_mutex);
 
-    IF_PAR_DEBUG(mpcomm,debugBelch("Sending of message from thread %d returned code %d\n", (int) sendingtso->id, success));
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("Sending message by thread %d returned code %d\n",
+                            (int) sendingtso->id, success));
   }
   if (success == MSG_BLOCKED || success == MSG_FAILED) {
     // in rFork case, packing might have failed, so RR-placement must
@@ -312,14 +314,14 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     if ( m==4 && (mode >> 3) == 0) {
       targetPE = (targetPE == 1) ? nPEs : (targetPE - 1);
       IF_PAR_DEBUG(pack,
-		   debugBelch("packing failed, resetting target PE to %d)\n", 
-			      targetPE));
+                   debugBelch("packing failed, resetting target PE to %d)\n",
+                              targetPE));
     }
   }
 
   // restore receiver (for rFork case only)
   //  setReceiver(sendingtso,
-  //	      savePort.machine, savePort.process, savePort.id);
+  //              savePort.machine, savePort.process, savePort.id);
 
   return success;
 }
@@ -327,7 +329,7 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
 
 
 /* Heap Data Messages: Data, Head, Constr
- *   contains a subgraph. Receiving triggers a new process which 
+ *   contains a subgraph. Receiving triggers a new process which
  *   evaluates the sent subgraph (see Schedule.c::processMessages)
  *
  *   Sending is triggered by a primitive operation.
@@ -339,30 +341,30 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
   StgClosure *placeholder;
 
   IF_PAR_DEBUG(pack,
-	       debugBelch("Processing data message (%s, tag %#0x)\n",
-			  getOpName(tag), tag));
+               debugBelch("Processing data message (%s, tag %#0x)\n",
+                          getOpName(tag), tag));
 
   ASSERT(gumPackBuffer->receiver.process != 0);
   inport = findInportByP(gumPackBuffer->receiver);
 
   if (inport == NULL) {
     IF_PAR_DEBUG(ports,
-		 errorBelch("unknown inport: Port (%d,%" 
+                 errorBelch("unknown inport: Port (%d,%"
                             FMT_Word ",%" FMT_Word ")\n",
-			    gumPackBuffer->receiver.machine, 
-			    gumPackBuffer->receiver.process, 
-			    gumPackBuffer->receiver.id));
+                            gumPackBuffer->receiver.machine,
+                            gumPackBuffer->receiver.process,
+                            gumPackBuffer->receiver.id));
     // just ignore the message... (shrug)
     return;
   }
 
   if (!(equalPorts(inport->sender,gumPackBuffer->sender))) {
     IF_PAR_DEBUG(ports,
-		 debugBelch("Sender (%d,%" 
+                 debugBelch("Sender (%d,%"
                             FMT_Word ",%" FMT_Word ") not connected yet\n",
-			    gumPackBuffer->sender.machine, 
-			    gumPackBuffer->sender.process, 
-			    gumPackBuffer->sender.id));
+                            gumPackBuffer->sender.machine,
+                            gumPackBuffer->sender.process,
+                            gumPackBuffer->sender.id));
     if (tag != PP_DATA)
       connectInportByP(gumPackBuffer->receiver, gumPackBuffer->sender);
   }
@@ -387,17 +389,17 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
       temp            = createBH(cap); // new tail node
       inport->closure = temp;
       // graph becomes head, BH becomes tail:
-      list = createListNode(cap, graph, temp); 
+      list = createListNode(cap, graph, temp);
       IF_PAR_DEBUG(pack,
-		   debugBelch("HEAD message: created list node %p/new BH %p\n",
-			      list, temp));
+                   debugBelch("HEAD message: created list node %p/new BH %p\n",
+                              list, temp));
       graph = list;
       break;
     }
   case PP_DATA:
     IF_PAR_DEBUG(pack,
-		 debugBelch("DATA message, removing inport %d\n",
-			    (int) gumPackBuffer->receiver.id));
+                 debugBelch("DATA message, removing inport %d\n",
+                            (int) gumPackBuffer->receiver.id));
     removeInportByP(gumPackBuffer->receiver);
     break;
 
@@ -409,8 +411,8 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
   traceReceiveMessageEvent(cap,tag,gumPackBuffer);
   // and update the old blackhole
   IF_PAR_DEBUG(pack,
-	       debugBelch("Replacing Blackhole @ %p by node %p\n",
-			  placeholder, graph));
+               debugBelch("Replacing Blackhole @ %p by node %p\n",
+                          placeholder, graph));
 
   // use system tso as owner when waking up blocked threads
   updateThunk(cap, (StgTSO*) &stg_system_tso, placeholder, graph);
@@ -422,43 +424,43 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
  *   duplication. Returns sendWrapper return codes (see sendWrapper).
  */
 int
-fakeDataMsg(StgClosure *graph, 
-	    Port sender, Port receiver, 
-	    Capability * cap, OpCode tag) {
+fakeDataMsg(StgClosure *graph,
+            Port sender, Port receiver,
+            Capability * cap, OpCode tag) {
   Inport* inport;
   StgClosure *placeholder;
 
   IF_PAR_DEBUG(pack,
-	       debugBelch("shortcut for data message (%s, tag %#0x), data %p\n",
-			  getOpName(tag), tag, graph));
+               debugBelch("shortcut for data message (%s, tag %#0x), data %p\n",
+                          getOpName(tag), tag, graph));
 
   // should only be called when sender and receiver share heap
   ASSERT(sender.machine == receiver.machine
 #ifdef PEDANTIC
-	 && sender.process == receiver.process
+         && sender.process == receiver.process
 #endif
-	 );
+         );
 
   inport = findInportByP(receiver);
 
   if (inport == NULL) {
     IF_PAR_DEBUG(ports,
-		 errorBelch("fakeDataMsg: unknown inport: Port (%d,%"
+                 errorBelch("fakeDataMsg: unknown inport: Port (%d,%"
                             FMT_Word ",%" FMT_Word ")\n",
-			    receiver.machine, 
-			    receiver.process, 
-			    receiver.id));
+                            receiver.machine,
+                            receiver.process,
+                            receiver.id));
     // should not happen... but just ignore (MSG_FAILED would retry)
     return MSG_OK;
   }
 
   if (!(equalPorts(inport->sender,sender))) {
     IF_PAR_DEBUG(ports,
-		 debugBelch("fakeDataMsg: Sender (%d,%"
+                 debugBelch("fakeDataMsg: Sender (%d,%"
                             FMT_Word ",%" FMT_Word ") not connected yet\n",
-			    sender.machine, 
-			    sender.process, 
-			    sender.id));
+                            sender.machine,
+                            sender.process,
+                            sender.id));
     if (tag != PP_DATA)
       connectInportByP(receiver, sender);
   }
@@ -474,18 +476,18 @@ fakeDataMsg(StgClosure *graph,
       temp            = createBH(cap); // new tail node
       inport->closure = temp;
       // graph becomes head, BH becomes tail:
-      list = createListNode(cap, graph, temp); 
+      list = createListNode(cap, graph, temp);
       IF_PAR_DEBUG(pack,
-		   debugBelch("fakeDataMsg: HEAD message:" 
-			      " created list node %p/new BH %p\n",
-			      list, temp));
+                   debugBelch("fakeDataMsg: HEAD message:"
+                              " created list node %p/new BH %p\n",
+                              list, temp));
       graph = list;
       break;
     }
   case PP_DATA:
     IF_PAR_DEBUG(pack,
-		 debugBelch("fakeDataMsg: DATA message, removing inport %d\n",
-			    (int) receiver.id));
+                 debugBelch("fakeDataMsg: DATA message, removing inport %d\n",
+                            (int) receiver.id));
     removeInportByP(receiver);
     break;
 
@@ -493,12 +495,13 @@ fakeDataMsg(StgClosure *graph,
     barf("fakeDataMsg: unexpected tag %#0x \n", tag);
   }
   // edentrace: emit event sendMessage(tag,dataBuffer)
-  traceSendReceiveLocalMessageEvent(tag,sender.process,sender.id,receiver.process,receiver.id);
-  
+  traceSendReceiveLocalMessageEvent(tag,sender.process,sender.id,
+                                    receiver.process,receiver.id);
+
   // and update the old blackhole
   IF_PAR_DEBUG(pack,
-	       debugBelch("fakeDataMsg: Replacing Blackhole @ %p by node %p\n",
-			  placeholder, graph));
+               debugBelch("fakeDataMsg: Replacing Blackhole @ %p by node %p\n",
+                          placeholder, graph));
 
   // use system tso as owner when waking up blocked threads
   updateThunk(cap, (StgTSO*) &stg_system_tso, placeholder, graph);

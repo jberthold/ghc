@@ -1,9 +1,9 @@
-/* 
+/*
  * Generalised RTE for parallel Haskells.
  *
  * File: ghc/rts/parallel/PVMComm.c
  *
- * Purpose: map generalised Comm.functions to PVM, 
+ * Purpose: map generalised Comm.functions to PVM,
  * abstracting from the concrete MP-System
  *
  * Comments:
@@ -28,7 +28,7 @@ send data format is always PvmDataRaw, containing longs
 #include <libgen.h> // for basename() function
 
 // pvm-specific error control:
-#define checkComms(c,s)		do {                  \
+#define checkComms(c,s)         do {                  \
                                   if ((c)<0) {        \
                                     pvm_perror(s);    \
                                     Failure = rtsTrue;\
@@ -74,13 +74,13 @@ char* pvmError[] = {
   [-PvmNotFound] = "PvmNotFound", /* Not Found */
   [-PvmExists] = "PvmExists", /* Already exists */
   [-PvmHostrNMstr] = "PvmHostrNMstr", /* Hoster run on non-master host */
-  [-PvmParentNotSet] = "PvmParentNotSet", /* Spawning parent set PvmNoSpawnParent */
+  [-PvmParentNotSet] = "PvmParentNotSet", /* parent set PvmNoSpawnParent */
   [-PvmIPLoopback] = "PvmIPLoopback" /* Master Host's IP is Loopback */
 };
 
 // Global conditions defined here.
 // main thread (PE 1 in logical numbering)
-rtsBool	IAmMainThread = rtsFalse;	// Set this for the main PE
+rtsBool IAmMainThread = rtsFalse;       // Set this for the main PE
 rtsBool Failure = rtsFalse; // Set this in case of error shutdown
 // nPEs, thisPE
 nat nPEs = 0; // number of PEs in system
@@ -93,7 +93,7 @@ nat thisPE=0;
 int finishRecvd=0;
 
 // these were in SysMan in the good old days
-// GlobalTaskId  mytid; 
+// GlobalTaskId  mytid;
 
 int pvmMyself; // node's own address in pvm
 int pvmParent; // the parent's address (parent is master node)
@@ -109,15 +109,15 @@ int allPEs[MAX_PES]; // array of all PEs (mapping from logical node no.s to pvm 
  *
  * Note that messages with ISMPCODE(msg-code) must be entirely
  * handled inside this file, and therefore have absolute priority.
- * 
- * Every implementation of MPSystem.h can decide which messages 
- * to snatch in this way and how to process them. The solution 
+ *
+ * Every implementation of MPSystem.h can decide which messages
+ * to snatch in this way and how to process them. The solution
  * below is only for PVM.
- */ 
+ */
 
 // MP messages, concern the internals of the MP system only
 #define ISMPCODE(code)    ((code) == PP_READY  || \
-			   (code) == PP_NEWPE  || \
+                           (code) == PP_NEWPE  || \
                            (code) == PP_PETIDS || \
                            (code) == PP_FAIL)
 
@@ -130,21 +130,23 @@ static void MPMsgHandle(OpCode code, int buffer) {
   int t;
 
   ASSERT(ISMPCODE(code)); // we only want to see internal messages...
-  IF_PAR_DEBUG(mpcomm, 
-	       debugBelch("MPMsgHandle: handling a message with tag %x\n", code));
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MPMsgHandle: handling a message with tag %x\n",
+                          code));
 
   if (buffer == 0)  // recv. message, if not previously received
     buffer = pvm_recv(ANY_TASK, code);
   pvm_bufinfo(buffer, &bytes, &code, &task);
 
   switch(code) {
-  case PP_NEWPE: 
+  case PP_NEWPE:
     // new PE wants to join the system.
     ASSERT(IAmMainThread);
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("Ignoring NEWPE(%x) message from PE %x\n", code, task));
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("Ignoring NEWPE(%x) message from PE %x\n",
+                            code, task));
     break;
-  case PP_FAIL: 
+  case PP_FAIL:
     // one of the PEs has failed
     ASSERT(IAmMainThread);
     pvm_upkint(&t,1,1);
@@ -154,9 +156,9 @@ static void MPMsgHandle(OpCode code, int buffer) {
       whofailed++;
     }
     debugBelch("System failure on node %d (%x).\n", whofailed+1, (nat)t);
-    // delete from PE address table (avoid errors in shutdown). 
+    // delete from PE address table (avoid errors in shutdown).
     if (whofailed < nPEs) { // found the terminated PE
-      allPEs[whofailed] = 0; 
+      allPEs[whofailed] = 0;
     }
     // JB: q&d solution for debugging GUM (global stop on first
     // error). RACE CONDITION on multiple failures!
@@ -170,8 +172,9 @@ static void MPMsgHandle(OpCode code, int buffer) {
     // update of PE addresses (update due to PE failure, or a new PE).
 
   // stop execution! (not implemented)
-    barf("MPSystem PVM: receiving MP-Code %x from PE %x outside startup phase\n", code, task);
-  default: 
+    barf("MPSystem PVM: receiving MP-Code %x from PE %x after startup\n",
+         code, task);
+  default:
     barf("MPMsgHandle: Strange unimplemented OpCode %x",code);
   }
 }
@@ -179,23 +182,23 @@ static void MPMsgHandle(OpCode code, int buffer) {
 /**************************************************************
  * Startup and Shutdown routines (used inside ParInit.c only) */
 
-/* MP_start starts up the node: 
- *   - connects to the MP-System used, 
+/* MP_start starts up the node:
+ *   - connects to the MP-System used,
  *   - determines wether we are main thread
- *   - starts up other nodes in case we are first and 
+ *   - starts up other nodes in case we are first and
  *     the MP-System requires to spawn nodes from here.
  * Global Var.s set here:
  *   nPEs (main only)- int: no. of PEs
  *   IAmMainThread - Bool: wether this node is main PE
- * Parameters: 
+ * Parameters:
  *     IN/OUT    argc  - int*   : prog. arg. count
  *     IN/OUT    argv  - char***: program arguments (for pvm-spawn/mpi-init)
  *      (first argument added by a start script, removed here)
  * Returns: Bool: success (1) or failure (0)
  *
- * For PVM: 
- *   MP_start first registers with PVM. 
- *   Then it checks wether it has a pvm-parent. 
+ * For PVM:
+ *   MP_start first registers with PVM.
+ *   Then it checks wether it has a pvm-parent.
  *   If not, it must be the first (i.e. main) node; it will start
  *   (spawn) the others (care that all available nodes are used. PVM
  *   tends to start multiple tasks on the local host).
@@ -206,7 +209,7 @@ static void MPMsgHandle(OpCode code, int buffer) {
  *
  */
 rtsBool MP_start(int* argc, char** argv[]) {
-  
+
   if (*argc < 2) {
     debugBelch("Need argument to specify number of PEs");
     exit(EXIT_FAILURE);
@@ -216,17 +219,17 @@ rtsBool MP_start(int* argc, char** argv[]) {
   if ((*argv)[1][0] == '-') {
     RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
     IF_PAR_DEBUG(mpcomm,
-		 debugBelch("PVM debug mode! Starting\n"));
+                 debugBelch("PVM debug mode! Starting\n"));
   }
 
-  IF_PAR_DEBUG(mpcomm, 
-	       debugBelch("Entered MP startup\n"));
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("Entered MP startup\n"));
 
   checkComms(pvmMyself = pvm_mytid(),// node starts or joins pvm
-	     "PVM -- Failure on startup: ");
+             "PVM -- Failure on startup: ");
 
-  IF_PAR_DEBUG(mpcomm, 
-	       debugBelch("Connected to pvm\n"));
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("Connected to pvm\n"));
 
   pvmParent = pvm_parent(); // determine master
 
@@ -234,18 +237,18 @@ rtsBool MP_start(int* argc, char** argv[]) {
 // code for the main node:
     char *progname, *tmp;
     int nArch, nHost;
-    struct pvmhostinfo *hostp; 
+    struct pvmhostinfo *hostp;
     int taskTag = PvmTaskDefault;
-  
+
     // no parent => we are the main node
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("I am main node\n"));
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("I am main node\n"));
     IAmMainThread = rtsTrue;
     allPEs[0]=pvmMyself; // first node in array is main
 
     // get pvm config for spawning other tasks
     checkComms(pvm_config(&nHost,&nArch,&hostp),
-	       "PVM -- get config: ");
+               "PVM -- get config: ");
 
     // we should have a correct argument...
     ASSERT(argv && (*argv)[1]);
@@ -261,13 +264,13 @@ rtsBool MP_start(int* argc, char** argv[]) {
 
     // determine number of nodes, if not given
     if (!(nPEs)) {
-      IF_PAR_DEBUG(mpcomm, 
-		   debugBelch("nPEs not set explicitly (arg is %s)\n",
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("nPEs not set explicitly (arg is %s)\n",
                               (*argv)[1]));
       nPEs = nHost;
     }
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("Nodes requested: %d\n", nPEs));
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("Nodes requested: %d\n", nPEs));
 
     // refuse to create more PEs than the system can contain
     // see MPSystem.h for MAX_PES
@@ -279,8 +282,8 @@ rtsBool MP_start(int* argc, char** argv[]) {
 
     if (nPEs > 1) {
       /*   if needed, we spawn the program (the same name as ourselves),
-	   assuming it is in scope in $PVM_ROOT/bin/$PVM_ARCH.
-	   This variable has been set by the generated startup script. */
+           assuming it is in scope in $PVM_ROOT/bin/$PVM_ARCH.
+           This variable has been set by the generated startup script. */
       int i, myHost;
       nat tasks;
 
@@ -289,76 +292,76 @@ rtsBool MP_start(int* argc, char** argv[]) {
       tmp = strdup((*argv)[0]);
       progname = basename(tmp);
 
-      IF_PAR_DEBUG(mpcomm, 
-		   debugBelch("Spawning pvm-program %s\n",progname));
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("Spawning pvm-program %s\n",progname));
 
       // spawn all other nodes, specify available hosts until all used
       // or enough tasks spawned
       myHost = pvm_tidtohost(pvmMyself);
       for(tasks=1, i=0; tasks < nPEs && i < nHost; i++) {
-	if(hostp[i].hi_tid != myHost) {
-	  checkComms(-1+pvm_spawn(progname, &((*argv)[1]),
+        if(hostp[i].hi_tid != myHost) {
+          checkComms(-1+pvm_spawn(progname, &((*argv)[1]),
                                   taskTag | PvmTaskHost,
-			          hostp[i].hi_name, 1, allPEs+tasks),
-		     "PVM -- task startup");
-	  tasks++;
-	}
+                                  hostp[i].hi_name, 1, allPEs+tasks),
+                     "PVM -- task startup");
+          tasks++;
+        }
       }
       // rest anywhere pvm likes. If this fails, error code is in
       // allPEs array (at offset)
       if (tasks < nPEs) {
-	tasks += pvm_spawn(progname, &((*argv)[1]), taskTag, 
-			       (char*)NULL, nPEs-tasks, allPEs+tasks);
+        tasks += pvm_spawn(progname, &((*argv)[1]), taskTag,
+                           (char*)NULL, nPEs-tasks, allPEs+tasks);
       }
       i = nPEs - tasks;
       while (i > 0) {
-	// some spawns went wrong, output error codes from allPEs array
-	debugBelch("PVM could not start node %d: %s (%d)\n",
-		   nPEs-i+1, pvmError[-allPEs[nPEs-i]], allPEs[nPEs-i]);
-	i--;
+        // some spawns went wrong, output error codes from allPEs array
+        debugBelch("PVM could not start node %d: %s (%d)\n",
+                   nPEs-i+1, pvmError[-allPEs[nPEs-i]], allPEs[nPEs-i]);
+        i--;
       }
 
-      IF_PAR_DEBUG(mpcomm, 
-		   debugBelch("%d tasks in total\n", tasks));
+      IF_PAR_DEBUG(mpcomm,
+                   debugBelch("%d tasks in total\n", tasks));
 
       // possibly correct nPEs value:
       nPEs=tasks;
-      
+
       // we might end up having started nothing...
       if (nPEs > 1) {
 
-	// broadcast returned addresses
-	pvm_initsend(PvmDataRaw);
-	pvm_pkint((int*)&nPEs, 1, 1);
-	IF_PAR_DEBUG(mpcomm, 
-		     debugBelch("Packing allPEs array\n"));
-	pvm_pkint(allPEs, nPEs, 1);
-	checkComms(pvm_mcast(allPEs+1, nPEs-1,PP_PETIDS),
-		   "PVM -- Multicast of PE mapping failed");
-	IF_PAR_DEBUG(mpcomm, 
-		     debugBelch("Broadcasted addresses: \n"));
-	
-	// register for receiving failure notice (by PP_FAIL) from children
-	checkComms(pvm_notify(PvmTaskExit, PP_FAIL, nPEs-1, allPEs+1),
-		   "pvm_notify error");
+        // broadcast returned addresses
+        pvm_initsend(PvmDataRaw);
+        pvm_pkint((int*)&nPEs, 1, 1);
+        IF_PAR_DEBUG(mpcomm,
+                     debugBelch("Packing allPEs array\n"));
+        pvm_pkint(allPEs, nPEs, 1);
+        checkComms(pvm_mcast(allPEs+1, nPEs-1,PP_PETIDS),
+                   "PVM -- Multicast of PE mapping failed");
+        IF_PAR_DEBUG(mpcomm,
+                     debugBelch("Broadcasted addresses: \n"));
+
+        // register for receiving failure notice (by PP_FAIL) from children
+        checkComms(pvm_notify(PvmTaskExit, PP_FAIL, nPEs-1, allPEs+1),
+                   "pvm_notify error");
       }
     }
 
     // set back debug option (will be set again while digesting RTS flags)
     RtsFlags.ParFlags.Debug.mpcomm = rtsFalse;
 
-  } else { 
+  } else {
 // we have a parent => slave node
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("I am slave node\n"));
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("I am slave node\n"));
     IAmMainThread = rtsFalse;
 
     // send a synchronisation message
     pvm_initsend(PvmDataRaw);
     checkComms(pvm_send(pvmParent, PP_READY), // node READY
-	       "PVM -- Failed to send sync. message: ");
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("Sent sync message.\n"));
+               "PVM -- Failed to send sync. message: ");
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("Sent sync message.\n"));
 
   }
 
@@ -370,9 +373,9 @@ rtsBool MP_start(int* argc, char** argv[]) {
 }
 
 /* MP_sync synchronises all nodes in a parallel computation:
- * Global Var.s set here: 
- *   nPEs (slaves) - int: no. of PEs to expect/start (if 0: should equal no. of hosts)
- *   thisPE        - GlobalTaskId: node's own task Id 
+ * Global Var.s set here:
+ *   nPEs (slaves) - int: #PEs to expect/start (if 0: set to #hosts)
+ *   thisPE        - GlobalTaskId: node's own task Id
  *               (logical node address for messages)
  * Returns: Bool: success (1) or failure (0)
  */
@@ -382,42 +385,42 @@ rtsBool MP_sync(void) {
     int nodesArrived=1;
     int buffer=0;
 
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("Synchronisation (main)...\n"));
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("Synchronisation (main)...\n"));
 
     thisPE = 1; // set myId correctly (node 1 is main node)
     ASSERT(allPEs[0]==pvmMyself);
 
-    // expect sync messages from all other nodes, 
+    // expect sync messages from all other nodes,
     //   and check allPEs array for completeness
     while(nodesArrived < (int) nPEs) {
-	  checkComms(buffer=pvm_nrecv(allPEs[nodesArrived], PP_READY),
-		     "PVM: Failed to receive sync message");
-	  if (buffer==0) {
-	  /*
-	    IF_PAR_DEBUG(mpcomm, 
-			 debugBelch("Missing PE %d.\n", nodesArrived+1));
-	  */
-	  } else {
-	    IF_PAR_DEBUG(mpcomm, 
-			 debugBelch("Node %d [%x] has joined the system.\n",
-				    nodesArrived+1, allPEs[nodesArrived]));
-	    nodesArrived++;
-	  }
+      checkComms(buffer=pvm_nrecv(allPEs[nodesArrived], PP_READY),
+                 "PVM: Failed to receive sync message");
+      if (buffer==0) {
+        /*
+          IF_PAR_DEBUG(mpcomm,
+          debugBelch("Missing PE %d.\n", nodesArrived+1));
+        */
+      } else {
+        IF_PAR_DEBUG(mpcomm,
+                     debugBelch("Node %d [%x] has joined the system.\n",
+                                nodesArrived+1, allPEs[nodesArrived]));
+        nodesArrived++;
+      }
     }
 
   } else {
     int i;
 
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("Synchronisation (child)...\n"));
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("Synchronisation (child)...\n"));
 
     // code for children... receive allPEs[] and detect node no.
     checkComms(pvm_recv(pvmParent, PP_PETIDS),
-	       "PVM: Failed to receive node address array");
+               "PVM: Failed to receive node address array");
     pvm_upkint((int*)&nPEs,1,1);
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("%d PEs in the system\n",nPEs));
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("%d PEs in the system\n",nPEs));
     pvm_upkint(allPEs,nPEs,1);
 
     // set own node id
@@ -429,8 +432,8 @@ rtsBool MP_sync(void) {
     if (!thisPE) return rtsFalse;
   }
 
-  IF_PAR_DEBUG(mpcomm, 
-	       debugBelch("I am node %d, synchronised.\n",thisPE));
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("I am node %d, synchronised.\n",thisPE));
   return rtsTrue;
 }
 
@@ -442,9 +445,10 @@ rtsBool MP_sync(void) {
 rtsBool MP_quit(int isError) {
   int errval;
 
-  IF_PAR_DEBUG(mpcomm, 
-	       debugBelch("MP_quit: leaving system (exit code %d).\n", isError));
-  
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MP_quit: leaving system (exit code %d).\n",
+                          isError));
+
   // pack a PP_FINISH message
   pvm_initsend(PvmDataRaw);
   // must repeat OpCode as a long int inside message data (common format)
@@ -470,19 +474,19 @@ rtsBool MP_quit(int isError) {
   } else {
 
     // unregister failure notice
-    if ( nPEs > 1 && !Failure ) 
-      checkComms(pvm_notify(PvmTaskExit | PvmNotifyCancel, 
-			    PP_FAIL, nPEs-1, allPEs+1),
-		 "pvm_notify error");
+    if ( nPEs > 1 && !Failure )
+      checkComms(pvm_notify(PvmTaskExit | PvmNotifyCancel,
+                            PP_FAIL, nPEs-1, allPEs+1),
+                 "pvm_notify error");
     // This launches the PP_FAIL messages we ordered! We ignore these
     // messages (only accept PP_FINISH in shutdown phase).
 
     // if we are main node, we broadcast a PP_FINISH to the remaining group
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("MP_quit: Main node sends FINISH.\n"));
-    if (!Failure) 
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("MP_quit: Main node sends FINISH.\n"));
+    if (!Failure)
       checkComms(pvm_mcast(allPEs+1,nPEs-1, PP_FINISH),
-		 "shutdown: Failed to broadcast PP_FINISH");
+                 "shutdown: Failed to broadcast PP_FINISH");
     else {
       // correct PEs array (for clean shutdown on remote PE failure)
       nat j,k;
@@ -490,16 +494,16 @@ rtsBool MP_quit(int isError) {
 
       k = 0;
       for (j = 1; j < nPEs; j++) {
-	if (allPEs[j] != 0) 
-	  // if allPEs[j] then send finish to it... (build a new array)
-	  mcastArr[k++] = allPEs[j];
-	else 
+        if (allPEs[j] != 0)
+          // if allPEs[j] then send finish to it... (build a new array)
+          mcastArr[k++] = allPEs[j];
+        else
           IF_PAR_DEBUG(mpcomm,
                        debugBelch("Node %d failed previously.\n", j));
-	  finishRecvd++; // otherwise, PE already terminated (with error)
+        finishRecvd++; // otherwise, PE already terminated (with error)
       }
       checkComms(pvm_mcast(mcastArr,k,PP_FINISH),
-	 "error shutdown: failed to broadcast PP_FINISH to remaining PEs");
+        "error shutdown: failed to broadcast PP_FINISH to remaining PEs");
     }
 
     // main node should wait for all others to terminate
@@ -513,22 +517,22 @@ rtsBool MP_quit(int isError) {
       ASSERT(errorcode == PP_FINISH);
       pvm_upkint(&errorcode,1,1);
       IF_PAR_DEBUG(mpcomm,
-		   debugBelch("Received msg from task %x: Code %d\n",
-			      task, errorcode));
+                   debugBelch("Received msg from task %x: Code %d\n",
+                              task, errorcode));
       finishRecvd++;
     }
 
-    IF_PAR_DEBUG(mpcomm, 
-		 debugBelch("MP_quit: Main node received %d replies, exiting from pvm now.\n", 
-			    finishRecvd));
+    IF_PAR_DEBUG(mpcomm,
+                 debugBelch("MP_quit: Main node received %d replies,"
+                            " exiting from pvm now.\n", finishRecvd));
   }
 
   checkComms(pvm_exit(),
-	     "PVM: Failed to shut down pvm.");
+             "PVM: Failed to shut down pvm.");
 
   /* indicate that quit has been executed */
   nPEs = 0;
-	
+
   return rtsTrue;
 }
 
@@ -545,28 +549,28 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length) {
   ASSERT(ISOPCODE(tag));
 
   IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MP_send for PVM: sending buffer@%p "
+               debugBelch("MP_send for PVM: sending buffer@%p "
                           "(length %d) to %d with tag %x (%s)\n",
-			  data, length, node, tag, getOpName(tag)));
+                          data, length, node, tag, getOpName(tag)));
   pvm_initsend(PvmDataRaw);
-  
+
   if (length > 0) {
     pvm_pkbyte((char*) data, length, 1);
   }
   checkComms(pvm_send(allPEs[node-1],tag),
-	     "PVM:send failed");
+             "PVM:send failed");
   return rtsTrue;
 }
 
 /* - a blocking receive operation
    where system messages have priority! */
 int MP_recv(int maxlength, StgWord8 *destination,
-	    OpCode *retcode, nat *sender) {
+            OpCode *retcode, nat *sender) {
   int bytes; // return value
   OpCode code; // internal use...
   int buffer=0;
   int sendPE, i;
-  
+
   IF_PAR_DEBUG(mpcomm, debugBelch("MP_recv for PVM.\n"));
 
   // absolute priority for internal messages of MPSystem:
@@ -583,9 +587,9 @@ int MP_recv(int maxlength, StgWord8 *destination,
   // go through all possible OpCodes, pick system message
   for (code=MIN_PEOPS; code<=MAX_PEOPS; code++){
     // if code is for priority (system) messages:
-    if ( ISSYSCODE(code) &&  
-	 pvm_probe(ANY_TASK, code)) {
-      buffer = pvm_recv(ANY_TASK, code); // receive 
+    if ( ISSYSCODE(code) &&
+         pvm_probe(ANY_TASK, code)) {
+      buffer = pvm_recv(ANY_TASK, code); // receive
       IF_PAR_DEBUG(mpcomm, debugBelch("Syscode received.\n"));
       pvm_bufinfo(buffer, &bytes, retcode, &sendPE); // inspect message
       ASSERT( *retcode==code );
@@ -599,17 +603,17 @@ int MP_recv(int maxlength, StgWord8 *destination,
     IF_PAR_DEBUG(mpcomm, debugBelch("received.\n"));
     pvm_bufinfo(buffer, &bytes, retcode, &sendPE); // inspect message
   }
-  
-  IF_PAR_DEBUG(mpcomm, 
-	       debugBelch("Packet No. (pvm-%d) (code %x (%s), "
+
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("Packet No. (pvm-%d) (code %x (%s), "
                           "size %d bytes) from PE %x.\n",
-			  buffer, *retcode, getOpName(*retcode), 
+                          buffer, *retcode, getOpName(*retcode),
                           bytes, sendPE));
 
   // could happen that we pick up an MPCODE message here :-(
   if (ISMPCODE(*retcode)) {
     IF_PAR_DEBUG(mpcomm,
-		 debugBelch("picked up an internal message!\n"));
+                 debugBelch("picked up an internal message!\n"));
     // handle message and make a recursive call to get another message
     MPMsgHandle(*retcode, buffer);
     return MP_recv(maxlength, destination, retcode, sender);
@@ -626,26 +630,26 @@ int MP_recv(int maxlength, StgWord8 *destination,
   if (!(*sender)) {
     // errorBelch: complain, but do not stop
     errorBelch("MPSystem(PVM): unable to find ID of PE # %x.",
-	       sendPE);
+               sendPE);
 #ifdef DEBUG
     stg_exit(EXIT_FAILURE);
 #else
-    // ignore error, discard message and make a recursive 
+    // ignore error, discard message and make a recursive
     // call to get another message
     return MP_recv(maxlength, destination, retcode, sender);
 #endif
   }
 
   // unpack data, if enough space, abort if not
-  if (bytes > maxlength) 
-    // should never happen, higher levels send and expect at most maxlength bytes!
+  if (bytes > maxlength)
+    // should never happen, higher levels use at most maxlength bytes!
     barf("MPSystem(PVM): not enough space for packet (needed %d, have %d)!",
-	 bytes, maxlength);
+         bytes, maxlength);
   pvm_upkbyte((char*) destination, bytes, 1);
 
-  if (*retcode == PP_FINISH) finishRecvd++; 
+  if (*retcode == PP_FINISH) finishRecvd++;
 
-  return bytes; // data and all variables set, ready 
+  return bytes; // data and all variables set, ready
 }
 
 /* - a non-blocking probe operation (unspecified sender)

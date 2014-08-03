@@ -1,4 +1,4 @@
-/* 
+/*
  * Generalised RTE for parallel Haskells.
  *
  * Windows Mail slot / POSIX msg box version for shared memory mcores
@@ -10,7 +10,7 @@
 #include "RtsUtils.h"
 #include "PEOpCodes.h"
 
-#if defined(mingw32_HOST_OS) 
+#if defined(mingw32_HOST_OS)
 #include "windows.h"
 
 // TODO check these (HAVE_STRING_H or such)
@@ -48,7 +48,7 @@ nat mp_state = MP_NOT_STARTED;
  *          \\.\mailslot\<prog-name>\<rnd-string>\<thisPE>
  * where rnd-string is an 8-char rnd string created by the main PE
  * and distributed via env.-variable "EdenSlot".
- * 
+ *
  */
 
 /* this is the common prefix with prog.name and rnd string for slots */
@@ -85,15 +85,15 @@ nat setnPEsArg(int *argc, char **argv);
 /**************************************************************
  * Startup and Shutdown routines (used inside ParInit.c only) */
 
-/* MP_start starts up the node: 
- *   - connects to the MP-System used, 
+/* MP_start starts up the node:
+ *   - connects to the MP-System used,
  *   - determines wether we are main thread
- *   - starts up other nodes in case we are first and 
+ *   - starts up other nodes in case we are first and
  *     the MP-System requires to spawn nodes from here.
  *     sets globar var.s:
  *      nPEs          - int: no. of PEs to expect/start
  *      IAmMainThread - rtsBool: whether this node is main PE
- * Parameters: 
+ * Parameters:
  *     IN/OUT    argc  - int*   : program arg.count
  *     IN/OUT    argv  - char***: program arguments
  *   (at the moment, argc and argv are modified. TODO)
@@ -106,7 +106,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
    *
    * As in CpComm, children are detected by checking environment
    * variable "EdenChild" (containing the child number), and a random
-   * string for the mailslots is distributed via "EdenSlot"). 
+   * string for the mailslots is distributed via "EdenSlot").
    *
    * The main node creates its slot, spawns all children, and returns.
    * Children just set thisPE, create their slots and return.
@@ -144,8 +144,8 @@ rtsBool MP_start(int* argc, char** argv[]) {
   }
 
   // initialise slotPrefix (used in mkSlotName)
-  ret=snprintf(slotPrefix, 252, "\\\\.\\mailslot\\%s\\%s\\", 
-	       (*argv)[0], slotkey);
+  ret=snprintf(slotPrefix, 252, "\\\\.\\mailslot\\%s\\%s\\",
+               (*argv)[0], slotkey);
   if (ret < 0 || ret == 252-1 || !(mkSlotName(slotName, thisPE))) {
     barf("Failure during startup: failed to init slotPrefix");
   }
@@ -153,11 +153,11 @@ rtsBool MP_start(int* argc, char** argv[]) {
   // create own mail slot
   IF_PAR_DEBUG(mpcomm, debugBelch("creating slot %s\n", slotName));
   mySlot = CreateMailslot(slotName,
-	       0,                             // no max. msg. size 
-	       MAILSLOT_WAIT_FOREVER,         // no time-out
-	       (LPSECURITY_ATTRIBUTES) NULL); // default security
- 
-  if (mySlot == INVALID_HANDLE_VALUE) { 
+               0,                             // no max. msg. size
+               MAILSLOT_WAIT_FOREVER,         // no time-out
+               (LPSECURITY_ATTRIBUTES) NULL); // default security
+
+  if (mySlot == INVALID_HANDLE_VALUE) {
     sysErrorBelch("CreateMailslot failed\n");
     barf("Comm.system malfunction during startup, aborting");
   }
@@ -201,10 +201,10 @@ rtsBool MP_start(int* argc, char** argv[]) {
       // CreateProcess might modify the cmdLine string, so make a copy
       char *argsTmp = stgMallocBytes(strlen(cmdLine)+1, "cmdLine");
       strcpy(argsTmp, cmdLine);
-      
+
       CreateProcess(NULL, cmdLine, NULL, NULL,
-		    TRUE, 0, NULL, NULL, &si, &pi[i-2]);
-      
+                    TRUE, 0, NULL, NULL, &si, &pi[i-2]);
+
       free(argsTmp);
       IF_PAR_DEBUG(mpcomm, debugBelch("child %d forked\n", i));
     }
@@ -216,8 +216,8 @@ rtsBool MP_start(int* argc, char** argv[]) {
 }
 
 /* MP_sync synchronises all nodes in a parallel computation:
- *  sets global var.: 
- *    thisPE - GlobalTaskId: node's own task Id 
+ *  sets global var.:
+ *    thisPE - GlobalTaskId: node's own task Id
  *             (logical node address for messages)
  * Returns: Bool: success (1) or failure (0)
  */
@@ -231,7 +231,7 @@ rtsBool MP_sync(void) {
    *
    * Children send PP_READY (as text) to the main node, receive
    * PP_PETIDS, and open all slots before they return.
-   * 
+   *
    * thisPE should be set before, in MP_start.
    */
 
@@ -243,15 +243,15 @@ rtsBool MP_sync(void) {
   nat i;
 
   IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MP_sync\n"));
+               debugBelch("MP_sync\n"));
 
   // allocate the mailslot array (nPEs * sizeof(HANDLE)).
   mailslot = (HANDLE*) stgMallocBytes((int) nPEs*sizeof(HANDLE),
-				      "Mailslot handles");
+                                      "Mailslot handles");
 
   // at this point we know DATASPACEWORDS
   msg = (SlotMsg*) stgMallocBytes(sizeof(SlotMsg)
-				  + DATASPACEWORDS*sizeof(StgWord), "Slot");
+                                  + DATASPACEWORDS*sizeof(StgWord), "Slot");
 
   if (IAmMainThread) {
     nat proc;
@@ -263,10 +263,10 @@ rtsBool MP_sync(void) {
      */
     mkSlotName(slotName, 1);
     writeEnd = CreateFile(slotName, GENERIC_WRITE, FILE_SHARE_READ,
-			  (LPSECURITY_ATTRIBUTES) NULL, 
-			  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 
-			  (HANDLE) NULL); 
-    if (writeEnd == INVALID_HANDLE_VALUE) { 
+                          (LPSECURITY_ATTRIBUTES) NULL,
+                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                          (HANDLE) NULL);
+    if (writeEnd == INVALID_HANDLE_VALUE) {
       barf("MP_sync error: cannot create local mailslot");
     }
     mailslot[ 0 ] = writeEnd;
@@ -274,27 +274,27 @@ rtsBool MP_sync(void) {
     // for each child proc, receive PP_READY, then open its slot for writing.
     for (i = 1; i < nPEs; i++) {
       IF_PAR_DEBUG(mpcomm,
-		   debugBelch("Awaiting PP_READY (%i of %i)\n", i, nPEs-1));
+                   debugBelch("Awaiting PP_READY (%i of %i)\n", i, nPEs-1));
       fRes = ReadFile(mySlot, (char*) msg, sizeof(SlotMsg),
-		      &rwCount, NULL);
+                      &rwCount, NULL);
       if (!fRes || msg->tag != PP_READY ) {
-	sysErrorBelch("MP_sync: failed to read sync msg (%i of %i).",
-		      i, nPEs-1);
-	barf("aborting");
+        sysErrorBelch("MP_sync: failed to read sync msg (%i of %i).",
+                      i, nPEs-1);
+        barf("aborting");
       }
       proc = msg->proc;
       if (proc < 2 || proc > nPEs) {
-	barf("Inconsistent sync message (proc = %i)", proc);
+        barf("Inconsistent sync message (proc = %i)", proc);
       }
       IF_PAR_DEBUG(mpcomm, debugBelch("Received from proc %i\n", proc));
 
       mkSlotName(slotName, proc);
       writeEnd = CreateFile(slotName, GENERIC_WRITE, FILE_SHARE_READ,
-			    (LPSECURITY_ATTRIBUTES) NULL, 
-			    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 
-			    (HANDLE) NULL); 
-      if (writeEnd == INVALID_HANDLE_VALUE) { 
-	barf("MP_sync error: cannot create mailslot for %i (%i of %i)",
+                            (LPSECURITY_ATTRIBUTES) NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                            (HANDLE) NULL);
+      if (writeEnd == INVALID_HANDLE_VALUE) {
+        barf("MP_sync error: cannot create mailslot for %i (%i of %i)",
              proc, i, nPEs);
       }
       mailslot[ proc-1 ] = writeEnd;
@@ -307,9 +307,9 @@ rtsBool MP_sync(void) {
     for (i = 2; i <= nPEs; i++) {
       // send to mailslot[i]
       fRes = WriteFile(mailslot[i-1], (char*)msg, sizeof(SlotMsg),
-		       &rwCount, (LPOVERLAPPED) NULL);
+                       &rwCount, (LPOVERLAPPED) NULL);
       if (!fRes) {
-	barf("MP_sync error: cannot reach child node %d", i);
+        barf("MP_sync error: cannot reach child node %d", i);
       }
     }
   } else {
@@ -319,10 +319,10 @@ rtsBool MP_sync(void) {
     }
 
     writeEnd = CreateFile(slotName, GENERIC_WRITE, FILE_SHARE_READ,
-			  (LPSECURITY_ATTRIBUTES) NULL, 
-			  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 
-			  (HANDLE) NULL); 
-    if (writeEnd == INVALID_HANDLE_VALUE) { 
+                          (LPSECURITY_ATTRIBUTES) NULL,
+                          OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                          (HANDLE) NULL);
+    if (writeEnd == INVALID_HANDLE_VALUE) {
       barf("MP_sync error: cannot create mailslot write end 1");
     }
     mailslot[0] = writeEnd;
@@ -331,14 +331,14 @@ rtsBool MP_sync(void) {
     msg->proc = thisPE;
     msg->tag  = PP_READY;
     fRes = WriteFile(mailslot[0], (char*)msg, sizeof(SlotMsg),
-		     &rwCount, (LPOVERLAPPED) NULL);
+                     &rwCount, (LPOVERLAPPED) NULL);
     if (!fRes) {
       barf("MP_sync error: cannot reach main node");
     }
 
     // receive PP_PETIDS (blocking until available)
     fRes = ReadFile(mySlot, (char*) msg, sizeof(SlotMsg),
-		    &rwCount, NULL);
+                    &rwCount, NULL);
     if (!fRes || msg->tag != PP_PETIDS || msg->proc != 1 ) {
       sysErrorBelch("MP_sync: failed to read sync msg.");
       barf("aborting");
@@ -348,11 +348,11 @@ rtsBool MP_sync(void) {
     for (i = 2; i <= nPEs; i++) {
       mkSlotName(slotName, i);
       writeEnd = CreateFile(slotName, GENERIC_WRITE, FILE_SHARE_READ,
-			    (LPSECURITY_ATTRIBUTES) NULL, 
-			    OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 
-			    (HANDLE) NULL); 
-      if (writeEnd == INVALID_HANDLE_VALUE) { 
-	barf("MP_sync error: cannot create mailslots (%i of %i)",
+                            (LPSECURITY_ATTRIBUTES) NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL,
+                            (HANDLE) NULL);
+      if (writeEnd == INVALID_HANDLE_VALUE) {
+        barf("MP_sync error: cannot create mailslots (%i of %i)",
              i, nPEs);
       }
       mailslot[i-1] = writeEnd;
@@ -366,7 +366,7 @@ rtsBool MP_sync(void) {
 
 /* MP_quit disconnects current node from MP-System:
  * Main PE will shut down the parallel system, others just inform main PE.
- * Sets nPEs to 0 on exit, can be checked to avoid duplicate calls. 
+ * Sets nPEs to 0 on exit, can be checked to avoid duplicate calls.
  * Parameters:
  *     IN isError - error number, 0 if normal exit
  * Returns: Bool: success (1) or failure (0)
@@ -390,7 +390,7 @@ rtsBool MP_quit(int isError) {
   nat i;
 
   IF_PAR_DEBUG(mpcomm, debugBelch("MP_quit (%i%s)\n",
-				  isError, isError?": ERROR!":"" ));
+                                  isError, isError?": ERROR!":"" ));
 
   // skip the entire shutdown protocol if not properly started or
   // already shutting duwn
@@ -412,12 +412,12 @@ rtsBool MP_quit(int isError) {
     /* send FINISH to other PEs */
     for (i=2; i <= nPEs; i++) {
       if (mailslot[i-1] != 0) {
-	fRes = WriteFile(mailslot[i-1], (char*)msg, 
-			 sizeof(SlotMsg)+ sizeof(StgWord),
-			 &rwCount, (LPOVERLAPPED) NULL);
-	if (!fRes) {
-	  errorBelch("MP_quit: cannot PP_FINISH from main node to %i", i);
-	}
+        fRes = WriteFile(mailslot[i-1], (char*)msg,
+                         sizeof(SlotMsg)+ sizeof(StgWord),
+                         &rwCount, (LPOVERLAPPED) NULL);
+        if (!fRes) {
+          errorBelch("MP_quit: cannot PP_FINISH from main node to %i", i);
+        }
       }
     }
 
@@ -426,17 +426,17 @@ rtsBool MP_quit(int isError) {
                             finishRecvd));
     while (finishRecvd != nPEs-1) {
       /* receive msg.s, discard all but PP_FINISH messages */
-      fRes = ReadFile(mySlot, (char*) msg, 
-		      sizeof(SlotMsg) + sizeof(StgWord)*DATASPACEWORDS,
-		      &rwCount, NULL);
+      fRes = ReadFile(mySlot, (char*) msg,
+                      sizeof(SlotMsg) + sizeof(StgWord)*DATASPACEWORDS,
+                      &rwCount, NULL);
       if (!fRes) {
-	sysErrorBelch("MP_quit: failed to receive msg.");
+        sysErrorBelch("MP_quit: failed to receive msg.");
       }
       if (msg->tag == PP_FINISH) {
           finishRecvd++;
           IF_PAR_DEBUG(mpcomm,
                        debugBelch("received reply from %i, now %i\n",
-				  msg->proc, finishRecvd));
+                                  msg->proc, finishRecvd));
         }
     }
     IF_PAR_DEBUG(mpcomm,
@@ -447,9 +447,9 @@ rtsBool MP_quit(int isError) {
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("child finishing (code %i),"
                             "sending FINISH\n", isError));
-    fRes = WriteFile(mailslot[0], (char*)msg, 
-		     sizeof(SlotMsg)+ sizeof(StgWord),
-		     &rwCount, (LPOVERLAPPED) NULL);
+    fRes = WriteFile(mailslot[0], (char*)msg,
+                     sizeof(SlotMsg)+ sizeof(StgWord),
+                     &rwCount, (LPOVERLAPPED) NULL);
     if (!fRes) {
       errorBelch("MP_quit: cannot PP_FINISH to main node");
       barf("aborting clean shutdown!");
@@ -460,12 +460,12 @@ rtsBool MP_quit(int isError) {
       IF_PAR_DEBUG(mpcomm,
             debugBelch("waiting for reply (error case)\n"));
       while (msg->tag != PP_FINISH) {
-	fRes = ReadFile(mySlot, (char*) msg, 
-			sizeof(SlotMsg) + sizeof(StgWord)*DATASPACEWORDS,
-			&rwCount, NULL);
-	if (!fRes) {
-	  sysErrorBelch("MP_quit: failed to receive msg.");
-	}
+        fRes = ReadFile(mySlot, (char*) msg,
+                        sizeof(SlotMsg) + sizeof(StgWord)*DATASPACEWORDS,
+                        &rwCount, NULL);
+        if (!fRes) {
+          sysErrorBelch("MP_quit: failed to receive msg.");
+        }
       }
 
       IF_PAR_DEBUG(mpcomm,
@@ -494,11 +494,11 @@ rtsBool MP_quit(int isError) {
 /**************************************
  * Data Communication between nodes:  */
 
-/* a send operation for peer2peer communication: 
+/* a send operation for peer2peer communication:
  * sends the included data (array of length length) to the indicated node
  * (numbered from 1 to the requested nodecount nPEs) with the given message
  * tag. Length 0 is allowed and leads to a message containing no payload data.
- * The send action may fail, in which case rtsFalse is returned, and the 
+ * The send action may fail, in which case rtsFalse is returned, and the
  * caller is expected to handle this situation.
  * Data length should be given in bytes, data will be sent raw
  * (unsigned char).
@@ -529,53 +529,53 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length) {
   DWORD rwCount;
   BOOL fRes;
 
-  IF_PAR_DEBUG(mpcomm, debugBelch("MP_send(%s) to %i\n", 
-				  getOpName(tag), node));
+  IF_PAR_DEBUG(mpcomm, debugBelch("MP_send(%s) to %i\n",
+                                  getOpName(tag), node));
 
   ASSERT(node >= 1 && node <= (int) nPEs);
 
   msg->proc = thisPE;
   msg->tag  = tag;
   memcpy(&msg->data, data, length);
-  
+
   // send "msg" of length+sizeof(SlotMsg) bytes to mailslot[ node-1 ]
   fRes = WriteFile(mailslot[node-1], (char*)msg, sizeof(SlotMsg)+length,
-		   &rwCount, (LPOVERLAPPED) NULL);
+                   &rwCount, (LPOVERLAPPED) NULL);
   if (!fRes) {
     // we could return rtsFalse here, but that would probably loop...
     sysErrorBelch("MP_send failed");
     barf("Comm. system malfunction, aborting.");
   }
 
-  IF_PAR_DEBUG(mpcomm, 
-	       debugBelch("MP_send: sent %i Bytes (== %i?) in %s message\n",
-			  (int) rwCount-sizeof(SlotMsg),
-			  length, getOpName(tag)));
+  IF_PAR_DEBUG(mpcomm,
+               debugBelch("MP_send: sent %i Bytes (== %i?) in %s message\n",
+                          (int) rwCount-sizeof(SlotMsg),
+                          length, getOpName(tag)));
 
   return rtsTrue;
 }
 
 /* - a blocking receive operation
- *   where system messages from main node have priority! 
+ *   where system messages from main node have priority!
  * Effect:
- *   A message is received from a peer. 
+ *   A message is received from a peer.
  *   Data are received as unsigned char values and stored in
  *   destination (capacity given in Bytes), and opcode and sender
  *   fields set.
- *   If no messages were waiting, the method blocks until a 
+ *   If no messages were waiting, the method blocks until a
  *   message is available. If too much data arrives (> maxlength),
  *   the program stops with an error (resp. of higher levels).
- * 
- * Parameters: 
+ *
+ * Parameters:
  *   IN  maxlength   -- maximum data length (in bytes)
  *   IN  destination -- where to unpack data (unsigned char array)
  *   OUT code   -- OpCode of message (aka message tag)
- *   OUT sender -- originator of this message 
- * Returns: 
+ *   OUT sender -- originator of this message
+ * Returns:
  *   int: amount of data (in bytes) received with message
  */
 int MP_recv(int maxlength, StgWord8 *destination, // IN
-	    OpCode *code, nat *sender) {          // OUT
+            OpCode *code, nat *sender) {          // OUT
   /* use GetMailslotInfo to determine whether messages are waiting,
    * receive the first one (unless size is too big, in which case
    * the entire system fails).
@@ -588,8 +588,8 @@ int MP_recv(int maxlength, StgWord8 *destination, // IN
   ASSERT((nat) maxlength <= DATASPACEWORDS*sizeof(StgWord));
 
   fResult = ReadFile(mySlot, msg, sizeof(SlotMsg) + maxlength,
-		     &msgBytes, NULL);
-  if (!fResult) { 
+                     &msgBytes, NULL);
+  if (!fResult) {
     sysErrorBelch("failed to MP_recv.");
     barf("Comm. system malfunction, aborting.");
   }
@@ -604,34 +604,34 @@ int MP_recv(int maxlength, StgWord8 *destination, // IN
   /* attention, hack                       ^^^^^^^^^^^^^^ */
 
   IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MP_recv: received %i Byte in %s message\n",
-			  (int) msgBytes-sizeof(SlotMsg), getOpName(*code)));
+               debugBelch("MP_recv: received %i Byte in %s message\n",
+                          (int) msgBytes-sizeof(SlotMsg), getOpName(*code)));
 
   if (*code == PP_FINISH) finishRecvd++; /* for error shutdown */
 
   return ((int)msgBytes - sizeof(SlotMsg));
 }
 
-/* - a non-blocking probe operation 
- * (unspecified sender, no receive buffers any more) 
+/* - a non-blocking probe operation
+ * (unspecified sender, no receive buffers any more)
  */
 rtsBool MP_probe(void) {
   /* use GetMailslotInfo to determine whether a message is waiting,
    * check for MAILSLOT_NO_MESSAGE
    */
-  
+
   DWORD fResult, msgBytes, msgCount;
 
   fResult = GetMailslotInfo(mySlot, NULL,
-			    &msgBytes, &msgCount, NULL);
- 
-  if (!fResult) { 
-    sysErrorBelch("failed to GetMailslotInfo"); 
+                            &msgBytes, &msgCount, NULL);
+
+  if (!fResult) {
+    sysErrorBelch("failed to GetMailslotInfo");
     barf("Comm. system malfunction, aborting.");
   }
   IF_PAR_DEBUG(mpcomm,
-	       debugBelch("MP_probe: %i messages waiting (first: %i Byte).\n",
-			  (int) msgCount, (int) msgBytes));
+               debugBelch("MP_probe: %i messages waiting (first: %i Byte).\n",
+                          (int) msgCount, (int) msgBytes));
 
   return (msgBytes != MAILSLOT_NO_MESSAGE);
 }
@@ -643,10 +643,10 @@ static char* mkCmdLineString(int argc, char ** argv) {
   for (i = 0; i < argc; i++) {
     len += strlen(argv[i]);
   }
-	
+
   char *result = stgMallocBytes(sizeof(char) * (len+1), "cmd line string");
   result[0] = '\0';
-	
+
   for (i = 0; i < argc; i++) {
     strcat(result, "\"");
     strcat(result, argv[i]);
@@ -665,7 +665,7 @@ static char* mkCmdLineString(int argc, char ** argv) {
  * The function assumes slotPrefix to be initialised to this string,
  * except the final <thisPE>.
  *
- * Parameters: 
+ * Parameters:
  *    OUT slotName (assumed 256 char allocated)
  *    IN  proc     (proc number)
  * Returns rtsFalse on failures (to be caught by caller)

@@ -46,11 +46,12 @@ void
 shutdownParallelSystem(StgInt n)
 {
   IF_PAR_DEBUG(verbose,
-	       if (n==0)
-  	         debugBelch("==== entered shutdownParallelSystem ...\n");
-               else
-  	         debugBelch("==== entered shutdownParallelSystem (ERROR %d)...\n", (int) n);
-	       );
+      if (n==0)
+        debugBelch("==== entered shutdownParallelSystem ...\n");
+      else
+        debugBelch("==== entered shutdownParallelSystem (ERROR %d)...\n",
+                   (int) n);
+               );
 
   // JB 11/2006: write stop event, close trace file. Done here to
   // avoid a race condition if trace files merged by main node
@@ -72,7 +73,7 @@ shutdownParallelSystem(StgInt n)
 
 }
 
-/* 
+/*
  * SynchroniseSystem synchronises the reduction task with the system
  * manager, and initialises global structures: receive buffer for
  * communication, process table, and in GUM the Global address tables
@@ -102,10 +103,11 @@ synchroniseSystem(void)
 
 void emitStartupEvents(void){
   //edentrace: traceCreateMachine
-  //startupTicks was fetched earlier, CreateMachine has 
-  //to be the first Event writen to keep the order of the 
+  //startupTicks was fetched earlier, CreateMachine has
+  //to be the first Event writen to keep the order of the
   //timestamps in the buffers valid
-  traceCreateMachine(thisPE,((startupTime.tv_sec) * 100000000 + (startupTime.tv_usec) * 100),startupTicks); 
+  traceCreateMachine(thisPE,((startupTime.tv_sec) * 100000000 +
+                             (startupTime.tv_usec) * 100),startupTicks);
 
   //edentrace:  traceVersion
   traceVersion(ProjectVersion);
@@ -138,7 +140,9 @@ void zipTraceFiles(void) {
   int i;
   rtsBool res;
 
-  if (!IAmMainThread || RtsFlags.TraceFlags.tracing != TRACE_EVENTLOG) { return; }
+  if (!IAmMainThread || RtsFlags.TraceFlags.tracing != TRACE_EVENTLOG) {
+    return;
+  }
 
   // see rts/eventlog/EventLog.c, must match naming convention there
     prog = stgMallocBytes(strlen(prog_name) + 1, "initEventLogging");
@@ -190,10 +194,10 @@ void zipTraceFiles(void) {
       }
     } else {
       res = compressFiles(archive, pes, files, argvsave);
-      
+
       // and remove the files if this worked
       for (i=0; i < (int)pes; i++) {
-        if (res == rtsTrue) { 
+        if (res == rtsTrue) {
           if (remove(files[i]) < 0) {
             sysErrorBelch("Failed to remove file");
             errorBelch("(when removing file %s)\n", files[i]);
@@ -201,7 +205,7 @@ void zipTraceFiles(void) {
         }
         free(files[i]);
       }
-    } 
+    }
   }
   free(files);
   free(archive);
@@ -209,14 +213,14 @@ void zipTraceFiles(void) {
 }
 
 
-/* 
+/*
   Do the startup stuff (middleware-dependencies wrapped in MPSystem.h
   Global vars held in MPSystem:  IAmMainThread, thisPE, nPEs
   Called at the beginning of RtsStartup.startupHaskell
 */
 
-void 
-startupParallelSystem(int* argc, char **argv[]) { 
+void
+startupParallelSystem(int* argc, char **argv[]) {
 
   //  getStartTime(); // init start time (in RtsUtils.*)
 
@@ -225,7 +229,7 @@ startupParallelSystem(int* argc, char **argv[]) {
 
   // JB 11/2006: thisPE is still 0 at this moment, we cannot name the
   // trace file here => startup time is in reality sync time.
-//MD/TH 03/2010: workaround: store timestamp here and use it in synchroniseSystem
+//MD/TH 03/2010: workaround: store timestamp here, use it in synchroniseSystem
 #ifdef TRACING
   startupTicks = stat_getElapsedTime(); // see Stats.c, elapsed time from init
   gettimeofday(&startupTime,&startupTimeZone);
@@ -244,15 +248,15 @@ startupParallelSystem(int* argc, char **argv[]) {
     i++;
   }
 #endif //TRACING
-  // possibly starts other PEs (first argv is number) 
+  // possibly starts other PEs (first argv is number)
   // sets IAmMainThread, nPEs.
   // strips argv of first argument, adjusts argc
   MP_start(argc, argv);
-  
+
   if (IAmMainThread){
-	/* Only in debug mode? */
-	fprintf(stderr, "==== Starting parallel execution on %d processors ...\n", 
-		nPEs);
+    /* Only in debug mode? */
+    fprintf(stderr, "==== Starting parallel execution on %d processors ...\n",
+            nPEs);
   }
 }
 #endif /* PARALLEL_RTS -- whole file */
