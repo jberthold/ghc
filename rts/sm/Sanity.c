@@ -305,7 +305,7 @@ checkClosure( StgClosure* p )
 
 #ifdef PARALLEL_RTS
         ASSERT(bq->owner == (StgTSO*) &stg_system_tso
-	       || get_itbl((StgClosure *)(bq->owner))->type == TSO);
+               || get_itbl((StgClosure *)(bq->owner))->type == TSO);
 #else
         ASSERT(get_itbl((StgClosure *)(bq->owner))->type == TSO);
 #endif

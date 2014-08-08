@@ -775,10 +775,10 @@ stg_forkzh ( gcptr closure )
     ccall scheduleThread(MyCapability() "ptr", threadid "ptr");
 
 #if defined(PARALLEL_RTS)
-    // add the new thread to the process of the running (forking) one 
+    // add the new thread to the process of the running (forking) one
     W_ proc;
     (proc) = ccall MyProcess(CurrentTSO "ptr");
-    ccall addTSO(proc, threadid "ptr"); 
+    ccall addTSO(proc, threadid "ptr");
 #endif
     // context switch soon, but not immediately: we don't want every
     // forkIO to force a context-switch.
@@ -804,10 +804,10 @@ again: MAYBE_GC(again);
         TO_W_(StgTSO_flags(CurrentTSO)) & (TSO_BLOCKEX | TSO_INTERRUPTIBLE));
 
 #if defined(PARALLEL_RTS)
-    // add the new thread to the process of the running (forking) one 
+    // add the new thread to the process of the running (forking) one
     W_ proc;
     (proc) = ccall MyProcess(CurrentTSO "ptr");
-    ccall addTSO(proc, threadid "ptr"); 
+    ccall addTSO(proc, threadid "ptr");
 #endif
     ccall scheduleThreadOn(MyCapability() "ptr", cpu, threadid "ptr");
 
@@ -2275,7 +2275,7 @@ stg_serializzezh (gcptr original)
 
   // call packing function (pass TSO, so enabling blocking
   ("ptr" buff) = ccall tryPackToMemory(original "ptr", CurrentTSO "ptr",
-				       MyCapability() "ptr");
+                                       MyCapability() "ptr");
   // if packing hits a black hole, it will block the TSO
   // for all error codes by the RTS see includes/rts/Parallel.h
   if (buff == P_BLACKHOLE) {
@@ -2287,7 +2287,7 @@ stg_serializzezh (gcptr original)
     // We do not use stg_block_blackhole, since R1 is *not* the
     // closure TSO is blocked on! Must save R1 (graph
     // root) for reentering after getting unblocked.
-    
+
     // defined in HeapStackCheck.cmm, declared in
     // StgMiscClosures.h. Save R1 = original
 
@@ -2379,12 +2379,12 @@ stg_expectDatazh ()
   ccall debugBelch(no_parallel_primops, retBH);
   R1 = CurrentTSO; R2=NULL; jump stg_killMyself [R1,R2];
 #endif
-  return (id, proc, retBH); 
+  return (id, proc, retBH);
 }
 
 stg_connectToPortzh (W_ pe, W_ proc, W_ inport)
 {
-  // args: 3 Int#s for remote port (pe,proc,inport) 
+  // args: 3 Int#s for remote port (pe,proc,inport)
   // passed on directly
 #if defined(PARALLEL_RTS)
   ccall setReceiver(CurrentTSO "ptr", pe, proc, inport);
@@ -2394,11 +2394,11 @@ stg_connectToPortzh (W_ pe, W_ proc, W_ inport)
 
 stg_sendDatazh(W_ mode, gcptr graphroot)
 {
-  /* args: 
-     R1: send mode & target (Int#) 
-	 Modes will be hardcoded in HLComms.c::sendWrapper, 
-	 as explained in primops.txt.pp.
-     R2: graph root 
+  /* args:
+     R1: send mode & target (Int#)
+         Modes will be hardcoded in HLComms.c::sendWrapper,
+         as explained in primops.txt.pp.
+     R2: graph root
 
      returns: unit
 
@@ -2425,7 +2425,7 @@ stg_sendDatazh(W_ mode, gcptr graphroot)
     // We do not use stg_block_blackhole, since R1 is *not* the
     // closure TSO is blocked on! Must save R1 (mode) and R2 (graph
     // root) for reentering after getting unblocked.
-    
+
     // defined in HeapStackCheck.cmm, declared in
     // StgMiscClosures.h. Saves R1 and R2 (as restored before)
 
@@ -2467,7 +2467,7 @@ stg_myProcesszh ()
 #else
   val = 1;
 #endif
-  return (val); 
+  return (val);
 }
 
 

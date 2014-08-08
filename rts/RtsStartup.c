@@ -150,9 +150,9 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
 #ifdef PARALLEL_RTS
     /*
      * The parallel system needs to be initialised and synchronised before
-     * the program is run.  
-     * 
-     */ 
+     * the program is run.
+     *
+     */
     startupParallelSystem(argc, argv);
 
 #endif
@@ -190,7 +190,7 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     IF_PAR_DEBUG(verbose,
                  debugBelch("==== Synchronising system (%d PEs)\n", nPEs));
     synchroniseSystem();             // calls initParallelSystem etc
-#endif	/* PARALLEL_RTS */
+#endif /* PARALLEL_RTS */
 
     InitPackBuffer(); /* also in seq. rts (serialisation support) */
 
@@ -206,7 +206,6 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     emitStartupEvents();
 #endif
 
-    
     /* initialise scheduler data structures (needs to be done before
      * initStorage()).
      */
@@ -451,7 +450,7 @@ hs_exit_(rtsBool wait_foreign)
 
 #if defined(PARALLEL_RTS)
     /* exit parallel system at the last possible place */
-    IF_PAR_DEBUG(verbose, 
+    IF_PAR_DEBUG(verbose,
                  debugBelch("==-- hs_exit(%d) on [%d]...", err, thisPE));
     shutdownParallelSystem(err); // use stored error code
 #endif

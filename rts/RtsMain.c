@@ -56,10 +56,10 @@ static void real_main(void)
     /* kick off the computation by creating the main thread with a pointer
        to mainIO_closure representing the computation of the overall program;
        then enter the scheduler with this thread and off we go;
-      
+
        in a parallel setup, where we have many instances of this code
        running on different PEs, we should do this only for the main PE
-       (IAmMainThread is set in startupHaskell) 
+       (IAmMainThread is set in startupHaskell)
     */
 
 #if defined(PARALLEL_RTS)
@@ -68,16 +68,16 @@ static void real_main(void)
     if (RtsFlags.ParFlags.wait != 0) {
 #  if defined (mingw32_HOST_OS)
       debugBelch("%s: wait loop during startup not supported in MinGW\n"
-		 , progargv[0]);
+                 , progargv[0]);
 #  else
     /* a wait loop to allow attachment of gdb to UNIX threads */
       char hostname[256];
       gethostname(hostname, sizeof(hostname));
       debugBelch("Process is ready for attaching debugger.\n"
-		 "%s %d (on host %s) and set RtsFlags.ParFlags.wait=rtsFalse\n"
-		 , progargv[0], getpid(), hostname);
+                 "%s %d (on host %s) and set RtsFlags.ParFlags.wait=rtsFalse\n"
+                 , progargv[0], getpid(), hostname);
       while (RtsFlags.ParFlags.wait != 0) {
-	RtsFlags.ParFlags.wait--;
+        RtsFlags.ParFlags.wait--;
         sleep(1);
       }
 #  endif /* mingw */
@@ -88,32 +88,32 @@ static void real_main(void)
 
     /* ToDo: want to start with a larger stack size */
       Capability *cap;
-	IF_PAR_DEBUG(verbose,
-		     debugBelch("==== [%x] Main Thread Started ...\n", thisPE));
+      IF_PAR_DEBUG(verbose,
+                   debugBelch("==== [%x] Main Thread Started ...\n", thisPE));
 
-	cap = rts_lock();
-	// copied from below...
-	rts_evalLazyIO(&cap,progmain_closure, NULL);
-	status = rts_getSchedStatus(cap);
-	rts_unlock(cap);
+      cap = rts_lock();
+      // copied from below...
+      rts_evalLazyIO(&cap,progmain_closure, NULL);
+      status = rts_getSchedStatus(cap);
+      rts_unlock(cap);
 
-	IF_PAR_DEBUG(verbose,
-		     debugBelch("== [%x] Main PE stopping ...\n",
-				thisPE));
+      IF_PAR_DEBUG(verbose,
+                   debugBelch("== [%x] Main PE stopping ...\n",
+                              thisPE));
     } else {
       Capability *cap = rts_lock();
 
       /* Just to show we're alive */
       IF_PAR_DEBUG(verbose,
-		   debugBelch("== [%x] Non-Main PE enters scheduler via taskStart() without work ...\n",
-			   thisPE));
+                   debugBelch("== [%x] Non-Main PE enters scheduler w/o work\n",
+                              thisPE));
       /* all non-main threads enter the scheduler without work */
       startEmptyScheduler(cap);
 
       rts_unlock(cap);
       IF_PAR_DEBUG(verbose,
-		   debugBelch("== [%x] Non-Main PE stopping ...\n",
-			   thisPE));
+                   debugBelch("== [%x] Non-Main PE stopping ...\n",
+                              thisPE));
       status = Success;  // declare victory (see shutdownParallelSystem)
     }
 
