@@ -39,15 +39,13 @@ import HscTypes ( tyThingParent_maybe, handleFlagWarnings, getSafeMode, hsc_IC,
                   setInteractivePrintName )
 import Module
 import Name
-import Packages ( ModuleExport(..), trusted, getPackageDetails, exposed,
-                  exposedModules, reexportedModules, pkgIdMap )
+import Packages ( trusted, getPackageDetails, listVisibleModuleNames, pprFlag )
 import PprTyThing
 import RdrName ( getGRE_NameQualifier_maybes )
 import SrcLoc
 import qualified Lexer
 
 import StringBuffer
-import UniqFM ( eltsUFM )
 import Outputable hiding ( printForUser, printForUserPartWay, bold )
 
 -- Other random utilities
@@ -1605,13 +1603,13 @@ isSafeModule m = do
     liftIO $ putStrLn $ "Package Trust: " ++ (if packageTrustOn dflags then "On" else "Off")
     when (not $ null good)
          (liftIO $ putStrLn $ "Trusted package dependencies (trusted): " ++
-                        (intercalate ", " $ map packageKeyString good))
+                        (intercalate ", " $ map (showPpr dflags) good))
     case msafe && null bad of
         True -> liftIO $ putStrLn $ mname ++ " is trusted!"
         False -> do
             when (not $ null bad)
                  (liftIO $ putStrLn $ "Trusted package dependencies (untrusted): "
-                            ++ (intercalate ", " $ map packageKeyString bad))
+                            ++ (intercalate ", " $ map (showPpr dflags) bad))
             liftIO $ putStrLn $ mname ++ " is NOT trusted!"
 
   where
@@ -1619,12 +1617,11 @@ isSafeModule m = do
 
     packageTrusted dflags md
         | thisPackage dflags == modulePackageKey md = True
-        | otherwise = trusted $ getPackageDetails (pkgState dflags) (modulePackageKey md)
+        | otherwise = trusted $ getPackageDetails dflags (modulePackageKey md)
 
     tallyPkgs dflags deps | not (packageTrustOn dflags) = ([], [])
                           | otherwise = partition part deps
-        where state = pkgState dflags
-              part pkg = trusted $ getPackageDetails state pkg
+        where part pkg = trusted $ getPackageDetails dflags pkg
 
 -----------------------------------------------------------------------------
 -- :browse
@@ -2334,15 +2331,9 @@ showPackages :: GHCi ()
 showPackages = do
   dflags <- getDynFlags
   let pkg_flags = packageFlags dflags
-  liftIO $ putStrLn $ showSDoc dflags $ vcat $
-    text ("active package flags:"++if null pkg_flags then " none" else "")
-    : map showFlag pkg_flags
-  where showFlag (ExposePackage   p) = text $ "  -package " ++ p
-        showFlag (HidePackage     p) = text $ "  -hide-package " ++ p
-        showFlag (IgnorePackage   p) = text $ "  -ignore-package " ++ p
-        showFlag (ExposePackageId p) = text $ "  -package-id " ++ p
-        showFlag (TrustPackage    p) = text $ "  -trust " ++ p
-        showFlag (DistrustPackage p) = text $ "  -distrust " ++ p
+  liftIO $ putStrLn $ showSDoc dflags $
+    text ("active package flags:"++if null pkg_flags then " none" else "") $$
+      nest 2 (vcat (map pprFlag pkg_flags))
 
 showPaths :: GHCi ()
 showPaths = do
@@ -2477,7 +2468,7 @@ completeIdentifier = wrapIdentCompleter $ \w -> do
 
 completeModule = wrapIdentCompleter $ \w -> do
   dflags <- GHC.getSessionDynFlags
-  let pkg_mods = allExposedModules dflags
+  let pkg_mods = allVisibleModules dflags
   loaded_mods <- liftM (map GHC.ms_mod_name) getLoadedModules
   return $ filter (w `isPrefixOf`)
         $ map (showPpr dflags) $ loaded_mods ++ pkg_mods
@@ -2489,7 +2480,7 @@ completeSetModule = wrapIdentCompleterWithModifier "+-" $ \m w -> do
       imports <- GHC.getContext
       return $ map iiModuleName imports
     _ -> do
-      let pkg_mods = allExposedModules dflags
+      let pkg_mods = allVisibleModules dflags
       loaded_mods <- liftM (map GHC.ms_mod_name) getLoadedModules
       return $ loaded_mods ++ pkg_mods
   return $ filter (w `isPrefixOf`) $ map (showPpr dflags) modules
@@ -2546,13 +2537,9 @@ wrapIdentCompleterWithModifier modifChars fun = completeWordWithPrev Nothing wor
   getModifier = find (`elem` modifChars)
 
 -- | Return a list of visible module names for autocompletion.
-allExposedModules :: DynFlags -> [ModuleName]
-allExposedModules dflags
- = concatMap extract (filter exposed (eltsUFM pkg_db))
- where
-  pkg_db = pkgIdMap (pkgState dflags)
-  extract pkg = exposedModules pkg ++ map exportName (reexportedModules pkg)
-  -- Extract the *new* name, because that's what is user visible
+-- (NB: exposed != visible)
+allVisibleModules :: DynFlags -> [ModuleName]
+allVisibleModules dflags = listVisibleModuleNames dflags
 
 completeExpression = completeQuotedWord (Just '\\') "\"" listFiles
                         completeIdentifier

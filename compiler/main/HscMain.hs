@@ -932,13 +932,13 @@ hscCheckSafe' dflags m l = do
                     return (trust == Sf_Trustworthy, pkgRs)
 
                 where
-                    pkgTrustErr = unitBag $ mkPlainErrMsg dflags l $
+                    pkgTrustErr = unitBag $ mkErrMsg dflags l (pkgQual dflags) $
                         sep [ ppr (moduleName m)
                                 <> text ": Can't be safely imported!"
                             , text "The package (" <> ppr (modulePackageKey m)
                                 <> text ") the module resides in isn't trusted."
                             ]
-                    modTrustErr = unitBag $ mkPlainErrMsg dflags l $
+                    modTrustErr = unitBag $ mkErrMsg dflags l (pkgQual dflags) $
                         sep [ ppr (moduleName m)
                                 <> text ": Can't be safely imported!"
                             , text "The module itself isn't safe." ]
@@ -955,8 +955,7 @@ hscCheckSafe' dflags m l = do
     packageTrusted Sf_Safe         False _ = True
     packageTrusted _ _ m
         | isHomePkg m = True
-        | otherwise   = trusted $ getPackageDetails (pkgState dflags)
-                                                    (modulePackageKey m)
+        | otherwise   = trusted $ getPackageDetails dflags (modulePackageKey m)
 
     lookup' :: Module -> Hsc (Maybe ModIface)
     lookup' m = do
@@ -992,10 +991,10 @@ checkPkgTrust dflags pkgs =
     where
         errors = catMaybes $ map go pkgs
         go pkg
-            | trusted $ getPackageDetails (pkgState dflags) pkg
+            | trusted $ getPackageDetails dflags pkg
             = Nothing
             | otherwise
-            = Just $ mkPlainErrMsg dflags noSrcSpan
+            = Just $ mkErrMsg dflags noSrcSpan (pkgQual dflags)
                    $ text "The package (" <> ppr pkg <> text ") is required" <>
                      text " to be trusted but it isn't!"
 

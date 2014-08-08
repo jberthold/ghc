@@ -43,7 +43,7 @@ module DynFlags (
         targetRetainsAllBindings,
         GhcMode(..), isOneShot,
         GhcLink(..), isNoLink,
-        PackageFlag(..),
+        PackageFlag(..), PackageArg(..), ModRenaming,
         PkgConfRef(..),
         Option(..), showOpt,
         DynLibLoader(..),
@@ -90,7 +90,7 @@ module DynFlags (
         getVerbFlags,
         updOptLevel,
         setTmpDir,
-        setPackageName,
+        setPackageKey,
 
         -- ** Parsing DynFlags
         parseDynamicFlagsCmdLine,
@@ -190,6 +190,8 @@ import Data.Word
 import System.FilePath
 import System.IO
 import System.IO.Error
+import Text.ParserCombinators.ReadP hiding (char)
+import Text.ParserCombinators.ReadP as R
 
 import Data.IntSet (IntSet)
 import qualified Data.IntSet as IntSet
@@ -269,6 +271,7 @@ data DumpFlag
    | Opt_D_dump_hi
    | Opt_D_dump_hi_diffs
    | Opt_D_dump_mod_cycles
+   | Opt_D_dump_mod_map
    | Opt_D_dump_view_pattern_commoning
    | Opt_D_verbose_core2core
 
@@ -1020,9 +1023,15 @@ isNoLink :: GhcLink -> Bool
 isNoLink NoLink = True
 isNoLink _      = False
 
+data PackageArg = PackageArg String
+                | PackageIdArg String
+                | PackageKeyArg String
+  deriving (Eq, Show)
+
+type ModRenaming = Maybe [(String, String)]
+
 data PackageFlag
-  = ExposePackage   String
-  | ExposePackageId String
+  = ExposePackage   PackageArg ModRenaming
   | HidePackage     String
   | IgnorePackage   String
   | TrustPackage    String
@@ -1676,6 +1685,7 @@ dopt f dflags = (fromEnum f `IntSet.member` dumpFlags dflags)
           enableIfVerbose Opt_D_dump_ticked                 = False
           enableIfVerbose Opt_D_dump_view_pattern_commoning = False
           enableIfVerbose Opt_D_dump_mod_cycles             = False
+          enableIfVerbose Opt_D_dump_mod_map                = False
           enableIfVerbose _                                 = True
 
 -- | Set a 'DumpFlag'
@@ -2425,6 +2435,7 @@ dynamic_flags = [
   , Flag "ddump-hpc"               (setDumpFlag Opt_D_dump_ticked) -- back compat
   , Flag "ddump-ticked"            (setDumpFlag Opt_D_dump_ticked)
   , Flag "ddump-mod-cycles"        (setDumpFlag Opt_D_dump_mod_cycles)
+  , Flag "ddump-mod-map"           (setDumpFlag Opt_D_dump_mod_map)
   , Flag "ddump-view-pattern-commoning" (setDumpFlag Opt_D_dump_view_pattern_commoning)
   , Flag "ddump-to-file"           (NoArg (setGeneralFlag Opt_DumpToFile))
   , Flag "ddump-hi-diffs"          (setDumpFlag Opt_D_dump_hi_diffs)
@@ -2578,9 +2589,13 @@ package_flags = [
                                     removeUserPkgConf
                                     deprecate "Use -no-user-package-db instead")
 
-  , Flag "package-name"          (hasArg setPackageName)
+  , Flag "package-name"          (HasArg $ \name -> do
+                                    upd (setPackageKey name)
+                                    deprecate "Use -this-package-key instead")
+  , Flag "this-package-key"      (hasArg setPackageKey)
   , Flag "package-id"            (HasArg exposePackageId)
   , Flag "package"               (HasArg exposePackage)
+  , Flag "package-key"           (HasArg exposePackageKey)
   , Flag "hide-package"          (HasArg hidePackage)
   , Flag "hide-all-packages"     (NoArg (setGeneralFlag Opt_HideAllPackages))
   , Flag "ignore-package"        (HasArg ignorePackage)
@@ -3390,11 +3405,39 @@ removeGlobalPkgConf = upd $ \s -> s { extraPkgConfs = filter isNotGlobal . extra
 clearPkgConf :: DynP ()
 clearPkgConf = upd $ \s -> s { extraPkgConfs = const [] }
 
-exposePackage, exposePackageId, hidePackage, ignorePackage,
+parsePackageFlag :: (String -> PackageArg) -- type of argument
+                 -> String                 -- string to parse
+                 -> PackageFlag
+parsePackageFlag constr str = case filter ((=="").snd) (readP_to_S parse str) of
+    [(r, "")] -> r
+    _ -> throwGhcException $ CmdLineError ("Can't parse package flag: " ++ str)
+  where parse = do
+            pkg <- munch1 (\c -> isAlphaNum c || c `elem` ":-_.")
+            (do _ <- tok $ R.char '('
+                rns <- tok $ sepBy parseItem (tok $ R.char ',')
+                _ <- tok $ R.char ')'
+                return (ExposePackage (constr pkg) (Just rns))
+              +++
+             return (ExposePackage (constr pkg) Nothing))
+        parseMod = munch1 (\c -> isAlphaNum c || c `elem` ".")
+        parseItem = do
+            orig <- tok $ parseMod
+            (do _ <- tok $ string "as"
+                new <- tok $ parseMod
+                return (orig, new)
+              +++
+             return (orig, orig))
+        tok m = skipSpaces >> m
+
+exposePackage, exposePackageId, exposePackageKey, hidePackage, ignorePackage,
         trustPackage, distrustPackage :: String -> DynP ()
 exposePackage p = upd (exposePackage' p)
 exposePackageId p =
-  upd (\s -> s{ packageFlags = ExposePackageId p : packageFlags s })
+  upd (\s -> s{ packageFlags =
+    parsePackageFlag PackageIdArg p : packageFlags s })
+exposePackageKey p =
+  upd (\s -> s{ packageFlags =
+    parsePackageFlag PackageKeyArg p : packageFlags s })
 hidePackage p =
   upd (\s -> s{ packageFlags = HidePackage p : packageFlags s })
 ignorePackage p =
@@ -3406,10 +3449,11 @@ distrustPackage p = exposePackage p >>
 
 exposePackage' :: String -> DynFlags -> DynFlags
 exposePackage' p dflags
-    = dflags { packageFlags = ExposePackage p : packageFlags dflags }
+    = dflags { packageFlags =
+            parsePackageFlag PackageArg p : packageFlags dflags }
 
-setPackageName :: String -> DynFlags -> DynFlags
-setPackageName p s =  s{ thisPackage = stringToPackageKey p }
+setPackageKey :: String -> DynFlags -> DynFlags
+setPackageKey p s =  s{ thisPackage = stringToPackageKey p }
 
 -- If we're linking a binary, then only targets that produce object
 -- code are allowed (requests for other target types are ignored).
@@ -3652,6 +3696,7 @@ compilerInfo dflags
        ("Support dynamic-too",         if isWindows then "NO" else "YES"),
        ("Support parallel --make",     "YES"),
        ("Support reexported-modules",  "YES"),
+       ("Uses package keys",           "YES"),
        ("Dynamic by default",          if dYNAMIC_BY_DEFAULT dflags
                                        then "YES" else "NO"),
        ("GHC Dynamic",                 if dynamicGhc

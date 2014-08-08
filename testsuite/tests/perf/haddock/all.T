@@ -33,7 +33,7 @@ test('haddock.base',
             # 2014-01-22: 62189068 (x86/Linux)
             # 2014-06-29: 58243640 (x86/Linux)
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 7498123680,  5)
+          [(wordsize(64), 7946284944,  5)
             # 2012-08-14: 5920822352 (amd64/Linux)
             # 2012-09-20: 5829972376 (amd64/Linux)
             # 2012-10-08: 5902601224 (amd64/Linux)
@@ -44,16 +44,20 @@ test('haddock.base',
             # 2013-11-21: 6756213256 (x86_64/Linux)
             # 2014-01-12: 7128342344 (x86_64/Linux)
             # 2014-06-12: 7498123680 (x86_64/Linux)
+            # 2014-08-05: 7992757384 (x86_64/Linux - bugfix for #314, Haddock now parses more URLs)
+            # 2014-08-08: 7946284944 (x86_64/Linux - Haddock updates to attoparsec-0.12.1.0)
           ,(platform('i386-unknown-mingw32'), 3548581572, 5)
             # 2013-02-10:                     3358693084 (x86/Windows)
             # 2013-11-13:                     3097751052 (x86/Windows, 64bit machine)
             # 2014-04-04:                     3548581572 (x86/Windows, 64bit machine)
+            # 2014-08-05: XXX TODO UPDATE ME XXX
           ,(wordsize(32), 3799130400, 1)])
             # 2012-08-14: 3046487920 (x86/OSX)
             # 2012-10-30: 2955470952 (x86/Windows)
             # 2013-02-10: 3146596848 (x86/OSX)
             # 2014-02-22: 3554624600 (x86/Linux - new haddock)
             # 2014-06-29: 3799130400 (x86/Linux)
+            # 2014-08-05: XXX TODO UPDATE ME XXX
       ],
      stats,
      ['../../../../libraries/base/dist-install/doc/html/base/base.haddock.t'])
@@ -99,7 +103,7 @@ test('haddock.Cabal',
             # 2014-01-22: 52718512 (x86/Linux)
             # 2014-06-29: 66411508 (x86/Linux)
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 4200993768, 5)
+          [(wordsize(64), 4493770224, 5)
             # 2012-08-14: 3255435248 (amd64/Linux)
             # 2012-08-29: 3324606664 (amd64/Linux, new codegen)
             # 2012-10-08: 3373401360 (amd64/Linux)
@@ -111,15 +115,18 @@ test('haddock.Cabal',
             # 2013-12-12: 3828567272 (amd64/Linux)
             # 2014-01-12: 3979151552 (amd64/Linux) new parser
             # 2014-06-29: 4200993768 (amd64/Linux)
+            # 2014-08-05: 4493770224 (x86_64/Linux - bugfix for #314, Haddock now parses more URLs)
           ,(platform('i386-unknown-mingw32'), 2052220292, 5)
             # 2012-10-30:                     1733638168 (x86/Windows)
             # 2013-02-10:                     1906532680 (x86/Windows)
             # 2014-01-28:                     1966911336 (x86/Windows)
             # 2014-04-24:                     2052220292 (x86/Windows)
+            # 2014-08-05: XXX TODO UPDATE ME XXX
           ,(wordsize(32), 2127198484, 1)])
             # 2012-08-14: 1648610180 (x86/OSX)
             # 2014-01-22: 1986290624 (x86/Linux)
             # 2014-06-29: 2127198484 (x86/Linux)
+            # 2014-08-05: XXX TODO UPDATE ME XXX
       ],
      stats,
      ['../../../../libraries/Cabal/Cabal/dist-install/doc/html/Cabal/Cabal.haddock.t'])
