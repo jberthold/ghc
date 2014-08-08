@@ -595,35 +595,30 @@ void removeTSO(StgWord id) {
   }
 }
 
-/* mark all threads reachable from the process table, unless they are
- * killed or completed.
+/* Garbage collection of inports and blocked TSOs
  *
- * These threads are additional roots, since they produce output for
- * other processes. Not found if they are blocked on blackholes with
- * inport! OTOH, if we evacuated all blackholes with inport, we do not
- * find out whether an input is actually needed.
- * => evacuate all "live" threads
+ * In a system with a single heap, threads blocked on a blackhole
+ * which is not locally reachable are garbage, and therefore removed
+ * by the garbage collector.
  *
- * Our logic of evacuation is reverse to that of the sequential system:
- *   Sequential:
- *   evacuate heads of runnable + ccalling + sleeping + "blocked" queue
- *            => scavenge them (evacuate stack + link field = next in q)
- *            => evacuate some blackholes
- *            => evacuate TSOs blocked on *these* blackholes
- *                       (found on the blackhole_queue)
- *            => scavenge... (see above)
- *      non-evacuated threads (killed/complete/blocked-on-dead-BH) are
- *      evacuated later, to be "resurrected", so the scheduler cleanly
- *      removes them (!!)
+ * In a parallel system with multiple heaps, messages may arrive and
+ * unblock those blocked threads. Therefore, these threads must be
+ * kept alive if the blackhole they block on is one connected to an
+ * inport.
  *
- * Parallel:
- *           evacuate *all* tsos *except* Thread[Complete|Killed]
- *             + if BlockedOnBlackHole: evacuate block_info (the blackhole)
- *            => scavenge these (stack + (unnecessarily:) link)
- *            => ...(see above)
+ * OTOH, one cannot simple evacuate all blackholes with inport, as
+ * this would assume that the incoming data is actually
+ * _needed_. Inports for data which is not needed should be closed
+ * (terminating the sender if it is known).
  *
- * The evacuation described is now done inside MarkWeak.c, where the
- * blackhole queue is traversed. Code here removed.
+ * A special "system TSO" n the parallel RTS "adopts" each blackholes
+ * connected to an inport, when a thread blocks on it. To achieve the
+ * above GC strategy, it suffices to evacuate blackholes owned by the
+ * system TSO (done in rts/sm/GC.c).
+ *
+ * The functions below are called _after_ evacuation has finished, to
+ * update the addresses of live blackholes, close inports to dead
+ * blackholes, and terminate processes without threads.
  */
 
 
@@ -701,12 +696,11 @@ void updateRTT(void) {
       IF_PAR_DEBUG(procs,
                    debugBelch("updating process %d (table @ %p)\n",
                               (int) p->id, p));
-//      if (!updateTSOList(p)) {
       if (p->tsos == 0) {
         StgWord killID;
         killID = p->id;
         killProcess_(p); // invalidates p, updates processtable!
-        // advance to ID after killID in processtable
+        // advance to ID after killID in processtable (assumes ID monotonicity)
         p = processtable;
         while (p != NULL && p->id < killID) p = p->next;
       } else {
