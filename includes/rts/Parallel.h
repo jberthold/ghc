@@ -32,7 +32,7 @@ StgInt newSpark (StgRegTable *reg, StgClosure *p);
 */
 
 /* even when not parallel, these should be present (and 1) when
-   implementing noPe and selfPe as foreign imports. 
+   implementing noPe and selfPe as foreign imports.
    Reside in MPSystem files, or in ParInit.c when not parallel.
 */
 extern nat nPEs, thisPE;
@@ -45,8 +45,8 @@ typedef struct rtsPackBuffer_ {
   // Eden channel communication
   Port                 sender;
   Port                 receiver;
-  // for data messages only,  
-  StgInt /* nat */     id; 
+  // for data messages only,
+  StgInt /* nat */     id;
   StgInt /* nat */     size;
   StgInt /* nat */     unpacked_size;
   struct StgTSO_       *tso;
@@ -63,25 +63,25 @@ extern Mutex pack_mutex;
 void InitPackBuffer(void);
 void freePackBuffer(void);
 
-// minimum sizes for message buffers: 
+// minimum sizes for message buffers:
 
 /* (arbitrary) amount of additional StgWords to remain free */
 #define DEBUG_HEADROOM  2
 
 // =>  minimum data space for a MessageBuffer (in words!) is max. msg.size:
 #define DATASPACEWORDS (((int)RtsFlags.ParFlags.packBufferSize/sizeof(StgWord))\
-			+ (sizeof(rtsPackBuffer)/sizeof(StgWord)) \
-			+ DEBUG_HEADROOM)
+                        + (sizeof(rtsPackBuffer)/sizeof(StgWord))       \
+                        + DEBUG_HEADROOM)
 
 // following functions internal if PACKING, used externally when PARALLEL_RTS
 
-// Check, defined in Pack.c as well. 
+// Check, defined in Pack.c as well.
 // Is there still a macro for it somewhere else?
 rtsBool IsBlackhole(StgClosure* closure);
 
 // interfaces for (un-)packing, defined in Pack.c.
 
-// pack heap subgraph starting at closure (which might block the caller). 
+// pack heap subgraph starting at closure (which might block the caller).
 // Note that PackNearbyGraph returns a global data structure protected by
 // pack_mutex (should be held as long as return value is needed).
 rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso);
@@ -105,26 +105,26 @@ rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso);
 
 // unpack a graph from the packBuffer. caller should hold pack_mutex.
 StgClosure*    UnpackGraph(rtsPackBuffer *packBuffer,
-			   Port inPort,
-			   Capability* cap);
+                           Port inPort,
+                           Capability* cap);
 
 // serialisation into a Haskell Byte array, returning error codes on failure
 StgClosure* tryPackToMemory(StgClosure* graphroot, StgTSO* tso,
-			 Capability* cap);
+                            Capability* cap);
 
 // respective deserialisation (global pack buffer used for unpacking)
 StgClosure* UnpackGraphWrapper(StgArrWords* packBufferArray,
-			       Capability* cap);
+                               Capability* cap);
 
 // creating a blackhole from scratch. Defined in Pack.c (where it is
 // used), but mainly used by the primitive for channel creation.
-StgClosure* createBH(Capability *cap); 
+StgClosure* createBH(Capability *cap);
 // and creating a list node (CONS).
 // used in HLComms.c, defined in Pack.c
-StgClosure* createListNode(Capability *cap, 
+StgClosure* createListNode(Capability *cap,
               StgClosure *head, StgClosure *tail);
 
-#if defined(PARALLEL_RTS) 
+#if defined(PARALLEL_RTS)
 
 // parallel machine setup, startup / shutdown
 // in MPSystem file (PVMComm | MPIComm | CpComm currently)
@@ -158,11 +158,11 @@ void newProcess(StgTSO* firstTSO);
 rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer);
 
 // sendWrapper is called by primitive operations, does not need
-// declaration here. 
+// declaration here.
 
 // Unpacking and updating placeholders (if valid data)
-void processDataMsg(Capability* cap, OpCode opcode, 
-		    rtsPackBuffer *recvBuffer);
+void processDataMsg(Capability* cap, OpCode opcode,
+                    rtsPackBuffer *recvBuffer);
 
 // special structure used as the "owning thread" of system-generated
 // blackholes.  Layout [ hdr | payload ], holds a TSO header.info and blocking
