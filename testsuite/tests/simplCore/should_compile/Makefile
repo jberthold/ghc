@@ -4,7 +4,7 @@ include $(TOP)/mk/test.mk
 
 T8832:
 	$(RM) -f T8832.o T8832.hi
-	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl T8832.hs | grep '#'
+	'$(TEST_HC)' $(TEST_HC_OPTS) $(T8832_WORDSIZE_OPTS) -O -c -ddump-simpl T8832.hs | grep '#'
 
 T7865:
 	$(RM) -f T7865.o T7865.hi
@@ -35,9 +35,12 @@ T4306:
 	'$(TEST_HC)' $(TEST_HC_OPTS) --show-iface T4306.hi | grep 'wupd ::'
 
 T4201:
-	$(RM) -f T4201.hi T4201.o
+	$(RM) -f T4201.hi T4201.o T4201.list
 	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T4201.hs
-	'$(TEST_HC)' $(TEST_HC_OPTS) --show-iface T4201.hi | grep -B2 'Sym'
+	'$(TEST_HC)' $(TEST_HC_OPTS) --show-iface T4201.hi > T4201.list
+	# poor man idea about how to replace GNU grep -B2 "Sym" invocation with pure POSIX tools
+	for i in `grep -n "Sym" T4201.list |cut -d ':' -f -1`; do head -$$i T4201.list | tail -3 ; done
+	$(RM) -f T4201.list
 
 # This one looped as a result of bogus specialisation
 T4903:

@@ -25,7 +25,7 @@ module HsTypes (
 
         ConDeclField(..), pprConDeclFields,
         
-        mkHsQTvs, hsQTvBndrs,
+        mkHsQTvs, hsQTvBndrs, isHsKindedTyVar, hsTvbAllKinded,
         mkExplicitHsForAllTy, mkImplicitHsForAllTy, hsExplicitTvs,
         hsTyVarName, mkHsWithBndrs, hsLKiTyVarNames,
         hsLTyVarName, hsLTyVarNames, hsLTyVarLocName, hsLTyVarLocNames,
@@ -187,6 +187,15 @@ data HsTyVarBndr name
          name
          (LHsKind name)  -- The user-supplied kind signature
   deriving (Data, Typeable)
+
+-- | Does this 'HsTyVarBndr' come with an explicit kind annotation?
+isHsKindedTyVar :: HsTyVarBndr name -> Bool
+isHsKindedTyVar (UserTyVar {})   = False
+isHsKindedTyVar (KindedTyVar {}) = True
+
+-- | Do all type variables in this 'LHsTyVarBndr' come with kind annotations?
+hsTvbAllKinded :: LHsTyVarBndrs name -> Bool
+hsTvbAllKinded = all (isHsKindedTyVar . unLoc) . hsQTvBndrs
 
 data HsType name
   = HsForAllTy  HsExplicitFlag          -- Renamer leaves this flag unchanged, to record the way

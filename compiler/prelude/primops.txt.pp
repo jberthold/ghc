@@ -247,13 +247,19 @@ primop   NotIOp   "notI#"   Monadic   Int# -> Int#
 
 primop   IntNegOp    "negateInt#"    Monadic   Int# -> Int#
 primop   IntAddCOp   "addIntC#"    GenPrimOp   Int# -> Int# -> (# Int#, Int# #)
-	 {Add with carry.  First member of result is (wrapped) sum;
-          second member is 0 iff no overflow occured.}
+         {Add signed integers reporting overflow.
+          First member of result is the sum truncated to an {\tt Int#};
+          second member is zero if the true sum fits in an {\tt Int#},
+          nonzero if overflow occurred (the sum is either too large
+          or too small to fit in an {\tt Int#}).}
    with code_size = 2
 
 primop   IntSubCOp   "subIntC#"    GenPrimOp   Int# -> Int# -> (# Int#, Int# #)
-	 {Subtract with carry.  First member of result is (wrapped) difference;
-          second member is 0 iff no overflow occured.}
+         {Subtract signed integers reporting overflow.
+          First member of result is the difference truncated to an {\tt Int#};
+          second member is zero if the true difference fits in an {\tt Int#},
+          nonzero if overflow occurred (the difference is either too large
+          or too small to fit in an {\tt Int#}).}
    with code_size = 2
 
 primop   IntGtOp  ">#"   Compare   Int# -> Int# -> Int#
@@ -379,6 +385,28 @@ primop   PopCnt64Op   "popCnt64#"   GenPrimOp   WORD64 -> Word#
     {Count the number of set bits in a 64-bit word.}
 primop   PopCntOp   "popCnt#"   Monadic   Word# -> Word#
     {Count the number of set bits in a word.}
+
+primop   Clz8Op   "clz8#" Monadic   Word# -> Word#
+    {Count leading zeros in the lower 8 bits of a word.}
+primop   Clz16Op   "clz16#" Monadic   Word# -> Word#
+    {Count leading zeros in the lower 16 bits of a word.}
+primop   Clz32Op   "clz32#" Monadic   Word# -> Word#
+    {Count leading zeros in the lower 32 bits of a word.}
+primop   Clz64Op   "clz64#" GenPrimOp WORD64 -> Word#
+    {Count leading zeros in a 64-bit word.}
+primop   ClzOp     "clz#"   Monadic   Word# -> Word#
+    {Count leading zeros in a word.}
+
+primop   Ctz8Op   "ctz8#"  Monadic   Word# -> Word#
+    {Count trailing zeros in the lower 8 bits of a word.}
+primop   Ctz16Op   "ctz16#" Monadic   Word# -> Word#
+    {Count trailing zeros in the lower 16 bits of a word.}
+primop   Ctz32Op   "ctz32#" Monadic   Word# -> Word#
+    {Count trailing zeros in the lower 32 bits of a word.}
+primop   Ctz64Op   "ctz64#" GenPrimOp WORD64 -> Word#
+    {Count trailing zeros in a 64-bit word.}
+primop   CtzOp     "ctz#"   Monadic   Word# -> Word#
+    {Count trailing zeros in a word.}
 
 primop   BSwap16Op   "byteSwap16#"   Monadic   Word# -> Word#
     {Swap bytes in the lower 16 bits of a word. The higher bytes are undefined. }
@@ -1045,6 +1073,30 @@ primop  ByteArrayContents_Char "byteArrayContents#" GenPrimOp
 
 primop  SameMutableByteArrayOp "sameMutableByteArray#" GenPrimOp
    MutableByteArray# s -> MutableByteArray# s -> Int#
+
+primop  ShrinkMutableByteArrayOp_Char "shrinkMutableByteArray#" GenPrimOp
+   MutableByteArray# s -> Int# -> State# s -> State# s
+   {Shrink mutable byte array to new specified size (in bytes), in
+    the specified state thread. The new size argument must be less than or
+    equal to the current size as reported by {\tt sizeofMutableArray\#}.}
+   with out_of_line = True
+        has_side_effects = True
+
+primop  ResizeMutableByteArrayOp_Char "resizeMutableByteArray#" GenPrimOp
+   MutableByteArray# s -> Int# -> State# s -> (# State# s,MutableByteArray# s #)
+   {Resize (unpinned) mutable byte array to new specified size (in bytes).
+    The returned {\tt MutableByteArray\#} is either the original
+    {\tt MutableByteArray\#} resized in-place or, if not possible, a newly
+    allocated (unpinned) {\tt MutableByteArray\#} (with the original content
+    copied over).
+
+    To avoid undefined behaviour, the original {\tt MutableByteArray\#} shall
+    not be accessed anymore after a {\tt resizeMutableByteArray\#} has been
+    performed.  Moreover, no reference to the old one should be kept in order
+    to allow garbage collection of the original {\tt MutableByteArray\#} in
+    case a new {\tt MutableByteArray\#} had to be allocated.}
+   with out_of_line = True
+        has_side_effects = True
 
 primop  UnsafeFreezeByteArrayOp "unsafeFreezeByteArray#" GenPrimOp
    MutableByteArray# s -> State# s -> (# State# s, ByteArray# #)

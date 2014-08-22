@@ -120,10 +120,10 @@ static void real_main(void)
 #  else /* !PARALLEL_RTS */
 
     /* ToDo: want to start with a larger stack size */
-    { 
-	Capability *cap = rts_lock();
+    {
+        Capability *cap = rts_lock();
         rts_evalLazyIO(&cap,progmain_closure, NULL);
-	status = rts_getSchedStatus(cap);
+        status = rts_getSchedStatus(cap);
         rts_unlock(cap);
     }
 
