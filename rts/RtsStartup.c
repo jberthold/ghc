@@ -192,8 +192,6 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     synchroniseSystem();             // calls initParallelSystem etc
 #endif /* PARALLEL_RTS */
 
-    InitPackBuffer(); /* also in seq. rts (serialisation support) */
-
     /* initTracing must be after setupRtsFlags() */
 #ifdef TRACING
     initTracing();

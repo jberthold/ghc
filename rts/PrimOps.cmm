@@ -2325,9 +2325,9 @@ stg_serializzezh (gcptr original)
 
   // assign something to keep cmm reg.allocator happy
   buff = ghczmprim_GHCziTypes_False_closure;
-  errCode = 0;
+  errCode = P_SUCCESS;
 
-  // call packing function (pass TSO, so enabling blocking
+  // call packing function (pass TSO, so enabling blocking)
   ("ptr" buff) = ccall tryPackToMemory(original "ptr", CurrentTSO "ptr",
                                        MyCapability() "ptr");
   // if packing hits a black hole, it will block the TSO
@@ -2353,7 +2353,7 @@ stg_serializzezh (gcptr original)
     errCode = buff;
     buff = ghczmprim_GHCziTypes_False_closure;
   } else {
-    errCode = 0;
+    errCode = P_SUCCESS;
   }
 
   return (errCode, buff);
@@ -2400,7 +2400,7 @@ stg_deserializzezh (gcptr buff)
   MAYBE_GC_P(stg_deserializzezh, buff);
 
   // call packing function
-  ("ptr" new) = ccall UnpackGraphWrapper(buff "ptr", MyCapability() "ptr");
+  ("ptr" new) = ccall unpackGraphWrapper(buff "ptr", MyCapability() "ptr");
 
   if ( new <= P_ERRCODEMAX ) {
     errCode = new;

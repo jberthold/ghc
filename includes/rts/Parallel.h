@@ -42,26 +42,15 @@ extern nat nPEs, thisPE;
 // Pack Buffer for constructing messages between PEs
 // defined here instead of in RtsTypes.h due to FLEXIBLE_ARRAY usage
 typedef struct rtsPackBuffer_ {
-  // Eden channel communication
-  Port                 sender;
-  Port                 receiver;
-  // for data messages only,
-  StgInt /* nat */     id;
-  StgInt /* nat */     size;
-  StgInt /* nat */     unpacked_size;
-  struct StgTSO_       *tso;
-  StgWord              buffer[FLEXIBLE_ARRAY];
+    // Eden channel communication
+    Port                 sender;
+    Port                 receiver;
+    // for data messages only,
+    StgInt /* nat */     id;            // currently unused
+    StgInt /* nat */     size;          // payload size in units of StgWord
+    StgInt /* nat */     unpacked_size; // currently unused
+    StgWord              buffer[FLEXIBLE_ARRAY]; // payload
 } rtsPackBuffer;
-
-// In multithreaded version, this lock must be held during pack and unpack
-// operations and while using return values of packNearbyGraph
-#ifdef THREADED_RTS
-extern Mutex pack_mutex;
-#endif
-
-// initialiser and destructor, defined in Pack.c
-void InitPackBuffer(void);
-void freePackBuffer(void);
 
 // minimum sizes for message buffers:
 
@@ -77,52 +66,48 @@ void freePackBuffer(void);
 
 // Check, defined in Pack.c as well.
 // Is there still a macro for it somewhere else?
-rtsBool IsBlackhole(StgClosure* closure);
+rtsBool isBlackhole(StgClosure* closure);
 
 // interfaces for (un-)packing, defined in Pack.c.
 
-// pack heap subgraph starting at closure (which might block the caller).
-// Note that PackNearbyGraph returns a global data structure protected by
-// pack_mutex (should be held as long as return value is needed).
-rtsPackBuffer* PackNearbyGraph(StgClosure* closure, StgTSO* tso);
+// packs to buffer, returns size-in-bytes + P_ERRCODEMAX, or an error code
+int packToBuffer(StgClosure* closure,
+                 StgWord *buffer, nat bufsize, StgTSO *caller);
 
 // packing can fail for different reasons, encoded in small ints which are
-// returned by PackNearbyGraph: (corresponding HS type to be supplied)
+// returned by packToBuffer:
 // constant definition in includes/Constants.h:
 // #define P_SUCCESS       0x00 /* used for return value of PackToMemory only */
 // #define P_BLACKHOLE     0x01 /* possibly also blocking the packing thread */
 // #define P_NOBUFFER      0x02 /* buffer too small */
 // #define P_CANNOTPACK    0x03 /* type cannot be packed (MVar, TVar) */
 // #define P_UNSUPPORTED   0x04 /* type not supported (but could/should be) */
-// #define P_IMPOSSIBLE    0x05 /* impossible type found (stack frame,msg, etc) */
+// #define P_IMPOSSIBLE    0x05 /* impossible type (stack frame,msg, etc) */
 // #define P_GARBLED       0x06 /* invalid data for deserialisation */
 // #define P_ERRCODEMAX    0x06
 
-// // these codes will be returned instead of the pack buffer
+// If packing succeeds, size + P_ERRCODEMAX is returned
 
 // predicate for checks:
-#define isPackError(bufptr) (((StgWord) (bufptr)) <= P_ERRCODEMAX)
-
-// unpack a graph from the packBuffer. caller should hold pack_mutex.
-StgClosure*    UnpackGraph(rtsPackBuffer *packBuffer,
-                           Port inPort,
-                           Capability* cap);
+#define isPackError(val) (((StgWord) (val)) <= P_ERRCODEMAX)
 
 // serialisation into a Haskell Byte array, returning error codes on failure
 StgClosure* tryPackToMemory(StgClosure* graphroot, StgTSO* tso,
                             Capability* cap);
 
+// unpack a graph from packBuffer (wiping the buffer), aborts if unsuccessful
+StgClosure* unpackGraph(rtsPackBuffer *packBuffer, Capability* cap);
+
 // respective deserialisation (global pack buffer used for unpacking)
-StgClosure* UnpackGraphWrapper(StgArrWords* packBufferArray,
-                               Capability* cap);
+StgClosure* unpackGraphWrapper(StgArrWords *packBufferArray, Capability *cap);
 
 // creating a blackhole from scratch. Defined in Pack.c (where it is
 // used), but mainly used by the primitive for channel creation.
 StgClosure* createBH(Capability *cap);
 // and creating a list node (CONS).
-// used in HLComms.c, defined in Pack.c
+// used in DataComms.c, defined in Pack.c
 StgClosure* createListNode(Capability *cap,
-              StgClosure *head, StgClosure *tail);
+                           StgClosure *head, StgClosure *tail);
 
 #if defined(PARALLEL_RTS)
 
@@ -139,7 +124,11 @@ void          emitStartupEvents(void);
 // defined in ParInit.c, called in RtsStartup.c (after shutdown when tracing)
 void          zipTraceFiles(void);
 
-// resides in Schedule.c:
+// packbuffer resides in DataComms.c
+void initPackBuffer(void);
+void freePackBuffer(void);
+
+// RecvBuffer resides in Schedule.c:
 // init on demand
 void freeRecvBuffer(void);
 

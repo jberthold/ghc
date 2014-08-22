@@ -280,7 +280,7 @@ Inport* addInport_(ProcessData *p, StgClosure *blackhole) {
   Inport* newIn;
 
   ASSERT(p != NULL);
-  ASSERT(IsBlackhole(blackhole));
+  ASSERT(isBlackhole(blackhole));
 
   newIn = (Inport*) stgMallocBytes(sizeof(Inport),
                                    "new inport");

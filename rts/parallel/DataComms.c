@@ -75,10 +75,10 @@ choosePE(void)
  *
  * Structure of standard (non-MPSystem) messages:
  *    Port      Port       (optional) data section
- * -------------------------------------------------------------
- * | Sender | Receiver | id | tso | nelem | data(length nelem) |
- * -------------------------------------------------------------
- * |<------------- rtsPackBuffer ----------------------------->|
+ * --------------------------------------------------------
+ * | Sender | Receiver | id  | nelem | data(length nelem) |
+ * --------------------------------------------------------
+ * |<------------- rtsPackBuffer ------------------------>|
  *
  * The rtsPackBuffer is defined to capture exactly this structure
  * (includes the sender and receiver), so we can just send it away
@@ -87,6 +87,26 @@ choosePE(void)
  * More on ports in RTTables.h, on packing data in Pack.c
  */
 
+// global pack buffer
+rtsPackBuffer *globalPackBuffer;
+
+// allocate the pack buffer. Called from ParInit (synchroniseSystem)
+void initPackBuffer(void) {
+    IF_PAR_DEBUG(verbose, debugBelch("init pack buffer"));
+    if (globalPackBuffer == NULL) {
+        globalPackBuffer = (rtsPackBuffer*)
+            stgMallocBytes(sizeof(rtsPackBuffer)
+                           + RtsFlags.ParFlags.packBufferSize
+                           + DEBUG_HEADROOM * sizeof(StgWord),
+                           "init pack buffer");
+    }
+}
+
+// free allocated pack buffer. Called from ParInit (shutdownParallelSystem)
+#warning (init|free) not used properly
+void freePackBuffer(void) {
+    stgFree(globalPackBuffer);
+}
 
 /* sendMsg()
  *  sends a message tagged, with given tag, via given port,
@@ -118,7 +138,7 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
                           dataBuffer->receiver.id));
 
   if (dataBuffer->size != 0) {
-    size = sizeof(rtsPackBuffer) + sizeof(StgWord)*dataBuffer->size;
+    size = sizeof(rtsPackBuffer) + dataBuffer->size*sizeof(StgWord);
   } else {
     size = sizeof(rtsPackBuffer);
   }
@@ -168,8 +188,9 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data);
  */
 int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
 
-  rtsPackBuffer *packedData = (rtsPackBuffer*) NULL;
-  rtsPackBuffer dummyBuffer;
+  rtsPackBuffer *packedData = globalPackBuffer;
+  nat size; // packed size (returned by packToBuffer with error code bias)
+
   OpCode sendTag = 0;
   int success=MSG_OK; // indicates successful packing, becomes return value
                       // codes defined in includes/rts/Constants.h
@@ -209,7 +230,6 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     }
 
     // no data needed
-    packedData = &dummyBuffer;
     packedData->size = 0;
     break;
   case 2: // stream data
@@ -261,19 +281,14 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     }
 
     // pack the graph, needed in modes 2-4
-    // TODO: later, we need to save/restore the sendingtso's receiver.
-    // PackNearbyGraph will send parts to sendingtso's receiver and
-    // change the tag to PP_PART if the graph is too large for one
-    // message.
-    ACQUIRE_LOCK(&pack_mutex);
-
-    packedData = PackNearbyGraph(data, sendingtso);
+    size = packToBuffer(data, packedData->buffer, 
+                        RtsFlags.ParFlags.packBufferSize, sendingtso);
 
     // graph might contain blackholes, in which case sendingtso
-    // blocks (state set in PackNearbyGraph, blocked when returning
+    // blocks (state set in packToBuffer, blocked when returning
     // success == MSG_BLOCKED to the calling primop sendData# )
-    if (isPackError(packedData)) {
-      switch ((StgWord)packedData) {
+    if (isPackError(size)) {
+      switch (size) {
       case P_BLACKHOLE:
         success = MSG_BLOCKED;
         break;
@@ -284,6 +299,8 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
       }
     } else {
       success = MSG_OK;
+      // remove bias in size, adjust to StgWord unit
+      packedData->size = (size - P_ERRCODEMAX) / sizeof(StgWord);
     }
     break;
 
@@ -371,12 +388,10 @@ processDataMsg(Capability * cap, OpCode tag, rtsPackBuffer *gumPackBuffer) {
 
   // select placeholder closure (assumed: blackhole!)
   placeholder = inport->closure;
-  ASSERT(IsBlackhole(placeholder));
+  ASSERT(isBlackhole(placeholder));
 
   // unpack the graph
-  ACQUIRE_LOCK(&pack_mutex);
-  graph = UnpackGraph(gumPackBuffer, gumPackBuffer->receiver, cap);
-  RELEASE_LOCK(&pack_mutex);
+  graph = unpackGraph(gumPackBuffer, cap);
 
   // replace placeholder by received data, possibly leaving port open
   switch(tag) {
@@ -467,7 +482,7 @@ fakeDataMsg(StgClosure *graph,
 
   // select placeholder closure (assumed: blackhole!)
   placeholder = inport->closure;
-  ASSERT(IsBlackhole(placeholder));
+  ASSERT(isBlackhole(placeholder));
 
   // replace placeholder by received data, possibly leaving port open
   switch(tag) {

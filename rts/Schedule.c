@@ -771,9 +771,7 @@ static void processMessages(Capability *cap) {
                recvBuffer->receiver.machine == thisPE);
         // edentrace: emit an event receiveMessage(cap, recvBuffer)
         traceReceiveMessageEvent(cap, opcode, recvBuffer);
-        ACQUIRE_LOCK(&pack_mutex);
-        graph = UnpackGraph(recvBuffer, recvBuffer->receiver, cap);
-        RELEASE_LOCK(&pack_mutex);
+        graph = unpackGraph(recvBuffer, cap);
         startNewProcess(cap, graph);
 
         break;
