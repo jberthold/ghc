@@ -20,7 +20,12 @@
 #include "RtsUtils.h" // utilities for error msg., allocation, etc.
 #include "PEOpCodes.h" // message codes
 #include "Rts.h" //sendBufferSize
+
+// this code won't compile without a few C99 standard headers
+#if defined(HAVE_STRING_H) && defined(HAVE_LIMITS_H)
 #include <string.h>
+#include <limits.h>
+#endif
 
 /* Global conditions defined here. */
 // main thread (PE 1 in logical numbering)
@@ -148,6 +153,27 @@ rtsBool MP_sync(void) {
   // buffer size default is 20, use RTS option -qq<N> to change it
   maxMsgs = RtsFlags.ParFlags.sendBufferSize;
   // and resulting buffer space
+
+  // checks inside RtsFlags.c:
+  // DATASPACEWORDS * sizeof(StgWord) < INT_MAX / 2
+  // maxMsgs <= max(20,nPEs)
+  // Howver, they might be just too much in combination.
+  if (INT_MAX / sizeof(StgWord) < DATASPACEWORDS * maxMsgs) {
+      IF_PAR_DEBUG(mpcomm,
+              debugBelch("requested buffer sizes too large, adjusting...\n"));
+      do { maxMsgs--;
+      } while (maxMsgs > 0 &&
+               INT_MAX / sizeof(StgWord) < DATASPACEWORDS * maxMsgs);
+      if (maxMsgs == 0) {
+          // should not be possible with checks inside RtsFlags.c, see above
+          barf("pack buffer too large to allocate, aborting program.");
+      } else {
+          IF_PAR_DEBUG(mpcomm,
+                       debugBelch("send buffer size reduced to %d messages.\n",
+                                  maxMsgs));
+      }
+  }
+
   bufsize = maxMsgs * DATASPACEWORDS * sizeof(StgWord);
 
   mpiMsgBuffer = (void*) stgMallocBytes(bufsize, "mpiMsgBuffer");
@@ -250,13 +276,18 @@ rtsBool MP_quit(int isError) {
   {
     // allocate fresh buffer to avoid overflow
     void* voidbuffer;
+    int voidsize;
+
+    // we might come here because of requesting too much buffer (bug!)
+    voidsize = (INT_MAX / sizeof(StgWord) < DATASPACEWORDS)?\
+               INT_MAX : DATASPACEWORDS * sizeof(StgWord);
 
     voidbuffer = (void*)
-      stgMallocBytes(DATASPACEWORDS * sizeof(StgWord), "voidBuffer");
+      stgMallocBytes(voidsize, "voidBuffer");
 
     // receive whatever is out there...
     while (MP_probe()) {
-      MPI_Recv(voidbuffer, DATASPACEWORDS * sizeof(StgWord), MPI_BYTE,
+      MPI_Recv(voidbuffer, voidsize, MPI_BYTE,
                MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
       if (ISSYSCODE(status.MPI_TAG))
         MPI_Recv(voidbuffer, 1, MPI_INT,
@@ -266,7 +297,7 @@ rtsBool MP_quit(int isError) {
     MPI_Barrier(MPI_COMM_WORLD);
     // all in sync (noone sends further messages), receive rest
     while (MP_probe()) {
-      MPI_Recv(voidbuffer, DATASPACEWORDS * sizeof(StgWord), MPI_BYTE,
+      MPI_Recv(voidbuffer, voidsize, MPI_BYTE,
                MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
       if (ISSYSCODE(status.MPI_TAG))
         MPI_Recv(voidbuffer, 1, MPI_INT,
