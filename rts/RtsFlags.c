@@ -1293,7 +1293,8 @@ error = rtsTrue;
                   // -qQ<n> ... set pack buffer size to <n> bytes
                   if (rts_argv[arg][3] != '\0') {
                     RtsFlags.ParFlags.packBufferSize = 
-                      decodeSize(rts_argv[arg], 3, 1024, HS_INT_MAX);
+                      decodeSize(rts_argv[arg], 3, 1024, 1073741823
+                                                         /* INT_MAX / 2 */);
                     IF_PAR_DEBUG(verbose,
                        debugBelch("-qQ<n>: pack buffer size set to %d bytes\n"
                                   , RtsFlags.ParFlags.packBufferSize));
@@ -1578,28 +1579,32 @@ process_par_option(int arg, rtsBool *error)
 
   /* Communication and task creation cost parameters */
   switch(rts_argv[arg][2]) {
- 
+
   // alphabetical order:
   case 'q': /* -qq<n> ... set send buffer size to <n> * packbuffer */
     if (rts_argv[arg][3] != '\0') {
-      RtsFlags.ParFlags.sendBufferSize 
-        = strtol(rts_argv[arg]+3, (char **) NULL, 10);
-    }
-    if (RtsFlags.ParFlags.sendBufferSize <= 0) {
-      errorBelch("bad value for -qq");
-      *error = rtsTrue;
+      RtsFlags.ParFlags.sendBufferSize =
+          // reasonable max for larger runs: nPEs. Max never < 20
+          decodeSize(rts_argv[arg], 3, 2, (nPEs>20?nPEs:20));
+    } else {
+        errorBelch("missing argument to -qq\n");
+        *error = rtsTrue;
     }
     break;
   case 'Q': /* -qQ<n> ... set pack buffer size to <n> bytes*/
     if (rts_argv[arg][3] != '\0') {
-      RtsFlags.ParFlags.packBufferSize = 
-        decodeSize(rts_argv[arg], 3, 1024, HS_INT_MAX);
+      RtsFlags.ParFlags.packBufferSize =
+          decodeSize(rts_argv[arg], 3, 1024, 1073741823 /* INT_MAX / 2 */ );
+      // the max. buffer size of INT_MAX/2 is required for the MPI
+      // implementation using at least 2 msg.s of send buffer (see above)
+      // Note: MPI implementation may later fail to allocate if -qq and -qQ are
+      // used and sendBufferSize * packBufferSize > INT_MAX
     } else {
       errorBelch("missing size of PackBuffer (for -qQ)\n");
       *error = rtsTrue;
     }
     IF_PAR_DEBUG(verbose,
-                 debugBelch("-qQ<n>: pack buffer size set to %d bytes\n", 
+                 debugBelch("-qQ<n>: pack buffer size set to %d bytes\n",
                        RtsFlags.ParFlags.packBufferSize));
     break;
   case 'r':  // -Qr... : something about placement  
