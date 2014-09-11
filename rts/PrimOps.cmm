@@ -2331,7 +2331,7 @@ stg_serializzezh (gcptr original)
   ("ptr" buff) = ccall tryPackToMemory(original "ptr", CurrentTSO "ptr",
                                        MyCapability() "ptr");
   // if packing hits a black hole, it will block the TSO
-  // for all error codes by the RTS see includes/rts/Parallel.h
+  // for all error codes by the RTS see includes/rts/Constants.h
   if (buff == P_BLACKHOLE) {
     // Packing code has written block_reason and -closure, and
     // created/modified a blocking queue by a new message, see packing code.
@@ -2375,7 +2375,7 @@ stg_trySerializzezh (gcptr original)
   // call packing function (without giving the TSO, no blocking)
   ("ptr" buff) = ccall tryPackToMemory(original "ptr", NULL,
                                        MyCapability() "ptr");
-  // small values indicate failure, see includes/rts/Parallel.h
+  // small values indicate failure, see includes/rts/Constants.h
   if ( buff <= P_ERRCODEMAX ) {
     errCode = buff;
     buff = ghczmprim_GHCziTypes_False_closure;
