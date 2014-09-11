@@ -6,7 +6,7 @@
 -- Module      :  Prelude
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  stable
 -- Portability :  portable
@@ -48,7 +48,7 @@ module Prelude (
 
     -- *** Numeric types
     Int, Integer, Float, Double,
-    Rational,
+    Rational, Word,
 
     -- *** Numeric type classes
     Num((+), (-), (*), negate, abs, signum, fromInteger),
@@ -67,8 +67,9 @@ module Prelude (
     fromIntegral, realToFrac,
 
     -- ** Monads and functors
-    Monad((>>=), (>>), return, fail),
     Functor(fmap),
+    Applicative(pure, (<*>), (*>), (<*)),
+    Monad((>>=), (>>), return, fail),
     mapM, mapM_, sequence, sequence_, (=<<),
 
     -- ** Miscellaneous functions

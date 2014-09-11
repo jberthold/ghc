@@ -1,8 +1,10 @@
 # Changelog for [`base` package](http://hackage.haskell.org/package/base)
 
-## 4.7.1.0 *TBA*
+## 4.8.0.0  *TBA*
 
   * Bundled with GHC 7.10.1
+
+  * Make `Applicative` a superclass of `Monad`
 
   * Add reverse application operator `Data.Function.(&)`
 
@@ -19,6 +21,13 @@
     like `Proxy` itself is.
 
   * Make `abs` and `signum` handle (-0.0) correctly per IEEE-754.
+
+  * Re-export `Data.Word.Word` from `Prelude`
+
+  * Add `countLeadingZeros` and `countTrailingZeros` methods to
+    `Data.Bits.FiniteBits` class
+
+  * Add `Data.List.uncons` list destructor (#9550)
 
 ## 4.7.0.1  *Jul 2014*
 

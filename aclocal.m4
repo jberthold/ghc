@@ -473,18 +473,18 @@ AC_DEFUN([FP_SETTINGS],
         SettingsWindresCommand="/bin/false"
         SettingsLibtoolCommand="libtool"
         SettingsTouchCommand='touch'
-        if test -z "$LlcCmd"
-        then
-          SettingsLlcCommand="llc"
-        else
-          SettingsLlcCommand="$LlcCmd"
-        fi
-        if test -z "$OptCmd"
-        then
-          SettingsOptCommand="opt"
-        else
-          SettingsOptCommand="$OptCmd"
-        fi
+    fi
+    if test -z "$LlcCmd"
+    then
+      SettingsLlcCommand="llc"
+    else
+      SettingsLlcCommand="$LlcCmd"
+    fi
+    if test -z "$OptCmd"
+    then
+      SettingsOptCommand="opt"
+    else
+      SettingsOptCommand="$OptCmd"
     fi
     SettingsCCompilerFlags="$CONF_CC_OPTS_STAGE2"
     SettingsCCompilerLinkFlags="$CONF_GCC_LINKER_OPTS_STAGE2"
@@ -897,8 +897,8 @@ changequote([, ])dnl
 ])
 if test ! -f compiler/parser/Parser.hs || test ! -f compiler/cmm/CmmParse.hs
 then
-    FP_COMPARE_VERSIONS([$fptools_cv_happy_version],[-lt],[1.19],
-      [AC_MSG_ERROR([Happy version 1.19 or later is required to compile GHC.])])[]
+    FP_COMPARE_VERSIONS([$fptools_cv_happy_version],[-lt],[1.19.4],
+      [AC_MSG_ERROR([Happy version 1.19.4 or later is required to compile GHC.])])[]
 fi
 HappyVersion=$fptools_cv_happy_version;
 AC_SUBST(HappyVersion)

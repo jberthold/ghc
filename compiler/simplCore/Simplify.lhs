@@ -744,19 +744,19 @@ simplUnfolding env top_lvl id new_rhs unf
               ; args' <- mapM (simplExpr env') args
               ; return (mkDFunUnfolding bndrs' con args') }
 
-      CoreUnfolding { uf_tmpl = expr, uf_arity = arity
-                    , uf_src = src, uf_guidance = guide }
+      CoreUnfolding { uf_tmpl = expr, uf_src = src, uf_guidance = guide }
         | isStableSource src
         -> do { expr' <- simplExpr rule_env expr
               ; case guide of
-                  UnfWhen sat_ok _    -- Happens for INLINE things
-                     -> let guide' = UnfWhen sat_ok (inlineBoringOk expr')
+                  UnfWhen { ug_arity = arity, ug_unsat_ok = sat_ok }  -- Happens for INLINE things
+                     -> let guide' = UnfWhen { ug_arity = arity, ug_unsat_ok = sat_ok
+                                             , ug_boring_ok = inlineBoringOk expr' }
                         -- Refresh the boring-ok flag, in case expr'
                         -- has got small. This happens, notably in the inlinings
                         -- for dfuns for single-method classes; see
                         -- Note [Single-method classes] in TcInstDcls.
                         -- A test case is Trac #4138
-                        in return (mkCoreUnfolding src is_top_lvl expr' arity guide')
+                        in return (mkCoreUnfolding src is_top_lvl expr' guide')
                             -- See Note [Top-level flag on inline rules] in CoreUnfold
 
                   _other              -- Happens for INLINABLE things
@@ -780,8 +780,8 @@ simplUnfolding env top_lvl id new_rhs unf
     bottoming = isBottomingId id
     is_top_lvl = isTopLevel top_lvl
     act      = idInlineActivation id
-    rule_env = updMode (updModeForInlineRules act) env
-               -- See Note [Simplifying inside InlineRules] in SimplUtils
+    rule_env = updMode (updModeForStableUnfoldings act) env
+               -- See Note [Simplifying inside stable unfoldings] in SimplUtils
 \end{code}
 
 Note [Force bottoming field]
@@ -824,9 +824,9 @@ Note [Setting the new unfolding]
   important: if exprIsConApp says 'yes' for a recursive thing, then we
   can get into an infinite loop
 
-If there's an InlineRule on a loop breaker, we hang on to the inlining.
-It's pretty dodgy, but the user did say 'INLINE'.  May need to revisit
-this choice.
+If there's an stable unfolding on a loop breaker (which happens for
+INLINEABLE), we hang on to the inlining.  It's pretty dodgy, but the
+user did say 'INLINE'.  May need to revisit this choice.
 
 Note [Setting the demand info]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -956,19 +956,8 @@ simplExprF1 env expr@(Lam {}) cont
     zap b | isTyVar b = b
           | otherwise = zapLamIdInfo b
 
-simplExprF1 env (Case scrut bndr alts_ty alts) cont
-  | sm_case_case (getMode env)
-  =     -- Simplify the scrutinee with a Select continuation
-    simplExprF env scrut (Select NoDup bndr alts env cont)
-
-  | otherwise
-  =     -- If case-of-case is off, simply simplify the case expression
-        -- in a vanilla Stop context, and rebuild the result around it
-    do  { case_expr' <- simplExprC env scrut
-                             (Select NoDup bndr alts env (mkBoringStop alts_out_ty))
-        ; rebuild env case_expr' cont }
-  where
-    alts_out_ty = substTy env alts_ty
+simplExprF1 env (Case scrut bndr _ alts) cont
+  = simplExprF env scrut (Select NoDup bndr alts env cont)
 
 simplExprF1 env (Let (Rec pairs) body) cont
   = do  { env' <- simplRecBndrs env (map fst pairs)
@@ -2326,7 +2315,9 @@ missingAlt env case_bndr _ cont
 \begin{code}
 prepareCaseCont :: SimplEnv
                 -> [InAlt] -> SimplCont
-                -> SimplM (SimplEnv, SimplCont, SimplCont)
+                -> SimplM (SimplEnv,
+                           SimplCont,   -- Non-dupable part
+                           SimplCont)   -- Dupable part
 -- We are considering
 --     K[case _ of { p1 -> r1; ...; pn -> rn }]
 -- where K is some enclosing continuation for the case
@@ -2336,12 +2327,15 @@ prepareCaseCont :: SimplEnv
 -- The idea is that we'll transform thus:
 --          Knodup[ (case _ of { p1 -> Kdup[r1]; ...; pn -> Kdup[rn] }
 --
--- We also return some extra bindings in SimplEnv (that scope over
+-- We may also return some extra bindings in SimplEnv (that scope over
 -- the entire continuation)
+--
+-- When case-of-case is off, just make the entire continuation non-dupable
 
 prepareCaseCont env alts cont
-  | many_alts alts = mkDupableCont env cont
-  | otherwise      = return (env, cont, mkBoringStop (contResultType cont))
+  | not (sm_case_case (getMode env)) = return (env, mkBoringStop (contInputType cont), cont)
+  | not (many_alts alts)             = return (env, cont, mkBoringStop (contResultType cont))
+  | otherwise                        = mkDupableCont env cont
   where
     many_alts :: [InAlt] -> Bool  -- True iff strictly > 1 non-bottom alternative
     many_alts []  = False         -- See Note [Bottom alternatives]
@@ -2574,7 +2568,7 @@ An alternative plan is this:
 but that is bad if 'c' is *not* later scrutinised.
 
 So instead we do both: we pass 'c' and 'c#' , and record in c's inlining
-(an InlineRule) that it's really I# c#, thus
+(a stable unfolding) that it's really I# c#, thus
 
    $j = \c# -> \c[=I# c#] -> ...c....
 

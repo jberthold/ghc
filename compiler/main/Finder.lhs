@@ -42,7 +42,6 @@ import UniqFM
 import Maybes           ( expectJust )
 import Exception        ( evaluate )
 
-import Distribution.Text
 import Data.IORef       ( IORef, writeIORef, readIORef, atomicModifyIORef )
 import System.Directory
 import System.FilePath
@@ -610,31 +609,33 @@ cantFindErr cannot_find _ dflags mod_name find_result
          tried_these files
 
     tried_these files
-        | null files = empty
+        | null files = Outputable.empty
         | verbosity dflags < 3 =
               ptext (sLit "Use -v to see a list of the files searched for.")
         | otherwise =
                hang (ptext (sLit "Locations searched:")) 2 $ vcat (map text files)
 
-    pkg_hidden pkg =
-        ptext (sLit "It is a member of the hidden package") <+> quotes (ppr pkg)
-        <> dot $$ cabal_pkg_hidden_hint pkg
-    cabal_pkg_hidden_hint pkg
+    pkg_hidden :: PackageKey -> SDoc
+    pkg_hidden pkgid =
+        ptext (sLit "It is a member of the hidden package")
+        <+> quotes (ppr pkgid)
+        --FIXME: we don't really want to show the package key here we should
+        -- show the source package id or installed package id if it's ambiguous
+        <> dot $$ cabal_pkg_hidden_hint pkgid
+    cabal_pkg_hidden_hint pkgid
      | gopt Opt_BuildingCabalPackage dflags
-        = case simpleParse (packageKeyString pkg) of
-          Just pid ->
-              ptext (sLit "Perhaps you need to add") <+>
-              quotes (text (display (pkgName pid))) <+>
+        = let pkg = expectJust "pkg_hidden" (lookupPackage dflags pkgid)
+           in ptext (sLit "Perhaps you need to add") <+>
+              quotes (ppr (packageName pkg)) <+>
               ptext (sLit "to the build-depends in your .cabal file.")
-          Nothing -> empty
-     | otherwise = empty
+     | otherwise = Outputable.empty
 
     mod_hidden pkg =
         ptext (sLit "it is a hidden module in the package") <+> quotes (ppr pkg)
 
     pp_suggestions :: [ModuleSuggestion] -> SDoc
     pp_suggestions sugs
-      | null sugs = empty
+      | null sugs = Outputable.empty
       | otherwise = hang (ptext (sLit "Perhaps you meant"))
                        2 (vcat (map pp_sugg sugs))
 
@@ -642,7 +643,7 @@ cantFindErr cannot_find _ dflags mod_name find_result
     -- package flags when making suggestions.  ToDo: if the original package
     -- also has a reexport, prefer that one
     pp_sugg (SuggestVisible m mod o) = ppr m <+> provenance o
-      where provenance ModHidden = empty
+      where provenance ModHidden = Outputable.empty
             provenance (ModOrigin{ fromOrigPackage = e,
                                    fromExposedReexport = res,
                                    fromPackageFlag = f })
@@ -656,9 +657,9 @@ cantFindErr cannot_find _ dflags mod_name find_result
               | f
                  = parens (ptext (sLit "defined via package flags to be")
                     <+> ppr mod)
-              | otherwise = empty
+              | otherwise = Outputable.empty
     pp_sugg (SuggestHidden m mod o) = ppr m <+> provenance o
-      where provenance ModHidden =  empty
+      where provenance ModHidden =  Outputable.empty
             provenance (ModOrigin{ fromOrigPackage = e,
                                    fromHiddenReexport = rhs })
               | Just False <- e
@@ -667,5 +668,5 @@ cantFindErr cannot_find _ dflags mod_name find_result
               | (pkg:_) <- rhs
                  = parens (ptext (sLit "needs flag -package-key")
                     <+> ppr (packageConfigId pkg))
-              | otherwise = empty
+              | otherwise = Outputable.empty
 \end{code}

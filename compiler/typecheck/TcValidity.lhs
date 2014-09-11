@@ -332,8 +332,10 @@ check_syn_tc_app ctxt rank ty tc tys
   = mapM_ check_arg tys
 
   | otherwise
-  = failWithTc (arityErr "Type synonym" (tyConName tc) tc_arity n_args)
+  = failWithTc (arityErr flavour (tyConName tc) tc_arity n_args)
   where
+    flavour | isSynFamilyTyCon tc = "Type family" 
+            | otherwise           = "Type synonym"
     n_args = length tys
     tc_arity  = tyConArity tc
     check_arg | isSynFamilyTyCon tc = check_arg_type  ctxt rank
@@ -402,7 +404,7 @@ forAllTyErr rank ty
     suggestion = case rank of
                    LimitedRank {} -> ptext (sLit "Perhaps you intended to use RankNTypes or Rank2Types")
                    MonoType d     -> d
-                   _              -> empty      -- Polytype is always illegal
+                   _              -> Outputable.empty -- Polytype is always illegal
 
 unliftedArgErr, ubxArgTyErr :: Type -> SDoc
 unliftedArgErr  ty = sep [ptext (sLit "Illegal unlifted type:"), ppr ty]

@@ -8,7 +8,7 @@
 module WorkWrap ( wwTopBinds ) where
 
 import CoreSyn
-import CoreUnfold       ( certainlyWillInline, mkInlineUnfolding, mkWwInlineRule )
+import CoreUnfold       ( certainlyWillInline, mkWwInlineRule, mkWorkerUnfolding )
 import CoreUtils        ( exprType, exprIsHNF )
 import CoreArity        ( exprArity )
 import Var
@@ -148,8 +148,8 @@ The only reason this is monadised is for the unique supply.
 Note [Don't w/w INLINE things]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 It's very important to refrain from w/w-ing an INLINE function (ie one
-with an InlineRule) because the wrapper will then overwrite the
-InlineRule unfolding.
+with a stable unfolding) because the wrapper will then overwrite the
+old stable unfolding with the wrapper code.
 
 Furthermore, if the programmer has marked something as INLINE,
 we may lose by w/w'ing it.
@@ -163,19 +163,46 @@ Notice that we refrain from w/w'ing an INLINE function even if it is
 in a recursive group.  It might not be the loop breaker.  (We could
 test for loop-breaker-hood, but I'm not sure that ever matters.)
 
-Note [Don't w/w INLINABLE things]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Worker-wrapper for INLINABLE functions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 If we have
   {-# INLINABLE f #-}
-  f x y = ....
-then in principle we might get a more efficient loop by w/w'ing f.
-But that would make a new unfolding which would overwrite the old
-one.  So we leave INLINABLE things alone too.
+  f :: Ord a => [a] -> Int -> a
+  f x y = ....f....
 
-This is a slight infelicity really, because it means that adding
-an INLINABLE pragma could make a program a bit less efficient,
-because you lose the worker/wrapper stuff.  But I don't see a way
-to avoid that.
+where f is strict in y, we might get a more efficient loop by w/w'ing
+f.  But that would make a new unfolding which would overwrite the old
+one! So the function would no longer be ININABLE, and in particular
+will not be specialised at call sites in other modules.
+
+This comes in practice (Trac #6056).
+
+Solution: do the w/w for strictness analysis, but transfer the Stable
+unfolding to the *worker*.  So we will get something like this:
+
+  {-# INLINE[0] f #-}
+  f :: Ord a => [a] -> Int -> a
+  f d x y = case y of I# y' -> fw d x y'
+
+  {-# INLINABLE[0] fw #-}
+  fw :: Ord a => [a] -> Int# -> a
+  fw d x y' = let y = I# y' in ...f...
+
+How do we "transfer the unfolding"? Easy: by using the old one, wrapped
+in work_fn! See CoreUnfold.mkWorkerUnfolding.
+
+Note [Activation for INLINABLE worker]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Follows on from Note [Worker-wrapper for INLINABLE functions]
+It is *vital* that if the worker gets an INLINABLE pragma (from the
+original function), then the worker has the same phase activation as
+the wrapper (or later).  That is necessary to allow the wrapper to
+inline into the worker's unfolding: see SimplUtils
+Note [Simplifying inside stable unfoldings].
+
+Notihng is lost by giving the worker the same activation as the
+worker, because the worker won't have any chance of inlining until the
+wrapper does; there's no point in giving it an earlier activation.
 
 Note [Don't w/w inline small non-loop-breaker things]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -218,7 +245,7 @@ strictness.  Eg if we have
     g :: Int -> Int
     g x = f x x            -- Provokes a specialisation for f
 
-  module Bsr where
+  module Bar where
     import Foo
 
     h :: Int -> Int
@@ -231,6 +258,10 @@ having rules on, but inlinings off.  But that's kind of lucky. It seems
 more robust to give the wrapper an Activation of (ActiveAfter 0),
 so that it becomes active in an importing module at the same time that
 it appears in the first place in the defining module.
+
+At one stage I tried making the wrapper inlining always-active, and
+that had a very bad effect on nofib/imaginary/x2n1; a wrapper was
+inlined before the specialisation fired.
 
 \begin{code}
 tryWW   :: DynFlags
@@ -253,17 +284,10 @@ tryWW dflags fam_envs is_rec fn_id rhs
         -- Furthermore, don't even expose strictness info
   = return [ (fn_id, rhs) ]
 
-  | isStableUnfolding (realIdUnfolding fn_id)
-  = return [ (fn_id, rhs) ]
-      -- See Note [Don't w/w INLINE things]
-      -- and Note [Don't w/w INLINABLE things]
-      -- NB: use realIdUnfolding because we want to see the unfolding
-      --     even if it's a loop breaker!
-
-  | certainlyWillInline dflags (idUnfolding fn_id)
-  = let inline_rule = mkInlineUnfolding Nothing rhs
-    in  return [ (fn_id `setIdUnfolding` inline_rule, rhs) ]
-        -- Note [Don't w/w inline small non-loop-breaker things]
+  | not loop_breaker
+  , Just stable_unf <- certainlyWillInline dflags fn_unf
+  = return [ (fn_id `setIdUnfolding` stable_unf, rhs) ]
+        -- Note [Don't w/w inline small non-loop-breaker, or INLINE, things]
         -- NB: use idUnfolding because we don't want to apply
         --     this criterion to a loop breaker!
 
@@ -277,8 +301,10 @@ tryWW dflags fam_envs is_rec fn_id rhs
   = return [ (new_fn_id, rhs) ]
 
   where
+    loop_breaker = isStrongLoopBreaker (occInfo fn_info)
     fn_info      = idInfo fn_id
     inline_act   = inlinePragmaActivation (inlinePragInfo fn_info)
+    fn_unf       = unfoldingInfo fn_info
 
         -- In practice it always will have a strictness
         -- signature, even if it's a uninformative one
@@ -309,6 +335,14 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
       Just (work_demands, wrap_fn, work_fn) -> do
         work_uniq <- getUniqueM
         let work_rhs = work_fn rhs
+            work_prag = InlinePragma { inl_inline = inl_inline inl_prag
+                                     , inl_sat    = Nothing
+                                     , inl_act    = wrap_act
+                                     , inl_rule   = FunLike }
+              -- idl_inline: copy from fn_id; see Note [Worker-wrapper for INLINABLE functions]
+              -- idl_act: see Note [Activation for INLINABLE workers]
+              -- inl_rule: it does not make sense for workers to be constructorlike.
+
             work_id  = mkWorkerId work_uniq fn_id (exprType work_rhs)
                         `setIdOccInfo` occInfo fn_info
                                 -- Copy over occurrence info from parent
@@ -316,41 +350,36 @@ splitFun dflags fam_envs fn_id fn_info wrap_dmds res_info rhs
                                 -- Doesn't matter much, since we will simplify next, but
                                 -- seems right-er to do so
 
-                        `setInlineActivation` (inlinePragmaActivation inl_prag)
-                                -- Any inline activation (which sets when inlining is active)
-                                -- on the original function is duplicated on the worker
-                                -- It *matters* that the pragma stays on the wrapper
-                                -- It seems sensible to have it on the worker too, although we
-                                -- can't think of a compelling reason. (In ptic, INLINE things are
-                                -- not w/wd). However, the RuleMatchInfo is not transferred since
-                                -- it does not make sense for workers to be constructorlike.
+                        `setInlinePragma` work_prag
+
+                        `setIdUnfolding` mkWorkerUnfolding dflags work_fn (unfoldingInfo fn_info)
+                                -- See Note [Worker-wrapper for INLINABLE functions]
 
                         `setIdStrictness` mkClosedStrictSig work_demands work_res_info
                                 -- Even though we may not be at top level,
                                 -- it's ok to give it an empty DmdEnv
 
-                        `setIdArity` (exprArity work_rhs)
+                        `setIdArity` exprArity work_rhs
                                 -- Set the arity so that the Core Lint check that the
                                 -- arity is consistent with the demand type goes through
 
+            wrap_act  = ActiveAfter 0
             wrap_rhs  = wrap_fn work_id
             wrap_prag = InlinePragma { inl_inline = Inline
                                      , inl_sat    = Nothing
-                                     , inl_act    = ActiveAfter 0
+                                     , inl_act    = wrap_act
                                      , inl_rule   = rule_match_info }
                 -- See Note [Wrapper activation]
                 -- The RuleMatchInfo is (and must be) unaffected
-                -- The inl_inline is bound to be False, else we would not be
-                --    making a wrapper
 
-            wrap_id   = fn_id `setIdUnfolding` mkWwInlineRule wrap_rhs arity
+            wrap_id   = fn_id `setIdUnfolding`  mkWwInlineRule wrap_rhs arity
                               `setInlinePragma` wrap_prag
-                              `setIdOccInfo` NoOccInfo
+                              `setIdOccInfo`    NoOccInfo
                                 -- Zap any loop-breaker-ness, to avoid bleating from Lint
                                 -- about a loop breaker with an INLINE rule
+
         return $ [(work_id, work_rhs), (wrap_id, wrap_rhs)]
             -- Worker first, because wrapper mentions it
-            -- mkWwBodies has already built a wrap_rhs with an INLINE pragma wrapped around it
 
       Nothing -> return [(fn_id, rhs)]
   where

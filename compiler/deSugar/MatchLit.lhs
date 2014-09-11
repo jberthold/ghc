@@ -38,7 +38,6 @@ import TysWiredIn
 import Literal
 import SrcLoc
 import Data.Ratio
-import MonadUtils
 import Outputable
 import BasicTypes
 import DynFlags
@@ -187,7 +186,7 @@ warnAboutOverflowedLiterals dflags lit
             , i > 0
             , not (xopt Opt_NegativeLiterals dflags)
             = ptext (sLit "If you are trying to write a large negative literal, use NegativeLiterals")
-            | otherwise = empty
+            | otherwise = Outputable.empty
 \end{code}
 
 Note [Suggest NegativeLiterals]
@@ -365,7 +364,7 @@ matchLiterals (var:vars) ty sub_groups
     wrap_str_guard eq_str (MachStr s, mr)
         = do { -- We now have to convert back to FastString. Perhaps there
                -- should be separate MachBytes and MachStr constructors?
-               s'     <- liftIO $ mkFastStringByteString s
+               let s'  = mkFastStringByteString s
              ; lit    <- mkStringExprFS s'
              ; let pred = mkApps (Var eq_str) [Var var, lit]
              ; return (mkGuardedMatchResult pred mr) }

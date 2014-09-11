@@ -54,11 +54,11 @@ module CoreSyn (
         unSaturatedOk, needSaturated, boringCxtOk, boringCxtNotOk,
 	
 	-- ** Predicates and deconstruction on 'Unfolding'
-	unfoldingTemplate, setUnfoldingTemplate, expandUnfolding_maybe,
-	maybeUnfoldingTemplate, otherCons, unfoldingArity,
+	unfoldingTemplate, expandUnfolding_maybe,
+	maybeUnfoldingTemplate, otherCons, 
 	isValueUnfolding, isEvaldUnfolding, isCheapUnfolding,
         isExpandableUnfolding, isConLikeUnfolding, isCompulsoryUnfolding,
-        isStableUnfolding, isStableCoreUnfolding_maybe,
+        isStableUnfolding, hasStableCoreUnfolding_maybe,
         isClosedUnfolding, hasSomeUnfolding, 
 	canUnfold, neverUnfoldGuidance, isStableSource,
 
@@ -81,7 +81,7 @@ module CoreSyn (
 	-- ** Operations on 'CoreRule's 
 	seqRules, ruleArity, ruleName, ruleIdName, ruleActivation,
 	setRuleIdName,
-	isBuiltinRule, isLocalRule,
+	isBuiltinRule, isLocalRule, isAutoRule,
 
 	-- * Core vectorisation declarations data type
 	CoreVect(..)
@@ -599,6 +599,10 @@ isBuiltinRule :: CoreRule -> Bool
 isBuiltinRule (BuiltinRule {}) = True
 isBuiltinRule _		       = False
 
+isAutoRule :: CoreRule -> Bool
+isAutoRule (BuiltinRule {}) = False
+isAutoRule (Rule { ru_auto = is_auto }) = is_auto
+
 -- | The number of arguments the 'ru_fn' must be applied 
 -- to before the rule can match on it
 ruleArity :: CoreRule -> Int
@@ -686,7 +690,6 @@ data Unfolding
 	uf_tmpl       :: CoreExpr,	  -- Template; occurrence info is correct
 	uf_src        :: UnfoldingSource, -- Where the unfolding came from
 	uf_is_top     :: Bool,		-- True <=> top level binding
-	uf_arity      :: Arity,		-- Number of value arguments expected
 	uf_is_value   :: Bool,		-- exprIsHNF template (cached); it is ok to discard 
 		      			--	a `seq` on this variable
         uf_is_conlike :: Bool,          -- True <=> applicn of constructor or CONLIKE function
@@ -752,6 +755,8 @@ data UnfoldingGuidance
     		-- Used (a) for small *and* cheap unfoldings
  		--      (b) for INLINE functions 
                 -- See Note [INLINE for small functions] in CoreUnfold
+      ug_arity    :: Arity,		-- Number of value arguments expected
+
       ug_unsat_ok  :: Bool,	-- True <=> ok to inline even if unsaturated
       ug_boring_ok :: Bool      -- True <=> ok to inline even if the context is boring
       		-- So True,True means "always"
@@ -846,8 +851,8 @@ seqUnfolding :: Unfolding -> ()
 seqUnfolding (CoreUnfolding { uf_tmpl = e, uf_is_top = top, 
 		uf_is_value = b1, uf_is_work_free = b2, 
 	   	uf_expandable = b3, uf_is_conlike = b4,
-                uf_arity = a, uf_guidance = g})
-  = seqExpr e `seq` top `seq` b1 `seq` a `seq` b2 `seq` b3 `seq` b4 `seq` seqGuidance g
+                uf_guidance = g})
+  = seqExpr e `seq` top `seq` b1 `seq` b2 `seq` b3 `seq` b4 `seq` seqGuidance g
 
 seqUnfolding _ = ()
 
@@ -867,13 +872,17 @@ isStableSource InlineRhs          = False
 unfoldingTemplate :: Unfolding -> CoreExpr
 unfoldingTemplate = uf_tmpl
 
-setUnfoldingTemplate :: Unfolding -> CoreExpr -> Unfolding
-setUnfoldingTemplate unf rhs = unf { uf_tmpl = rhs }
-
 -- | Retrieves the template of an unfolding if possible
+-- maybeUnfoldingTemplate is used mainly wnen specialising, and we do
+-- want to specialise DFuns, so it's important to return a template
+-- for DFunUnfoldings
 maybeUnfoldingTemplate :: Unfolding -> Maybe CoreExpr
-maybeUnfoldingTemplate (CoreUnfolding { uf_tmpl = expr })       = Just expr
-maybeUnfoldingTemplate _                            		= Nothing
+maybeUnfoldingTemplate (CoreUnfolding { uf_tmpl = expr })
+  = Just expr
+maybeUnfoldingTemplate (DFunUnfolding { df_bndrs = bndrs, df_con = con, df_args = args })
+  = Just (mkLams bndrs (mkApps (Var (dataConWorkId con)) args))
+maybeUnfoldingTemplate _
+  = Nothing
 
 -- | The constructors that the unfolding could never be: 
 -- returns @[]@ if no information is available
@@ -920,10 +929,17 @@ expandUnfolding_maybe :: Unfolding -> Maybe CoreExpr
 expandUnfolding_maybe (CoreUnfolding { uf_expandable = True, uf_tmpl = rhs }) = Just rhs
 expandUnfolding_maybe _                                                       = Nothing
 
-isStableCoreUnfolding_maybe :: Unfolding -> Maybe UnfoldingSource
-isStableCoreUnfolding_maybe (CoreUnfolding { uf_src = src })
-   | isStableSource src   = Just src
-isStableCoreUnfolding_maybe _ = Nothing
+hasStableCoreUnfolding_maybe :: Unfolding -> Maybe Bool
+-- Just True  <=> has stable inlining, very keen to inline (eg. INLINE pragma)
+-- Just False <=> has stable inlining, open to inlining it (eg. INLINEABLE pragma)
+-- Nothing    <=> not stable, or cannot inline it anyway
+hasStableCoreUnfolding_maybe (CoreUnfolding { uf_src = src, uf_guidance = guide })
+   | isStableSource src
+   = case guide of
+       UnfWhen {}       -> Just True
+       UnfIfGoodArgs {} -> Just False
+       UnfNever         -> Nothing
+hasStableCoreUnfolding_maybe _ = Nothing
 
 isCompulsoryUnfolding :: Unfolding -> Bool
 isCompulsoryUnfolding (CoreUnfolding { uf_src = InlineCompulsory }) = True
@@ -935,10 +951,6 @@ isStableUnfolding :: Unfolding -> Bool
 isStableUnfolding (CoreUnfolding { uf_src = src }) = isStableSource src
 isStableUnfolding (DFunUnfolding {})		   = True
 isStableUnfolding _                                = False
-
-unfoldingArity :: Unfolding -> Arity
-unfoldingArity (CoreUnfolding { uf_arity = arity }) = arity
-unfoldingArity _	      		   	    = panic "unfoldingArity"
 
 isClosedUnfolding :: Unfolding -> Bool		-- No free variables
 isClosedUnfolding (CoreUnfolding {}) = False

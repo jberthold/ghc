@@ -303,6 +303,7 @@ data GeneralFlag
    | Opt_FullLaziness
    | Opt_FloatIn
    | Opt_Specialise
+   | Opt_SpecialiseAggressively
    | Opt_StaticArgumentTransformation
    | Opt_CSE
    | Opt_LiberateCase
@@ -2723,6 +2724,7 @@ fFlags = [
   ( "strictness",                       Opt_Strictness, nop ),
   ( "late-dmd-anal",                    Opt_LateDmdAnal, nop ),
   ( "specialise",                       Opt_Specialise, nop ),
+  ( "specialise-aggressively",          Opt_SpecialiseAggressively, nop ),
   ( "float-in",                         Opt_FloatIn, nop ),
   ( "static-argument-transformation",   Opt_StaticArgumentTransformation, nop ),
   ( "full-laziness",                    Opt_FullLaziness, nop ),
@@ -2955,7 +2957,7 @@ xFlags = [
     deprecatedForExtension "MultiParamTypeClasses" ),
   ( "FunctionalDependencies",           Opt_FunctionalDependencies, nop ),
   ( "GeneralizedNewtypeDeriving",       Opt_GeneralizedNewtypeDeriving, setGenDeriving ),
-  ( "OverlappingInstances",             Opt_OverlappingInstances, 
+  ( "OverlappingInstances",             Opt_OverlappingInstances,
     \ turn_on -> when turn_on
                $ deprecate "instead use per-instance pragmas OVERLAPPING/OVERLAPPABLE/OVERLAPS" ),
   ( "UndecidableInstances",             Opt_UndecidableInstances, nop ),
@@ -3046,7 +3048,7 @@ impliedFlags
     , (Opt_ImplicitParams, turnOn, Opt_FlexibleInstances)
 
     , (Opt_JavaScriptFFI, turnOn, Opt_InterruptibleFFI)
-    
+
     , (Opt_DeriveTraversable, turnOn, Opt_DeriveFunctor)
     , (Opt_DeriveTraversable, turnOn, Opt_DeriveFoldable)
   ]
