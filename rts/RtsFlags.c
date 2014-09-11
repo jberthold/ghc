@@ -1295,6 +1295,12 @@ error = rtsTrue;
                     RtsFlags.ParFlags.packBufferSize = 
                       decodeSize(rts_argv[arg], 3, 1024, 1073741823
                                                          /* INT_MAX / 2 */);
+                    // the max. buffer size of INT_MAX/2 is required
+                    // for the MPI implementation using at least 2
+                    // msg.s of send buffer (see process_par_option)
+                    // Note: MPI implementation may later fail to
+                    // allocate if -qq and -qQ are used and
+                    // sendBufferSize * packBufferSize > INT_MAX
                     IF_PAR_DEBUG(verbose,
                        debugBelch("-qQ<n>: pack buffer size set to %d bytes\n"
                                   , RtsFlags.ParFlags.packBufferSize));
@@ -1591,22 +1597,24 @@ process_par_option(int arg, rtsBool *error)
         *error = rtsTrue;
     }
     break;
-  case 'Q': /* -qQ<n> ... set pack buffer size to <n> bytes*/
-    if (rts_argv[arg][3] != '\0') {
-      RtsFlags.ParFlags.packBufferSize =
-          decodeSize(rts_argv[arg], 3, 1024, 1073741823 /* INT_MAX / 2 */ );
-      // the max. buffer size of INT_MAX/2 is required for the MPI
-      // implementation using at least 2 msg.s of send buffer (see above)
-      // Note: MPI implementation may later fail to allocate if -qq and -qQ are
-      // used and sendBufferSize * packBufferSize > INT_MAX
-    } else {
-      errorBelch("missing size of PackBuffer (for -qQ)\n");
-      *error = rtsTrue;
-    }
-    IF_PAR_DEBUG(verbose,
-                 debugBelch("-qQ<n>: pack buffer size set to %d bytes\n",
-                       RtsFlags.ParFlags.packBufferSize));
-    break;
+    // this one is valid for the sequential system as well, code moved
+    // to main flag processing function procRtsOpts.
+  // case 'Q': // -qQ<n> ... set pack buffer size to <n> bytes
+  //   if (rts_argv[arg][3] != '\0') {
+  //     RtsFlags.ParFlags.packBufferSize =
+  //         decodeSize(rts_argv[arg], 3, 1024, 1073741823 /* INT_MAX / 2 */ );
+  //     // the max. buffer size of INT_MAX/2 is required for the MPI
+  //     // implementation using at least 2 msg.s of send buffer (see above)
+  //     // Note: MPI implementation may later fail to allocate if -qq and -qQ are
+  //     // used and sendBufferSize * packBufferSize > INT_MAX
+  //   } else {
+  //     errorBelch("missing size of PackBuffer (for -qQ)\n");
+  //     *error = rtsTrue;
+  //   }
+  //   IF_PAR_DEBUG(verbose,
+  //                debugBelch("-qQ<n>: pack buffer size set to %d bytes\n",
+  //                      RtsFlags.ParFlags.packBufferSize));
+  //   break;
   case 'r':  // -Qr... : something about placement  
     switch(rts_argv[arg][3]) {
     case 'n': // will be "random placement"
