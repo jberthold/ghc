@@ -1,6 +1,7 @@
-{-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE AutoDeriveTypeable #-}
 {-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE Trustworthy #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -46,19 +47,26 @@ module Control.Applicative (
     optional,
     ) where
 
-import Prelude hiding (id,(.))
-
-import GHC.Base (liftA, liftA2, liftA3, (<**>))
 import Control.Category
 import Control.Arrow
-import Control.Monad (liftM, ap, MonadPlus(..), Alternative(..))
-import Data.Functor ((<$>), (<$))
-import Data.Monoid (Monoid(..))
+import Data.Maybe
+import Data.Tuple
+import Data.Eq
+import Data.Ord
+import Data.Foldable (Foldable(..))
+import Data.Functor ((<$>))
 
+import GHC.Base hiding ((.), id)
 import GHC.Generics
+import GHC.List (repeat, zipWith)
+import GHC.Read (Read)
+import GHC.Show (Show)
 
 newtype Const a b = Const { getConst :: a }
                   deriving (Generic, Generic1)
+
+instance Foldable (Const m) where
+    foldMap _ _ = mempty
 
 instance Functor (Const m) where
     fmap _ (Const v) = Const v

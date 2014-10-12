@@ -1115,8 +1115,7 @@ strict_mark :: { Located HsBang }
 ctype   :: { LHsType RdrName }
         : 'forall' tv_bndrs '.' ctype   {% hintExplicitForall (getLoc $1) >>
                                             return (LL $ mkExplicitHsForAllTy $2 (noLoc []) $4) }
-        | context '=>' ctype            { LL $ mkImplicitHsForAllTy   $1 $3 }
-        -- A type of form (context => type) is an *implicit* HsForAllTy
+        | context '=>' ctype            { LL $ mkQualifiedHsForAllTy   $1 $3 }
         | ipvar '::' type               { LL (HsIParamTy (unLoc $1) $3) }
         | type                          { $1 }
 
@@ -1134,8 +1133,7 @@ ctype   :: { LHsType RdrName }
 ctypedoc :: { LHsType RdrName }
         : 'forall' tv_bndrs '.' ctypedoc {% hintExplicitForall (getLoc $1) >>
                                             return (LL $ mkExplicitHsForAllTy $2 (noLoc []) $4) }
-        | context '=>' ctypedoc         { LL $ mkImplicitHsForAllTy   $1 $3 }
-        -- A type of form (context => type) is an *implicit* HsForAllTy
+        | context '=>' ctypedoc         { LL $ mkQualifiedHsForAllTy   $1 $3 }
         | ipvar '::' type               { LL (HsIParamTy (unLoc $1) $3) }
         | typedoc                       { $1 }
 
@@ -1209,8 +1207,8 @@ atype :: { LHsType RdrName }
 
         | '[' ctype ',' comma_types1 ']'  { LL $ HsExplicitListTy
                                                  placeHolderKind ($2 : $4) }
-        | INTEGER            {% mkTyLit $ LL $ HsNumTy $ getINTEGER $1 }
-        | STRING             {% mkTyLit $ LL $ HsStrTy $ getSTRING  $1 }
+        | INTEGER                         { LL $ HsTyLit $ HsNumTy $ getINTEGER $1 }
+        | STRING                          { LL $ HsTyLit $ HsStrTy $ getSTRING  $1 }
 
 -- An inst_type is what occurs in the head of an instance decl
 --      e.g.  (Foo a, Gaz b) => Wibble a b

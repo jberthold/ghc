@@ -640,19 +640,20 @@ AC_DEFUN([FPTOOLS_FLOAT_WORD_ORDER_BIGENDIAN],
 ])
 
 
-# FP_ARG_WITH_PATH_GNU_PROG
+# FP_ARG_WITH_PATH_GNU_PROG_GENERAL
 # --------------------
 # Find the specified command on the path or allow a user to set it manually
-# with a --with-<command> option. An error will be thrown if the command isn't
-# found.
+# with a --with-<command> option.
 #
 # This is ignored on the mingw32 platform.
 #
 # $1 = the variable to set
 # $2 = the with option name
 # $3 = the command to look for
+# $4 = prepend target to program name? if 'no', use the name unchanged
+# $5 = optional? if 'no', then raise an error if the command isn't found
 #
-AC_DEFUN([FP_ARG_WITH_PATH_GNU_PROG],
+AC_DEFUN([FP_ARG_WITH_PATH_GNU_PROG_GENERAL],
 [
 AC_ARG_WITH($2,
 [AC_HELP_STRING([--with-$2=ARG],
@@ -672,58 +673,40 @@ AC_ARG_WITH($2,
 [
     if test "$HostOS" != "mingw32"
     then
-        if test "$target_alias" = "" ; then
+        if test "$4" = "no" -o "$target_alias" = "" ; then
             AC_PATH_PROG([$1], [$3])
         else
             AC_PATH_PROG([$1], [$target_alias-$3])
         fi
-        if test -z "$$1"
+        if test "$5" = "no" -a -z "$$1"
         then
             AC_MSG_ERROR([cannot find $3 in your PATH])
         fi
     fi
 ]
 )
-]) # FP_ARG_WITH_PATH_GNU_PROG
+]) # FP_ARG_WITH_PATH_GNU_PROG_GENERAL
 
+
+# FP_ARG_WITH_PATH_GNU_PROG
+# --------------------
+# The usual case: prepend the target, and the program is not optional.
+AC_DEFUN([FP_ARG_WITH_PATH_GNU_PROG],
+[FP_ARG_WITH_PATH_GNU_PROG_GENERAL([$1], [$2], [$3], [yes], [no])])
 
 # FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL
 # --------------------
 # Same as FP_ARG_WITH_PATH_GNU_PROG but no error will be thrown if the command
 # isn't found.
-#
-# This is ignored on the mingw32 platform.
-#
-# $1 = the variable to set
-# $2 = the with option name
-# $3 = the command to look for
-#
 AC_DEFUN([FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL],
-[
-AC_ARG_WITH($2,
-[AC_HELP_STRING([--with-$2=ARG],
-        [Use ARG as the path to $2 [default=autodetect]])],
-[
-    if test "$HostOS" = "mingw32"
-    then
-        AC_MSG_WARN([Request to use $withval will be ignored])
-    else
-        $1=$withval
-    fi
+[FP_ARG_WITH_PATH_GNU_PROG_GENERAL([$1], [$2], [$3], [yes], [yes])])
 
-    # Remember that we set this manually.  Used to override CC_STAGE0
-    # and friends later, if we are not cross-compiling.
-    With_$2=$withval
-],
-[
-    if test "$HostOS" != "mingw32"
-    then
-        AC_PATH_PROG([$1], [$3])
-    fi
-]
-)
-]) # FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL
-
+# FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL_NOTARGET
+# --------------------
+# Same as FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL but don't prepend the target name
+# (used for LLVM).
+AC_DEFUN([FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL_NOTARGET],
+[FP_ARG_WITH_PATH_GNU_PROG_GENERAL([$1], [$2], [$3], [no], [yes])])
 
 
 # FP_PROG_CONTEXT_DIFF
@@ -1621,6 +1604,13 @@ AC_SUBST([ProjectVersionInt])
 # The project patchlevel is zero unless stated otherwise
 test -z "$ProjectPatchLevel" && ProjectPatchLevel=0
 
+# Save split version of ProjectPatchLevel
+ProjectPatchLevel1=`echo $ProjectPatchLevel | sed 's/^\(@<:@^.@:>@*\)\(\.\{0,1\}\(.*\)\)$/\1/'`
+ProjectPatchLevel2=`echo $ProjectPatchLevel | sed 's/^\(@<:@^.@:>@*\)\(\.\{0,1\}\(.*\)\)$/\3/'`
+
+AC_SUBST([ProjectPatchLevel1])
+AC_SUBST([ProjectPatchLevel2])
+
 # Remove dots from the patch level; this allows us to have versions like 6.4.1.20050508
 ProjectPatchLevel=`echo $ProjectPatchLevel | sed 's/\.//'`
 
@@ -2063,7 +2053,7 @@ AC_DEFUN([XCODE_VERSION],[
 # $3 = the command to look for
 #
 AC_DEFUN([FIND_LLVM_PROG],[
-    FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [$2], [$3])
+    FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL_NOTARGET([$1], [$2], [$3])
     if test "$$1" == ""; then
         save_IFS=$IFS
         IFS=":;"
@@ -2223,6 +2213,55 @@ AC_ARG_WITH(hs-cpp-flags,
 $1=$HS_CPP_CMD
 $2=$HS_CPP_ARGS
 
+])
+
+# FP_BFD_SUPPORT()
+# ----------------------
+# whether to use libbfd for debugging RTS
+AC_DEFUN([FP_BFD_SUPPORT], [
+    AC_ARG_ENABLE(bfd-debug,
+        [AC_HELP_STRING([--enable-bfd-debug],
+              [Enable symbol resolution for -debug rts ('+RTS -Di') via binutils' libbfd [default=no]])],
+        [
+            # don't pollute general LIBS environment
+            save_LIBS="$LIBS"
+            AC_CHECK_HEADERS([bfd.h])
+            dnl ** check whether this machine has BFD and libiberty installed (used for debugging)
+            dnl    the order of these tests matters: bfd needs libiberty
+            AC_CHECK_LIB(iberty, xmalloc)
+            dnl 'bfd_init' is a rare non-macro in libbfd
+            AC_CHECK_LIB(bfd,    bfd_init)
+
+            AC_TRY_LINK([#include <bfd.h>],
+                        [
+                                /* mimic our rts/Printer.c */
+                                bfd* abfd;
+                                const char * name;
+                                char **matching;
+
+                                name = "some.executable";
+                                bfd_init();
+                                abfd = bfd_openr(name, "default");
+                                bfd_check_format_matches (abfd, bfd_object, &matching);
+                                {
+                                    long storage_needed;
+                                    storage_needed = bfd_get_symtab_upper_bound (abfd);
+                                }
+                                {
+                                    asymbol **symbol_table;
+                                    long number_of_symbols;
+                                    symbol_info info;
+
+                                    number_of_symbols = bfd_canonicalize_symtab (abfd, symbol_table);
+                                    bfd_get_symbol_info(abfd,symbol_table[0],&info);
+                                }
+                        ],
+                        [],dnl bfd seems to work
+                        [AC_MSG_ERROR([can't use 'bfd' library])])
+            LIBS="$save_LIBS"
+        ],
+        []
+    )
 ])
 
 # LocalWords:  fi

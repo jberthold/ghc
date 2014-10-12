@@ -15,6 +15,7 @@ module GHC.Event.TimerManager
     , new
     , newWith
     , newDefaultBackend
+    , emControl
 
       -- * Running
     , finished
@@ -38,10 +39,9 @@ module GHC.Event.TimerManager
 -- Imports
 
 import Control.Exception (finally)
-import Control.Monad ((=<<), sequence_, when)
+import Data.Foldable (sequence_)
 import Data.IORef (IORef, atomicModifyIORef', mkWeakIORef, newIORef, readIORef,
                    writeIORef)
-import Data.Maybe (Maybe(..))
 import GHC.Base
 import GHC.Conc.Signal (runHandlers)
 import GHC.Num (Num(..))

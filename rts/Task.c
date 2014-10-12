@@ -462,7 +462,7 @@ startWorkerTask (Capability *cap)
   ASSERT_LOCK_HELD(&cap->lock);
   cap->running_task = task;
 
-  r = createOSThread(&tid, (OSThreadProc*)workerStart, task);
+  r = createOSThread(&tid, "ghc_worker", (OSThreadProc*)workerStart, task);
   if (r != 0) {
     sysErrorBelch("failed to create OS thread");
     stg_exit(EXIT_FAILURE);
@@ -516,11 +516,3 @@ printAllTasks(void)
 
 #endif
 
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

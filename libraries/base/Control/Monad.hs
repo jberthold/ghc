@@ -20,7 +20,6 @@ module Control.Monad
 
       Functor(fmap)
     , Monad((>>=), (>>), return, fail)
-    , Alternative(empty, (<|>), some, many)
     , MonadPlus(mzero, mplus)
     -- * Functions
 
@@ -76,149 +75,32 @@ module Control.Monad
     , (<$!>)
     ) where
 
-import Data.Maybe
+import Data.Foldable ( sequence_, msum, mapM_, forM_ )
+import Data.Functor ( void )
+import Data.Traversable ( forM, mapM, sequence )
 
-import GHC.List
-import GHC.Base
-
-infixr 1 =<<
-infixl 3 <|>
-
--- -----------------------------------------------------------------------------
--- Prelude monad functions
-
--- | Same as '>>=', but with the arguments interchanged.
-{-# SPECIALISE (=<<) :: (a -> [b]) -> [a] -> [b] #-}
-(=<<)           :: Monad m => (a -> m b) -> m a -> m b
-f =<< x         = x >>= f
-
--- | Evaluate each action in the sequence from left to right,
--- and collect the results.
-sequence       :: Monad m => [m a] -> m [a] 
-{-# INLINE sequence #-}
-sequence ms = foldr k (return []) ms
-            where
-              k m m' = do { x <- m; xs <- m'; return (x:xs) }
-
--- | Evaluate each action in the sequence from left to right,
--- and ignore the results.
-sequence_        :: Monad m => [m a] -> m ()
-{-# INLINE sequence_ #-}
-sequence_ ms     =  foldr (>>) (return ()) ms
-
--- | @'mapM' f@ is equivalent to @'sequence' . 'map' f@.
-mapM            :: Monad m => (a -> m b) -> [a] -> m [b]
-{-# INLINE mapM #-}
-mapM f as       =  sequence (map f as)
-
--- | @'mapM_' f@ is equivalent to @'sequence_' . 'map' f@.
-mapM_           :: Monad m => (a -> m b) -> [a] -> m ()
-{-# INLINE mapM_ #-}
-mapM_ f as      =  sequence_ (map f as)
-
--- -----------------------------------------------------------------------------
--- The Alternative class definition
-
--- | A monoid on applicative functors.
---
--- Minimal complete definition: 'empty' and '<|>'.
---
--- If defined, 'some' and 'many' should be the least solutions
--- of the equations:
---
--- * @some v = (:) '<$>' v '<*>' many v@
---
--- * @many v = some v '<|>' 'pure' []@
-class Applicative f => Alternative f where
-    -- | The identity of '<|>'
-    empty :: f a
-    -- | An associative binary operation
-    (<|>) :: f a -> f a -> f a
-
-    -- | One or more.
-    some :: f a -> f [a]
-    some v = some_v
-      where
-        many_v = some_v <|> pure []
-        some_v = (fmap (:) v) <*> many_v
-
-    -- | Zero or more.
-    many :: f a -> f [a]
-    many v = many_v
-      where
-        many_v = some_v <|> pure []
-        some_v = (fmap (:) v) <*> many_v
-
-instance Alternative Maybe where
-    empty = Nothing
-    Nothing <|> r = r
-    l       <|> _ = l
-
-instance Alternative [] where
-    empty = []
-    (<|>) = (++)
-
-
--- -----------------------------------------------------------------------------
--- The MonadPlus class definition
-
--- | Monads that also support choice and failure.
-class (Alternative m, Monad m) => MonadPlus m where
-   -- | the identity of 'mplus'.  It should also satisfy the equations
-   --
-   -- > mzero >>= f  =  mzero
-   -- > v >> mzero   =  mzero
-   --
-   mzero :: m a
-   mzero = empty
-
-   -- | an associative operation
-   mplus :: m a -> m a -> m a
-   mplus = (<|>)
-
-instance MonadPlus [] where
-   mzero = []
-   mplus = (++)
-
-instance MonadPlus Maybe where
-   mzero = Nothing
-
-   Nothing `mplus` ys  = ys
-   xs      `mplus` _ys = xs
+import GHC.Base hiding ( mapM, sequence )
+import GHC.List ( zipWith, unzip, replicate )
 
 -- -----------------------------------------------------------------------------
 -- Functions mandated by the Prelude
 
--- | @'guard' b@ is @'return' ()@ if @b@ is 'True',
--- and 'mzero' if @b@ is 'False'.
-guard           :: (MonadPlus m) => Bool -> m ()
-guard True      =  return ()
-guard False     =  mzero
+-- | @'guard' b@ is @'pure' ()@ if @b@ is 'True',
+-- and 'empty' if @b@ is 'False'.
+guard           :: (Alternative f) => Bool -> f ()
+guard True      =  pure ()
+guard False     =  empty
 
 -- | This generalizes the list-based 'filter' function.
 
+{-# INLINE filterM #-}
 filterM          :: (Monad m) => (a -> m Bool) -> [a] -> m [a]
-filterM _ []     =  return []
-filterM p (x:xs) =  do
-   flg <- p x
-   ys  <- filterM p xs
-   return (if flg then x:ys else ys)
-
--- | 'forM' is 'mapM' with its arguments flipped
-forM            :: Monad m => [a] -> (a -> m b) -> m [b]
-{-# INLINE forM #-}
-forM            = flip mapM
-
--- | 'forM_' is 'mapM_' with its arguments flipped
-forM_           :: Monad m => [a] -> (a -> m b) -> m ()
-{-# INLINE forM_ #-}
-forM_           = flip mapM_
-
--- | This generalizes the list-based 'concat' function.
-
-msum        :: MonadPlus m => [m a] -> m a
-{-# INLINE msum #-}
-msum        =  foldr mplus mzero
+filterM p        = foldr go (return [])
+  where
+    go x r = do
+      flg <- p x
+      ys <- r
+      return (if flg then x:ys else ys)
 
 infixr 1 <=<, >=>
 
@@ -236,10 +118,6 @@ forever     :: (Monad m) => m a -> m b
 forever a   = let a' = a >> a' in a'
 -- Use explicit sharing here, as it is prevents a space leak regardless of
 -- optimizations.
-
--- | @'void' value@ discards or ignores the result of evaluation, such as the return value of an 'IO' action.
-void :: Functor f => f a -> f ()
-void = fmap (const ())
 
 -- -----------------------------------------------------------------------------
 -- Other monad functions
@@ -269,7 +147,7 @@ function' are not commutative.
 
 >       foldM f a1 [x1, x2, ..., xm]
 
-==  
+==
 
 >       do
 >         a2 <- f a1 x1
@@ -309,27 +187,12 @@ replicateM_       :: (Monad m) => Int -> m a -> m ()
 {-# SPECIALISE replicateM_ :: Int -> Maybe a -> Maybe () #-}
 replicateM_ n x   = sequence_ (replicate n x)
 
-{- | Conditional execution of monadic expressions. For example, 
-
->       when debug (putStr "Debugging\n")
-
-will output the string @Debugging\\n@ if the Boolean value @debug@ is 'True',
-and otherwise do nothing.
--}
-
-when              :: (Monad m) => Bool -> m () -> m ()
-{-# INLINEABLE when #-}
-{-# SPECIALISE when :: Bool -> IO () -> IO () #-}
-{-# SPECIALISE when :: Bool -> Maybe () -> Maybe () #-}
-when p s          =  if p then s else return ()
-
 -- | The reverse of 'when'.
-
-unless            :: (Monad m) => Bool -> m () -> m ()
+unless            :: (Applicative f) => Bool -> f () -> f ()
 {-# INLINEABLE unless #-}
 {-# SPECIALISE unless :: Bool -> IO () -> IO () #-}
 {-# SPECIALISE unless :: Bool -> Maybe () -> Maybe () #-}
-unless p s        =  if p then return () else s
+unless p s        =  if p then pure () else s
 
 infixl 4 <$!>
 
@@ -361,23 +224,23 @@ mfilter p ma = do
 
 {- $naming
 
-The functions in this library use the following naming conventions: 
+The functions in this library use the following naming conventions:
 
 * A postfix \'@M@\' always stands for a function in the Kleisli category:
   The monad type constructor @m@ is added to function results
-  (modulo currying) and nowhere else.  So, for example, 
+  (modulo currying) and nowhere else.  So, for example,
 
 >  filter  ::              (a ->   Bool) -> [a] ->   [a]
 >  filterM :: (Monad m) => (a -> m Bool) -> [a] -> m [a]
 
 * A postfix \'@_@\' changes the result type from @(m a)@ to @(m ())@.
-  Thus, for example: 
+  Thus, for example:
 
->  sequence  :: Monad m => [m a] -> m [a] 
->  sequence_ :: Monad m => [m a] -> m () 
+>  sequence  :: Monad m => [m a] -> m [a]
+>  sequence_ :: Monad m => [m a] -> m ()
 
 * A prefix \'@m@\' generalizes an existing function to a monadic form.
-  Thus, for example: 
+  Thus, for example:
 
 >  sum  :: Num a       => [a]   -> a
 >  msum :: MonadPlus m => [m a] -> m a

@@ -23,10 +23,13 @@ module Util (
         mapAndUnzip, mapAndUnzip3, mapAccumL2,
         nOfThem, filterOut, partitionWith, splitEithers,
 
+        dropWhileEndLE,
+
         foldl1', foldl2, count, all2,
 
         lengthExceeds, lengthIs, lengthAtLeast,
-        listLengthCmp, atLength, equalLength, compareLength,
+        listLengthCmp, atLength,
+        equalLength, compareLength, leLength,
 
         isSingleton, only, singleton,
         notNull, snocView,
@@ -261,7 +264,7 @@ splitEithers (e : es) = case e of
 chkAppend :: [a] -> [a] -> [a]
 -- Checks for the second arguemnt being empty
 -- Used in situations where that situation is common
-chkAppend xs ys 
+chkAppend xs ys
   | null ys   = xs
   | otherwise = xs ++ ys
 \end{code}
@@ -423,6 +426,13 @@ compareLength (_:xs) (_:ys) = compareLength xs ys
 compareLength []     _      = LT
 compareLength _      []     = GT
 
+leLength :: [a] -> [b] -> Bool
+-- ^ True if length xs <= length ys
+leLength xs ys = case compareLength xs ys of
+                   LT -> True
+                   EQ -> True
+                   GT -> False
+
 ----------------------------
 singleton :: a -> [a]
 singleton x = [x]
@@ -581,9 +591,21 @@ dropTail :: Int -> [a] -> [a]
 dropTail n xs
   = go (drop n xs) xs
   where
-    go (_:ys) (x:xs) = x : go ys xs 
+    go (_:ys) (x:xs) = x : go ys xs
     go _      _      = []  -- Stop when ys runs out
                            -- It'll always run out before xs does
+
+-- dropWhile from the end of a list. This is similar to Data.List.dropWhileEnd,
+-- but is lazy in the elements and strict in the spine. For reasonably short lists,
+-- such as path names and typical lines of text, dropWhileEndLE is generally
+-- faster than dropWhileEnd. Its advantage is magnified when the predicate is
+-- expensive--using dropWhileEndLE isSpace to strip the space off a line of text
+-- is generally much faster than using dropWhileEnd isSpace for that purpose.
+-- Specification: dropWhileEndLE p = reverse . dropWhile p . reverse
+-- Pay attention to the short-circuit (&&)! The order of its arguments is the only
+-- difference between dropWhileEnd and dropWhileEndLE.
+dropWhileEndLE :: (a -> Bool) -> [a] -> [a]
+dropWhileEndLE p = foldr (\x r -> if null r && p x then [] else x:r) []
 
 snocView :: [a] -> Maybe ([a],a)
         -- Split off the last element
@@ -643,7 +665,7 @@ cmpList cmp (a:as) (b:bs)
 
 \begin{code}
 removeSpaces :: String -> String
-removeSpaces = reverse . dropWhile isSpace . reverse . dropWhile isSpace
+removeSpaces = dropWhileEndLE isSpace . dropWhile isSpace
 \end{code}
 
 %************************************************************************
@@ -729,7 +751,6 @@ matchVectors = snd . foldl' go (0 :: Int, IM.empty)
                            im' = IM.insertWith (.|.) (ord char) (2 ^ ix) im
                        in seq ix' $ seq im' $ (ix', im')
 
-#ifdef __GLASGOW_HASKELL__
 {-# SPECIALIZE INLINE restrictedDamerauLevenshteinDistance'
                       :: Word32 -> Int -> Int -> String -> String -> Int #-}
 {-# SPECIALIZE INLINE restrictedDamerauLevenshteinDistance'
@@ -749,7 +770,6 @@ matchVectors = snd . foldl' go (0 :: Int, IM.empty)
 
 {-# SPECIALIZE matchVectors :: String -> IM.IntMap Word32 #-}
 {-# SPECIALIZE matchVectors :: String -> IM.IntMap Integer #-}
-#endif
 
 fuzzyMatch :: String -> [String] -> [String]
 fuzzyMatch key vals = fuzzyLookup key [(v,v) | v <- vals]
@@ -942,9 +962,7 @@ maybeReadFuzzy str = case reads str of
 -- Verify that the 'dirname' portion of a FilePath exists.
 --
 doesDirNameExist :: FilePath -> IO Bool
-doesDirNameExist fpath = case takeDirectory fpath of
-                         "" -> return True -- XXX Hack
-                         _  -> doesDirectoryExist (takeDirectory fpath)
+doesDirNameExist fpath = doesDirectoryExist (takeDirectory fpath)
 
 -----------------------------------------------------------------------------
 -- Backwards compatibility definition of getModificationTime

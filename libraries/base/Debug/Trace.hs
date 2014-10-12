@@ -1,12 +1,14 @@
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE UnboxedTuples #-}
 {-# LANGUAGE Unsafe #-}
-{-# LANGUAGE MagicHash, UnboxedTuples #-}
 
 -----------------------------------------------------------------------------
 -- |
 -- Module      :  Debug.Trace
 -- Copyright   :  (c) The University of Glasgow 2001
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- Maintainer  :  libraries@haskell.org
 -- Stability   :  provisional
 -- Portability :  portable
@@ -35,22 +37,21 @@ module Debug.Trace (
         -- $eventlog_tracing
         traceEvent,
         traceEventIO,
-        
+
         -- * Execution phase markers
         -- $markers
         traceMarker,
         traceMarkerIO,
   ) where
 
-import Prelude
 import System.IO.Unsafe
-import Control.Monad
 
 import Foreign.C.String
 import GHC.Base
 import qualified GHC.Foreign
 import GHC.IO.Encoding
 import GHC.Ptr
+import GHC.Show
 import GHC.Stack
 import Data.List
 
@@ -245,7 +246,7 @@ traceEventIO msg =
 --
 -- Markers let us do this: we can annotate the program to emit a marker at
 -- an appropriate point during execution and then see that in a profile.
--- 
+--
 -- Currently this feature is only supported in GHC by the eventlog tracing
 -- system, but in future it may also be supported by the heap profiling or
 -- other profiling tools. These function exists for other Haskell

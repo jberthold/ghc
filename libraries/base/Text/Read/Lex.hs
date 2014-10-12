@@ -39,13 +39,19 @@ import GHC.Base
 import GHC.Char
 import GHC.Num( Num(..), Integer )
 import GHC.Show( Show(..) )
-import {-# SOURCE #-} GHC.Unicode ( isSpace, isAlpha, isAlphaNum )
+import GHC.Unicode( isSpace, isAlpha, isAlphaNum )
 import GHC.Real( Rational, (%), fromIntegral,
                  toInteger, (^) )
 import GHC.List
 import GHC.Enum( minBound, maxBound )
 import Data.Maybe
-import Control.Monad
+
+-- local copy to break import-cycle
+-- | @'guard' b@ is @'return' ()@ if @b@ is 'True',
+-- and 'mzero' if @b@ is 'False'.
+guard           :: (MonadPlus m) => Bool -> m ()
+guard True      =  return ()
+guard False     =  mzero
 
 -- -----------------------------------------------------------------------------
 -- Lexing types
@@ -158,7 +164,7 @@ lex = skipSpaces >> lexToken
 
 -- | /Since: 4.7.0.0/
 expect :: Lexeme -> ReadP ()
-expect lexeme = do { skipSpaces 
+expect lexeme = do { skipSpaces
                    ; thing <- lexToken
                    ; if thing == lexeme then return () else pfail }
 

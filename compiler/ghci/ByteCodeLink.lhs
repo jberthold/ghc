@@ -203,7 +203,7 @@ lookupStaticPtr addr_of_label_string
 
 lookupPrimOp :: PrimOp -> IO HValue
 lookupPrimOp primop
-   = do let sym_to_find = primopToCLabel primop "closure"
+   = do let sym_to_find = primopToCLabel primop "static_closure"
         m <- lookupSymbol sym_to_find
         case m of
            Just (Ptr addr) -> case addrToAny# addr of
@@ -216,7 +216,7 @@ lookupName ce nm
         Just (_,aa) -> return aa
         Nothing
            -> ASSERT2(isExternalName nm, ppr nm)
-              do let sym_to_find = nameToCLabel nm "closure"
+              do let sym_to_find = nameToCLabel nm "static_closure"
                  m <- lookupSymbol sym_to_find
                  case m of
                     Just (Ptr addr) -> case addrToAny# addr of
@@ -257,25 +257,28 @@ linkFail who what
                 , "  glasgow-haskell-bugs@haskell.org"
                 ])
 
--- HACKS!!!  ToDo: cleaner
-nameToCLabel :: Name -> String{-suffix-} -> String
-nameToCLabel n suffix
-   = if pkgid /= mainPackageKey
-        then package_part ++ '_': qual_name
-        else qual_name
-  where
-        pkgid = modulePackageKey mod
-        mod = ASSERT( isExternalName n ) nameModule n
-        package_part = zString (zEncodeFS (packageKeyFS (modulePackageKey mod)))
-        module_part  = zString (zEncodeFS (moduleNameFS (moduleName mod)))
-        occ_part     = zString (zEncodeFS (occNameFS (nameOccName n)))
-        qual_name = module_part ++ '_':occ_part ++ '_':suffix
+
+nameToCLabel :: Name -> String -> String
+nameToCLabel n suffix = label where
+    encodeZ = zString . zEncodeFS
+    (Module pkgKey modName) = ASSERT( isExternalName n ) nameModule n
+    packagePart = encodeZ (packageKeyFS pkgKey)
+    modulePart  = encodeZ (moduleNameFS modName)
+    occPart     = encodeZ (occNameFS (nameOccName n))
+
+    label = concat
+        [ if pkgKey == mainPackageKey then "" else packagePart ++ "_"
+        , modulePart
+        , '_':occPart
+        , '_':suffix
+        ]
 
 
-primopToCLabel :: PrimOp -> String{-suffix-} -> String
-primopToCLabel primop suffix
-   = let str = "ghczmprim_GHCziPrimopWrappers_" ++ zString (zEncodeFS (occNameFS (primOpOcc primop))) ++ '_':suffix
-     in --trace ("primopToCLabel: " ++ str)
-        str
+primopToCLabel :: PrimOp -> String -> String
+primopToCLabel primop suffix = concat
+    [ "ghczmprim_GHCziPrimopWrappers_"
+    , zString (zEncodeFS (occNameFS (primOpOcc primop)))
+    , '_':suffix
+    ]
 \end{code}
 

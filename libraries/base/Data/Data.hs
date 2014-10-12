@@ -2,6 +2,7 @@
 {-# LANGUAGE RankNTypes, ScopedTypeVariables, PolyKinds #-}
 {-# LANGUAGE StandaloneDeriving, AutoDeriveTypeable, TypeOperators,
              GADTs #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -40,7 +41,7 @@ module Data.Data (
                 dataTypeOf,
                 dataCast1,      -- mediate types and unary type constructors
                 dataCast2,      -- mediate types and binary type constructors
-                -- Generic maps defined in terms of gfoldl 
+                -- Generic maps defined in terms of gfoldl
                 gmapT,
                 gmapQ,
                 gmapQl,
@@ -106,19 +107,24 @@ module Data.Data (
 
 ------------------------------------------------------------------------------
 
-import Prelude -- necessary to get dependencies right
-
-import Data.Typeable
+import Data.Either
+import Data.Eq
 import Data.Maybe
+import Data.Ord
+import Data.Typeable
 import Data.Version( Version(..) )
-import Control.Monad
+import GHC.Base
+import GHC.List
+import GHC.Num
+import GHC.Read
+import GHC.Show
+import Text.Read( reads )
 
 -- Imports for the instances
 import Data.Int              -- So we can give Data instance for Int8, ...
 import Data.Type.Coercion
-import Data.Coerce
 import Data.Word             -- So we can give Data instance for Word8, ...
-import GHC.Real( Ratio(..) ) -- So we can give Data instance for Ratio
+import GHC.Real              -- So we can give Data instance for Ratio
 --import GHC.IOBase            -- So we can give Data instance for IO, Handle
 import GHC.Ptr               -- So we can give Data instance for Ptr
 import GHC.ForeignPtr        -- So we can give Data instance for ForeignPtr
@@ -345,10 +351,10 @@ class Typeable a => Data a where
   -- injection and projection using 'return' and '>>='.
   gmapM :: forall m. Monad m => (forall d. Data d => d -> m d) -> a -> m a
 
-  -- Use immediately the monad datatype constructor 
+  -- Use immediately the monad datatype constructor
   -- to instantiate the type constructor c in the type of gfoldl,
   -- so injection and projection is done by return and >>=.
-  --  
+  --
   gmapM f = gfoldl k return
     where
       k :: Data d => m (d -> b) -> d -> m b
@@ -385,8 +391,8 @@ this end, we couple the monadic computation with a Boolean.
 
 {-
 
-We use the same pairing trick as for gmapMp, 
-i.e., we use an extra Bool component to keep track of the 
+We use the same pairing trick as for gmapMp,
+i.e., we use an extra Bool component to keep track of the
 fact whether an immediate subterm was processed successfully.
 However, we cut of mapping over subterms once a first subterm
 was transformed successfully.
@@ -449,7 +455,7 @@ fromConstrB f = unID . gunfold k z
  where
   k :: forall b r. Data b => ID (b -> r) -> ID r
   k c = ID (unID c f)
- 
+
   z :: forall r. r -> ID r
   z = ID
 
@@ -619,7 +625,7 @@ dataTypeConstrs dt = case datarep dt of
 
 
 -- | Gets the field labels of a constructor.  The list of labels
--- is returned in the same order as they were given in the original 
+-- is returned in the same order as they were given in the original
 -- constructor declaration.
 constrFields :: Constr -> [String]
 constrFields = confields
@@ -634,7 +640,7 @@ constrFixity = confixity
 ------------------------------------------------------------------------------
 --
 --      From strings to constr's and vice versa: all data types
---      
+--
 ------------------------------------------------------------------------------
 
 
@@ -1313,7 +1319,7 @@ instance (Data a, Typeable a) => Data (ForeignPtr a) where
   dataCast1 x  = gcast1 x
 
 ------------------------------------------------------------------------------
--- The Data instance for Array preserves data abstraction at the cost of 
+-- The Data instance for Array preserves data abstraction at the cost of
 -- inefficiency. We omit reflection services for the sake of data abstraction.
 instance (Typeable a, Data a, Data b, Ix a) => Data (Array a b)
  where

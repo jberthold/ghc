@@ -696,6 +696,15 @@ GarbageCollect (nat collect_gen,
   if (major_gc) { gcCAFs(); }
 #endif
 
+  // Update the stable pointer hash table.
+  updateStableTables(major_gc);
+
+  // unlock the StablePtr table.  Must be before scheduleFinalizers(),
+  // because a finalizer may call hs_free_fun_ptr() or
+  // hs_free_stable_ptr(), both of which access the StablePtr table.
+  stableUnlock();
+
+  // Must be after stableUnlock(), because it might free stable ptrs.
   if (major_gc) {
       checkUnload (gct->scavenged_static_objects);
   }
@@ -721,14 +730,6 @@ GarbageCollect (nat collect_gen,
           }
       }
   }
-
-  // Update the stable pointer hash table.
-  updateStableTables(major_gc);
-
-  // unlock the StablePtr table.  Must be before scheduleFinalizers(),
-  // because a finalizer may call hs_free_fun_ptr() or
-  // hs_free_stable_ptr(), both of which access the StablePtr table.
-  stableUnlock();
 
   // Start any pending finalizers.  Must be after
   // updateStableTables() and stableUnlock() (see #4221).
@@ -1796,11 +1797,3 @@ static void gcCAFs(void)
     debugTrace(DEBUG_gccafs, "%d CAFs live", i);
 }
 #endif
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

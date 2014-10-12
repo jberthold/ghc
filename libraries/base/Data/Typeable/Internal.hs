@@ -6,7 +6,7 @@
 -- Module      :  Data.Typeable.Internal
 -- Copyright   :  (c) The University of Glasgow, CWI 2001--2011
 -- License     :  BSD-style (see the file libraries/base/LICENSE)
--- 
+--
 -- The representations of the types TyCon and TypeRep, and the
 -- function mkTyCon which is used by derived instances of Typeable to
 -- construct a TyCon.
@@ -54,7 +54,6 @@ import GHC.Base
 import GHC.Word
 import GHC.Show
 import GHC.Read ( Read )
-import Data.Maybe
 import Data.Proxy
 import GHC.Num
 import GHC.Real
@@ -75,8 +74,6 @@ import Text.ParserCombinators.ReadPrec ( ReadPrec )
 import GHC.Float ( FFFormat, RealFloat, Floating )
 import Data.Bits ( Bits, FiniteBits )
 import GHC.Enum ( Bounded, Enum )
-import Control.Monad ( MonadPlus )
--- import Data.Int
 
 import GHC.Fingerprint.Type
 import {-# SOURCE #-} GHC.Fingerprint
@@ -140,7 +137,7 @@ mkTyConApp tc@(TyCon tc_k _ _ _) args
   where
     arg_ks = [k | TypeRep k _ _ <- args]
 
--- | A special case of 'mkTyConApp', which applies the function 
+-- | A special case of 'mkTyConApp', which applies the function
 -- type constructor to a pair of types.
 mkFunTy  :: TypeRep -> TypeRep -> TypeRep
 mkFunTy f a = mkTyConApp funTc [f,a]
@@ -164,7 +161,7 @@ mkAppTy :: TypeRep -> TypeRep -> TypeRep
 mkAppTy (TypeRep _ tc trs) arg_tr = mkTyConApp tc (trs ++ [arg_tr])
    -- Notice that we call mkTyConApp to construct the fingerprint from tc and
    -- the arg fingerprints.  Simply combining the current fingerprint with
-   -- the new one won't give the same answer, but of course we want to 
+   -- the new one won't give the same answer, but of course we want to
    -- ensure that a TypeRep of the same shape has the same fingerprint!
    -- See Trac #5962
 
@@ -293,8 +290,8 @@ instance Show TypeRep where
       xs | isTupleTyCon tycon -> showTuple xs
          | otherwise         ->
             showParen (p > 9) $
-            showsPrec p tycon . 
-            showChar ' '      . 
+            showsPrec p tycon .
+            showChar ' '      .
             showArgs (showChar ' ') tys
 
 showsTypeRep :: TypeRep -> ShowS
@@ -312,7 +309,7 @@ isTupleTyCon _                         = False
 showArgs :: Show a => ShowS -> [a] -> ShowS
 showArgs _   []     = id
 showArgs _   [a]    = showsPrec 10 a
-showArgs sep (a:as) = showsPrec 10 a . sep . showArgs sep as 
+showArgs sep (a:as) = showsPrec 10 a . sep . showArgs sep as
 
 showTuple :: [TypeRep] -> ShowS
 showTuple args = showChar '('
@@ -423,9 +420,12 @@ deriving instance Typeable Ix
 deriving instance Typeable Show
 deriving instance Typeable Read
 
+deriving instance Typeable Alternative
+deriving instance Typeable Applicative
 deriving instance Typeable Functor
 deriving instance Typeable Monad
 deriving instance Typeable MonadPlus
+deriving instance Typeable Monoid
 
 deriving instance Typeable Typeable
 

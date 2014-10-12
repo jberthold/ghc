@@ -17,6 +17,10 @@
 
 #define IEEE_FLOATING_POINT 1
 
+#if FLT_RADIX != 2
+# error FLT_RADIX != 2 not supported
+#endif
+
 /*
  * Encoding and decoding Doubles.  Code based on the HBC code
  * (lib/fltcode.c).
@@ -48,13 +52,13 @@ StgDouble
 __word_encodeDouble (W_ j, I_ e)
 {
   StgDouble r;
-  
+
   r = (StgDouble)j;
-  
+
   /* Now raise to the exponent */
   if ( r != 0.0 ) /* Lennart suggests this avoids a bug in MIPS's ldexp */
     r = ldexp(r, e);
-  
+
   return r;
 }
 
@@ -63,17 +67,17 @@ StgDouble
 __int_encodeDouble (I_ j, I_ e)
 {
   StgDouble r;
-  
+
   r = (StgDouble)__abs(j);
-  
+
   /* Now raise to the exponent */
   if ( r != 0.0 ) /* Lennart suggests this avoids a bug in MIPS's ldexp */
     r = ldexp(r, e);
-  
+
   /* sign is encoded in the size */
   if (j < 0)
     r = -r;
-  
+
   return r;
 }
 
@@ -82,17 +86,17 @@ StgFloat
 __int_encodeFloat (I_ j, I_ e)
 {
   StgFloat r;
-  
+
   r = (StgFloat)__abs(j);
-  
+
   /* Now raise to the exponent */
   if ( r != 0.0 ) /* Lennart suggests this avoids a bug in MIPS's ldexp */
     r = ldexp(r, e);
-  
+
   /* sign is encoded in the size */
   if (j < 0)
     r = -r;
-  
+
   return r;
 }
 
@@ -101,13 +105,13 @@ StgFloat
 __word_encodeFloat (W_ j, I_ e)
 {
   StgFloat r;
-  
+
   r = (StgFloat)j;
-  
+
   /* Now raise to the exponent */
   if ( r != 0.0 ) /* Lennart suggests this avoids a bug in MIPS's ldexp */
     r = ldexp(r, e);
-  
+
   return r;
 }
 
@@ -158,6 +162,20 @@ __decodeDouble_2Int (I_ *man_sign, W_ *man_high, W_ *man_low, I_ *exp, StgDouble
     }
 }
 
+/* This is expected to replace uses of __decodeDouble_2Int() in the long run */
+StgInt
+__decodeDouble_Int64 (StgInt64 *const mantissa, const StgDouble dbl)
+{
+    if (dbl) {
+        int exp = 0;
+        *mantissa = (StgInt64)scalbn(frexp(dbl, &exp), DBL_MANT_DIG);
+        return exp-DBL_MANT_DIG;
+    } else {
+        *mantissa = 0;
+        return 0;
+    }
+}
+
 /* Convenient union types for checking the layout of IEEE 754 types -
    based on defs in GNU libc <ieee754.h>
 */
@@ -200,11 +218,3 @@ __decodeFloat_Int (I_ *man, I_ *exp, StgFloat flt)
     }
 }
 
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

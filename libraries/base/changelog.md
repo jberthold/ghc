@@ -29,6 +29,57 @@
 
   * Add `Data.List.uncons` list destructor (#9550)
 
+  * Export `Monoid(..)` from `Prelude`
+
+  * Export `Foldable(..)` from `Prelude`
+    (hiding `fold`, `foldl'`, `foldr'`, and `toList`)
+
+  * Export `Traversable(..)` from `Prelude`
+
+  * Set fixity for `Data.Foldable.{elem,notElem}` to match the
+    conventional one set for `Data.List.{elem,notElem}` (#9610)
+
+  * Turn `toList`, `elem`, `sum`, `product`, `maximum`, and `minimum`
+    into `Foldable` methods (#9621)
+
+  * Replace the `Data.List`-exported functions
+
+    ```
+    all, and, any, concat, concatMap, elem, find, product, sum,
+    mapAccumL, mapAccumR
+    ```
+
+    by re-exports of their generalised `Data.Foldable`/`Data.Traversable`
+    counterparts.  In other words, unqualified imports of `Data.List`
+    and `Data.Foldable`/`Data.Traversable` no longer lead to conflicting
+    definitions. (#9586)
+
+  * Replace the `Control.Monad`-exported functions
+
+    ```
+    sequence_, msum, mapM_, forM_,
+    forM, mapM, sequence
+    ```
+
+    by re-exports of their generalised `Data.Foldable`/`Data.Traversable`
+    counterparts.  In other words, unqualified imports of `Control.Monad`
+    and `Data.Foldable`/`Data.Traversable` no longer lead to conflicting
+    definitions. (#9586)
+
+  * Generalise `Control.Monad.{when,unless,guard}` from `Monad` to
+    `Applicative` and from `MonadPlus` to `Alternative` respectively.
+
+  * New module `Data.OldList` containing only list-specialised versions of
+    the functions from `Data.List` (in other words, `Data.OldList` corresponds
+    to `base-4.7.0.1`'s `Data.List`)
+
+  * `foldr2` (together with `zip` and `zipWith`) is made a bit stricter in the
+    second argument, so that the fusion RULES for it do not change the
+    semantics. (#9596)
+
+  * `scanr`, `mapAccumL` and `filterM` now take part in list fusion (#9355,
+    #9502, #9546)
+
 ## 4.7.0.1  *Jul 2014*
 
   * Bundled with GHC 7.8.3

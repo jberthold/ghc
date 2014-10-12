@@ -63,7 +63,7 @@ import Util
 -- Haskell Libraries
 import System.Console.Haskeline as Haskeline
 
-import Control.Monad as Monad hiding (empty)
+import Control.Monad as Monad
 
 import Control.Applicative hiding (empty)
 import Control.Monad.Trans.Class
@@ -2145,6 +2145,17 @@ newDynFlags interactive_only minus_opts = do
               idflags{ pkgState = pkgState dflags2
                      , pkgDatabase = pkgDatabase dflags2
                      , packageFlags = packageFlags dflags2 }
+
+        let ld0length   = length $ ldInputs dflags0
+            fmrk0length = length $ cmdlineFrameworks dflags0
+
+            newLdInputs     = drop ld0length (ldInputs dflags2)
+            newCLFrameworks = drop fmrk0length (cmdlineFrameworks dflags2)
+
+        when (not (null newLdInputs && null newCLFrameworks)) $
+          liftIO $ linkCmdLineLibs $
+            dflags2 { ldInputs = newLdInputs
+                    , cmdlineFrameworks = newCLFrameworks }
 
       return ()
 

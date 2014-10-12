@@ -1,3 +1,4 @@
+{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE Trustworthy #-}
 -----------------------------------------------------------------------------
 -- |
@@ -41,11 +42,11 @@ module Control.Arrow (
     ArrowLoop(..)
     ) where
 
-import Prelude hiding (id,(.))
-
-import Control.Monad
+import Data.Tuple ( fst, snd, uncurry )
+import Data.Either
 import Control.Monad.Fix
 import Control.Category
+import GHC.Base hiding ( (.), id )
 
 infixr 5 <+>
 infixr 3 ***

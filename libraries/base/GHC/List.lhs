@@ -22,7 +22,7 @@ module GHC.List (
 
    map, (++), filter, concat,
    head, last, tail, init, uncons, null, length, (!!),
-   foldl, scanl, scanl1, foldr, foldr1, scanr, scanr1,
+   foldl, scanl, scanl1, scanl', foldr, foldr1, scanr, scanr1,
    iterate, repeat, replicate, cycle,
    take, drop, splitAt, takeWhile, dropWhile, span, break,
    reverse, and, or,
@@ -200,10 +200,33 @@ foldl k z0 xs = foldr (\(v::a) (fn::b->b) (z::b) -> fn (k z v)) (id :: b -> b) x
 --
 -- > last (scanl f z xs) == foldl f z xs.
 
+-- This peculiar arrangement is necessary to prevent scanl being rewritten in
+-- its own right-hand side.
+{-# NOINLINE [1] scanl #-}
 scanl                   :: (b -> a -> b) -> b -> [a] -> [b]
-scanl f q ls            =  q : (case ls of
-                                []   -> []
-                                x:xs -> scanl f (f q x) xs)
+scanl                   = scanlGo
+  where
+    scanlGo           :: (b -> a -> b) -> b -> [a] -> [b]
+    scanlGo f q ls    = q : (case ls of
+                               []   -> []
+                               x:xs -> scanlGo f (f q x) xs)
+
+-- Note [scanl rewrite rules]
+{-# RULES
+"scanl"  [~1] forall f a bs . scanl f a bs =
+  build (\c n -> a `c` foldr (scanlFB f c) (constScanl n) bs a)
+"scanlList" [1] forall f (a::a) bs .
+    foldr (scanlFB f (:)) (constScanl []) bs a = tail (scanl f a bs)
+ #-}
+
+{-# INLINE [0] scanlFB #-}
+scanlFB :: (b -> a -> b) -> (b -> c -> c) -> a -> (b -> c) -> b -> c
+scanlFB f c = \b g x -> let b' = f x b in b' `c` g b'
+
+{-# INLINE [0] constScanl #-}
+constScanl :: a -> b -> a
+constScanl = const
+
 
 -- | 'scanl1' is a variant of 'scanl' that has no starting value argument:
 --
@@ -212,6 +235,64 @@ scanl f q ls            =  q : (case ls of
 scanl1                  :: (a -> a -> a) -> [a] -> [a]
 scanl1 f (x:xs)         =  scanl f x xs
 scanl1 _ []             =  []
+
+-- | A strictly accumulating version of 'scanl'
+{-# NOINLINE [1] scanl' #-}
+scanl'           :: (b -> a -> b) -> b -> [a] -> [b]
+-- This peculiar form is needed to prevent scanl' from being rewritten
+-- in its own right hand side.
+scanl' = scanlGo'
+  where
+    scanlGo'           :: (b -> a -> b) -> b -> [a] -> [b]
+    scanlGo' f q ls    = q `seq` q : (case ls of
+                                []   -> []
+                                x:xs -> scanlGo' f (f q x) xs)
+
+-- Note [scanl rewrite rules]
+{-# RULES
+"scanl'"  [~1] forall f a bs . scanl' f a bs =
+  build (\c n -> a `c` foldr (scanlFB' f c) (flipSeqScanl' n) bs a)
+"scanlList'" [1] forall f a bs .
+    foldr (scanlFB' f (:)) (flipSeqScanl' []) bs a = tail (scanl' f a bs)
+ #-}
+
+{-# INLINE [0] scanlFB' #-}
+scanlFB' :: (b -> a -> b) -> (b -> c -> c) -> a -> (b -> c) -> b -> c
+scanlFB' f c = \b g x -> let b' = f x b in b' `seq` b' `c` g b'
+
+{-# INLINE [0] flipSeqScanl' #-}
+flipSeqScanl' :: a -> b -> a
+flipSeqScanl' = flip seq
+
+{-
+Note [scanl rewrite rules]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In most cases, when we rewrite a form to one that can fuse, we try to rewrite it
+back to the original form if it does not fuse. For scanl, we do something a
+little different. In particular, we rewrite
+
+scanl f a bs
+
+to
+
+build (\c n -> a `c` foldr (scanlFB f c) (constScanl n) bs a)
+
+When build is inlined, this becomes
+
+a : foldr (scanlFB f (:)) (constScanl []) bs a
+
+To rewrite this form back to scanl, we would need a rule that looked like
+
+forall f a bs. a : foldr (scanlFB f (:)) (constScanl []) bs a = scanl f a bs
+
+The problem with this rule is that it has (:) at its head. This would have the
+effect of changing the way the inliner looks at (:), not only here but
+everywhere.  In most cases, this makes no difference, but in some cases it
+causes it to come to a different decision about whether to inline something.
+Based on nofib benchmarks, this is bad for performance. Therefore, we instead
+match on everything past the :, which is just the tail of scanl.
+-}
 
 -- foldr, foldr1, scanr, and scanr1 are the right-to-left duals of the
 -- above functions.
@@ -229,10 +310,28 @@ foldr1 _ []             =  errorEmptyList "foldr1"
 --
 -- > head (scanr f z xs) == foldr f z xs.
 
+{-# NOINLINE [1] scanr #-}
 scanr                   :: (a -> b -> b) -> b -> [a] -> [b]
 scanr _ q0 []           =  [q0]
 scanr f q0 (x:xs)       =  f x q : qs
                            where qs@(q:_) = scanr f q0 xs
+
+{-# INLINE [0] strictUncurryScanr #-}
+strictUncurryScanr :: (a -> b -> c) -> (a, b) -> c
+strictUncurryScanr f pair = case pair of
+                              (x, y) -> f x y
+
+{-# INLINE [0] scanrFB #-}
+scanrFB :: (a -> b -> b) -> (b -> c -> c) -> a -> (b, c) -> (b, c)
+scanrFB f c = \x (r, est) -> (f x r, r `c` est)
+
+{-# RULES
+"scanr" [~1] forall f q0 ls . scanr f q0 ls =
+  build (\c n -> strictUncurryScanr c (foldr (scanrFB f c) (q0,n) ls))
+"scanrList" [1] forall f q0 ls .
+               strictUncurryScanr (:) (foldr (scanrFB f (:)) (q0,[]) ls) =
+                 scanr f q0 ls
+ #-}
 
 -- | 'scanr1' is a variant of 'scanr' that has no starting value argument.
 
@@ -301,11 +400,31 @@ cycle xs                = xs' where xs' = xs ++ xs'
 -- > takeWhile (< 0) [1,2,3] == []
 --
 
+{-# NOINLINE [1] takeWhile #-}
 takeWhile               :: (a -> Bool) -> [a] -> [a]
 takeWhile _ []          =  []
 takeWhile p (x:xs)
             | p x       =  x : takeWhile p xs
             | otherwise =  []
+
+{-# INLINE [0] takeWhileFB #-}
+takeWhileFB :: (a -> Bool) -> (a -> b -> b) -> b -> a -> b -> b
+takeWhileFB p c n = \x r -> if p x then x `c` r else n
+
+-- The takeWhileFB rule is similar to the filterFB rule. It works like this:
+-- takeWhileFB q (takeWhileFB p c n) n =
+-- \x r -> if q x then (takeWhileFB p c n) x r else n =
+-- \x r -> if q x then (\x' r' -> if p x' then x' `c` r' else n) x r else n =
+-- \x r -> if q x then (if p x then x `c` r else n) else n =
+-- \x r -> if q x && p x then x `c` r else n =
+-- takeWhileFB (\x -> q x && p x) c n
+{-# RULES
+"takeWhile"     [~1] forall p xs. takeWhile p xs =
+                                build (\c n -> foldr (takeWhileFB p c n) n xs)
+"takeWhileList" [1]  forall p.    foldr (takeWhileFB p (:) []) [] = takeWhile p
+"takeWhileFB"        forall c n p q. takeWhileFB q (takeWhileFB p c n) n =
+                        takeWhileFB (\x -> q x && p x) c n
+ #-}
 
 -- | 'dropWhile' @p xs@ returns the suffix remaining after 'takeWhile' @p xs@:
 --
@@ -624,9 +743,6 @@ xs     !! n | n < 0 =  error "Prelude.!!: negative index"
 (_:xs) !! n         =  xs !! (n-1)
 #else
 -- HBC version (stolen), then unboxified
--- The semantics is not quite the same for error conditions
--- in the more efficient version.
---
 xs !! (I# n0) | isTrue# (n0 <# 0#) =  error "Prelude.(!!): negative index\n"
               | otherwise          =  sub xs n0
                          where
@@ -649,9 +765,9 @@ xs !! (I# n0) | isTrue# (n0 <# 0#) =  error "Prelude.(!!): negative index\n"
 foldr2 :: (a -> b -> c -> c) -> c -> [a] -> [b] -> c
 foldr2 k z = go
   where
-	go []    _ys     = z
-	go _xs   []      = z
-	go (x:xs) (y:ys) = k x y (go xs ys)
+        go []    ys      = ys `seq` z -- see #9495 for the seq
+        go _xs   []      = z
+        go (x:xs) (y:ys) = k x y (go xs ys)
 {-# INLINE [0] foldr2 #-}
 
 foldr2_left :: (a -> b -> c -> d) -> d -> a -> ([b] -> c) -> [b] -> d
@@ -673,16 +789,6 @@ foldr2_right  k _z  y  r (x:xs) = k x y (r xs)
  #-}
 \end{code}
 
-The foldr2/right rule isn't exactly right, because it changes
-the strictness of foldr2 (and thereby zip)
-
-E.g. main = print (null (zip nonobviousNil (build undefined)))
-          where   nonobviousNil = f 3
-                  f n = if n == 0 then [] else f (n-1)
-
-I'm going to leave it though.
-
-
 Zips for larger tuples are in the List module.
 
 \begin{code}
@@ -690,10 +796,22 @@ Zips for larger tuples are in the List module.
 -- | 'zip' takes two lists and returns a list of corresponding pairs.
 -- If one input list is short, excess elements of the longer list are
 -- discarded.
+--
+-- NOTE: GHC's implementation of @zip@ deviates slightly from the
+-- standard. In particular, Haskell 98 and Haskell 2010 require that
+-- @zip [x1,x2,...,xn] (y1:y2:...:yn:_|_) = [(x1,y1),(x2,y2),...,(xn,yn)]@
+-- In GHC, however,
+-- @zip [x1,x2,...,xn] (y1:y2:...:yn:_|_) = (x1,y1):(x2,y2):...:(xn,yn):_|_@
+-- That is, you cannot use termination of the left list to avoid hitting
+-- bottom in the right list.
+
+-- This deviation is necessary to make fusion with 'build' in the right
+-- list preserve semantics.
 {-# NOINLINE [1] zip #-}
 zip :: [a] -> [b] -> [(a,b)]
+zip []     bs     = bs `seq` [] -- see #9495 for the seq
+zip _as    []     = []
 zip (a:as) (b:bs) = (a,b) : zip as bs
-zip _      _      = []
 
 {-# INLINE [0] zipFB #-}
 zipFB :: ((a, b) -> c -> d) -> a -> b -> c -> d
@@ -726,10 +844,23 @@ zip3 _      _      _      = []
 -- as the first argument, instead of a tupling function.
 -- For example, @'zipWith' (+)@ is applied to two lists to produce the
 -- list of corresponding sums.
+--
+-- NOTE: GHC's implementation of @zipWith@ deviates slightly from the
+-- standard. In particular, Haskell 98 and Haskell 2010 require that
+-- @zipWith (,) [x1,x2,...,xn] (y1:y2:...:yn:_|_) = [(x1,y1),(x2,y2),...,(xn,yn)]@
+-- In GHC, however,
+-- @zipWith (,) [x1,x2,...,xn] (y1:y2:...:yn:_|_) = (x1,y1):(x2,y2):...:(xn,yn):_|_@
+-- That is, you cannot use termination of the left list to avoid hitting
+-- bottom in the right list.
+
+-- This deviation is necessary to make fusion with 'build' in the right
+-- list preserve semantics.
+
 {-# NOINLINE [1] zipWith #-}
 zipWith :: (a->b->c) -> [a]->[b]->[c]
-zipWith f (a:as) (b:bs) = f a b : zipWith f as bs
-zipWith _ _      _      = []
+zipWith _f []     bs     = bs `seq` [] -- see #9495 for the seq
+zipWith _f _as    []     = []
+zipWith f  (a:as) (b:bs) = f a b : zipWith f as bs
 
 -- zipWithFB must have arity 2 since it gets two arguments in the "zipWith"
 -- rule; it might not get inlined otherwise

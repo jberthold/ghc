@@ -9,12 +9,7 @@ type-synonym declarations; those cannot be done at this stage because
 they may be affected by renaming (which isn't fully worked out yet).
 
 \begin{code}
-{-# OPTIONS_GHC -fno-warn-tabs #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and
--- detab the module (please do the detabbing in a separate patch). See
---     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
--- for details
+{-# LANGUAGE CPP #-}
 
 module RnBinds (
    -- Renaming top-level bindings
@@ -55,7 +50,9 @@ import FastString
 import Data.List        ( partition, sort )
 import Maybes           ( orElse )
 import Control.Monad
+#if __GLASGOW_HASKELL__ < 709
 import Data.Traversable ( traverse )
+#endif
 \end{code}
 
 -- ToDo: Put the annotations into the monad, so that they arrive in the proper

@@ -98,7 +98,8 @@ shutdownThread()
 }
 
 int
-createOSThread (OSThreadId* pId, OSThreadProc *startProc, void *param)
+createOSThread (OSThreadId* pId, char *name STG_UNUSED,
+                OSThreadProc *startProc, void *param)
 {
     HANDLE h;
     h = CreateThread ( NULL,  /* default security attributes */
@@ -321,11 +322,3 @@ KernelThreadId kernelThreadId (void)
     DWORD tid = GetCurrentThreadId();
     return tid;
 }
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

@@ -1,11 +1,5 @@
 \begin{code}
 {-# LANGUAGE CPP #-}
-{-# OPTIONS_GHC -fno-warn-tabs #-}
--- The above warning supression flag is a temporary kludge.
--- While working on this module you are encouraged to remove it and
--- detab the module (please do the detabbing in a separate patch). See
---     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#TabsvsSpaces
--- for details
 
 -- | Handy functions for creating much Core syntax
 module MkCore (
@@ -135,8 +129,8 @@ mkCoreLets binds body = foldr mkCoreLet body binds
 -- | Construct an expression which represents the application of one expression
 -- to the other
 mkCoreApp :: CoreExpr -> CoreExpr -> CoreExpr
--- Check the invariant that the arg of an App is ok-for-speculation if unlifted
--- See CoreSyn Note [CoreSyn let/app invariant]
+-- Respects the let/app invariant by building a case expression where necessary
+--   See CoreSyn Note [CoreSyn let/app invariant]
 mkCoreApp fun (Type ty) = App fun (Type ty)
 mkCoreApp fun (Coercion co) = App fun (Coercion co)
 mkCoreApp fun arg       = ASSERT2( isFunTy fun_ty, ppr fun $$ ppr arg )
@@ -147,18 +141,21 @@ mkCoreApp fun arg       = ASSERT2( isFunTy fun_ty, ppr fun $$ ppr arg )
 
 -- | Construct an expression which represents the application of a number of
 -- expressions to another. The leftmost expression in the list is applied first
+-- Respects the let/app invariant by building a case expression where necessary
+--   See CoreSyn Note [CoreSyn let/app invariant]
 mkCoreApps :: CoreExpr -> [CoreExpr] -> CoreExpr
 -- Slightly more efficient version of (foldl mkCoreApp)
 mkCoreApps orig_fun orig_args
   = go orig_fun (exprType orig_fun) orig_args
   where
-    go fun _      []               = fun
-    go fun fun_ty (Type ty : args) = go (App fun (Type ty)) (applyTy fun_ty ty) args
+    go fun _      []                   = fun
+    go fun fun_ty (Type ty     : args) = go (App fun (Type ty)) (applyTy fun_ty ty) args
     go fun fun_ty (Coercion co : args) = go (App fun (Coercion co)) (applyCo fun_ty co) args
-    go fun fun_ty (arg     : args) = ASSERT2( isFunTy fun_ty, ppr fun_ty $$ ppr orig_fun $$ ppr orig_args )
-                                     go (mk_val_app fun arg arg_ty res_ty) res_ty args
-                                   where
-                                     (arg_ty, res_ty) = splitFunTy fun_ty
+    go fun fun_ty (arg         : args) = ASSERT2( isFunTy fun_ty, ppr fun_ty $$ ppr orig_fun
+                                                                  $$ ppr orig_args )
+                                         go (mk_val_app fun arg arg_ty res_ty) res_ty args
+                                       where
+                                         (arg_ty, res_ty) = splitFunTy fun_ty
 
 -- | Construct an expression which represents the application of a number of
 -- expressions to that of a data constructor expression. The leftmost expression
@@ -166,13 +163,16 @@ mkCoreApps orig_fun orig_args
 mkCoreConApps :: DataCon -> [CoreExpr] -> CoreExpr
 mkCoreConApps con args = mkCoreApps (Var (dataConWorkId con)) args
 
------------
 mk_val_app :: CoreExpr -> CoreExpr -> Type -> Type -> CoreExpr
-mk_val_app fun arg arg_ty _        -- See Note [CoreSyn let/app invariant]
+-- Build an application (e1 e2),
+-- or a strict binding  (case e2 of x -> e1 x)
+-- using the latter when necessary to respect the let/app invariant
+--   See Note [CoreSyn let/app invariant]
+mk_val_app fun arg arg_ty res_ty
   | not (needsCaseBinding arg_ty arg)
   = App fun arg                -- The vastly common case
 
-mk_val_app fun arg arg_ty res_ty
+  | otherwise
   = Case arg arg_id res_ty [(DEFAULT,[],App fun (Var arg_id))]
   where
     arg_id = mkWildValBinder arg_ty
@@ -185,6 +185,7 @@ mk_val_app fun arg arg_ty res_ty
         -- is if you take apart this case expression, and pass a
         -- fragmet of it as the fun part of a 'mk_val_app'.
 
+-----------
 mkWildEvBinder :: PredType -> EvVar
 mkWildEvBinder pred = mkWildValBinder pred
 
@@ -282,10 +283,6 @@ mkStringExpr str = mkStringExprFS (mkFastString str)
 mkStringExprFS str
   | nullFS str
   = return (mkNilExpr charTy)
-
-  | lengthFS str == 1
-  = do let the_char = mkCharExpr (headFS str)
-       return (mkConsExpr charTy the_char (mkNilExpr charTy))
 
   | all safeChar chars
   = do unpack_id <- lookupId unpackCStringName

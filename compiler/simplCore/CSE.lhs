@@ -90,8 +90,9 @@ to the substitution
 
 Note [CSE for INLINE and NOINLINE]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We are careful to with CSE inside functions that the user has marked as
-INLINE or NOINLINE. (Examples from Roman Leshchinskiy.)  Consider
+There are some subtle interactions of CSE with functions that the user
+has marked as INLINE or NOINLINE. (Examples from Roman Leshchinskiy.)
+Consider
 
         yes :: Int  {-# NOINLINE yes #-}
         yes = undefined
@@ -153,14 +154,7 @@ let-binding, and we can use cseRhs for dealing with the scrutinee.
 
 \begin{code}
 cseProgram :: CoreProgram -> CoreProgram
-cseProgram binds = cseBinds emptyCSEnv binds
-
-cseBinds :: CSEnv -> [CoreBind] -> [CoreBind]
-cseBinds _   []     = []
-cseBinds env (b:bs) = (b':bs')
-                    where
-                      (env1, b') = cseBind  env  b
-                      bs'        = cseBinds env1 bs
+cseProgram binds = snd (mapAccumL cseBind emptyCSEnv binds)
 
 cseBind :: CSEnv -> CoreBind -> (CSEnv, CoreBind)
 cseBind env (NonRec b e)

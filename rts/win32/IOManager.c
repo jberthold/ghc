@@ -436,8 +436,9 @@ AddIORequest ( int   fd,
                CompletionProc onCompletion)
 {
     WorkItem* wItem    = (WorkItem*)malloc(sizeof(WorkItem));
-    unsigned int reqID = ioMan->requestID++;
+    unsigned int reqID;
     if (!ioMan || !wItem) return 0;
+    reqID = ioMan->requestID++;
 
     /* Fill in the blanks */
     wItem->workKind     = ( isSocket   ? WORKER_FOR_SOCKET : 0 ) |
@@ -464,8 +465,9 @@ AddDelayRequest ( unsigned int   usecs,
                   CompletionProc onCompletion)
 {
     WorkItem* wItem = (WorkItem*)malloc(sizeof(WorkItem));
-    unsigned int reqID = ioMan->requestID++;
+    unsigned int reqID;
     if (!ioMan || !wItem) return FALSE;
+    reqID = ioMan->requestID++;
 
     /* Fill in the blanks */
     wItem->workKind     = WORKER_DELAY;
@@ -488,8 +490,9 @@ AddProcRequest ( void* proc,
                  CompletionProc onCompletion)
 {
     WorkItem* wItem = (WorkItem*)malloc(sizeof(WorkItem));
-    unsigned int reqID = ioMan->requestID++;
+    unsigned int reqID;
     if (!ioMan || !wItem) return FALSE;
+    reqID = ioMan->requestID++;
 
     /* Fill in the blanks */
     wItem->workKind     = WORKER_DO_PROC;
@@ -603,11 +606,3 @@ abandonWorkRequest ( int reqID )
 }
 
 #endif
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

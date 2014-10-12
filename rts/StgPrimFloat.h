@@ -12,6 +12,7 @@
 #include "BeginPrivate.h"
 
 /* grimy low-level support functions defined in StgPrimFloat.c */
+StgInt    __decodeDouble_Int64 (StgInt64 *mantissa, StgDouble dbl);
 void      __decodeDouble_2Int (I_ *man_sign, W_ *man_high, W_ *man_low, I_ *exp, StgDouble dbl);
 void      __decodeFloat_Int (I_ *man, I_ *exp, StgFloat flt);
 
@@ -21,11 +22,3 @@ void      __decodeFloat_Int (I_ *man, I_ *exp, StgFloat flt);
 #include "EndPrivate.h"
 
 #endif /* STGPRIMFLOAT_H */
-
-// Local Variables:
-// mode: C
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

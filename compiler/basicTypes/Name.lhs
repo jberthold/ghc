@@ -49,7 +49,7 @@ module Name (
         nameUnique, setNameUnique,
         nameOccName, nameModule, nameModule_maybe,
         tidyNameOcc,
-        hashName, localiseName,
+        localiseName,
         mkLocalisedOccName,
 
         nameSrcLoc, nameSrcSpan, pprNameDefnLoc, pprDefinedAt,
@@ -349,11 +349,6 @@ mkLocalisedOccName this_mod mk_occ name = mk_occ origin (nameOccName name)
 %************************************************************************
 
 \begin{code}
-hashName :: Name -> Int         -- ToDo: should really be Word
-hashName name = getKey (nameUnique name) + 1
-        -- The +1 avoids keys with lots of zeros in the ls bits, which
-        -- interacts badly with the cheap and cheerful multiplication in
-        -- hashExpr
 
 cmpName :: Name -> Name -> Ordering
 cmpName n1 n2 = iBox (n_uniq n1) `compare` iBox (n_uniq n2)
@@ -363,7 +358,7 @@ stableNameCmp :: Name -> Name -> Ordering
 stableNameCmp (Name { n_sort = s1, n_occ = occ1 })
               (Name { n_sort = s2, n_occ = occ2 })
   = (s1 `sort_cmp` s2) `thenCmp` (occ1 `compare` occ2)
-    -- The ordinary compare on OccNames is lexicogrpahic
+    -- The ordinary compare on OccNames is lexicographic
   where
     -- Later constructors are bigger
     sort_cmp (External m1) (External m2)       = m1 `stableModuleCmp` m2

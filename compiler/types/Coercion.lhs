@@ -102,7 +102,9 @@ import Pair
 import SrcLoc
 import PrelNames        ( funTyConKey, eqPrimTyConKey, eqReprPrimTyConKey )
 import Control.Applicative
+#if __GLASGOW_HASKELL__ < 709
 import Data.Traversable (traverse, sequenceA)
+#endif
 import FastString
 import ListSetOps
 
@@ -1228,9 +1230,9 @@ mkCoCast c g
 -- Checks for a newtype, and for being saturated
 instNewTyCon_maybe :: TyCon -> [Type] -> Maybe (Type, Coercion)
 instNewTyCon_maybe tc tys
-  | Just (tvs, ty, co_tc) <- unwrapNewTyCon_maybe tc  -- Check for newtype
-  , tys `lengthIs` tyConArity tc                      -- Check saturated
-  = Just (substTyWith tvs tys ty, mkUnbranchedAxInstCo Representational co_tc tys)
+  | Just (tvs, ty, co_tc) <- unwrapNewTyConEtad_maybe tc  -- Check for newtype
+  , tvs `leLength` tys                                    -- Check saturated enough
+  = Just (applyTysX tvs ty tys, mkUnbranchedAxInstCo Representational co_tc tys)
   | otherwise
   = Nothing
 

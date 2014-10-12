@@ -73,7 +73,9 @@ import qualified System.FilePath.Posix as FilePath.Posix
 import Control.Monad
 import Data.List as List
 import Data.Map (Map)
+#if __GLASGOW_HASKELL__ < 709
 import Data.Monoid hiding ((<>))
+#endif
 import qualified Data.Map as Map
 import qualified FiniteMap as Map
 import qualified Data.Set as Set
@@ -765,11 +767,15 @@ findBroken pkgs = go [] Map.empty pkgs
 -- package name/version.  Additionally, a package may be preferred if
 -- it is in the transitive closure of packages selected using -package-id
 -- flags.
+type UnusablePackage = (PackageConfig, UnusablePackageReason)
 shadowPackages :: [PackageConfig] -> [InstalledPackageId] -> UnusablePackages
 shadowPackages pkgs preferred
  = let (shadowed,_) = foldl check ([],emptyUFM) pkgs
    in  Map.fromList shadowed
  where
+ check :: ([(InstalledPackageId, UnusablePackage)], UniqFM PackageConfig)
+       -> PackageConfig
+       -> ([(InstalledPackageId, UnusablePackage)], UniqFM PackageConfig)
  check (shadowed,pkgmap) pkg
       | Just oldpkg <- lookupUFM pkgmap pkgid
       , let
@@ -783,7 +789,7 @@ shadowPackages pkgs preferred
       | otherwise
       = (shadowed, pkgmap')
       where
-        pkgid = mkFastString (sourcePackageIdString pkg)
+        pkgid = packageKeyFS (packageKey pkg)
         pkgmap' = addToUFM pkgmap pkgid pkg
 
 -- -----------------------------------------------------------------------------
@@ -1304,7 +1310,8 @@ lookupModuleWithSuggestions dflags m mb_pn
 
 listVisibleModuleNames :: DynFlags -> [ModuleName]
 listVisibleModuleNames dflags =
-    Map.keys (moduleToPkgConfAll (pkgState dflags))
+    map fst (filter visible (Map.toList (moduleToPkgConfAll (pkgState dflags))))
+  where visible (_, ms) = any originVisible (Map.elems ms)
 
 -- | Find all the 'PackageConfig' in both the preload packages from 'DynFlags' and corresponding to the list of
 -- 'PackageConfig's
@@ -1417,7 +1424,7 @@ isDllName dflags _this_pkg this_mod name
                                   Just i -> i
                                   Nothing -> panic ("Can't find " ++ modStr ++ "in DLL split")
                in findMod mod /= findMod this_mod
-       
+
   | otherwise = False  -- no, it is not even an external name
 
 -- -----------------------------------------------------------------------------
