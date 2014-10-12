@@ -2553,7 +2553,7 @@ print:
 
         case MVAR_CLEAN:
         case MVAR_DIRTY:
-            if (((StgMVar *)p)->value != &stg_END_TSO_QUEUE_closure)
+            if (((StgMVar *)p)->value != END_TSO_QUEUE)
                 graphFingerPrint_(fp, visited, ((StgMVar *)p)->value);
             break;
 
@@ -2779,11 +2779,3 @@ static void checkPacket(StgWord* buffer, nat size) {
 
 /* END OF DEBUG */
 #endif
-
-// Local Variables:
-// mode: C++
-// fill-column: 80
-// indent-tabs-mode: nil
-// c-basic-offset: 4
-// buffer-file-coding-system: utf-8-unix
-// End:

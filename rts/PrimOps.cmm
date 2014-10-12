@@ -2341,7 +2341,7 @@ stg_serializzezh (gcptr original)
   MAYBE_GC_P(stg_serializzezh, original);
 
   // assign something to keep cmm reg.allocator happy
-  buff = ghczmprim_GHCziTypes_False_closure;
+  buff = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
   errCode = P_SUCCESS;
 
   // call packing function (pass TSO, so enabling blocking)
@@ -2368,7 +2368,7 @@ stg_serializzezh (gcptr original)
   // other small values indicate other failures
   if ( buff <= P_ERRCODEMAX ) {
     errCode = buff;
-    buff = ghczmprim_GHCziTypes_False_closure;
+    buff = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
   } else {
     errCode = P_SUCCESS;
   }
@@ -2386,7 +2386,7 @@ stg_trySerializzezh (gcptr original)
   MAYBE_GC_P(stg_serializzezh, original);
 
   // assign something to keep cmm reg.allocator happy
-  buff = ghczmprim_GHCziTypes_False_closure;
+  buff = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
   errCode = P_SUCCESS;
 
   // call packing function (without giving the TSO, no blocking)
@@ -2395,7 +2395,7 @@ stg_trySerializzezh (gcptr original)
   // small values indicate failure, see includes/rts/Constants.h
   if ( buff <= P_ERRCODEMAX ) {
     errCode = buff;
-    buff = ghczmprim_GHCziTypes_False_closure;
+    buff = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
   } else {
     errCode = P_SUCCESS;
   }
@@ -2411,7 +2411,7 @@ stg_deserializzezh (gcptr buff)
   W_ errCode;
 
   // assign something to keep cmm reg.allocator happy
-  new = ghczmprim_GHCziTypes_False_closure;
+  new = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
   errCode = P_SUCCESS;
 
   MAYBE_GC_P(stg_deserializzezh, buff);
@@ -2421,7 +2421,7 @@ stg_deserializzezh (gcptr buff)
 
   if ( new <= P_ERRCODEMAX ) {
     errCode = new;
-    new = ghczmprim_GHCziTypes_False_closure;
+    new = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
   }
 
   return (errCode, new);
@@ -2437,7 +2437,7 @@ stg_expectDatazh ()
   W_ id, proc;
 
   // assign something to keep cmm reg.allocator happy
-  retBH = ghczmprim_GHCziTypes_False_closure;
+  retBH = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
   id = 0;
   proc = 0;
 
