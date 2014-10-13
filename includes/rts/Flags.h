@@ -158,7 +158,7 @@ struct MISC_FLAGS {
 };
 
 #ifdef PARALLEL_RTS
-struct PAR_DEBUG_FLAGS {  
+struct PAR_DEBUG_FLAGS {
   /* flags to control debugging output in various subsystems */
   rtsBool verbose    : 1; /* 2^0=1 */
   rtsBool mpcomm     : 1; /* 2^1=2 */
@@ -181,7 +181,7 @@ struct PAR_FLAGS {
 #if defined(PARALLEL_RTS)
   struct PAR_DEBUG_FLAGS Debug;         /* debugging options */
   nat      sendBufferSize;
-  nat      placement;            
+  nat      placement;
 
   long   wait;
 #endif /* PARALLEL_RTS */
