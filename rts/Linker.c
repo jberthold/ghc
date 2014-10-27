@@ -217,8 +217,9 @@ static int ocRunInit_PEi386     ( ObjectCode* oc );
 static void *lookupSymbolInDLLs ( unsigned char *lbl );
 static void zapTrailingAtSign   ( unsigned char *sym );
 static char *allocateImageAndTrampolines (
+   pathchar* arch_name, char* member_name,
 #if defined(x86_64_HOST_ARCH)
-   FILE* f, pathchar* arch_name, char* member_name,
+   FILE* f,
 #endif
    int size );
 #if defined(x86_64_HOST_ARCH)
@@ -1044,8 +1045,8 @@ typedef struct _RtsSymbolVal {
 #define RTS_INTCHAR_SYMBOLS
 #else
 #define RTS_INTCHAR_SYMBOLS                             \
-      SymI_HasProto(stg_CHARLIKE_static_closure)               \
-      SymI_HasProto(stg_INTLIKE_static_closure)
+      SymI_HasProto(stg_CHARLIKE_closure)               \
+      SymI_HasProto(stg_INTLIKE_closure)
 #endif
 
 
@@ -2382,7 +2383,9 @@ mkOc( pathchar *path, char *image, int imageSize,
    oc->sections          = NULL;
    oc->proddables        = NULL;
    oc->stable_ptrs       = NULL;
+#if powerpc_HOST_ARCH || x86_64_HOST_ARCH || arm_HOST_ARCH
    oc->symbol_extras     = NULL;
+#endif
 
 #ifndef USE_MMAP
 #ifdef darwin_HOST_OS
@@ -2736,9 +2739,9 @@ loadArchive( pathchar *path )
 #elif defined(mingw32_HOST_OS)
         // TODO: We would like to use allocateExec here, but allocateExec
         //       cannot currently allocate blocks large enough.
-            image = allocateImageAndTrampolines(
+            image = allocateImageAndTrampolines(path, fileName,
 #if defined(x86_64_HOST_ARCH)
-               f, path, fileName,
+               f,
 #endif
                memberSize);
 #elif defined(darwin_HOST_OS)
@@ -2957,9 +2960,9 @@ loadObj( pathchar *path )
 #   if defined(mingw32_HOST_OS)
         // TODO: We would like to use allocateExec here, but allocateExec
         //       cannot currently allocate blocks large enough.
-    image = allocateImageAndTrampolines(
+    image = allocateImageAndTrampolines(path, "itself",
 #if defined(x86_64_HOST_ARCH)
-       f, path, "itself",
+       f,
 #endif
        fileSize);
     if (image == NULL) {
@@ -3674,8 +3677,9 @@ static int verifyCOFFHeader ( COFF_header *hdr, pathchar *filename);
  */
 static char *
 allocateImageAndTrampolines (
+   pathchar* arch_name, char* member_name,
 #if defined(x86_64_HOST_ARCH)
-   FILE* f, pathchar* arch_name, char* member_name,
+   FILE* f,
 #endif
    int size )
 {
@@ -4271,7 +4275,6 @@ ocGetNames_PEi386 ( ObjectCode* oc )
           0==strcmp(".rodata",(char*)secname))
          kind = SECTIONKIND_CODE_OR_RODATA;
       if (0==strcmp(".data",(char*)secname) ||
-          0==strcmp("staticclosures",(char*)secname) ||
           0==strcmp(".bss",(char*)secname))
          kind = SECTIONKIND_RWDATA;
       if (0==strcmp(".ctors", (char*)secname))

@@ -46,13 +46,13 @@ import VarSet
 import CoreUnfold ( mkDFunUnfolding )
 import CoreSyn    ( Expr(Var, Type), CoreExpr, mkTyApps, mkVarApps )
 import PrelNames  ( tYPEABLE_INTERNAL, typeableClassName,
-                    oldTypeableClassNames, genericClassNames )
+                    genericClassNames )
 import Bag
 import BasicTypes
 import DynFlags
 import ErrUtils
 import FastString
-import HscTypes ( isHsBoot )
+import HscTypes ( isHsBootOrSig )
 import Id
 import MkId
 import Name
@@ -410,13 +410,11 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
        -- performed. Derived instances are OK.
        ; dflags <- getDynFlags
        ; when (safeLanguageOn dflags) $ forM_ local_infos $ \x -> case x of
-             _ | typInstCheck x -> addErrAt (getSrcSpan $ iSpec x) (typInstErr x)
              _ | genInstCheck x -> addErrAt (getSrcSpan $ iSpec x) (genInstErr x)
              _ -> return ()
 
        -- As above but for Safe Inference mode.
        ; when (safeInferOn dflags) $ forM_ local_infos $ \x -> case x of
-             _ | typInstCheck x -> recordUnsafeInfer
              _ | genInstCheck x -> recordUnsafeInfer
              _ | overlapCheck x -> recordUnsafeInfer
              _ -> return ()
@@ -434,16 +432,11 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
             (typeableClassName == is_cls_nm (iSpec i))
             -- but not those that come from Data.Typeable.Internal
             && tcg_mod env /= tYPEABLE_INTERNAL
-            -- nor those from an .hs-boot file (deriving can't be used there)
-            && not (isHsBoot (tcg_src env))
+            -- nor those from an .hs-boot or .hsig file
+            -- (deriving can't be used there)
+            && not (isHsBootOrSig (tcg_src env))
          then (i:typeableInsts, otherInsts)
          else (typeableInsts, i:otherInsts)
-
-    typInstCheck ty = is_cls_nm (iSpec ty) `elem` oldTypeableClassNames
-    typInstErr i = hang (ptext (sLit $ "Typeable instances can only be "
-                            ++ "derived in Safe Haskell.") $+$
-                         ptext (sLit "Replace the following instance:"))
-                     2 (pprInstanceHdr (iSpec i))
 
     overlapCheck ty = overlapMode (is_flag $ iSpec ty) `elem`
                         [Overlappable, Overlapping, Overlaps]
@@ -519,7 +512,7 @@ tcClsInstDecl (L loc (ClsInstDecl { cid_poly_ty = poly_ty, cid_binds = binds
                                   , cid_datafam_insts = adts }))
   = setSrcSpan loc                      $
     addErrCtxt (instDeclCtxt1 poly_ty)  $
-    do  { is_boot <- tcIsHsBoot
+    do  { is_boot <- tcIsHsBootOrSig
         ; checkTc (not is_boot || (isEmptyLHsBinds binds && null uprags))
                   badBootDeclErr
 
@@ -636,7 +629,7 @@ tcFamInstDeclCombined mb_clsinfo fam_tc_lname
          -- and can't (currently) be in an hs-boot file
        ; traceTc "tcFamInstDecl" (ppr fam_tc_lname)
        ; type_families <- xoptM Opt_TypeFamilies
-       ; is_boot <- tcIsHsBoot   -- Are we compiling an hs-boot file?
+       ; is_boot <- tcIsHsBootOrSig   -- Are we compiling an hs-boot file?
        ; checkTc type_families $ badFamInstDecl fam_tc_lname
        ; checkTc (not is_boot) $ badBootFamInstDeclErr
 
@@ -1471,7 +1464,7 @@ So for the above example we generate:
 
   $cop2 = <blah>
 
-Note carefullly:
+Note carefully:
 
 * We *copy* any INLINE pragma from the default method $dmop1 to the
   instance $cop1.  Otherwise we'll just inline the former in the

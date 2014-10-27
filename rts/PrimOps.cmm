@@ -28,10 +28,10 @@
 import pthread_mutex_lock;
 import pthread_mutex_unlock;
 #endif
-import base_ControlziExceptionziBase_nestedAtomically_static_closure;
+import base_ControlziExceptionziBase_nestedAtomically_closure;
 import EnterCriticalSection;
 import LeaveCriticalSection;
-import ghczmprim_GHCziTypes_False_static_closure;
+import ghczmprim_GHCziTypes_False_closure;
 #if defined(USE_MINIINTERPRETER) || !defined(mingw32_HOST_OS)
 import sm_mutex;
 #endif
@@ -1183,7 +1183,7 @@ stg_atomicallyzh (P_ stm)
 
     /* Nested transactions are not allowed; raise an exception */
     if (old_trec != NO_TREC) {
-        jump stg_raisezh(STATIC_CLOSURE(base_ControlziExceptionziBase_nestedAtomically));
+        jump stg_raisezh(base_ControlziExceptionziBase_nestedAtomically_closure);
     }
 
     code = stm;
@@ -2341,7 +2341,7 @@ stg_serializzezh (gcptr original)
   MAYBE_GC_P(stg_serializzezh, original);
 
   // assign something to keep cmm reg.allocator happy
-  buff = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
+  buff = ghczmprim_GHCziTypes_False_closure;
   errCode = P_SUCCESS;
 
   // call packing function (pass TSO, so enabling blocking)
@@ -2368,7 +2368,7 @@ stg_serializzezh (gcptr original)
   // other small values indicate other failures
   if ( buff <= P_ERRCODEMAX ) {
     errCode = buff;
-    buff = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
+    buff = ghczmprim_GHCziTypes_False_closure;
   } else {
     errCode = P_SUCCESS;
   }
@@ -2386,7 +2386,7 @@ stg_trySerializzezh (gcptr original)
   MAYBE_GC_P(stg_serializzezh, original);
 
   // assign something to keep cmm reg.allocator happy
-  buff = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
+  buff = ghczmprim_GHCziTypes_False_closure;
   errCode = P_SUCCESS;
 
   // call packing function (without giving the TSO, no blocking)
@@ -2395,7 +2395,7 @@ stg_trySerializzezh (gcptr original)
   // small values indicate failure, see includes/rts/Constants.h
   if ( buff <= P_ERRCODEMAX ) {
     errCode = buff;
-    buff = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
+    buff = ghczmprim_GHCziTypes_False_closure;
   } else {
     errCode = P_SUCCESS;
   }
@@ -2411,7 +2411,7 @@ stg_deserializzezh (gcptr buff)
   W_ errCode;
 
   // assign something to keep cmm reg.allocator happy
-  new = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
+  new = ghczmprim_GHCziTypes_False_closure;
   errCode = P_SUCCESS;
 
   MAYBE_GC_P(stg_deserializzezh, buff);
@@ -2421,7 +2421,7 @@ stg_deserializzezh (gcptr buff)
 
   if ( new <= P_ERRCODEMAX ) {
     errCode = new;
-    new = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
+    new = ghczmprim_GHCziTypes_False_closure;
   }
 
   return (errCode, new);
@@ -2437,7 +2437,7 @@ stg_expectDatazh ()
   W_ id, proc;
 
   // assign something to keep cmm reg.allocator happy
-  retBH = STATIC_CLOSURE(ghczmprim_GHCziTypes_False);
+  retBH = ghczmprim_GHCziTypes_False_closure;
   id = 0;
   proc = 0;
 
@@ -2575,13 +2575,13 @@ stg_getSparkzh ()
     W_ spark;
 
 #ifndef THREADED_RTS
-    return (0,STATIC_CLOSURE(ghczmprim_GHCziTypes_False));
+    return (0,ghczmprim_GHCziTypes_False_closure);
 #else
     (spark) = ccall findSpark(MyCapability());
     if (spark != 0) {
         return (1,spark);
     } else {
-        return (0,STATIC_CLOSURE(ghczmprim_GHCziTypes_False));
+        return (0,ghczmprim_GHCziTypes_False_closure);
     }
 #endif
 }

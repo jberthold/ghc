@@ -197,7 +197,7 @@ compileOne' m_tc_result mHscMessage
            case hsc_lang of
                HscInterpreted ->
                    case ms_hsc_src summary of
-                   HsBootFile ->
+                   t | isHsBootOrSig t ->
                        do (iface, _changed, details) <- hscSimpleIface hsc_env tc_result mb_old_hash
                           return (HomeModInfo{ hm_details  = details,
                                                hm_iface    = iface,
@@ -231,7 +231,7 @@ compileOne' m_tc_result mHscMessage
                    do (iface, changed, details) <- hscSimpleIface hsc_env tc_result mb_old_hash
                       when (gopt Opt_WriteInterface dflags) $
                          hscWriteIface dflags iface changed summary
-                      let linkable = if isHsBoot src_flavour
+                      let linkable = if isHsBootOrSig src_flavour
                                      then maybe_old_linkable
                                      else Just (LM (ms_hs_date summary) this_mod [])
                       return (HomeModInfo{ hm_details  = details,
@@ -240,7 +240,7 @@ compileOne' m_tc_result mHscMessage
 
                _ ->
                    case ms_hsc_src summary of
-                   HsBootFile ->
+                   t | isHsBootOrSig t ->
                        do (iface, changed, details) <- hscSimpleIface hsc_env tc_result mb_old_hash
                           hscWriteIface dflags iface changed summary
                           touchObjectFile dflags object_filename
@@ -341,7 +341,11 @@ link' dflags batch_attempt_linking hpt
                           LinkStaticLib -> True
                           _ -> platformBinariesAreStaticLibs (targetPlatform dflags)
 
-            home_mod_infos = eltsUFM hpt
+            -- Don't attempt to link hsigs; they don't actually produce objects.
+            -- This is in contrast to hs-boot files, which will /eventually/
+            -- get objects.
+            home_mod_infos =
+                filter ((==Nothing).mi_sig_of.hm_iface) (eltsUFM hpt)
 
             -- the packages we depend on
             pkg_deps  = concatMap (map fst . dep_pkgs . mi_deps . hm_iface) home_mod_infos
@@ -1511,8 +1515,8 @@ getLocation src_flavour mod_name = do
     location1 <- liftIO $ mkHomeModLocation2 dflags mod_name basename suff
 
     -- Boot-ify it if necessary
-    let location2 | isHsBoot src_flavour = addBootSuffixLocn location1
-                  | otherwise            = location1
+    let location2 | HsBootFile <- src_flavour = addBootSuffixLocn location1
+                  | otherwise                 = location1
 
 
     -- Take -ohi into account if present
@@ -1619,26 +1623,26 @@ mkExtraObjToLinkIntoBinary dflags = do
 
    mkExtraObj dflags "c" (showSDoc dflags main)
 
-  where
-    main
-      | gopt Opt_NoHsMain dflags = Outputable.empty
-      | otherwise = vcat [
-             ptext (sLit "#include \"Rts.h\""),
-             ptext (sLit "extern StgClosure ZCMain_main_static_closure;"),
-             ptext (sLit "int main(int argc, char *argv[])"),
-             char '{',
-             ptext (sLit "    RtsConfig __conf = defaultRtsConfig;"),
-             ptext (sLit "    __conf.rts_opts_enabled = ")
-                 <> text (show (rtsOptsEnabled dflags)) <> semi,
-             case rtsOpts dflags of
-                Nothing   -> Outputable.empty
-                Just opts -> ptext (sLit "    __conf.rts_opts= ") <>
-                               text (show opts) <> semi,
-             ptext (sLit "    __conf.rts_hs_main = rtsTrue;"),
-             ptext (sLit "    return hs_main(argc, argv, &ZCMain_main_static_closure,__conf);"),
-             char '}',
-             char '\n' -- final newline, to keep gcc happy
-           ]
+ where
+  main
+   | gopt Opt_NoHsMain dflags = Outputable.empty
+   | otherwise = vcat [
+      text "#include \"Rts.h\"",
+      text "extern StgClosure ZCMain_main_closure;",
+      text "int main(int argc, char *argv[])",
+      char '{',
+      text " RtsConfig __conf = defaultRtsConfig;",
+      text " __conf.rts_opts_enabled = "
+          <> text (show (rtsOptsEnabled dflags)) <> semi,
+      case rtsOpts dflags of
+         Nothing   -> Outputable.empty
+         Just opts -> ptext (sLit "    __conf.rts_opts= ") <>
+                        text (show opts) <> semi,
+      text " __conf.rts_hs_main = rtsTrue;",
+      text " return hs_main(argc,argv,&ZCMain_main_closure,__conf);",
+      char '}',
+      char '\n' -- final newline, to keep gcc happy
+     ]
 
 -- Write out the link info section into a new assembly file. Previously
 -- this was included as inline assembly in the main.c file but this
@@ -2359,6 +2363,7 @@ joinObjectFiles dflags o_files output_fn = do
 -- | What phase to run after one of the backend code generators has run
 hscPostBackendPhase :: DynFlags -> HscSource -> HscTarget -> Phase
 hscPostBackendPhase _ HsBootFile _    =  StopLn
+hscPostBackendPhase _ HsigFile _      =  StopLn
 hscPostBackendPhase dflags _ hsc_lang =
   case hsc_lang of
         HscC -> HCc
