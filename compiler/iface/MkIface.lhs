@@ -1624,10 +1624,6 @@ tyConToIfaceDecl env tycon
                   ifPromotable = isJust (promotableTyCon_maybe tycon),
                   ifParent  = parent })
 
-  | isForeignTyCon tycon
-  = (env, IfaceForeign { ifName    = getOccName tycon,
-                         ifExtName = tyConExtName tycon })
-
   | otherwise  -- FunTyCon, PrimTyCon, promoted TyCon/DataCon
   -- For pretty printing purposes only.
   = ( env
@@ -1982,7 +1978,7 @@ toIfaceExpr (Var v)         = toIfaceVar v
 toIfaceExpr (Lit l)         = IfaceLit l
 toIfaceExpr (Type ty)       = IfaceType (toIfaceType ty)
 toIfaceExpr (Coercion co)   = IfaceCo   (toIfaceCoercion co)
-toIfaceExpr (Lam x b)       = IfaceLam (toIfaceBndr x) (toIfaceExpr b)
+toIfaceExpr (Lam x b)       = IfaceLam (toIfaceBndr x, toIfaceOneShot x) (toIfaceExpr b)
 toIfaceExpr (App f a)       = toIfaceApp f [a]
 toIfaceExpr (Case s x ty as)
   | null as                 = IfaceECase (toIfaceExpr s) (toIfaceType ty)
@@ -1992,6 +1988,13 @@ toIfaceExpr (Cast e co)     = IfaceCast (toIfaceExpr e) (toIfaceCoercion co)
 toIfaceExpr (Tick t e) 
   | Just t' <- toIfaceTickish t = IfaceTick t' (toIfaceExpr e) 
   | otherwise                   = toIfaceExpr e
+
+toIfaceOneShot :: Id -> IfaceOneShot
+toIfaceOneShot id | isId id
+                  , OneShotLam <- oneShotInfo (idInfo id)
+                  = IfaceOneShot
+                  | otherwise
+                  = IfaceNoOneShot
 
 ---------------------
 toIfaceTickish :: Tickish Id -> Maybe IfaceTickish

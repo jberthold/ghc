@@ -15,6 +15,7 @@ module Inst (
 
        newOverloadedLit, mkOverLit,
 
+       newClsInst,
        tcGetInsts, tcGetInstEnvs, getOverlapFlag,
        tcExtendLocalInstEnv, instCallConstraints, newMethodFromName,
        tcSyntaxName,
@@ -44,6 +45,8 @@ import Type
 import Coercion ( Role(..) )
 import TcType
 import HscTypes
+import Class( Class )
+import MkId( mkDictFunId )
 import Id
 import Name
 import Var      ( EvVar, varType, setVarType )
@@ -168,9 +171,14 @@ deeplyInstantiate :: CtOrigin -> TcSigmaType -> TcM (HsWrapper, TcRhoType)
 
 deeplyInstantiate orig ty
   | Just (arg_tys, tvs, theta, rho) <- tcDeepSplitSigmaTy_maybe ty
-  = do { (_, tys, subst) <- tcInstTyVars tvs
+  = do { (subst, tvs') <- tcInstTyVars tvs
        ; ids1  <- newSysLocalIds (fsLit "di") (substTys subst arg_tys)
-       ; wrap1 <- instCall orig tys (substTheta subst theta)
+       ; let theta' = substTheta subst theta
+       ; wrap1 <- instCall orig (mkTyVarTys tvs') theta'
+       ; traceTc "Instantiating (deply)" (vcat [ ppr ty
+                                               , text "with" <+> ppr tvs'
+                                               , text "args:" <+> ppr ids1
+                                               , text "theta:" <+>  ppr theta' ])
        ; (wrap2, rho2) <- deeplyInstantiate orig (substTy subst rho)
        ; return (mkWpLams ids1
                     <.> wrap2
@@ -378,18 +386,19 @@ syntaxNameCtxt name orig ty tidy_env
 %************************************************************************
 
 \begin{code}
-getOverlapFlag :: TcM OverlapFlag
-getOverlapFlag
+getOverlapFlag :: Maybe OverlapMode -> TcM OverlapFlag
+getOverlapFlag overlap_mode
   = do  { dflags <- getDynFlags
         ; let overlap_ok    = xopt Opt_OverlappingInstances dflags
               incoherent_ok = xopt Opt_IncoherentInstances  dflags
               use x = OverlapFlag { isSafeOverlap = safeLanguageOn dflags
                                   , overlapMode   = x }
-              overlap_flag | incoherent_ok = use Incoherent
-                           | overlap_ok    = use Overlaps
-                           | otherwise     = use NoOverlap
+              default_oflag | incoherent_ok = use Incoherent
+                            | overlap_ok    = use Overlaps
+                            | otherwise     = use NoOverlap
 
-        ; return overlap_flag }
+              final_oflag = setOverlapModeMaybe default_oflag overlap_mode
+        ; return final_oflag }
 
 tcGetInstEnvs :: TcM (InstEnv, InstEnv)
 -- Gets both the external-package inst-env
@@ -400,6 +409,22 @@ tcGetInstEnvs = do { eps <- getEps; env <- getGblEnv;
 tcGetInsts :: TcM [ClsInst]
 -- Gets the local class instances.
 tcGetInsts = fmap tcg_insts getGblEnv
+
+newClsInst :: Maybe OverlapMode -> Name -> [TyVar] -> ThetaType
+           -> Class -> [Type] -> TcM ClsInst
+newClsInst overlap_mode dfun_name tvs theta clas tys
+  = do { (subst, tvs') <- freshenTyVarBndrs tvs
+             -- Be sure to freshen those type variables,
+             -- so they are sure not to appear in any lookup
+       ; let tys'   = substTys subst tys
+             theta' = substTheta subst theta
+             dfun   = mkDictFunId dfun_name tvs' theta' clas tys'
+             -- Substituting in the DFun type just makes sure that
+             -- we are using TyVars rather than TcTyVars
+             -- Not sure if this is really the right place to do so,
+             -- but it'll do fine
+       ; oflag <- getOverlapFlag overlap_mode
+       ; return (mkLocalInstance dfun oflag tvs' clas tys') }
 
 tcExtendLocalInstEnv :: [ClsInst] -> TcM a -> TcM a
   -- Add new locally-defined instances
@@ -473,52 +498,60 @@ addLocalInst (home_ie, my_insts) ispec
            dupInstErr ispec (head dups)
 
          ; return (extendInstEnv home_ie' ispec, ispec:my_insts') }
+\end{code}
 
--- Note [Signature files and type class instances]
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- Instances in signature files do not have an effect when compiling:
--- when you compile a signature against an implementation, you will
--- see the instances WHETHER OR NOT the instance is declared in
--- the file (this is because the signatures go in the EPS and we
--- can't filter them out easily.)  This is also why we cannot
--- place the instance in the hi file: it would show up as a duplicate,
--- and we don't have instance reexports anyway.
---
--- However, you might find them useful when typechecking against
--- a signature: the instance is a way of indicating to GHC that
--- some instance exists, in case downstream code uses it.
---
--- Implementing this is a little tricky.  Consider the following
--- situation (sigof03):
---
---  module A where
---      instance C T where ...
---
---  module ASig where
---      instance C T
---
--- When compiling ASig, A.hi is loaded, which brings its instances
--- into the EPS.  When we process the instance declaration in ASig,
--- we should ignore it for the purpose of doing a duplicate check,
--- since it's not actually a duplicate. But don't skip the check
--- entirely, we still want this to fail (tcfail221):
---
---  module ASig where
---      instance C T
---      instance C T
---
--- Note that in some situations, the interface containing the type
--- class instances may not have been loaded yet at all.  The usual
--- situation when A imports another module which provides the
--- instances (sigof02m):
---
---  module A(module B) where
---      import B
---
--- See also Note [Signature lazy interface loading].  We can't
--- rely on this, however, since sometimes we'll have spurious
--- type class instances in the EPS, see #9422 (sigof02dm)
+Note [Signature files and type class instances]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Instances in signature files do not have an effect when compiling:
+when you compile a signature against an implementation, you will
+see the instances WHETHER OR NOT the instance is declared in
+the file (this is because the signatures go in the EPS and we
+can't filter them out easily.)  This is also why we cannot
+place the instance in the hi file: it would show up as a duplicate,
+and we don't have instance reexports anyway.
 
+However, you might find them useful when typechecking against
+a signature: the instance is a way of indicating to GHC that
+some instance exists, in case downstream code uses it.
+
+Implementing this is a little tricky.  Consider the following
+situation (sigof03):
+
+ module A where
+     instance C T where ...
+
+ module ASig where
+     instance C T
+
+When compiling ASig, A.hi is loaded, which brings its instances
+into the EPS.  When we process the instance declaration in ASig,
+we should ignore it for the purpose of doing a duplicate check,
+since it's not actually a duplicate. But don't skip the check
+entirely, we still want this to fail (tcfail221):
+
+ module ASig where
+     instance C T
+     instance C T
+
+Note that in some situations, the interface containing the type
+class instances may not have been loaded yet at all.  The usual
+situation when A imports another module which provides the
+instances (sigof02m):
+
+ module A(module B) where
+     import B
+
+See also Note [Signature lazy interface loading].  We can't
+rely on this, however, since sometimes we'll have spurious
+type class instances in the EPS, see #9422 (sigof02dm)
+
+%************************************************************************
+%*                                                                      *
+        Errors and tracing
+%*                                                                      *
+%************************************************************************
+
+\begin{code}
 traceDFuns :: [ClsInst] -> TcRn ()
 traceDFuns ispecs
   = traceTc "Adding instances:" (vcat (map pp ispecs))
@@ -557,13 +590,12 @@ addClsInstsErr herald ispecs
 \begin{code}
 ---------------- Getting free tyvars -------------------------
 tyVarsOfCt :: Ct -> TcTyVarSet
--- NB: the
-tyVarsOfCt (CTyEqCan { cc_tyvar = tv, cc_rhs = xi })    = extendVarSet (tyVarsOfType xi) tv
-tyVarsOfCt (CFunEqCan { cc_tyargs = tys, cc_rhs = xi }) = tyVarsOfTypes (xi:tys)
-tyVarsOfCt (CDictCan { cc_tyargs = tys })               = tyVarsOfTypes tys
-tyVarsOfCt (CIrredEvCan { cc_ev = ev })                 = tyVarsOfType (ctEvPred ev)
-tyVarsOfCt (CHoleCan { cc_ev = ev })                    = tyVarsOfType (ctEvPred ev)
-tyVarsOfCt (CNonCanonical { cc_ev = ev })               = tyVarsOfType (ctEvPred ev)
+tyVarsOfCt (CTyEqCan { cc_tyvar = tv, cc_rhs = xi })     = extendVarSet (tyVarsOfType xi) tv
+tyVarsOfCt (CFunEqCan { cc_tyargs = tys, cc_fsk = fsk }) = extendVarSet (tyVarsOfTypes tys) fsk
+tyVarsOfCt (CDictCan { cc_tyargs = tys })                = tyVarsOfTypes tys
+tyVarsOfCt (CIrredEvCan { cc_ev = ev })                  = tyVarsOfType (ctEvPred ev)
+tyVarsOfCt (CHoleCan { cc_ev = ev })                     = tyVarsOfType (ctEvPred ev)
+tyVarsOfCt (CNonCanonical { cc_ev = ev })                = tyVarsOfType (ctEvPred ev)
 
 tyVarsOfCts :: Cts -> TcTyVarSet
 tyVarsOfCts = foldrBag (unionVarSet . tyVarsOfCt) emptyVarSet
@@ -577,10 +609,10 @@ tyVarsOfWC (WC { wc_flat = flat, wc_impl = implic, wc_insol = insol })
 
 tyVarsOfImplic :: Implication -> TyVarSet
 -- Only called on *zonked* things, hence no need to worry about flatten-skolems
-tyVarsOfImplic (Implic { ic_skols = skols, ic_fsks = fsks
-                             , ic_given = givens, ic_wanted = wanted })
+tyVarsOfImplic (Implic { ic_skols = skols
+                       , ic_given = givens, ic_wanted = wanted })
   = (tyVarsOfWC wanted `unionVarSet` tyVarsOfTypes (map evVarPred givens))
-    `delVarSetList` skols `delVarSetList` fsks
+    `delVarSetList` skols
 
 tyVarsOfBag :: (a -> TyVarSet) -> Bag a -> TyVarSet
 tyVarsOfBag tvs_of = foldrBag (unionVarSet . tvs_of) emptyVarSet

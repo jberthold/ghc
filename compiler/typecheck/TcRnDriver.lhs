@@ -888,10 +888,6 @@ checkBootTyCon tc1 tc2
     eqListBy (eqPredX env) (tyConStupidTheta tc1) (tyConStupidTheta tc2) &&
     eqAlgRhs (algTyConRhs tc1) (algTyConRhs tc2)
 
-  | isForeignTyCon tc1 && isForeignTyCon tc2
-  = eqKind (tyConKind tc1) (tyConKind tc2) &&
-    tyConExtName tc1 == tyConExtName tc2
-
   | otherwise = False
   where
     roles1 = tyConRoles tc1
@@ -1645,11 +1641,12 @@ tcRnExpr hsc_env rdr_expr
         -- it might have a rank-2 type (e.g. :t runST)
     uniq <- newUnique ;
     let { fresh_it  = itName uniq (getLoc rdr_expr) } ;
-    ((_tc_expr, res_ty), lie) <- captureConstraints $ 
-                                 tcInferRho rn_expr ;
+    (((_tc_expr, res_ty), untch), lie) <- captureConstraints  $
+                                          captureUntouchables $
+                                          tcInferRho rn_expr ;
     ((qtvs, dicts, _, _), lie_top) <- captureConstraints $
                                       {-# SCC "simplifyInfer" #-}
-                                      simplifyInfer True {- Free vars are closed -}
+                                      simplifyInfer untch
                                                     False {- No MR for now -}
                                                     [(fresh_it, res_ty)]
                                                     lie ;
@@ -1919,7 +1916,7 @@ tcDump env
 
         -- Dump short output if -ddump-types or -ddump-tc
         when (dopt Opt_D_dump_types dflags || dopt Opt_D_dump_tc dflags)
-             (dumpTcRn short_dump) ;
+             (printForUserTcRn short_dump) ;
 
         -- Dump bindings if -ddump-tc
         dumpOptTcRn Opt_D_dump_tc (mkDumpDoc "Typechecker" full_dump)

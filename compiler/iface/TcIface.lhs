@@ -567,11 +567,6 @@ tc_iface_decl _parent ignore_prags
                            ; tvs2' <- mapM tcIfaceTyVar tvs2
                            ; return (tvs1', tvs2') }
 
-tc_iface_decl _ _ (IfaceForeign {ifName = rdr_name, ifExtName = ext_name})
-  = do  { name <- lookupIfaceTop rdr_name
-        ; return (ATyCon (mkForeignTyCon name ext_name
-                                         liftedTypeKind)) }
-
 tc_iface_decl _ _ (IfaceAxiom { ifName = ax_occ, ifTyCon = tc
                               , ifAxBranches = branches, ifRole = role })
   = do { tc_name     <- lookupIfaceTop ax_occ
@@ -1098,9 +1093,12 @@ tcIfaceExpr (IfaceTuple boxity args)  = do
     con_id = dataConWorkId (tupleCon boxity arity)
 
 
-tcIfaceExpr (IfaceLam bndr body)
+tcIfaceExpr (IfaceLam (bndr, os) body)
   = bindIfaceBndr bndr $ \bndr' ->
-    Lam bndr' <$> tcIfaceExpr body
+    Lam (tcIfaceOneShot os bndr') <$> tcIfaceExpr body
+  where
+    tcIfaceOneShot IfaceOneShot b = setOneShotLambda b
+    tcIfaceOneShot _            b = b
 
 tcIfaceExpr (IfaceApp fun arg)
   = tcIfaceApps fun arg
