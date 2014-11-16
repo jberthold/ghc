@@ -432,8 +432,7 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
               -- (deriving can't be used there)
       && not (isHsBootOrSig (tcg_src env))
 
-    overlapCheck ty = overlapMode (is_flag $ iSpec ty) `elem`
-                        [Overlappable, Overlapping, Overlaps]
+    overlapCheck ty = overlapMode (is_flag $ iSpec ty) /= NoOverlap
     genInstCheck ty = is_cls_nm (iSpec ty) `elem` genericClassNames
     genInstErr i = hang (ptext (sLit $ "Generic instances can only be "
                             ++ "derived in Safe Haskell.") $+$
@@ -1010,22 +1009,27 @@ superclass is bottom when it should not be.
 
 Consider the following (extreme) situation:
         class C a => D a where ...
-        instance D [a] => D [a] where ...
+        instance D [a] => D [a] where ...   (dfunD)
+        instance C [a] => C [a] where ...   (dfunC)
 Although this looks wrong (assume D [a] to prove D [a]), it is only a
 more extreme case of what happens with recursive dictionaries, and it
 can, just about, make sense because the methods do some work before
 recursing.
 
-To implement the dfun we must generate code for the superclass C [a],
+To implement the dfunD we must generate code for the superclass C [a],
 which we had better not get by superclass selection from the supplied
 argument:
-       dfun :: forall a. D [a] -> D [a]
-       dfun = \d::D [a] -> MkD (scsel d) ..
+       dfunD :: forall a. D [a] -> D [a]
+       dfunD = \d::D [a] -> MkD (scsel d) ..
 
 Otherwise if we later encounter a situation where
 we have a [Wanted] dw::D [a] we might solve it thus:
-     dw := dfun dw
+     dw := dfunD dw
 Which is all fine except that now ** the superclass C is bottom **!
+
+The instance we want is:
+       dfunD :: forall a. D [a] -> D [a]
+       dfunD = \d::D [a] -> MkD (dfunC (scsel d)) ...
 
       THE SOLUTION
 

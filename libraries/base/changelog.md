@@ -91,6 +91,15 @@
 
   * Add `Alt`, an `Alternative` wrapper, to `Data.Monoid`. (#9759)
 
+  * Add `isSubsequenceOf` to `Data.List` (#9767)
+
+  * The arguments to `==` and `eq` in `Data.List.nub` and `Data.List.nubBy`
+    are swapped, such that `Data.List.nubBy (<) [1,2]` now returns `[1]`
+    instead of `[1,2]` (#2528, #3280, #7913)
+
+  * New module `Data.Functor.Identity` (previously provided by `transformers`
+    package). (#9664)
+
 ## 4.7.0.1  *Jul 2014*
 
   * Bundled with GHC 7.8.3

@@ -128,8 +128,7 @@ solveFlatGivens loc givens
 solveFlatWanteds :: Cts -> TcS WantedConstraints
 solveFlatWanteds wanteds
   = do { solveFlats wanteds
-       ; unsolved_implics                  <- getWorkListImplics
-       ; (tv_eqs, fun_eqs, insols, others) <- getUnsolvedInerts
+       ; (implics, tv_eqs, fun_eqs, insols, others) <- getUnsolvedInerts
        ; unflattened_eqs <- unflatten tv_eqs fun_eqs
             -- See Note [Unflatten after solving the flat wanteds]
 
@@ -137,7 +136,7 @@ solveFlatWanteds wanteds
             -- Postcondition is that the wl_flats are zonked
        ; return (WC { wc_flat  = zonked
                     , wc_insol = insols
-                    , wc_impl  = unsolved_implics }) }
+                    , wc_impl  = implics }) }
 
 -- The main solver loop implements Note [Basic Simplifier Plan]
 ---------------------------------------------------------------
@@ -395,8 +394,7 @@ interactIrred _ wi = pprPanic "interactIrred" (ppr wi)
 \begin{code}
 interactDict :: InertCans -> Ct -> TcS (StopOrContinue Ct)
 interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs = tys })
-  | Just ct_i <- findDict (inert_dicts inerts) cls tys
-  , let ctev_i = ctEvidence ct_i
+  | Just ctev_i <- lookupInertDict inerts (ctEvLoc ev_w) cls tys
   = do { (inert_effect, stop_now) <- solveOneFromTheOther ctev_i ev_w
        ; case inert_effect of
            IRKeep    -> return ()
@@ -1089,56 +1087,69 @@ Consider generating the superclasses of the instance declaration
          instance Foo a => Foo [a]
 
 So our problem is this
-    d0 :_g Foo t
-    d1 :_w Data Maybe [t]
+    [G] d0 : Foo t
+    [W] d1 : Data Maybe [t]   -- Desired superclass
 
 We may add the given in the inert set, along with its superclasses
 [assuming we don't fail because there is a matching instance, see
  topReactionsStage, given case ]
   Inert:
-    d0 :_g Foo t
+    [G] d0 : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
   WorkList
-    d01 :_g Data Maybe t  -- d2 := EvDictSuperClass d0 0
-    d1 :_w Data Maybe [t]
-Then d2 can readily enter the inert, and we also do solving of the wanted
-  Inert:
-    d0 :_g Foo t
-    d1 :_s Data Maybe [t]           d1 := dfunData2 d2 d3
-  WorkList
-    d2 :_w Sat (Maybe [t])
-    d3 :_w Data Maybe t
-    d01 :_g Data Maybe t
-Now, we may simplify d2 more:
-  Inert:
-      d0 :_g Foo t
-      d1 :_s Data Maybe [t]           d1 := dfunData2 d2 d3
-      d1 :_g Data Maybe [t]
-      d2 :_g Sat (Maybe [t])          d2 := dfunSat d4
-  WorkList:
-      d3 :_w Data Maybe t
-      d4 :_w Foo [t]
-      d01 :_g Data Maybe t
+    [W] d1 : Data Maybe [t]
 
-Now, we can just solve d3.
-  Inert
-      d0 :_g Foo t
-      d1 :_s Data Maybe [t]           d1 := dfunData2 d2 d3
-      d2 :_g Sat (Maybe [t])          d2 := dfunSat d4
+Solve d1 using instance dfunData2; d1 := dfunData2 d2 d3
+  Inert:
+    [G] d0 : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
+  Solved:
+        d1 : Data Maybe [t]
   WorkList
-      d4 :_w Foo [t]
-      d01 :_g Data Maybe t
-And now we can simplify d4 again, but since it has superclasses we *add* them to the worklist:
-  Inert
-      d0 :_g Foo t
-      d1 :_s Data Maybe [t]           d1 := dfunData2 d2 d3
-      d2 :_g Sat (Maybe [t])          d2 := dfunSat d4
-      d4 :_g Foo [t]                  d4 := dfunFoo2 d5
+    [W] d2 : Sat (Maybe [t])
+    [W] d3 : Data Maybe t
+
+Now, we may simplify d2 using dfunSat; d2 := dfunSat d4
+  Inert:
+    [G] d0 : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
+  Solved:
+        d1 : Data Maybe [t]
+        d2 : Sat (Maybe [t])
   WorkList:
-      d5 :_w Foo t
-      d6 :_g Data Maybe [t]           d6 := EvDictSuperClass d4 0
-      d01 :_g Data Maybe t
-Now, d5 can be solved! (and its superclass enter scope)
+    [W] d3 : Data Maybe t
+    [W] d4 : Foo [t]
+
+Now, we can just solve d3 from d01; d3 := d01
   Inert
+    [G] d0 : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
+  Solved:
+        d1 : Data Maybe [t]
+        d2 : Sat (Maybe [t])
+  WorkList
+    [W] d4 : Foo [t]
+
+Now, solve d4 using dfunFoo2;  d4 := dfunFoo2 d5
+  Inert
+    [G] d0 : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
+  Solved:
+        d1 : Data Maybe [t]
+        d2 : Sat (Maybe [t])
+        d4 : Foo [t]
+  WorkList:
+    [W] d5 : Foo t
+
+Now, d5 can be solved! d5 := d0
+
+Result
+   d1 := dfunData2 d2 d3
+   d2 := dfunSat d4
+   d3 := d01
+   d4 := dfunFoo2 d5
+   d5 := d0
+
       d0 :_g Foo t
       d1 :_s Data Maybe [t]           d1 := dfunData2 d2 d3
       d2 :_g Sat (Maybe [t])          d2 := dfunSat d4
@@ -1392,8 +1403,7 @@ doTopReactDict inerts work_item@(CDictCan { cc_ev = fl, cc_class = cls
   | not (isWanted fl)   -- Never use instances for Given or Derived constraints
   = try_fundeps_and_return
 
-  | Just ev <- lookupSolvedDict inerts cls xis   -- Cached
-  , ctEvCheckDepth (ctLocDepth loc) ev
+  | Just ev <- lookupSolvedDict inerts loc cls xis   -- Cached
   = do { setEvBind dict_id (ctEvTerm ev);
        ; stopWith fl "Dict/Top (cached)" }
 
@@ -2038,7 +2048,7 @@ requestCoercible :: CtLoc -> TcType -> TcType
                         , TcCoercion )      -- Coercion witnessing (Coercible t1 t2)
 requestCoercible loc ty1 ty2
   = ASSERT2( typeKind ty1 `tcEqKind` typeKind ty2, ppr ty1 <+> ppr ty2)
-    do { (new_ev, freshness) <- newWantedEvVarNonrec loc' (mkCoerciblePred ty1 ty2)
+    do { (new_ev, freshness) <- newWantedEvVar loc' (mkCoerciblePred ty1 ty2)
        ; return ( case freshness of { Fresh -> [new_ev]; Cached -> [] }
                 , ctEvCoercion new_ev) }
            -- Evidence for a Coercible constraint is always a coercion t1 ~R t2

@@ -14,7 +14,8 @@ module PatSyn (
         -- ** Type deconstruction
         patSynName, patSynArity, patSynIsInfix,
         patSynArgs, patSynTyDetails, patSynType,
-        patSynWrapper, patSynMatcher,
+        patSynMatcher,
+        patSynWrapper, patSynWorker,
         patSynExTyVars, patSynSig,
         patSynInstArgTys, patSynInstResTy,
         tidyPatSynIds
@@ -36,6 +37,7 @@ import HsBinds( HsPatSynDetails(..) )
 import qualified Data.Data as Data
 import qualified Data.Typeable
 import Data.Function
+import Control.Arrow (second)
 \end{code}
 
 
@@ -76,17 +78,22 @@ For each pattern synonym, we generate a single matcher function which
 implements the actual matching. For the above example, the matcher
 will have type:
 
-        $mP :: forall r t. (Eq t, Num t)
+        $mP :: forall (r :: ?) t. (Eq t, Num t)
             => T (Maybe t)
             -> (forall b. (Show (Maybe t), Ord b) => b -> r)
-            -> r
+            -> (Void# -> r)
             -> r
 
 with the following implementation:
 
         $mP @r @t $dEq $dNum scrut cont fail = case scrut of
             MkT @b $dShow $dOrd [x] (Just 42) -> cont @b $dShow $dOrd x
-            _                                 -> fail
+            _                                 -> fail Void#
+
+The extra Void# argument for the failure continuation is needed so that
+it is lazy even when the result type is unboxed. For the same reason,
+if the pattern has no arguments, an extra Void# argument is added
+to the success continuation as well.
 
 For *bidirectional* pattern synonyms, we also generate a single wrapper
 function which implements the pattern synonym in an expression
@@ -103,6 +110,37 @@ stuff out.
 Injectivity of bidirectional pattern synonyms is checked in
 tcPatToExpr which walks the pattern and returns its corresponding
 expression when available.
+
+Note [Wrapper/worker for pattern synonyms with unboxed type]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+For bidirectional pattern synonyms that have no arguments and have
+an unboxed type, we add an extra level of indirection, since $WP would
+otherwise be a top-level declaration with an unboxed type. In this case,
+a separate worker function is generated that has an extra Void# argument,
+and the wrapper redirects to it via a compulsory unfolding (that just
+applies it on Void#). Example:
+
+        pattern P = 0#
+
+        $WP :: Int#
+        $WP unfolded to ($wP Void#)
+
+        $wP :: Void# -> Int#
+        $wP _ = 0#
+
+To make things more uniform, we always store two `Id`s in `PatSyn` for
+the wrapper and the worker, with the following behaviour:
+
+  if `psWrapper` == Just (`wrapper`, `worker`), then
+
+  * `wrapper` should always be used when compiling the pattern synonym
+    in an expression context (and its type is as prescribed)
+  * `worker` is always an `Id` with a binding that needs to be exported
+    as part of the definition of the pattern synonym
+
+If a separate worker is not needed (because the pattern synonym has arguments
+or has a non-unboxed type), the two `Id`s are the same.
 
 %************************************************************************
 %*                                                                      *
@@ -123,25 +161,35 @@ data PatSyn
         psInfix       :: Bool,        -- True <=> declared infix
 
         psUnivTyVars  :: [TyVar],     -- Universially-quantified type variables
+        psReqTheta    :: ThetaType,   -- Required dictionaries
         psExTyVars    :: [TyVar],     -- Existentially-quantified type vars
         psProvTheta   :: ThetaType,   -- Provided dictionaries
-        psReqTheta    :: ThetaType,   -- Required dictionaries
         psOrigResTy   :: Type,        -- Mentions only psUnivTyVars
 
         -- See Note [Matchers and wrappers for pattern synonyms]
         psMatcher     :: Id,
-             -- Matcher function, of type
-             --   forall r univ_tvs. req_theta
-             --                   => res_ty
-             --                   -> (forall ex_tvs. prov_theta -> arg_tys -> r)
-             --                   -> r -> r
+            -- Matcher function. If psArgs is empty, then it has type
+             --   forall (r :: ?) univ_tvs. req_theta
+             --                       => res_ty
+             --                       -> (forall ex_tvs. prov_theta -> Void# -> r)
+             --                       -> (Void# -> r)
+             --                       -> r
+             --
+             -- Otherwise:
+             --   forall (r :: ?) univ_tvs. req_theta
+             --                       => res_ty
+             --                       -> (forall ex_tvs. prov_theta -> arg_tys -> r)
+             --                       -> (Void# -> r)
+             --                       -> r
 
-        psWrapper     :: Maybe Id
+        psWrapper     :: Maybe (Id, Id)
              -- Nothing  => uni-directional pattern synonym
-             -- Just wid => bi-direcitonal
+             -- Just (wrapper, worker) => bi-direcitonal
              -- Wrapper function, of type
              --  forall univ_tvs, ex_tvs. (prov_theta, req_theta)
              --                       =>  arg_tys -> res_ty
+             --
+             -- See Note [Wrapper/worker for pattern synonyms with unboxed type]
   }
   deriving Data.Typeable.Typeable
 \end{code}
@@ -194,19 +242,20 @@ instance Data.Data PatSyn where
 \begin{code}
 -- | Build a new pattern synonym
 mkPatSyn :: Name
-         -> Bool       -- ^ Is the pattern synonym declared infix?
-         -> [Type]     -- ^ Original arguments
-         -> [TyVar]    -- ^ Universially-quantified type variables
-         -> [TyVar]    -- ^ Existentially-quantified type variables
-         -> ThetaType  -- ^ Wanted dicts
-         -> ThetaType  -- ^ Given dicts
-         -> Type       -- ^ Original result type
-         -> Id         -- ^ Name of matcher
-         -> Maybe Id   -- ^ Name of wrapper
+         -> Bool                 -- ^ Is the pattern synonym declared infix?
+         -> ([TyVar], ThetaType) -- ^ Universially-quantified type variables
+                                --   and required dicts
+         -> ([TyVar], ThetaType) -- ^ Existentially-quantified type variables
+                                --   and provided dicts
+         -> [Type]               -- ^ Original arguments
+         -> Type                 -- ^ Original result type
+         -> Id                   -- ^ Name of matcher
+         -> Maybe (Id, Id)       -- ^ Name of wrapper/worker
          -> PatSyn
-mkPatSyn name declared_infix orig_args
-         univ_tvs ex_tvs
-         prov_theta req_theta
+mkPatSyn name declared_infix
+         (univ_tvs, req_theta)
+         (ex_tvs, prov_theta)
+         orig_args
          orig_res_ty
          matcher wrapper
     = MkPatSyn {psName = name, psUnique = getUnique name,
@@ -262,14 +311,17 @@ patSynSig (MkPatSyn { psUnivTyVars = univ_tvs, psExTyVars = ex_tvs
   = (univ_tvs, ex_tvs, prov, req, arg_tys, res_ty)
 
 patSynWrapper :: PatSyn -> Maybe Id
-patSynWrapper = psWrapper
+patSynWrapper = fmap fst . psWrapper
+
+patSynWorker :: PatSyn -> Maybe Id
+patSynWorker = fmap snd . psWrapper
 
 patSynMatcher :: PatSyn -> Id
 patSynMatcher = psMatcher
 
 tidyPatSynIds :: (Id -> Id) -> PatSyn -> PatSyn
 tidyPatSynIds tidy_fn ps@(MkPatSyn { psMatcher = match_id, psWrapper = mb_wrap_id })
-  = ps { psMatcher = tidy_fn match_id, psWrapper = fmap tidy_fn mb_wrap_id }
+  = ps { psMatcher = tidy_fn match_id, psWrapper = fmap (second tidy_fn) mb_wrap_id }
 
 patSynInstArgTys :: PatSyn -> [Type] -> [Type]
 -- Return the types of the argument patterns

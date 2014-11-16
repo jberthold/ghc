@@ -16,7 +16,7 @@ module TcBinds ( tcLocalBinds, tcTopBinds, tcRecSelBinds,
 
 import {-# SOURCE #-} TcMatches ( tcGRHSsPat, tcMatchesFun )
 import {-# SOURCE #-} TcExpr  ( tcMonoExpr )
-import {-# SOURCE #-} TcPatSyn ( tcPatSynDecl, tcPatSynWrapper )
+import {-# SOURCE #-} TcPatSyn ( tcPatSynDecl, tcPatSynWorker )
 
 import DynFlags
 import HsSyn
@@ -320,8 +320,8 @@ tcValBinds top_lvl binds sigs thing_inside
             { (binds', (extra_binds', thing)) <- tcBindGroups top_lvl sig_fn prag_fn binds $ do
                    { thing <- thing_inside
                      -- See Note [Pattern synonym wrappers don't yield dependencies]
-                   ; patsyn_wrappers <- mapM tcPatSynWrapper patsyns
-                   ; let extra_binds = [ (NonRecursive, wrapper) | wrapper <- patsyn_wrappers ]
+                   ; patsyn_workers <- mapM tcPatSynWorker patsyns
+                   ; let extra_binds = [ (NonRecursive, worker) | worker <- patsyn_workers ]
                    ; return (extra_binds, thing) }
              ; return (binds' ++ extra_binds', thing) }}
   where
@@ -424,7 +424,7 @@ tc_single _top_lvl _sig_fn _prag_fn (L _ (PatSynBind psb)) thing_inside
 
        ; let tything = AConLike (PatSynCon pat_syn)
              implicit_ids = (patSynMatcher pat_syn) :
-                            (maybeToList (patSynWrapper pat_syn))
+                            (maybeToList (patSynWorker pat_syn))
 
        ; thing <- tcExtendGlobalEnv [tything] $
                   tcExtendGlobalEnvImplicit (map AnId implicit_ids) $
@@ -682,12 +682,15 @@ mkInferredPolyId poly_name qtvs theta mono_ty
   = do { fam_envs <- tcGetFamInstEnvs
 
        ; let (_co, norm_mono_ty) = normaliseType fam_envs Nominal mono_ty
-               -- Unification may not have normalised the type, so do it
+               -- Unification may not have normalised the type,
+               -- (see Note [Lazy flattening] in TcFlatten) so do it
                -- here to make it as uncomplicated as possible.
                -- Example: f :: [F Int] -> Bool
                -- should be rewritten to f :: [Char] -> Bool, if possible
+
              my_tvs2 = closeOverKinds (growThetaTyVars theta (tyVarsOfType norm_mono_ty))
                   -- Include kind variables!  Trac #7916
+
              my_tvs   = filter (`elemVarSet` my_tvs2) qtvs   -- Maintain original order
              my_theta = filter (quantifyPred my_tvs2) theta
              inferred_poly_ty = mkSigmaTy my_tvs my_theta norm_mono_ty

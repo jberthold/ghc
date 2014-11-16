@@ -359,7 +359,7 @@ endif
 # Packages to build
 # The lists of packages that we *actually* going to build in each stage:
 #
-#  $(PACKAGES_STAGE0) 
+#  $(PACKAGES_STAGE0)
 #  $(PACKAGES_STAGE1)
 #  $(PACKAGES_STAGE2)
 #
@@ -590,7 +590,9 @@ libraries/ghc-prim_dist-install_EXTRA_HADDOCK_SRCS = libraries/ghc-prim/dist-ins
 
 ifneq "$(CLEANING)" "YES"
 ifeq "$(INTEGER_LIBRARY)" "integer-gmp"
-libraries/base_dist-install_CONFIGURE_OPTS += --flags=-integer-simple
+libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-gmp
+else ifeq "$(INTEGER_LIBRARY)" "integer-gmp2"
+libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-gmp2
 else ifeq "$(INTEGER_LIBRARY)" "integer-simple"
 libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-simple
 else
@@ -630,7 +632,7 @@ BUILD_DIRS += includes
 BUILD_DIRS += rts
 
 ifneq "$(BINDIST)" "YES"
-BUILD_DIRS += bindisttest 
+BUILD_DIRS += bindisttest
 BUILD_DIRS += utils/genapply
 endif
 
@@ -655,6 +657,12 @@ BUILD_DIRS += libraries/integer-gmp/mkGmpDerivedConstants
 else ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
 BUILD_DIRS += libraries/integer-gmp/gmp
 BUILD_DIRS += libraries/integer-gmp/mkGmpDerivedConstants
+endif
+
+ifeq "$(INTEGER_LIBRARY)" "integer-gmp2"
+BUILD_DIRS += libraries/integer-gmp2/gmp
+else ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
+BUILD_DIRS += libraries/integer-gmp2/gmp
 endif
 
 BUILD_DIRS += utils/haddock
@@ -696,10 +704,10 @@ stage1_libs : $(ALL_STAGE1_LIBS)
 
 # ----------------------------------------------
 # Per-package compiler flags
-# 
-# If you want to add per-package compiler flags, this 
+#
+# If you want to add per-package compiler flags, this
 # is the place to do it.  Do it like this for package <pkg>
-#   
+#
 #   libraries/<pkg>_dist-boot_HC_OPTS += -Wwarn
 #   libraries/<pkg>_dist-install_HC_OPTS += -Wwarn
 
@@ -1140,7 +1148,7 @@ sdist-ghc-prep :
 	$(call sdist_ghc_file,compiler,stage2,cmm,,CmmLex,x)
 	$(call sdist_ghc_file,compiler,stage2,cmm,,CmmParse,y)
 	$(call sdist_ghc_file,compiler,stage2,parser,,Lexer,x)
-	$(call sdist_ghc_file,compiler,stage2,parser,,Parser,y.pp)
+	$(call sdist_ghc_file,compiler,stage2,parser,,Parser,y)
 	$(call sdist_ghc_file,utils/hpc,dist-install,,,HpcParser,y)
 	$(call sdist_ghc_file,utils/genprimopcode,dist,,,Lexer,x)
 	$(call sdist_ghc_file,utils/genprimopcode,dist,,,Parser,y)
@@ -1212,6 +1220,7 @@ sdist_%:
 CLEAN_FILES += libraries/bootstrapping.conf
 CLEAN_FILES += libraries/integer-gmp/cbits/GmpDerivedConstants.h
 CLEAN_FILES += libraries/integer-gmp/include/HsIntegerGmp.h
+CLEAN_FILES += libraries/integer-gmp2/include/HsIntegerGmp.h
 CLEAN_FILES += libraries/base/include/EventConfig.h
 CLEAN_FILES += mk/config.mk.old
 CLEAN_FILES += mk/project.mk.old
@@ -1225,7 +1234,6 @@ CLEAN_FILES += includes/ghcautoconf.h
 CLEAN_FILES += includes/ghcplatform.h
 CLEAN_FILES += includes/ghcversion.h
 CLEAN_FILES += utils/ghc-pkg/Version.hs
-CLEAN_FILES += compiler/parser/Parser.y
 CLEAN_FILES += compiler/prelude/primops.txt
 CLEAN_FILES += $(wildcard compiler/primop*incl)
 
