@@ -542,6 +542,8 @@ compiler_stage2_dll0_MODULES = \
 	IfaceType \
 	InstEnv \
 	Kind \
+	Lexeme \
+	ApiAnnotation \
 	ListSetOps \
 	Literal \
 	LoadIface \
@@ -580,7 +582,6 @@ compiler_stage2_dll0_MODULES = \
 	StringBuffer \
 	TcEvidence \
 	TcIface \
-	TcMType \
 	TcRnMonad \
 	TcRnTypes \
 	TcType \
@@ -605,6 +606,7 @@ ifeq "$(GhcWithInterpreter)" "YES"
 # These files are reacheable from DynFlags
 # only by GHCi-enabled code (see #9552)
 compiler_stage2_dll0_MODULES += \
+	ApiAnnotation \
 	Bitmap \
 	BlockId \
 	ByteCodeAsm \
@@ -620,17 +622,20 @@ compiler_stage2_dll0_MODULES += \
 	CmmUtils \
 	CodeGen.Platform \
 	CodeGen.Platform.ARM \
+	CodeGen.Platform.ARM64 \
 	CodeGen.Platform.NoRegs \
 	CodeGen.Platform.PPC \
 	CodeGen.Platform.PPC_Darwin \
 	CodeGen.Platform.SPARC \
 	CodeGen.Platform.X86 \
 	CodeGen.Platform.X86_64 \
+	Ctype \
 	FastBool \
 	Hoopl \
 	Hoopl.Dataflow \
 	InteractiveEvalTypes \
 	MkGraph \
+	Lexer \
 	PprCmm \
 	PprCmmDecl \
 	PprCmmExpr \

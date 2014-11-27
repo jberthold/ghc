@@ -543,7 +543,8 @@ tcClsInstDecl (L loc (ClsInstDecl { cid_poly_ty = poly_ty, cid_binds = binds
         ; dfun_name <- newDFunName clas inst_tys (getLoc poly_ty)
                 -- Dfun location is that of instance *header*
 
-        ; ispec <- newClsInst overlap_mode dfun_name tyvars theta clas inst_tys
+        ; ispec <- newClsInst (fmap unLoc overlap_mode) dfun_name tyvars theta
+                              clas inst_tys
         ; let inst_info = InstInfo { iSpec  = ispec
                                    , iBinds = InstBindings
                                      { ib_binds = binds
@@ -649,8 +650,8 @@ tcTyFamInstDecl mb_clsinfo (L loc decl@(TyFamInstDecl { tfid_eqn = eqn }))
 
          -- (0) Check it's an open type family
        ; checkTc (isFamilyTyCon fam_tc)        (notFamily fam_tc)
-       ; checkTc (isSynFamilyTyCon fam_tc)     (wrongKindOfFamily fam_tc)
-       ; checkTc (isOpenSynFamilyTyCon fam_tc) (notOpenFamily fam_tc)
+       ; checkTc (isTypeFamilyTyCon fam_tc)    (wrongKindOfFamily fam_tc)
+       ; checkTc (isOpenTypeFamilyTyCon fam_tc) (notOpenFamily fam_tc)
 
          -- (1) do the work of verifying the synonym group
        ; co_ax_branch <- tcTyFamInstEqn (famTyConShape fam_tc) eqn
@@ -706,7 +707,7 @@ tcDataFamInstDecl mb_clsinfo
 
        ; (rep_tc, fam_inst) <- fixM $ \ ~(rec_rep_tc, _) ->
            do { data_cons <- tcConDecls new_or_data rec_rep_tc
-                                       (tvs', orig_res_ty) cons
+                                        (tvs', orig_res_ty) cons
               ; tc_rhs <- case new_or_data of
                      DataType -> return (mkDataTyConRhs data_cons)
                      NewType  -> ASSERT( not (null data_cons) )
@@ -717,7 +718,9 @@ tcDataFamInstDecl mb_clsinfo
                                                (mkTyConApp rep_tc (mkTyVarTys eta_tvs))
                     parent   = FamInstTyCon axiom fam_tc pats'
                     roles    = map (const Nominal) tvs'
-                    rep_tc   = buildAlgTyCon rep_tc_name tvs' roles cType stupid_theta tc_rhs
+                    rep_tc   = buildAlgTyCon rep_tc_name tvs' roles
+                                             (fmap unLoc cType) stupid_theta
+                                             tc_rhs
                                              Recursive
                                              False      -- No promotable to the kind level
                                              gadt_syntax parent
@@ -1141,12 +1144,10 @@ Note that
 tcSpecInst :: Id -> Sig Name -> TcM TcSpecPrag
 tcSpecInst dfun_id prag@(SpecInstSig hs_ty)
   = addErrCtxt (spec_ctxt prag) $
-    do  { let name = idName dfun_id
-        ; (tyvars, theta, clas, tys) <- tcHsInstHead SpecInstCtxt hs_ty
+    do  { (tyvars, theta, clas, tys) <- tcHsInstHead SpecInstCtxt hs_ty
         ; let (_, spec_dfun_ty) = mkDictFunTy tyvars theta clas tys
 
-        ; co_fn <- tcSubType (SpecPragOrigin name) SpecInstCtxt
-                             (idType dfun_id) spec_dfun_ty
+        ; co_fn <- tcSubType SpecInstCtxt (idType dfun_id) spec_dfun_ty
         ; return (SpecPrag dfun_id co_fn defaultInlinePragma) }
   where
     spec_ctxt prag = hang (ptext (sLit "In the SPECIALISE pragma")) 2 (ppr prag)
@@ -1241,7 +1242,8 @@ tcInstanceMethods dfun_id clas tyvars dfun_ev_vars inst_tys
       where
         error_rhs dflags = L inst_loc $ HsApp error_fun (error_msg dflags)
         error_fun    = L inst_loc $ wrapId (WpTyApp meth_tau) nO_METHOD_BINDING_ERROR_ID
-        error_msg dflags = L inst_loc (HsLit (HsStringPrim (unsafeMkByteString (error_string dflags))))
+        error_msg dflags = L inst_loc (HsLit (HsStringPrim ""
+                                    (unsafeMkByteString (error_string dflags))))
         meth_tau     = funResultTy (applyTys (idType sel_id) inst_tys)
         error_string dflags = showSDoc dflags (hcat [ppr inst_loc, text "|", ppr sel_id ])
         lam_wrapper  = mkWpTyLams tyvars <.> mkWpLams dfun_ev_vars

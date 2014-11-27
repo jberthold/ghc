@@ -25,7 +25,7 @@ AC_DEFUN([GHC_SELECT_FILE_EXTENSIONS],
     x86_64-apple-darwin)
         $3='.dylib'
         ;;
-    arm-apple-darwin10|i386-apple-darwin11)
+    arm-apple-darwin10|i386-apple-darwin11|aarch64-apple-darwin14)
         $2='.a'
         $3='.dylib'
         ;;
@@ -1960,7 +1960,7 @@ AC_DEFUN([GHC_CONVERT_VENDOR],[
 # converts os from gnu to ghc naming, and assigns the result to $target_var
 AC_DEFUN([GHC_CONVERT_OS],[
 case "$1-$2" in
-  darwin10-arm|darwin11-i386)
+  darwin10-arm|darwin11-i386|darwin14-aarch64)
     $3="ios"
     ;;
   *)
@@ -2062,7 +2062,7 @@ AC_DEFUN([FIND_LLVM_PROG],[
                 if test "$windows" = YES; then
                     $1=`${FindCmd} "${p}" -type f -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' -or -type l -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' | ${SortCmd} -n | tail -1`
                 else
-                    $1=`${FindCmd} "${p}" -type f -perm +111 -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' -or -type l -perm +111 -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' | ${SortCmd} -n | tail -1`
+                    $1=`${FindCmd} "${p}" -type f -perm \111 -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' -or -type l -perm \111 -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' | ${SortCmd} -n | tail -1`
                 fi
                 if test -n "$$1"; then
                     break

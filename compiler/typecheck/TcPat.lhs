@@ -9,7 +9,8 @@ TcPat: Typechecking patterns
 {-# LANGUAGE CPP, RankNTypes #-}
 
 module TcPat ( tcLetPat, TcSigFun, TcPragFun
-             , TcSigInfo(..), findScopedTyVars
+             , TcSigInfo(..), TcPatSynInfo(..)
+             , findScopedTyVars
              , LetBndrSpec(..), addInlinePrags, warnPrags
              , tcPat, tcPats, newNoSigLetBndr
              , addDataConStupidTheta, badFieldCon, polyPatSig ) where
@@ -128,9 +129,9 @@ data LetBndrSpec
 makeLazy :: PatEnv -> PatEnv
 makeLazy penv = penv { pe_lazy = True }
 
-patSigCtxt :: PatEnv -> UserTypeCtxt
-patSigCtxt (PE { pe_ctxt = LetPat {} }) = BindPatSigCtxt
-patSigCtxt (PE { pe_ctxt = LamPat {} }) = LamPatSigCtxt
+inPatBind :: PatEnv -> Bool
+inPatBind (PE { pe_ctxt = LetPat {} }) = True
+inPatBind (PE { pe_ctxt = LamPat {} }) = False
 
 ---------------
 type TcPragFun = Name -> [LSig Name]
@@ -152,6 +153,17 @@ data TcSigInfo
 
         sig_loc    :: SrcSpan       -- The location of the signature
     }
+  | TcPatSynInfo TcPatSynInfo
+
+data TcPatSynInfo
+  = TPSI {
+        patsig_name  :: Name,
+        patsig_tau   :: TcSigmaType,
+        patsig_ex    :: [TcTyVar],
+        patsig_prov  :: TcThetaType,
+        patsig_univ  :: [TcTyVar],
+        patsig_req   :: TcThetaType
+    }
 
 findScopedTyVars  -- See Note [Binding scoped type variables]
   :: LHsType Name             -- The HsType
@@ -171,10 +183,19 @@ findScopedTyVars hs_ty sig_ty inst_tvs
     scoped_names = mkNameSet (hsExplicitTvs hs_ty)
     (sig_tvs,_)  = tcSplitForAllTys sig_ty
 
+instance NamedThing TcSigInfo where
+    getName TcSigInfo{ sig_id = id } = idName id
+    getName (TcPatSynInfo tpsi) = patsig_name tpsi
+
 instance Outputable TcSigInfo where
     ppr (TcSigInfo { sig_id = id, sig_tvs = tyvars, sig_theta = theta, sig_tau = tau})
         = ppr id <+> dcolon <+> vcat [ pprSigmaType (mkSigmaTy (map snd tyvars) theta tau)
                                      , ppr (map fst tyvars) ]
+    ppr (TcPatSynInfo tpsi) = text "TcPatSynInfo" <+> ppr tpsi
+
+instance Outputable TcPatSynInfo where
+    ppr (TPSI{ patsig_name = name}) = ppr name
+
 \end{code}
 
 Note [Binding scoped type variables]
@@ -484,7 +505,7 @@ tc_pat penv (ViewPat expr pat _) overall_pat_ty thing_inside
 -- Type signatures in patterns
 -- See Note [Pattern coercions] below
 tc_pat penv (SigPatIn pat sig_ty) pat_ty thing_inside
-  = do  { (inner_ty, tv_binds, wrap) <- tcPatSig (patSigCtxt penv) sig_ty pat_ty
+  = do  { (inner_ty, tv_binds, wrap) <- tcPatSig (inPatBind penv) sig_ty pat_ty
         ; (pat', res) <- tcExtendTyVarEnv2 tv_binds $
                          tc_lpat pat inner_ty penv thing_inside
 
@@ -944,11 +965,12 @@ tcConArgs con_like arg_tys (RecCon (HsRecFields rpats dd)) penv thing_inside
   = do  { (rpats', res) <- tcMultiple tc_field rpats penv thing_inside
         ; return (RecCon (HsRecFields rpats' dd), res) }
   where
-    tc_field :: Checker (HsRecField FieldLabel (LPat Name)) (HsRecField TcId (LPat TcId))
-    tc_field (HsRecField field_lbl pat pun) penv thing_inside
+    tc_field :: Checker (LHsRecField FieldLabel (LPat Name))
+                        (LHsRecField TcId (LPat TcId))
+    tc_field (L l (HsRecField field_lbl pat pun)) penv thing_inside
       = do { (sel_id, pat_ty) <- wrapLocFstM find_field_ty field_lbl
            ; (pat', res) <- tcConArg (pat, pat_ty) penv thing_inside
-           ; return (HsRecField sel_id pat' pun, res) }
+           ; return (L l (HsRecField sel_id pat' pun), res) }
 
     find_field_ty :: FieldLabel -> TcM (Id, TcType)
     find_field_ty field_lbl

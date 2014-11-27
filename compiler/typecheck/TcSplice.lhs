@@ -91,6 +91,7 @@ import BasicTypes hiding( SuccessFlag(..) )
 import Maybes( MaybeErr(..) )
 import DynFlags
 import Panic
+import Lexeme
 import FastString
 import Outputable
 import Control.Monad    ( when )
@@ -647,7 +648,7 @@ runQuasiQuote (HsQuasiQuote quoter q_span quote) quote_selector meta_ty meta_ops
 
           -- Build the expression
         ; let quoterExpr = L q_span $! HsVar $! quoter''
-        ; let quoteExpr = L q_span $! HsLit $! HsString quote'
+        ; let quoteExpr = L q_span $! HsLit $! HsString "" quote'
         ; let expr = L q_span $
                      HsApp (L q_span $
                             HsApp (L q_span (HsVar quote_selector)) quoterExpr) quoteExpr
@@ -1481,7 +1482,7 @@ reifyFunDep (xs, ys) = TH.FunDep (map reifyName xs) (map reifyName ys)
 
 reifyFamFlavour :: TyCon -> TcM (Either TH.FamFlavour [TH.TySynEqn])
 reifyFamFlavour tc
-  | isOpenSynFamilyTyCon tc = return $ Left TH.TypeFam
+  | isOpenTypeFamilyTyCon tc = return $ Left TH.TypeFam
   | isDataFamilyTyCon    tc = return $ Left TH.DataFam
 
     -- this doesn't really handle abstract closed families, but let's not worry

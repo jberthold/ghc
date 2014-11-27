@@ -88,8 +88,7 @@ finishHsVar name
 rnExpr (HsVar v)
   = do { mb_name <- lookupOccRn_maybe v
        ; case mb_name of {
-           Nothing -> do { opt_TypeHoles <- woptM Opt_WarnTypedHoles
-                         ; if opt_TypeHoles && startsWithUnderscore (rdrNameOcc v)
+           Nothing -> do { if startsWithUnderscore (rdrNameOcc v)
                            then return (HsUnboundVar v, emptyFVs)
                            else do { n <- reportUnboundName v; finishHsVar n } } ;
            Just name
@@ -103,10 +102,10 @@ rnExpr (HsVar v)
 rnExpr (HsIPVar v)
   = return (HsIPVar v, emptyFVs)
 
-rnExpr (HsLit lit@(HsString s))
+rnExpr (HsLit lit@(HsString src s))
   = do { opt_OverloadedStrings <- xoptM Opt_OverloadedStrings
        ; if opt_OverloadedStrings then
-            rnExpr (HsOverLit (mkHsIsString s placeHolderType))
+            rnExpr (HsOverLit (mkHsIsString src s placeHolderType))
          else do {
             ; rnLit lit
             ; return (HsLit lit, emptyFVs) } }
@@ -241,8 +240,10 @@ rnExpr (ExplicitTuple tup_args boxity)
        ; (tup_args', fvs) <- mapAndUnzipM rnTupArg tup_args
        ; return (ExplicitTuple tup_args' boxity, plusFVs fvs) }
   where
-    rnTupArg (Present e) = do { (e',fvs) <- rnLExpr e; return (Present e', fvs) }
-    rnTupArg (Missing _) = return (Missing placeHolderType, emptyFVs)
+    rnTupArg (L l (Present e)) = do { (e',fvs) <- rnLExpr e
+                                    ; return (L l (Present e'), fvs) }
+    rnTupArg (L l (Missing _)) = return (L l (Missing placeHolderType)
+                                        , emptyFVs)
 
 rnExpr (RecordCon con_id _ rbinds)
   = do  { conname <- lookupLocatedOccRn con_id
@@ -298,11 +299,7 @@ Since all the symbols are reservedops we can simply reject them.
 We return a (bogus) EWildPat in each case.
 
 \begin{code}
-rnExpr e@EWildPat      = do { holes <- woptM Opt_WarnTypedHoles
-                            ; if holes
-                                then return (hsHoleExpr, emptyFVs)
-                                else patSynErr e
-                            }
+rnExpr EWildPat        = return (hsHoleExpr, emptyFVs)
 rnExpr e@(EAsPat {})   = patSynErr e
 rnExpr e@(EViewPat {}) = patSynErr e
 rnExpr e@(ELazyPat {}) = patSynErr e
@@ -372,8 +369,8 @@ rnHsRecBinds ctxt rec_binds@(HsRecFields { rec_dotdot = dd })
        ; return (HsRecFields { rec_flds = flds', rec_dotdot = dd },
                  fvs `plusFV` plusFVs fvss) }
   where
-    rn_field fld = do { (arg', fvs) <- rnLExpr (hsRecFieldArg fld)
-                      ; return (fld { hsRecFieldArg = arg' }, fvs) }
+    rn_field (L l fld) = do { (arg', fvs) <- rnLExpr (hsRecFieldArg fld)
+                            ; return (L l (fld { hsRecFieldArg = arg' }), fvs) }
 \end{code}
 
 
@@ -1288,7 +1285,7 @@ okPArrStmt dflags _ stmt
        LastStmt {}  -> emptyInvalid  -- Should not happen (dealt with by checkLastStmt)
 
 ---------
-checkTupleSection :: [HsTupArg RdrName] -> RnM ()
+checkTupleSection :: [LHsTupArg RdrName] -> RnM ()
 checkTupleSection args
   = do  { tuple_section <- xoptM Opt_TupleSections
         ; checkErr (all tupArgPresent args || tuple_section) msg }

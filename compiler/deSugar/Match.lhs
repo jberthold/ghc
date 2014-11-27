@@ -973,8 +973,8 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
     exp _ _  = False
 
     ---------
-    tup_arg (Present e1) (Present e2) = lexp e1 e2
-    tup_arg (Missing t1) (Missing t2) = eqType t1 t2
+    tup_arg (L _ (Present e1)) (L _ (Present e2)) = lexp e1 e2
+    tup_arg (L _ (Missing t1)) (L _ (Missing t2)) = eqType t1 t2
     tup_arg _ _ = False
 
     ---------
@@ -987,6 +987,7 @@ viewLExprEq (e1,_) (e2,_) = lexp e1 e2
     --        equating different ways of writing a coercion)
     wrap WpHole WpHole = True
     wrap (WpCompose w1 w2) (WpCompose w1' w2') = wrap w1 w1' && wrap w2 w2'
+    wrap (WpFun w1 w2 _ _) (WpFun w1' w2' _ _) = wrap w1 w1' && wrap w2 w2'
     wrap (WpCast co)       (WpCast co')        = co `eq_co` co'
     wrap (WpEvApp et1)     (WpEvApp et2)       = et1 `ev_term` et2
     wrap (WpTyApp t)       (WpTyApp t')        = eqType t t'

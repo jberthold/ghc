@@ -1,5 +1,5 @@
-{-# LANGUAGE NoImplicitPrelude #-}
 {-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE NoImplicitPrelude #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -65,6 +65,7 @@ module Data.List
 
    -- ** Scans
    , scanl
+   , scanl'
    , scanl1
    , scanr
    , scanr1

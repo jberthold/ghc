@@ -130,10 +130,10 @@ mkSimpleMatch pats rhs
                 (pat:_) -> combineSrcSpans (getLoc pat) (getLoc rhs)
 
 unguardedGRHSs :: Located (body id) -> GRHSs id (Located (body id))
-unguardedGRHSs rhs = GRHSs (unguardedRHS rhs) emptyLocalBinds
+unguardedGRHSs rhs@(L loc _) = GRHSs (unguardedRHS loc rhs) emptyLocalBinds
 
-unguardedRHS :: Located (body id) -> [LGRHS id (Located (body id))]
-unguardedRHS rhs@(L loc _) = [L loc (GRHS [] rhs)]
+unguardedRHS :: SrcSpan -> Located (body id) -> [LGRHS id (Located (body id))]
+unguardedRHS loc rhs = [L loc (GRHS [] rhs)]
 
 mkMatchGroup :: Origin -> [LMatch RdrName (Located (body RdrName))]
              -> MatchGroup RdrName (Located (body RdrName))
@@ -196,9 +196,9 @@ mkParPat lp@(L loc p) | hsPatNeedsParens p = L loc (ParPat lp)
 -- These are the bits of syntax that contain rebindable names
 -- See RnEnv.lookupSyntaxName
 
-mkHsIntegral   :: Integer -> PostTc RdrName Type -> HsOverLit RdrName
+mkHsIntegral   :: String -> Integer -> PostTc RdrName Type -> HsOverLit RdrName
 mkHsFractional :: FractionalLit -> PostTc RdrName Type -> HsOverLit RdrName
-mkHsIsString   :: FastString -> PostTc RdrName Type -> HsOverLit RdrName
+mkHsIsString :: String -> FastString -> PostTc RdrName Type -> HsOverLit RdrName
 mkHsDo         :: HsStmtContext Name -> [ExprLStmt RdrName] -> HsExpr RdrName
 mkHsComp       :: HsStmtContext Name -> [ExprLStmt RdrName] -> LHsExpr RdrName
                -> HsExpr RdrName
@@ -217,9 +217,9 @@ emptyRecStmtId   :: StmtLR Id   Id      bodyR
 mkRecStmt    :: [LStmtLR idL RdrName bodyR] -> StmtLR idL RdrName bodyR
 
 
-mkHsIntegral   i       = OverLit (HsIntegral   i)  noRebindableInfo noSyntaxExpr
-mkHsFractional f       = OverLit (HsFractional f)  noRebindableInfo noSyntaxExpr
-mkHsIsString   s       = OverLit (HsIsString   s)  noRebindableInfo noSyntaxExpr
+mkHsIntegral src i  = OverLit (HsIntegral   src i) noRebindableInfo noSyntaxExpr
+mkHsFractional   f  = OverLit (HsFractional     f) noRebindableInfo noSyntaxExpr
+mkHsIsString src s  = OverLit (HsIsString   src s) noRebindableInfo noSyntaxExpr
 
 noRebindableInfo :: PlaceHolder
 noRebindableInfo = PlaceHolder -- Just another placeholder;
@@ -306,7 +306,7 @@ unqualQuasiQuote = mkRdrUnqual (mkVarOccFS (fsLit "quasiquote"))
                 -- identify the quasi-quote
 
 mkHsString :: String -> HsLit
-mkHsString s = HsString (mkFastString s)
+mkHsString s = HsString s (mkFastString s)
 
 -------------
 userHsTyVarBndrs :: SrcSpan -> [name] -> [Located (HsTyVarBndr name)]
@@ -338,7 +338,7 @@ nlHsApp :: LHsExpr id -> LHsExpr id -> LHsExpr id
 nlHsApp f x = noLoc (HsApp f x)
 
 nlHsIntLit :: Integer -> LHsExpr id
-nlHsIntLit n = noLoc (HsLit (HsInt n))
+nlHsIntLit n = noLoc (HsLit (HsInt (show n) n))
 
 nlHsApps :: id -> [LHsExpr id] -> LHsExpr id
 nlHsApps f xs = foldl nlHsApp (nlHsVar f) xs
@@ -416,7 +416,7 @@ types on the tuple.
 mkLHsTupleExpr :: [LHsExpr a] -> LHsExpr a
 -- Makes a pre-typechecker boxed tuple, deals with 1 case
 mkLHsTupleExpr [e] = e
-mkLHsTupleExpr es  = noLoc $ ExplicitTuple (map Present es) Boxed
+mkLHsTupleExpr es  = noLoc $ ExplicitTuple (map (noLoc . Present) es) Boxed
 
 mkLHsVarTuple :: [a] -> LHsExpr a
 mkLHsVarTuple ids  = mkLHsTupleExpr (map nlHsVar ids)
@@ -570,7 +570,7 @@ mk_easy_FunBind loc fun pats expr
 mkMatch :: [LPat id] -> LHsExpr id -> HsLocalBinds id -> LMatch id (LHsExpr id)
 mkMatch pats expr binds
   = noLoc (Match (map paren pats) Nothing
-                 (GRHSs (unguardedRHS expr) binds))
+                 (GRHSs (unguardedRHS noSrcSpan expr) binds))
   where
     paren lp@(L l p) | hsPatNeedsParens p = L l (ParPat lp)
                      | otherwise          = lp
@@ -792,7 +792,8 @@ hsDataFamInstBinders (DataFamInstDecl { dfid_defn = defn })
 -------------------
 -- the SrcLoc returned are for the whole declarations, not just the names
 hsDataDefnBinders :: Eq name => HsDataDefn name -> [Located name]
-hsDataDefnBinders (HsDataDefn { dd_cons = cons }) = hsConDeclsBinders cons
+hsDataDefnBinders (HsDataDefn { dd_cons = cons })
+  = hsConDeclsBinders cons
   -- See Note [Binders in family instances]
 
 -------------------
@@ -809,12 +810,12 @@ hsConDeclsBinders cons = go id cons
           case r of
              -- remove only the first occurrence of any seen field in order to
              -- avoid circumventing detection of duplicate fields (#9156)
-             L loc (ConDecl { con_name = L _ name , con_details = RecCon flds }) ->
-               (L loc name) : r' ++ go remSeen' rs
-                  where r' = remSeen (map cd_fld_name flds)
+             L loc (ConDecl { con_names = names, con_details = RecCon flds }) ->
+               (map (L loc . unLoc) names) ++ r' ++ go remSeen' rs
+                  where r' = remSeen (concatMap (cd_fld_names . unLoc) flds)
                         remSeen' = foldr (.) remSeen [deleteBy ((==) `on` unLoc) v | v <- r']
-             L loc (ConDecl { con_name = L _ name }) ->
-                (L loc name) : go remSeen rs
+             L loc (ConDecl { con_names = names }) ->
+                (map (L loc . unLoc) names) ++ go remSeen rs
 
 \end{code}
 
@@ -898,7 +899,8 @@ lPatImplicits = hs_lpat
     details (RecCon fs)      = hs_lpats explicit `unionNameSets` mkNameSet (collectPatsBinders implicit)
       where (explicit, implicit) = partitionEithers [if pat_explicit then Left pat else Right pat
                                                     | (i, fld) <- [0..] `zip` rec_flds fs
-                                                    , let pat = hsRecFieldArg fld
+                                                    , let pat = hsRecFieldArg
+                                                                     (unLoc fld)
                                                           pat_explicit = maybe True (i<) (rec_dotdot fs)]
     details (InfixCon p1 p2) = hs_lpat p1 `unionNameSets` hs_lpat p2
 \end{code}

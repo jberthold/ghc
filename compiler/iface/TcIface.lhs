@@ -14,8 +14,7 @@ module TcIface (
         tcIfaceDecl, tcIfaceInst, tcIfaceFamInst, tcIfaceRules,
         tcIfaceVectInfo, tcIfaceAnnotations,
         tcIfaceExpr,    -- Desired by HERMIT (Trac #7683)
-        tcIfaceGlobal,
-        mkPatSynWrapperId, mkPatSynWorkerId -- Have to be here to avoid circular import
+        tcIfaceGlobal
  ) where
 
 #include "HsVersions.h"
@@ -28,7 +27,6 @@ import BuildTyCl
 import TcRnMonad
 import TcType
 import Type
-import TcMType
 import Coercion hiding (substTy)
 import TypeRep
 import HscTypes
@@ -77,7 +75,6 @@ import qualified Data.Map as Map
 #if __GLASGOW_HASKELL__ < 709
 import Data.Traversable ( traverse )
 #endif
-import Data.Traversable ( for )
 \end{code}
 
 This module takes
@@ -184,9 +181,9 @@ We need to make sure that we have at least *read* the interface files
 for any module with an instance decl or RULE that we might want.
 
 * If the instance decl is an orphan, we have a whole separate mechanism
-  (loadOprhanModules)
+  (loadOrphanModules)
 
-* If the instance decl not an orphan, then the act of looking at the
+* If the instance decl is not an orphan, then the act of looking at the
   TyCon or Class will force in the defining module for the
   TyCon/Class, and hence the instance decl
 
@@ -487,28 +484,41 @@ tc_iface_decl parent _ (IfaceData {ifName = occ_name,
            ; lhs_tys <- tcIfaceTcArgs arg_tys
            ; return (FamInstTyCon ax_unbr fam_tc lhs_tys) }
 
-tc_iface_decl parent _ (IfaceSyn {ifName = occ_name, ifTyVars = tv_bndrs,
-                                  ifRoles = roles,
-                                  ifSynRhs = mb_rhs_ty,
-                                  ifSynKind = kind })
+tc_iface_decl _ _ (IfaceSynonym {ifName = occ_name, ifTyVars = tv_bndrs,
+                                      ifRoles = roles,
+                                      ifSynRhs = rhs_ty,
+                                      ifSynKind = kind })
    = bindIfaceTyVars_AT tv_bndrs $ \ tyvars -> do
      { tc_name  <- lookupIfaceTop occ_name
      ; rhs_kind <- tcIfaceKind kind     -- Note [Synonym kind loop]
      ; rhs      <- forkM (mk_doc tc_name) $
-                   tc_syn_rhs mb_rhs_ty
-     ; tycon    <- buildSynTyCon tc_name tyvars roles rhs rhs_kind parent
+                   tcIfaceType rhs_ty
+     ; tycon    <- buildSynonymTyCon tc_name tyvars roles rhs rhs_kind
      ; return (ATyCon tycon) }
    where
-     mk_doc n = ptext (sLit "Type syonym") <+> ppr n
-     tc_syn_rhs IfaceOpenSynFamilyTyCon   = return OpenSynFamilyTyCon
-     tc_syn_rhs (IfaceClosedSynFamilyTyCon ax_name _)
+     mk_doc n = ptext (sLit "Type synonym") <+> ppr n
+
+tc_iface_decl parent _ (IfaceFamily {ifName = occ_name, ifTyVars = tv_bndrs,
+                                     ifFamFlav = fam_flav,
+                                     ifFamKind = kind })
+   = bindIfaceTyVars_AT tv_bndrs $ \ tyvars -> do
+     { tc_name  <- lookupIfaceTop occ_name
+     ; rhs_kind <- tcIfaceKind kind     -- Note [Synonym kind loop]
+     ; rhs      <- forkM (mk_doc tc_name) $
+                   tc_fam_flav fam_flav
+     ; tycon    <- buildFamilyTyCon tc_name tyvars rhs rhs_kind parent
+     ; return (ATyCon tycon) }
+   where
+     mk_doc n = ptext (sLit "Type synonym") <+> ppr n
+     tc_fam_flav IfaceOpenSynFamilyTyCon   = return OpenSynFamilyTyCon
+     tc_fam_flav (IfaceClosedSynFamilyTyCon ax_name _)
        = do { ax <- tcIfaceCoAxiom ax_name
             ; return (ClosedSynFamilyTyCon ax) }
-     tc_syn_rhs IfaceAbstractClosedSynFamilyTyCon = return AbstractClosedSynFamilyTyCon
-     tc_syn_rhs (IfaceSynonymTyCon ty)    = do { rhs_ty <- tcIfaceType ty
-                                               ; return (SynonymTyCon rhs_ty) }
-     tc_syn_rhs IfaceBuiltInSynFamTyCon   = pprPanic "tc_iface_decl"
-                                               (ptext (sLit "IfaceBuiltInSynFamTyCon in interface file"))
+     tc_fam_flav IfaceAbstractClosedSynFamilyTyCon
+         = return AbstractClosedSynFamilyTyCon
+     tc_fam_flav IfaceBuiltInSynFamTyCon
+         = pprPanic "tc_iface_decl"
+                    (text "IfaceBuiltInSynFamTyCon in interface file")
 
 tc_iface_decl _parent ignore_prags
             (IfaceClass {ifCtxt = rdr_ctxt, ifName = tc_occ,
@@ -584,8 +594,8 @@ tc_iface_decl _ _ (IfaceAxiom { ifName = ax_occ, ifTyCon = tc
        ; return (ACoAxiom axiom) }
 
 tc_iface_decl _ _ (IfacePatSyn{ ifName = occ_name
-                              , ifPatMatcher = matcher_name
-                              , ifPatWorker = worker_name
+                              , ifPatMatcher = if_matcher
+                              , ifPatBuilder = if_builder
                               , ifPatIsInfix = is_infix
                               , ifPatUnivTvs = univ_tvs
                               , ifPatExTvs = ex_tvs
@@ -595,8 +605,8 @@ tc_iface_decl _ _ (IfacePatSyn{ ifName = occ_name
                               , ifPatTy = pat_ty })
   = do { name <- lookupIfaceTop occ_name
        ; traceIf (ptext (sLit "tc_iface_decl") <+> ppr name)
-       ; matcher <- tcExt "Matcher" matcher_name
-       ; worker <- traverse (tcExt "Worker") worker_name
+       ; matcher <- tc_pr if_matcher
+       ; builder <- fmapMaybeM tc_pr if_builder
        ; bindIfaceTyVars univ_tvs $ \univ_tvs -> do
        { bindIfaceTyVars ex_tvs $ \ex_tvs -> do
        { patsyn <- forkM (mk_doc name) $
@@ -604,21 +614,15 @@ tc_iface_decl _ _ (IfacePatSyn{ ifName = occ_name
                 ; req_theta  <- tcIfaceCtxt req_ctxt
                 ; pat_ty     <- tcIfaceType pat_ty
                 ; arg_tys    <- mapM tcIfaceType args
-                ; wrapper    <- for worker $ \worker_id -> do
-                    { wrapper_id <- mkPatSynWrapperId (noLoc name)
-                                      (univ_tvs ++ ex_tvs)
-                                      (req_theta ++ prov_theta)
-                                      arg_tys pat_ty
-                                      worker_id
-                    ; return (wrapper_id, worker_id)
-                    }
-                ; return $ buildPatSyn name is_infix matcher wrapper
+                ; return $ buildPatSyn name is_infix matcher builder
                                        (univ_tvs, req_theta) (ex_tvs, prov_theta)
                                        arg_tys pat_ty }
        ; return $ AConLike . PatSynCon $ patsyn }}}
   where
      mk_doc n = ptext (sLit "Pattern synonym") <+> ppr n
-     tcExt s name = forkM (ptext (sLit s) <+> ppr name) $ tcIfaceExtId name
+     tc_pr :: (IfExtName, Bool) -> IfL (Id, Bool)
+     tc_pr (nm, b) = do { id <- forkM (ppr nm) (tcIfaceExtId nm)
+                        ; return (id, b) }
 
 tc_ax_branches :: [IfaceAxBranch] -> IfL [CoAxBranch]
 tc_ax_branches if_branches = foldlM tc_ax_branch [] if_branches
@@ -1527,42 +1531,4 @@ bindIfaceTyVars_AT (b@(tv_occ,_) : bs) thing_inside
        ; bind_b $ \b' ->
          bindIfaceTyVars_AT bs $ \bs' ->
          thing_inside (b':bs') }
-\end{code}
-
-%************************************************************************
-%*                                                                      *
-                PatSyn wrapper/worker helpers
-%*                                                                      *
-%************************************************************************
-
-\begin{code}
--- These are here (and not in TcPatSyn) just to avoid circular imports.
-
-mkPatSynWrapperId :: Located Name
-                  -> [TyVar] -> ThetaType -> [Type] -> Type
-                  -> Id
-                  -> TcRnIf gbl lcl Id
-mkPatSynWrapperId name qtvs theta arg_tys pat_ty worker_id
-  | need_dummy_arg = do
-      { wrapper_id <- mkPatSynWorkerId name mkDataConWrapperOcc qtvs theta arg_tys pat_ty
-      ; let unfolding = mkCoreApp (Var worker_id) (Var voidPrimId)
-            wrapper_id' = setIdUnfolding wrapper_id $ mkCompulsoryUnfolding unfolding
-      ; return wrapper_id' }
-  | otherwise = return worker_id -- No indirection needed
-  where
-    need_dummy_arg = null arg_tys && isUnLiftedType pat_ty
-
-mkPatSynWorkerId :: Located Name -> (OccName -> OccName)
-                 -> [TyVar] -> ThetaType -> [Type] -> Type
-                 -> TcRnIf gbl loc Id
-mkPatSynWorkerId (L loc name) mk_occ_name qtvs theta arg_tys pat_ty
-  = do { worker_name <- newImplicitBinder name mk_occ_name
-       ; (subst, worker_tvs) <- tcInstSigTyVarsLoc loc qtvs
-       ; let worker_theta = substTheta subst theta
-             pat_ty' = substTy subst pat_ty
-             arg_tys' = map (substTy subst) arg_tys
-             worker_tau = mkFunTys arg_tys' pat_ty'
-             -- TODO: just substitute worker_sigma...
-             worker_sigma = mkSigmaTy worker_tvs worker_theta worker_tau
-       ; return $ mkVanillaGlobal worker_name worker_sigma }
 \end{code}

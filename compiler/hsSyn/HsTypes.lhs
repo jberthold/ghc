@@ -30,7 +30,7 @@ module HsTypes (
         LBangType, BangType, HsBang(..), 
         getBangType, getBangStrictness, 
 
-        ConDeclField(..), pprConDeclFields,
+        ConDeclField(..), LConDeclField, pprConDeclFields,
         
         mkHsQTvs, hsQTvBndrs, isHsKindedTyVar, hsTvbAllKinded,
         mkExplicitHsForAllTy, mkImplicitHsForAllTy, mkQualifiedHsForAllTy,
@@ -43,7 +43,8 @@ module HsTypes (
         splitHsAppTys, hsTyGetAppHead_maybe, mkHsAppTys, mkHsOpTy,
 
         -- Printing
-        pprParendHsType, pprHsForAll, pprHsContext, pprHsContextNoArrow, 
+        pprParendHsType, pprHsForAll,
+        pprHsContext, pprHsContextNoArrow, pprHsContextMaybe
     ) where
 
 import {-# SOURCE #-} HsExpr ( HsSplice, pprUntypedSplice )
@@ -63,6 +64,7 @@ import Outputable
 import FastString
 
 import Data.Data hiding ( Fixity )
+import Data.Maybe ( fromMaybe )
 \end{code}
 
 
@@ -134,6 +136,8 @@ type LHsContext name = Located (HsContext name)
 type HsContext name = [LHsType name]
 
 type LHsType name = Located (HsType name)
+      -- ^ May have 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnComma' when
+      --   in a list
 type HsKind name = HsType name
 type LHsKind name = Located (HsKind name)
 
@@ -197,6 +201,9 @@ data HsTyVarBndr name
   | KindedTyVar
          name
          (LHsKind name)  -- The user-supplied kind signature
+        -- ^
+        --  - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnOpen',
+        --          'ApiAnnotation.AnnDcolon', 'ApiAnnotation.AnnClose'
   deriving (Typeable)
 deriving instance (DataId name) => Data (HsTyVarBndr name)
 
@@ -209,6 +216,10 @@ isHsKindedTyVar (KindedTyVar {}) = True
 hsTvbAllKinded :: LHsTyVarBndrs name -> Bool
 hsTvbAllKinded = all (isHsKindedTyVar . unLoc) . hsQTvBndrs
 
+-- | - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnDcolon',
+--            'ApiAnnotation.AnnTilde','ApiAnnotation.AnnRarrow',
+--            'ApiAnnotation.AnnOpen','ApiAnnotation.AnnClose',
+--            'ApiAnnotation.AnnComma'
 data HsType name
   = HsForAllTy  HsExplicitFlag          -- Renamer leaves this flag unchanged, to record the way
                                         -- the user wrote it originally, so that the printer can
@@ -216,7 +227,8 @@ data HsType name
                 (LHsTyVarBndrs name) 
                 (LHsContext name)
                 (LHsType name)
-
+      -- ^ - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnForall',
+      --         'ApiAnnotation.AnnDot','ApiAnnotation.AnnDarrow'
   | HsTyVar             name            -- Type variable, type constructor, or data constructor
                                         -- see Note [Promotions (HsTyVar)]
 
@@ -256,18 +268,18 @@ data HsType name
   | HsDocTy             (LHsType name) LHsDocString -- A documented type
 
   | HsBangTy    HsBang (LHsType name)   -- Bang-style type annotations 
-  | HsRecTy [ConDeclField name]         -- Only in data type declarations
+  | HsRecTy     [LConDeclField name]    -- Only in data type declarations
 
   | HsCoreTy Type       -- An escape hatch for tunnelling a *closed* 
                         -- Core Type through HsSyn.  
 
   | HsExplicitListTy       -- A promoted explicit list
         (PostTc name Kind) -- See Note [Promoted lists and tuples]
-        [LHsType name]   
-                         
+        [LHsType name]
+
   | HsExplicitTupleTy      -- A promoted explicit tuple
         [PostTc name Kind] -- See Note [Promoted lists and tuples]
-        [LHsType name]   
+        [LHsType name]
 
   | HsTyLit HsTyLit      -- A promoted numeric literal.
 
@@ -396,10 +408,14 @@ data HsTupleSort = HsUnboxedTuple
 
 data HsExplicitFlag = Qualified | Implicit | Explicit deriving (Data, Typeable)
 
+type LConDeclField name = Located (ConDeclField name)
+      -- ^ May have 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnComma' when
+      --   in a list
 data ConDeclField name  -- Record fields have Haddoc docs on them
-  = ConDeclField { cd_fld_name :: Located name,
-                   cd_fld_type :: LBangType name, 
-                   cd_fld_doc  :: Maybe LHsDocString }
+  = ConDeclField { cd_fld_names :: [Located name],
+                   cd_fld_type  :: LBangType name,
+                   cd_fld_doc   :: Maybe LHsDocString }
+      -- ^ - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnDcolon'
   deriving (Typeable)
 deriving instance (DataId name) => Data (ConDeclField name)
 
@@ -604,20 +620,24 @@ pprHsForAll exp qtvs cxt
     forall_part = forAllLit <+> ppr qtvs <> dot
 
 pprHsContext :: (OutputableBndr name) => HsContext name -> SDoc
-pprHsContext []  = empty
-pprHsContext cxt = pprHsContextNoArrow cxt <+> darrow
+pprHsContext = maybe empty (<+> darrow) . pprHsContextMaybe
 
 pprHsContextNoArrow :: (OutputableBndr name) => HsContext name -> SDoc
-pprHsContextNoArrow []         = empty
-pprHsContextNoArrow [L _ pred] = ppr_mono_ty FunPrec pred
-pprHsContextNoArrow cxt        = parens (interpp'SP cxt)
+pprHsContextNoArrow = fromMaybe empty . pprHsContextMaybe
 
-pprConDeclFields :: OutputableBndr name => [ConDeclField name] -> SDoc
+pprHsContextMaybe :: (OutputableBndr name) => HsContext name -> Maybe SDoc
+pprHsContextMaybe []         = Nothing
+pprHsContextMaybe [L _ pred] = Just $ ppr_mono_ty FunPrec pred
+pprHsContextMaybe cxt        = Just $ parens (interpp'SP cxt)
+
+pprConDeclFields :: OutputableBndr name => [LConDeclField name] -> SDoc
 pprConDeclFields fields = braces (sep (punctuate comma (map ppr_fld fields)))
   where
-    ppr_fld (ConDeclField { cd_fld_name = n, cd_fld_type = ty, 
-                            cd_fld_doc = doc })
-        = ppr n <+> dcolon <+> ppr ty <+> ppr_mbDoc doc
+    ppr_fld (L _ (ConDeclField { cd_fld_names = ns, cd_fld_type = ty,
+                                 cd_fld_doc = doc }))
+        = ppr_names ns <+> dcolon <+> ppr ty <+> ppr_mbDoc doc
+    ppr_names [n] = ppr n
+    ppr_names ns = sep (punctuate comma (map ppr ns))
 \end{code}
 
 Note [Printing KindedTyVars]

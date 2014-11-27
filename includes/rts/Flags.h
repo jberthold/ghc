@@ -18,7 +18,14 @@
 
 /* For defaults, see the @initRtsFlagsDefaults@ routine. */
 
-struct GC_FLAGS {
+/* Note [Synchronization of flags and base APIs]
+ *
+ * We provide accessors to RTS flags in base. (GHC.RTS module)
+ * The API should be updated whenever RTS flags are modified.
+ */
+
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _GC_FLAGS {
     FILE   *statsFile;
     nat	    giveStats;
 #define NO_GC_STATS	 0
@@ -34,6 +41,7 @@ struct GC_FLAGS {
 
     nat	    maxHeapSize;        /* in *blocks* */
     nat     minAllocAreaSize;   /* in *blocks* */
+    nat     nurseryChunkSize;   /* in *blocks* */
     nat     minOldGenSize;      /* in *blocks* */
     nat     heapSizeSuggestion; /* in *blocks* */
     rtsBool heapSizeSuggestionAuto;
@@ -64,9 +72,10 @@ struct GC_FLAGS {
                                  * to handle the exception before we
                                  * raise it again.
                                  */
-};
+} GC_FLAGS;
 
-struct DEBUG_FLAGS {  
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _DEBUG_FLAGS {
     /* flags to control debugging output & extra checking in various subsystems */
     rtsBool scheduler;      /* 's' */
     rtsBool interpreter;    /* 'i' */
@@ -83,10 +92,12 @@ struct DEBUG_FLAGS {
     rtsBool squeeze;        /* 'z'  stack squeezing & lazy blackholing */
     rtsBool hpc; 	    /* 'c' coverage */
     rtsBool sparks; 	    /* 'r' */
-};
+} DEBUG_FLAGS;
 
-struct COST_CENTRE_FLAGS {
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _COST_CENTRE_FLAGS {
     nat	    doCostCentres;
+# define COST_CENTRES_NONE      0
 # define COST_CENTRES_SUMMARY	1
 # define COST_CENTRES_VERBOSE	2 /* incl. serial time profile */
 # define COST_CENTRES_ALL	3
@@ -94,9 +105,10 @@ struct COST_CENTRE_FLAGS {
 
     int	    profilerTicks;   /* derived */
     int	    msecsPerTick;    /* derived */
-};
+} COST_CENTRE_FLAGS;
 
-struct PROFILING_FLAGS {
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _PROFILING_FLAGS {
     nat	doHeapProfile;
 # define NO_HEAP_PROFILING	0	/* N.B. Used as indexes into arrays */
 # define HEAP_BY_CCS		1
@@ -127,13 +139,14 @@ struct PROFILING_FLAGS {
     char*               retainerSelector;
     char*               bioSelector;
 
-};
+} PROFILING_FLAGS;
 
 #define TRACE_NONE      0
 #define TRACE_EVENTLOG  1
 #define TRACE_STDERR    2
 
-struct TRACE_FLAGS {
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _TRACE_FLAGS {
     int tracing;
     rtsBool timestamp;      /* show timestamp in stderr output */
     rtsBool scheduler;      /* trace scheduler events */
@@ -141,12 +154,13 @@ struct TRACE_FLAGS {
     rtsBool sparks_sampled; /* trace spark events by a sampled method */
     rtsBool sparks_full;    /* trace spark events 100% accurately */
     rtsBool user;           /* trace user events (emitted from Haskell code) */
-};
+} TRACE_FLAGS;
 
-struct CONCURRENT_FLAGS {
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _CONCURRENT_FLAGS {
     Time ctxtSwitchTime;         /* units: TIME_RESOLUTION */
     int ctxtSwitchTicks;         /* derived */
-};
+} CONCURRENT_FLAGS;
 
 /*
  * The tickInterval is the time interval between "ticks", ie.
@@ -157,16 +171,17 @@ struct CONCURRENT_FLAGS {
  */
 #define DEFAULT_TICK_INTERVAL USToTime(10000)
 
-struct MISC_FLAGS {
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _MISC_FLAGS {
     Time    tickInterval;        /* units: TIME_RESOLUTION */
     rtsBool install_signal_handlers;
     rtsBool machineReadable;
     StgWord linkerMemBase;       /* address to ask the OS for memory
                                   * for the linker, NULL ==> off */
-};
+} MISC_FLAGS;
 
 #ifdef PARALLEL_RTS
-struct PAR_DEBUG_FLAGS {
+typedef struct _PAR_DEBUG_FLAGS {
   /* flags to control debugging output in various subsystems */
   rtsBool verbose    : 1; /* 2^0=1 */
   rtsBool mpcomm     : 1; /* 2^1=2 */
@@ -174,7 +189,7 @@ struct PAR_DEBUG_FLAGS {
   rtsBool packet     : 1; /*     8 */
   rtsBool procs      : 1; /*    16 */
   rtsBool ports      : 1; /*    32 */
-};
+} PAR_DEBUG_FLAGS;
 
 /* starting at 0, number of flags defined above... */
 #define MAX_PAR_DEBUG_OPTION     5
@@ -184,14 +199,14 @@ struct PAR_DEBUG_FLAGS {
 
 #endif /* PARALLEL_RTS */
 
-struct PAR_FLAGS {
-  nat      packBufferSize; // always active (serialisation support)
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _PAR_FLAGS {
+  nat           packBufferSize; // always active (serialisation support)
 #if defined(PARALLEL_RTS)
-  struct PAR_DEBUG_FLAGS Debug;         /* debugging options */
-  nat      sendBufferSize;
-  nat      placement;
-
-  long   wait;
+  PAR_DEBUG_FLAGS Debug;         /* debugging options */
+  nat           sendBufferSize;
+  nat           placement;
+  long          wait;
 #endif /* PARALLEL_RTS */
 #ifdef THREADED_RTS
   nat            nNodes;         /* number of threads to run simultaneously */
@@ -216,23 +231,25 @@ struct PAR_FLAGS {
 
   rtsBool        setAffinity;    /* force thread affinity with CPUs */
 #endif /* THREADED_RTS */
-};
+} PAR_FLAGS;
 
-struct TICKY_FLAGS {
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _TICKY_FLAGS {
     rtsBool showTickyStats;
     FILE   *tickyFile;
-};
+} TICKY_FLAGS;
 
 #ifdef USE_PAPI
 #define MAX_PAPI_USER_EVENTS 8
 
-struct PAPI_FLAGS {
+/* See Note [Synchronization of flags and base APIs] */
+typedef struct _PAPI_FLAGS {
     nat     eventType;          /* The type of events to count */
     nat     numUserEvents;
     char *  userEvents[MAX_PAPI_USER_EVENTS];
     /* Allow user to enter either PAPI preset or native events */
     nat     userEventsKind[MAX_PAPI_USER_EVENTS];
-};
+} PAPI_FLAGS;
 
 #define PAPI_FLAG_CACHE_L1 1
 #define PAPI_FLAG_CACHE_L2 2
@@ -247,20 +264,21 @@ struct PAPI_FLAGS {
 
 /* Put them together: */
 
+/* See Note [Synchronization of flags and base APIs] */
 typedef struct _RTS_FLAGS {
     /* The first portion of RTS_FLAGS is invariant. */
-    struct GC_FLAGS	     GcFlags;
-    struct CONCURRENT_FLAGS  ConcFlags;
-    struct MISC_FLAGS        MiscFlags;
-    struct DEBUG_FLAGS	     DebugFlags;
-    struct COST_CENTRE_FLAGS CcFlags;
-    struct PROFILING_FLAGS   ProfFlags;
-    struct TRACE_FLAGS       TraceFlags;
-    struct TICKY_FLAGS	     TickyFlags;
+    GC_FLAGS	      GcFlags;
+    CONCURRENT_FLAGS  ConcFlags;
+    MISC_FLAGS        MiscFlags;
+    DEBUG_FLAGS	      DebugFlags;
+    COST_CENTRE_FLAGS CcFlags;
+    PROFILING_FLAGS   ProfFlags;
+    TRACE_FLAGS       TraceFlags;
+    TICKY_FLAGS	      TickyFlags;
 
-    struct PAR_FLAGS    ParFlags;
+    PAR_FLAGS         ParFlags;
 #ifdef USE_PAPI
-    struct PAPI_FLAGS   PapiFlags;
+    PAPI_FLAGS        PapiFlags;
 #endif
 } RTS_FLAGS;
 

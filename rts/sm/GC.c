@@ -427,10 +427,6 @@ GarbageCollect (nat collect_gen,
       break;
   }
 
-  if (!DEBUG_IS_ON && n_gc_threads != 1) {
-      clearNursery(cap);
-  }
-
   shutdown_gc_threads(gct->thread_index);
 
   // Now see which stable names are still alive.
@@ -669,21 +665,6 @@ GarbageCollect (nat collect_gen,
       if (gen->bitmap != NULL) {
           freeGroup(gen->bitmap);
           gen->bitmap = NULL;
-      }
-  }
-
-  // Reset the nursery: make the blocks empty
-  if (DEBUG_IS_ON || n_gc_threads == 1) {
-      for (n = 0; n < n_capabilities; n++) {
-          clearNursery(capabilities[n]);
-      }
-  } else {
-      // When doing parallel GC, clearNursery() is called by the
-      // worker threads
-      for (n = 0; n < n_capabilities; n++) {
-          if (gc_threads[n]->idle) {
-              clearNursery(capabilities[n]);
-          }
       }
   }
 
@@ -1097,10 +1078,6 @@ gcWorkerThread (Capability *cap)
     scavenge_capability_mut_lists(cap);
 
     scavenge_until_all_done();
-
-    if (!DEBUG_IS_ON) {
-        clearNursery(cap);
-    }
 
 #ifdef THREADED_RTS
     // Now that the whole heap is marked, we discard any sparks that
@@ -1742,9 +1719,9 @@ resize_nursery (void)
         }
         else
         {
-            // we might have added extra large blocks to the nursery, so
-            // resize back to minAllocAreaSize again.
-            resizeNurseriesFixed(RtsFlags.GcFlags.minAllocAreaSize);
+            // we might have added extra blocks to the nursery, so
+            // resize back to the original size again.
+            resizeNurseriesFixed();
         }
     }
 }

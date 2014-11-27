@@ -19,7 +19,7 @@ module TcValidity (
 #include "HsVersions.h"
 
 -- friends:
-import TcUnify    ( tcSubType )
+import TcUnify    ( tcSubType_NC )
 import TcSimplify ( simplifyAmbiguityCheck )
 import TypeRep
 import TcType
@@ -89,18 +89,17 @@ checkAmbiguity ctxt ty
          -- tyvars are skolemised, we can safely use tcSimplifyTop
        ; (_wrap, wanted) <- addErrCtxtM (mk_msg ty') $
                             captureConstraints $
-                            tcSubType (AmbigOrigin ctxt) ctxt ty' ty'
+                            tcSubType_NC ctxt ty' ty'
        ; simplifyAmbiguityCheck ty wanted
 
        ; traceTc "Done ambiguity check for" (ppr ty) }
  where
    mk_msg ty tidy_env
      = do { allow_ambiguous <- xoptM Opt_AllowAmbiguousTypes
-          ; return (tidy_env', msg $$ ppWhen (not allow_ambiguous) ambig_msg) }
+          ; (tidy_env', tidy_ty) <- zonkTidyTcType tidy_env ty
+          ; return (tidy_env', mk_msg tidy_ty $$ ppWhen (not allow_ambiguous) ambig_msg) }
      where
-       (tidy_env', tidy_ty) = tidyOpenType tidy_env ty
-       msg = hang (ptext (sLit "In the ambiguity check for:"))
-                2 (ppr tidy_ty)
+       mk_msg ty = pprSigCtxt ctxt (ptext (sLit "the ambiguity check for")) (ppr ty)
        ambig_msg = ptext (sLit "To defer the ambiguity check to use sites, enable AllowAmbiguousTypes")
 \end{code}
 
@@ -160,8 +159,7 @@ checkValidType ctxt ty
                = case ctxt of
                  DefaultDeclCtxt-> MustBeMonoType
                  ResSigCtxt     -> MustBeMonoType
-                 LamPatSigCtxt  -> rank0
-                 BindPatSigCtxt -> rank0
+                 PatSigCtxt     -> rank0
                  RuleSigCtxt _  -> rank1
                  TySynCtxt _    -> rank0
 
@@ -294,7 +292,8 @@ check_type ctxt rank (AppTy ty1 ty2)
         ; check_arg_type ctxt rank ty2 }
 
 check_type ctxt rank ty@(TyConApp tc tys)
-  | isSynTyCon tc          = check_syn_tc_app ctxt rank ty tc tys
+  | isTypeSynonymTyCon tc || isTypeFamilyTyCon tc
+  = check_syn_tc_app ctxt rank ty tc tys
   | isUnboxedTupleTyCon tc = check_ubx_tuple  ctxt      ty    tys
   | otherwise              = mapM_ (check_arg_type ctxt rank) tys
 
@@ -303,7 +302,7 @@ check_type _ _ (LitTy {}) = return ()
 check_type _ _ ty = pprPanic "check_type" (ppr ty)
 
 ----------------------------------------
-check_syn_tc_app :: UserTypeCtxt -> Rank -> KindOrType 
+check_syn_tc_app :: UserTypeCtxt -> Rank -> KindOrType
                  -> TyCon -> [KindOrType] -> TcM ()
 -- Used for type synonyms and type synonym families,
 -- which must be saturated, 
@@ -318,7 +317,7 @@ check_syn_tc_app ctxt rank ty tc tys
        --      f :: Foo a b -> ...
   = do  { -- See Note [Liberal type synonyms]
         ; liberal <- xoptM Opt_LiberalTypeSynonyms
-        ; if not liberal || isSynFamilyTyCon tc then
+        ; if not liberal || isTypeFamilyTyCon tc then
                 -- For H98 and synonym families, do check the type args
                 mapM_ check_arg tys
 
@@ -334,12 +333,12 @@ check_syn_tc_app ctxt rank ty tc tys
   | otherwise
   = failWithTc (arityErr flavour (tyConName tc) tc_arity n_args)
   where
-    flavour | isSynFamilyTyCon tc = "Type family" 
-            | otherwise           = "Type synonym"
+    flavour | isTypeFamilyTyCon tc = "Type family"
+            | otherwise            = "Type synonym"
     n_args = length tys
     tc_arity  = tyConArity tc
-    check_arg | isSynFamilyTyCon tc = check_arg_type  ctxt rank
-              | otherwise           = check_mono_type ctxt synArgMonoType
+    check_arg | isTypeFamilyTyCon tc = check_arg_type  ctxt rank
+              | otherwise            = check_mono_type ctxt synArgMonoType
          
 ----------------------------------------
 check_ubx_tuple :: UserTypeCtxt -> KindOrType 

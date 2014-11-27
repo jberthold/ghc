@@ -162,7 +162,8 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
                 tcg_hpc            = False,
                 tcg_main           = Nothing,
                 tcg_safeInfer      = infer_var,
-                tcg_dependent_files = dependent_files_var
+                tcg_dependent_files = dependent_files_var,
+                tcg_tc_plugins     = []
              } ;
              lcl_env = TcLclEnv {
                 tcl_errs       = errs_var,
@@ -430,6 +431,11 @@ newSysName occ
   = do { uniq <- newUnique
        ; return (mkSystemName uniq occ) }
 
+newSysLocalId :: FastString -> TcType -> TcRnIf gbl lcl TcId
+newSysLocalId fs ty
+  = do  { u <- newUnique
+        ; return (mkSysLocal fs u ty) }
+
 newSysLocalIds :: FastString -> [TcType] -> TcRnIf gbl lcl [TcId]
 newSysLocalIds fs tys
   = do  { us <- newUniqueSupply
@@ -471,15 +477,17 @@ updTcRef = updMutVar
 traceTc :: String -> SDoc -> TcRn ()
 traceTc = traceTcN 1
 
+-- | Typechecker trace
 traceTcN :: Int -> String -> SDoc -> TcRn ()
 traceTcN level herald doc
     = do dflags <- getDynFlags
-         when (level <= traceLevel dflags) $
-             traceOptTcRn Opt_D_dump_tc_trace $ hang (text herald) 2 doc
+         when (level <= traceLevel dflags && not opt_NoDebugOutput) $
+             traceOptTcRn Opt_D_dump_tc_trace $
+                 hang (text herald) 2 doc
 
 traceRn, traceSplice :: SDoc -> TcRn ()
-traceRn      = traceOptTcRn Opt_D_dump_rn_trace
-traceSplice  = traceOptTcRn Opt_D_dump_splices
+traceRn      = traceOptTcRn Opt_D_dump_rn_trace -- Renamer Trace
+traceSplice  = traceOptTcRn Opt_D_dump_splices  -- Template Haskell
 
 traceIf, traceHiDiffs :: SDoc -> TcRnIf m n ()
 traceIf      = traceOptIf Opt_D_dump_if_trace
@@ -492,36 +500,51 @@ traceOptIf flag doc
     do { dflags <- getDynFlags
        ; liftIO (putMsg dflags doc) }
 
+-- | Output a doc if the given 'DumpFlag' is set.
+--
+-- By default this logs to stdout
+-- However, if the `-ddump-to-file` flag is set,
+-- then this will dump output to a file
+
+-- just a wrapper for 'dumpIfSet_dyn_printer'
+--
+-- does not check opt_NoDebugOutput;
+-- caller is responsible for than when appropriate
 traceOptTcRn :: DumpFlag -> SDoc -> TcRn ()
--- Output the message, with current location if opt_PprStyle_Debug
-traceOptTcRn flag doc 
-  = whenDOptM flag $
-    do { loc  <- getSrcSpanM
-       ; let real_doc
-               | opt_PprStyle_Debug = mkLocMessage SevInfo loc doc
-               | otherwise = doc   -- The full location is
-                                   -- usually way too much
-       ; dumpTcRn real_doc }
-
-dumpTcRn :: SDoc -> TcRn ()
-dumpTcRn doc
+traceOptTcRn flag doc
   = do { dflags <- getDynFlags
-       ; rdr_env <- getGlobalRdrEnv
-       ; liftIO (logInfo dflags (mkDumpStyle (mkPrintUnqualified dflags rdr_env)) doc) }
+       -- Checking the dynamic flag here is redundant when the flag is set
+       -- But it avoids extra work when the flag is unset.
+       ; when (dopt flag dflags) $ do {
+           ; real_doc <- prettyDoc doc
+           ; printer <- getPrintUnqualified dflags
+           ; liftIO $ dumpIfSet_dyn_printer printer dflags flag real_doc
+           }
+       }
+  where
+    -- add current location if opt_PprStyle_Debug
+    prettyDoc :: SDoc -> TcRn SDoc
+    prettyDoc doc = if opt_PprStyle_Debug
+       then do { loc  <- getSrcSpanM; return $ mkLocMessage SevOutput loc doc }
+       else return doc -- The full location is usually way too much
 
+
+getPrintUnqualified :: DynFlags -> TcRn PrintUnqualified
+getPrintUnqualified dflags
+  = do { rdr_env <- getGlobalRdrEnv
+       ; return $ mkPrintUnqualified dflags rdr_env }
+
+-- | Like logInfoTcRn, but for user consumption
 printForUserTcRn :: SDoc -> TcRn ()
--- Like dumpTcRn, but for user consumption
 printForUserTcRn doc
   = do { dflags <- getDynFlags
-       ; rdr_env <- getGlobalRdrEnv
-       ; liftIO (printInfoForUser dflags (mkPrintUnqualified dflags rdr_env) doc) }
+       ; printer <- getPrintUnqualified dflags
+       ; liftIO (printInfoForUser dflags printer doc) }
 
+-- | Typechecker debug
 debugDumpTcRn :: SDoc -> TcRn ()
-debugDumpTcRn doc | opt_NoDebugOutput = return ()
-                  | otherwise         = dumpTcRn doc
-
-dumpOptTcRn :: DumpFlag -> SDoc -> TcRn ()
-dumpOptTcRn flag doc = whenDOptM flag (dumpTcRn doc)
+debugDumpTcRn doc = unless opt_NoDebugOutput $
+  traceOptTcRn Opt_D_dump_tc doc
 \end{code}
 
 
@@ -684,9 +707,9 @@ discardWarnings thing_inside
 \begin{code}
 mkLongErrAt :: SrcSpan -> MsgDoc -> MsgDoc -> TcRn ErrMsg
 mkLongErrAt loc msg extra
-  = do { rdr_env <- getGlobalRdrEnv ;
-         dflags <- getDynFlags ;
-         return $ mkLongErrMsg dflags loc (mkPrintUnqualified dflags rdr_env) msg extra }
+  = do { dflags <- getDynFlags ;
+         printer <- getPrintUnqualified dflags ;
+         return $ mkLongErrMsg dflags loc printer msg extra }
 
 addLongErrAt :: SrcSpan -> MsgDoc -> MsgDoc -> TcRn ()
 addLongErrAt loc msg extra = mkLongErrAt loc msg extra >>= reportError
@@ -987,9 +1010,9 @@ add_warn msg extra_info
 
 add_warn_at :: SrcSpan -> MsgDoc -> MsgDoc -> TcRn ()
 add_warn_at loc msg extra_info
-  = do { rdr_env <- getGlobalRdrEnv ;
-         dflags <- getDynFlags ;
-         let { warn = mkLongWarnMsg dflags loc (mkPrintUnqualified dflags rdr_env)
+  = do { dflags <- getDynFlags ;
+         printer <- getPrintUnqualified dflags ;
+         let { warn = mkLongWarnMsg dflags loc printer
                                     msg extra_info } ;
          reportWarning warn }
 
@@ -1250,6 +1273,9 @@ mkIfLclEnv mod loc = IfLclEnv { if_mod     = mod,
                                 if_tv_env  = emptyUFM,
                                 if_id_env  = emptyUFM }
 
+-- | Run an 'IfG' (top-level interface monad) computation inside an existing
+-- 'TcRn' (typecheck-renaming monad) computation by initializing an 'IfGblEnv'
+-- based on 'TcGblEnv'.
 initIfaceTcRn :: IfG a -> TcRn a
 initIfaceTcRn thing_inside
   = do  { tcg_env <- getGblEnv

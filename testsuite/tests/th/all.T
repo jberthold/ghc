@@ -161,6 +161,9 @@ test('T3177a', normal, compile_fail, ['-v0'])
 
 test('T3319', normal, compile, ['-ddump-splices -v0'])
 test('TH_foreignInterruptible', normal, compile, ['-ddump-splices -v0'])
+test('TH_foreignCallingConventions', normal,
+                                     compile,
+                                     ['-ddump-splices -dsuppress-uniques -v0'])
 
 test('T3395', normal, compile_fail, ['-v0'])
 test('T3467', normal, compile, [''])
@@ -339,3 +342,9 @@ test('T9081', normal, compile, ['-v0'])
 test('T9066', normal, compile, ['-v0'])
 test('T8100', normal, compile, ['-v0'])
 test('T9064', normal, compile, ['-v0'])
+test('T9209', normal, compile_fail, ['-v0'])
+test('T7484', normal, compile_fail, ['-v0'])
+test('T1476', normal, compile, ['-v0'])
+test('T1476b', normal, compile_fail, ['-v0'])
+test('T9824', normal, compile, ['-v0'])
+test('T8031', normal, compile, ['-v0'])

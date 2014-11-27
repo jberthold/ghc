@@ -654,7 +654,7 @@ flatten fmode (TyConApp tc tys)
   | Just (tenv, rhs, tys') <- tcExpandTyCon_maybe tc tys
   , let expanded_ty = mkAppTys (substTy (mkTopTvSubst tenv) rhs) tys'
   = case fe_mode fmode of
-      FM_FlattenAll | anyNameEnv isSynFamilyTyCon (tyConsOfType rhs)
+      FM_FlattenAll | anyNameEnv isTypeFamilyTyCon (tyConsOfType rhs)
                    -> flatten fmode expanded_ty
                     | otherwise
                    -> flattenTyConApp fmode tc tys
@@ -663,7 +663,7 @@ flatten fmode (TyConApp tc tys)
   -- Otherwise, it's a type function application, and we have to
   -- flatten it away as well, and generate a new given equality constraint
   -- between the application and a newly generated flattening skolem variable.
-  | isSynFamilyTyCon tc
+  | isTypeFamilyTyCon tc
   = flattenFamApp fmode tc tys
 
   -- For * a normal data type application
@@ -813,9 +813,10 @@ flattenExactFamApp_fully fmode tc tys
 \begin{code}
 flattenTyVar :: FlattenEnv -> TcTyVar -> TcS (Xi, TcCoercion)
 -- "Flattening" a type variable means to apply the substitution to it
--- The substitution is actually the union of the substitution in the TyBinds
--- for the unification variables that have been unified already with the inert
--- equalities, see Note [Spontaneously solved in TyBinds] in TcInteract.
+-- The substitution is actually the union of 
+--     * the unifications that have taken place (either before the 
+--       solver started, or in TcInteract.solveByUnification)
+--     * the CTyEqCans held in the inert set
 --
 -- Postcondition: co : xi ~ tv
 flattenTyVar fmode tv
@@ -924,6 +925,9 @@ In effect they become Givens, implemented via the side-effected substitution.
 
 Note [An alternative story for the inert substitution]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+(This entire note is just background, left here in case we ever want
+ to return the the previousl state of affairs)
+
 We used (GHC 7.8) to have this story for the inert substitution inert_eqs
 
  * 'a' is not in fvs(ty)
@@ -1011,8 +1015,8 @@ Note [eqCanRewrite]
 tv ~ ty) can be used to rewrite ct2.
 
 The EqCanRewrite Property:
-  * For any a,b in {G,W,D}  if   a canRewrite b
-                            then a canRewrite a
+  * For any a,b in {G,W,D}  if   a eqCanRewrite b
+                            then a eqCanRewrite a
   This is what guarantees that canonicalisation will terminate.
   See Note [Applying the inert substitution]
 

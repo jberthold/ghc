@@ -12,9 +12,9 @@ module TcSMonad (
     extendWorkListCts, appendWorkList, selectWorkItem,
     workListSize,
 
-    updWorkListTcS, updWorkListTcS_return, 
+    updWorkListTcS, updWorkListTcS_return,
 
-    updInertCans, updInertDicts, updInertIrreds, updInertFunEqs,
+    updInertTcS, updInertCans, updInertDicts, updInertIrreds, updInertFunEqs,
 
     Ct(..), Xi, tyVarsOfCt, tyVarsOfCts,
     emitInsoluble, emitWorkNC,
@@ -28,6 +28,7 @@ module TcSMonad (
     traceFireTcS, bumpStepCountTcS, csTraceTcS,
     tryTcS, nestTcS, nestImplicTcS, recoverTcS,
     wrapErrTcS, wrapWarnTcS,
+    runTcPluginTcS,
 
     -- Getting and setting the flattening cache
     addSolvedDict, 
@@ -70,6 +71,7 @@ module TcSMonad (
     getNoGivenEqs, setInertCans, getInertEqs, getInertCans,
     emptyInert, getTcSInerts, setTcSInerts, 
     getUnsolvedInerts, checkAllSolved,
+    splitInertCans, removeInertCts,
     prepareInertsForImplications,
     addInertCan, insertInertItemTcS, insertFunEq,
     EqualCtList,
@@ -77,7 +79,7 @@ module TcSMonad (
 
     lookupInertDict, findDictsByClass, addDict, addDictsByClass, delDict, partitionDicts,
 
-    findFunEq, findTyEqs, 
+    findFunEq, findTyEqs,
     findFunEqsByTyCon, findFunEqs, partitionFunEqs,
     sizeFunEqMap,
 
@@ -147,6 +149,7 @@ import TrieMap
 import Control.Monad( ap, when, unless )
 import MonadUtils
 import Data.IORef
+import Data.List ( partition, foldl' )
 import Pair
 
 #ifdef DEBUG
@@ -253,7 +256,7 @@ extendWorkListCt ct wl
  = case classifyPredType (ctPred ct) of
      EqPred ty1 _
        | Just (tc,_) <- tcSplitTyConApp_maybe ty1
-       , isSynFamilyTyCon tc
+       , isTypeFamilyTyCon tc
        -> extendWorkListFunEq ct wl
        | otherwise
        -> extendWorkListEq ct wl
@@ -325,34 +328,8 @@ The InertCans represents a collection of constraints with the following properti
     to the CTyEqCan equalities (modulo canRewrite of course;
     eg a wanted cannot rewrite a given)
 
-  * CTyEqCan equalities _do_not_ form an idempotent substitution, but
-    they are guaranteed to not have any occurs errors. Additional notes:
-
-       - The lack of idempotence of the inert substitution implies
-         that we must make sure that when we rewrite a constraint we
-         apply the substitution /recursively/ to the types
-         involved. Currently the one AND ONLY way in the whole
-         constraint solver that we rewrite types and constraints wrt
-         to the inert substitution is TcFlatten/flattenTyVar.
-
-       - In the past we did try to have the inert substitution as
-         idempotent as possible but this would only be true for
-         constraints of the same flavor, so in total the inert
-         substitution could not be idempotent, due to flavor-related
-         issued.  Note [Non-idempotent inert substitution] in TcFlatten
-         explains what is going on.
-
-       - Whenever a constraint ends up in the worklist we do
-         recursively apply exhaustively the inert substitution to it
-         to check for occurs errors.  But if an equality is already in
-         the inert set and we can guarantee that adding a new equality
-         will not cause the first equality to have an occurs check
-         then we do not rewrite the inert equality.  This happens in
-         TcInteract, rewriteInertEqsFromInertEq.
-
-         See Note [Delicate equality kick-out] to see which inert
-         equalities can safely stay in the inert set and which must be
-         kicked out to be rewritten and re-checked for occurs errors.
+  * CTyEqCan equalities: see Note [Applying the inert substitution]
+                         in TcFlatten
 
 Note [Type family equations]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -379,8 +356,6 @@ Type-family equations, of form (ev : F tys ~ ty), live in three places
 data InertCans
   = IC { inert_eqs :: TyVarEnv EqualCtList
               -- All CTyEqCans; index is the LHS tyvar
-              -- Some Refl equalities are also in tcs_ty_binds
-              -- see Note [Spontaneously solved in TyBinds] in TcInteract
 
        , inert_funeqs :: FunEqMap Ct
               -- All CFunEqCans; index is the whole family head type.
@@ -736,6 +711,40 @@ b) 'a' will have been completely substituted out in the inert set,
 For an example, see Trac #9211.
 
 \begin{code}
+splitInertCans :: InertCans -> ([Ct], [Ct], [Ct])
+-- ^ Extract the (given, derived, wanted) inert constraints
+splitInertCans iCans = (given,derived,wanted)
+  where
+    allCts   = foldDicts  (:) (inert_dicts iCans)
+             $ foldFunEqs (:) (inert_funeqs iCans)
+             $ concat (varEnvElts (inert_eqs iCans))
+
+    (derived,other) = partition isDerivedCt allCts
+    (wanted,given)  = partition isWantedCt  other
+
+removeInertCts :: [Ct] -> InertCans -> InertCans
+-- ^ Remove inert constraints from the 'InertCans', for use when a
+-- typechecker plugin wishes to discard a given.
+removeInertCts cts icans = foldl' removeInertCt icans cts
+
+removeInertCt :: InertCans -> Ct -> InertCans
+removeInertCt is ct =
+  case ct of
+
+    CDictCan  { cc_class = cl, cc_tyargs = tys } ->
+      is { inert_dicts = delDict (inert_dicts is) cl tys }
+
+    CFunEqCan { cc_fun  = tf,  cc_tyargs = tys } ->
+      is { inert_funeqs = delFunEq (inert_funeqs is) tf tys }
+
+    CTyEqCan  { cc_tyvar = x,  cc_rhs    = ty  } ->
+      is { inert_eqs = delTyEq (inert_eqs is) x ty }
+
+    CIrredEvCan {}   -> panic "removeInertCt: CIrredEvCan"
+    CNonCanonical {} -> panic "removeInertCt: CNonCanonical"
+    CHoleCan {}      -> panic "removeInertCt: CHoleCan"
+
+
 checkAllSolved :: TcS Bool
 -- True if there are no unsolved wanteds
 -- Ignore Derived for this purpose, unless in insolubles
@@ -810,6 +819,11 @@ type TyEqMap a = TyVarEnv a
 
 findTyEqs :: TyEqMap EqualCtList -> TyVar -> EqualCtList
 findTyEqs m tv = lookupVarEnv m tv `orElse` []
+
+delTyEq :: TyEqMap EqualCtList -> TcTyVar -> TcType -> TyEqMap EqualCtList
+delTyEq m tv t = modifyVarEnv (filter (not . isThisOne)) m tv
+  where isThisOne (CTyEqCan { cc_rhs = t1 }) = eqType t t1
+        isThisOne _                          = False
 \end{code}
 
 
@@ -963,6 +977,9 @@ partitionFunEqs f m = foldTcAppMap k m (emptyBag, emptyFunEqs)
     k ct (yeses, noes)
       | f ct      = (yeses `snocBag` ct, noes)
       | otherwise = (yeses, insertFunEqCt noes ct)
+
+delFunEq :: FunEqMap a -> TyCon -> [Type] -> FunEqMap a
+delFunEq m tc tys = delTcApp m (getUnique tc) tys
 \end{code}
 
 
@@ -1045,6 +1062,9 @@ panicTcS doc = pprPanic "TcCanonical" doc
 
 traceTcS :: String -> SDoc -> TcS ()
 traceTcS herald doc = wrapTcS (TcM.traceTc herald doc)
+
+runTcPluginTcS :: TcPluginM a -> TcS a
+runTcPluginTcS = wrapTcS . runTcPluginM
 
 instance HasDynFlags TcS where
     getDynFlags = wrapTcS getDynFlags
@@ -1893,7 +1913,7 @@ maybeSym NotSwapped co = co
 matchFam :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType))
 -- Given (F tys) return (ty, co), where co :: F tys ~ ty
 matchFam tycon args
-  | isOpenSynFamilyTyCon tycon
+  | isOpenTypeFamilyTyCon tycon
   = do { fam_envs <- getFamInstEnvs
        ; let mb_match = tcLookupFamInst fam_envs tycon args
        ; traceTcS "lookupFamInst" $

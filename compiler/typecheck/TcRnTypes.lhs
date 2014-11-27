@@ -16,7 +16,7 @@ For state that is global and should be returned at the end (e.g not part
 of the stack mechanism), you should use an TcRef (= IORef) to store them.
 
 \begin{code}
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, ExistentialQuantification #-}
 
 module TcRnTypes(
         TcRnIf, TcRn, TcM, RnM, IfM, IfL, IfG, -- The monad is opaque outside this module
@@ -74,6 +74,10 @@ module TcRnTypes(
         mkGivenLoc,
         isWanted, isGiven, isDerived,
 
+        -- Constraint solver plugins
+        TcPlugin(..), TcPluginResult(..), TcPluginSolver,
+        TcPluginM, runTcPluginM, unsafeTcPluginTcM,
+
         -- Pretty printing
         pprEvVarTheta, 
         pprEvVars, pprEvVarWithType,
@@ -122,6 +126,7 @@ import ListSetOps
 import FastString
 
 import Data.Set (Set)
+import Control.Monad (ap, liftM)
 
 #ifdef GHCI
 import Data.Map      ( Map )
@@ -143,7 +148,11 @@ import qualified Language.Haskell.TH as TH
 The monad itself has to be defined here, because it is mentioned by ErrCtxt
 
 \begin{code}
+-- | Type alias for 'IORef'; the convention is we'll use this for mutable
+-- bits of data in 'TcGblEnv' which are updated during typechecking and
+-- returned at the end.
 type TcRef a     = IORef a
+-- ToDo: when should I refer to it as a 'TcId' instead of an 'Id'?
 type TcId        = Id
 type TcIdSet     = IdSet
 
@@ -153,9 +162,19 @@ type IfM lcl  = TcRnIf IfGblEnv lcl         -- Iface stuff
 
 type IfG  = IfM ()                          -- Top level
 type IfL  = IfM IfLclEnv                    -- Nested
+
+-- | Type-checking and renaming monad: the main monad that most type-checking
+-- takes place in.  The global environment is 'TcGblEnv', which tracks
+-- all of the top-level type-checking information we've accumulated while
+-- checking a module, while the local environment is 'TcLclEnv', which
+-- tracks local information as we move inside expressions.
 type TcRn = TcRnIf TcGblEnv TcLclEnv
-type RnM  = TcRn            -- Historical
-type TcM  = TcRn            -- Historical
+
+-- | Historical "renaming monad" (now it's just 'TcRn').
+type RnM  = TcRn
+
+-- | Historical "type-checking monad" (now it's just 'TcRn').
+type TcM  = TcRn
 \end{code}
 
 Representation of type bindings to uninstantiated meta variables used during
@@ -203,12 +222,11 @@ instance ContainsDynFlags (Env gbl lcl) where
 instance ContainsModule gbl => ContainsModule (Env gbl lcl) where
     extractModule env = extractModule (env_gbl env)
 
--- TcGblEnv describes the top-level of the module at the
+-- | 'TcGblEnv' describes the top-level of the module at the
 -- point at which the typechecker is finished work.
 -- It is this structure that is handed on to the desugarer
 -- For state that needs to be updated during the typechecking
--- phase and returned at end, use a TcRef (= IORef).
-
+-- phase and returned at end, use a 'TcRef' (= 'IORef').
 data TcGblEnv
   = TcGblEnv {
         tcg_mod     :: Module,         -- ^ Module being compiled
@@ -354,9 +372,12 @@ data TcGblEnv
         tcg_main      :: Maybe Name,         -- ^ The Name of the main
                                              -- function, if this module is
                                              -- the main module.
-        tcg_safeInfer :: TcRef Bool          -- Has the typechecker
+        tcg_safeInfer :: TcRef Bool,         -- Has the typechecker
                                              -- inferred this module
                                              -- as -XSafe (Safe Haskell)
+
+        -- | A list of user-defined plugins for the constraint solver.
+        tcg_tc_plugins :: [TcPluginSolver]
     }
 
 -- Note [Signature parameters in TcGblEnv and DynFlags]
@@ -494,8 +515,8 @@ data IfLclEnv
 %*                                                                      *
 %************************************************************************
 
-The Global-Env/Local-Env story
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [The Global-Env/Local-Env story]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 During type checking, we keep in the tcg_type_env
         * All types and classes
         * All Ids derived from types and classes (constructors, selectors)
@@ -1021,7 +1042,7 @@ data Ct
 
   | CFunEqCan {  -- F xis ~ fsk
        -- Invariants:
-       --   * isSynFamilyTyCon cc_fun
+       --   * isTypeFamilyTyCon cc_fun
        --   * typeKind (F xis) = tyVarKind fsk
        --   * always Nominal role
        --   * always Given or Wanted, never Derived
@@ -1840,7 +1861,6 @@ data CtOrigin
   | PArrSeqOrigin  (ArithSeqInfo Name) -- [:x..y:] and [:x,y..z:]
   | SectionOrigin
   | TupleOrigin                        -- (..,..)
-  | AmbigOrigin UserTypeCtxt    -- Will be FunSigCtxt, InstDeclCtxt, or SpecInstCtxt
   | ExprSigOrigin       -- e :: ty
   | PatSigOrigin        -- p :: ty
   | PatOrigin           -- Instantiating a polytyped pattern at a constructor
@@ -1909,13 +1929,6 @@ pprCtOrigin (DerivOriginDC dc n)
   where
     ty = dataConOrigArgTys dc !! (n-1)
 
-pprCtOrigin (AmbigOrigin ctxt)
-  = ctoHerald <+> ptext (sLit "the ambiguity check for")
-    <+> case ctxt of
-           FunSigCtxt name -> quotes (ppr name)
-           InfSigCtxt name -> quotes (ppr name)
-           _               -> pprUserTypeCtxt ctxt
-
 pprCtOrigin (DerivOriginCoerce meth ty1 ty2)
   = hang (ctoHerald <+> ptext (sLit "the coercion of the method") <+> quotes (ppr meth))
        2 (sep [ ptext (sLit "from type") <+> quotes (ppr ty1)
@@ -1954,4 +1967,72 @@ pprCtO AnnOrigin             = ptext (sLit "an annotation")
 pprCtO HoleOrigin            = ptext (sLit "a use of") <+> quotes (ptext $ sLit "_")
 pprCtO ListOrigin            = ptext (sLit "an overloaded list")
 pprCtO _                     = panic "pprCtOrigin"
+\end{code}
+
+
+
+
+
+Constraint Solver Plugins
+-------------------------
+
+
+\begin{code}
+
+type TcPluginSolver = [Ct]    -- given
+                   -> [Ct]    -- derived
+                   -> [Ct]    -- wanted
+                   -> TcPluginM TcPluginResult
+
+newtype TcPluginM a = TcPluginM (TcM a)
+
+instance Functor     TcPluginM where
+  fmap = liftM
+
+instance Applicative TcPluginM where
+  pure  = return
+  (<*>) = ap
+
+instance Monad TcPluginM where
+  return x = TcPluginM (return x)
+  fail x   = TcPluginM (fail x)
+  TcPluginM m >>= k =
+    TcPluginM (do a <- m
+                  let TcPluginM m1 = k a
+                  m1)
+
+runTcPluginM :: TcPluginM a -> TcM a
+runTcPluginM (TcPluginM m) = m
+
+-- | This function provides an escape for direct access to
+-- the 'TcM` monad.  It should not be used lightly, and
+-- the provided 'TcPluginM' API should be favoured instead.
+unsafeTcPluginTcM :: TcM a -> TcPluginM a
+unsafeTcPluginTcM = TcPluginM
+
+data TcPlugin = forall s. TcPlugin
+  { tcPluginInit  :: TcPluginM s
+    -- ^ Initialize plugin, when entering type-checker.
+
+  , tcPluginSolve :: s -> TcPluginSolver
+    -- ^ Solve some constraints.
+    -- TODO: WRITE MORE DETAILS ON HOW THIS WORKS.
+
+  , tcPluginStop  :: s -> TcPluginM ()
+   -- ^ Clean up after the plugin, when exiting the type-checker.
+  }
+
+data TcPluginResult
+  = TcPluginContradiction [Ct]
+    -- ^ The plugin found a contradiction.
+    -- The returned constraints are removed from the inert set,
+    -- and recorded as insoluable.
+
+  | TcPluginOk [(EvTerm,Ct)] [Ct]
+    -- ^ The first field is for constraints that were solved.
+    -- These are removed from the inert set,
+    -- and the evidence for them is recorded.
+    -- The second field contains new work, that should be processed by
+    -- the constraint solver.
+
 \end{code}

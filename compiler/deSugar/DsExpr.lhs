@@ -46,14 +46,12 @@ import MkCore
 import DynFlags
 import CostCentre
 import Id
-import Unique
 import Module
 import VarSet
 import VarEnv
 import ConLike
 import DataCon
 import TysWiredIn
-import PrelNames ( seqIdKey )
 import BasicTypes
 import Maybes
 import SrcLoc
@@ -193,12 +191,7 @@ dsLExpr (L loc e) = putSrcSpanDs loc $ dsExpr e
 dsExpr :: HsExpr Id -> DsM CoreExpr
 dsExpr (HsPar e)              = dsLExpr e
 dsExpr (ExprWithTySigOut e _) = dsLExpr e
-dsExpr (HsVar var)            -- See Note [Unfolding while desugaring]
-  | unfold_var = return $ unfoldingTemplate unfolding
-  | otherwise  = return (varToCoreExpr var)   -- See Note [Desugaring vars]
-  where
-    unfold_var = isCompulsoryUnfolding unfolding && not (var `hasKey` seqIdKey)
-    unfolding = idUnfolding var
+dsExpr (HsVar var)            = return (varToCoreExpr var)   -- See Note [Desugaring vars]
 dsExpr (HsIPVar _)            = panic "dsExpr: HsIPVar"
 dsExpr (HsLit lit)            = dsLit lit
 dsExpr (HsOverLit lit)        = dsOverLit lit
@@ -226,19 +219,6 @@ dsExpr (HsApp fun arg)
 
 dsExpr (HsUnboundVar _) = panic "dsExpr: HsUnboundVar"
 \end{code}
-
-Note [Unfolding while desugaring]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Variables with compulsory unfolding must be substituted at desugaring
-time. This is needed to preserve the let/app invariant in cases where
-the unfolding changes whether wrapping in a case is needed.
-Suppose we have a call like this:
-    I# x
-where 'x' has an unfolding like this:
-    f void#
-In this case, 'mkCoreAppDs' needs to see 'f void#', not 'x', to be
-able to do the right thing.
-
 
 Note [Desugaring vars]
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -298,12 +278,12 @@ dsExpr (SectionR op expr) = do
             Lam x_id (mkCoreAppsDs core_op [Var x_id, Var y_id]))
 
 dsExpr (ExplicitTuple tup_args boxity)
-  = do { let go (lam_vars, args) (Missing ty)
+  = do { let go (lam_vars, args) (L _ (Missing ty))
                     -- For every missing expression, we need
                     -- another lambda in the desugaring.
                = do { lam_var <- newSysLocalDs ty
                     ; return (lam_var : lam_vars, Var lam_var : args) }
-             go (lam_vars, args) (Present expr)
+             go (lam_vars, args) (L _ (Present expr))
                     -- Expressions that are present don't generate
                     -- lambdas, just arguments.
                = do { core_expr <- dsLExpr expr
@@ -515,15 +495,15 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
         ; return (add_field_binds field_binds' $
                   bindNonRec discrim_var record_expr' matching_code) }
   where
-    ds_field :: HsRecField Id (LHsExpr Id) -> DsM (Name, Id, CoreExpr)
+    ds_field :: LHsRecField Id (LHsExpr Id) -> DsM (Name, Id, CoreExpr)
       -- Clone the Id in the HsRecField, because its Name is that
       -- of the record selector, and we must not make that a lcoal binder
       -- else we shadow other uses of the record selector
       -- Hence 'lcl_id'.  Cf Trac #2735
-    ds_field rec_field = do { rhs <- dsLExpr (hsRecFieldArg rec_field)
-                            ; let fld_id = unLoc (hsRecFieldId rec_field)
-                            ; lcl_id <- newSysLocalDs (idType fld_id)
-                            ; return (idName fld_id, lcl_id, rhs) }
+    ds_field (L _ rec_field) = do { rhs <- dsLExpr (hsRecFieldArg rec_field)
+                                  ; let fld_id = unLoc (hsRecFieldId rec_field)
+                                  ; lcl_id <- newSysLocalDs (idType fld_id)
+                                  ; return (idName fld_id, lcl_id, rhs) }
 
     add_field_binds [] expr = expr
     add_field_binds ((_,b,r):bs) expr = bindNonRec b r (add_field_binds bs expr)
@@ -633,9 +613,9 @@ dsExpr (HsType        {})  = panic "dsExpr:HsType"
 dsExpr (HsDo          {})  = panic "dsExpr:HsDo"
 
 
-findField :: [HsRecField Id arg] -> Name -> [arg]
+findField :: [LHsRecField Id arg] -> Name -> [arg]
 findField rbinds lbl 
-  = [rhs | HsRecField { hsRecFieldId = id, hsRecFieldArg = rhs } <- rbinds 
+  = [rhs | L _ (HsRecField { hsRecFieldId = id, hsRecFieldArg = rhs }) <- rbinds
          , lbl == idName (unLoc id) ]
 \end{code}
 

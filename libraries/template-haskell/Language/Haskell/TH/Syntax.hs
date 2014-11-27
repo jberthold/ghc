@@ -1,5 +1,6 @@
 {-# LANGUAGE CPP, DeriveDataTypeable, PolymorphicComponents,
-             RoleAnnotations, DeriveGeneric #-}
+             RoleAnnotations, DeriveGeneric, TypeSynonymInstances,
+             FlexibleInstances #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -377,9 +378,16 @@ runIO :: IO a -> Q a
 runIO m = Q (qRunIO m)
 
 -- | Record external files that runIO is using (dependent upon).
--- The compiler can then recognize that it should re-compile the file using this TH when the external file changes.
--- Note that ghc -M will still not know about these dependencies - it does not execute TH.
+-- The compiler can then recognize that it should re-compile the Haskell file
+-- when an external file changes.
+--
 -- Expects an absolute file path.
+--
+-- Notes:
+--
+--   * ghc -M does not know about these dependencies - it does not execute TH.
+--
+--   * The dependency is based on file content, not a modification time
 addDependentFile :: FilePath -> Q ()
 addDependentFile fp = Q (qAddDependentFile fp)
 
@@ -447,7 +455,10 @@ instance Lift Integer where
   lift x = return (LitE (IntegerL x))
 
 instance Lift Int where
-  lift x= return (LitE (IntegerL (fromIntegral x)))
+  lift x = return (LitE (IntegerL (fromIntegral x)))
+
+instance Lift Rational where
+  lift x = return (LitE (RationalL x))
 
 instance Lift Char where
   lift x = return (LitE (CharL x))
@@ -470,6 +481,9 @@ instance Lift a => Lift [a] where
 liftString :: String -> Q Exp
 -- Used in TcExpr to short-circuit the lifting for strings
 liftString s = return (LitE (StringL s))
+
+instance Lift () where
+  lift () = return (ConE (tupleDataName 0))
 
 instance (Lift a, Lift b) => Lift (a, b) where
   lift (a, b)
@@ -864,6 +878,7 @@ data Loc
         , loc_module   :: String
         , loc_start    :: CharPos
         , loc_end      :: CharPos }
+   deriving( Show, Eq, Data, Typeable, Generic )
 
 type CharPos = (Int, Int)       -- ^ Line and character position
 
@@ -938,13 +953,13 @@ data Info
   | TyVarI      -- Scoped type variable
         Name
         Type    -- What it is bound to
-  deriving( Show, Data, Typeable, Generic )
+  deriving( Show, Eq, Data, Typeable, Generic )
 
 -- | Obtained from 'reifyModule' in the 'Q' Monad.
 data ModuleInfo =
   -- | Contains the import list of the module.
   ModuleInfo [Module]
-  deriving( Show, Data, Typeable, Generic )
+  deriving( Show, Eq, Data, Typeable, Generic )
 
 {- |
 In 'ClassOpI' and 'DataConI', name of the parent class or type
@@ -1235,7 +1250,8 @@ data Foreign = ImportF Callconv Safety String Name Type
              | ExportF Callconv        String Name Type
          deriving( Show, Eq, Data, Typeable, Generic )
 
-data Callconv = CCall | StdCall
+-- keep Callconv in sync with module ForeignCall in ghc/compiler/prelude/ForeignCall.hs
+data Callconv = CCall | StdCall | CApi | Prim | JavaScript
           deriving( Show, Eq, Data, Typeable, Generic )
 
 data Safety = Unsafe | Safe | Interruptible

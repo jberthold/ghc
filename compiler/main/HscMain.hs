@@ -164,6 +164,7 @@ import Data.Maybe
 import Data.IORef
 import System.FilePath as FilePath
 import System.Directory
+import qualified Data.Map as Map
 
 #include "HsVersions.h"
 
@@ -372,7 +373,11 @@ hscParse' mod_summary = do
 
             return HsParsedModule {
                       hpm_module    = rdr_module,
-                      hpm_src_files = srcs2
+                      hpm_src_files = srcs2,
+                      hpm_annotations
+                              = (Map.fromListWith (++) $ annotations pst,
+                                 Map.fromList $ ((noSrcSpan,comment_q pst)
+                                                 :(annotations_comments pst)))
                    }
 
 -- XXX: should this really be a Maybe X?  Check under which circumstances this
@@ -813,7 +818,7 @@ hscCheckSafeImports tcg_env = do
     warns dflags rules = listToBag $ map (warnRules dflags) rules
     warnRules dflags (L loc (HsRule n _ _ _ _ _ _)) =
         mkPlainWarnMsg dflags loc $
-            text "Rule \"" <> ftext n <> text "\" ignored" $+$
+            text "Rule \"" <> ftext (unLoc n) <> text "\" ignored" $+$
             text "User defined rules are disabled under Safe Haskell"
 
 -- | Validate that safe imported modules are actually safe.  For modules in the
@@ -1519,7 +1524,7 @@ hscImport hsc_env str = runInteractiveHsc hsc_env $ do
     (L _ (HsModule{hsmodImports=is})) <-
        hscParseThing parseModule str
     case is of
-        [i] -> return (unLoc i)
+        [L _ i] -> return i
         _ -> liftIO $ throwOneError $
                  mkPlainErrMsg (hsc_dflags hsc_env) noSrcSpan $
                      ptext (sLit "parse error in import declaration")

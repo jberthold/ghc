@@ -957,12 +957,13 @@ lookupQualifiedNameGHCi dflags is_ghci rdr_name
     -- and respect hiddenness of modules/packages, hence loadSrcInterface.
     do { res <- loadSrcInterface_maybe doc mod False Nothing
        ; case res of
-           Succeeded iface
+           Succeeded ifaces
              | (n:ns) <- [ name
-                         | avail <- mi_exports iface
+                         | iface <- ifaces
+                         , avail <- mi_exports iface
                          , name  <- availNames avail
                          , nameOccName name == occ ]
-             -> ASSERT(null ns) return (Just n)
+             -> ASSERT(all (==n) ns) return (Just n)
 
            _ -> -- Either we couldn't load the interface, or
                 -- we could but we didn't find the name in it
@@ -1855,7 +1856,7 @@ data HsDocContext
   | TyDataCtx (Located RdrName)
   | TySynCtx (Located RdrName)
   | TyFamilyCtx (Located RdrName)
-  | ConDeclCtx (Located RdrName)
+  | ConDeclCtx [Located RdrName]
   | ClassDeclCtx (Located RdrName)
   | ExprWithTySigCtx
   | TypBrCtx
@@ -1878,7 +1879,12 @@ docOfHsDocContext (RuleCtx name) = text "In the transformation rule" <+> ftext n
 docOfHsDocContext (TyDataCtx tycon) = text "In the data type declaration for" <+> quotes (ppr tycon)
 docOfHsDocContext (TySynCtx name) = text "In the declaration for type synonym" <+> quotes (ppr name)
 docOfHsDocContext (TyFamilyCtx name) = text "In the declaration for type family" <+> quotes (ppr name)
-docOfHsDocContext (ConDeclCtx name) = text "In the definition of data constructor" <+> quotes (ppr name)
+
+docOfHsDocContext (ConDeclCtx [name])
+   = text "In the definition of data constructor" <+> quotes (ppr name)
+docOfHsDocContext (ConDeclCtx names)
+   = text "In the definition of data constructors" <+> interpp'SP names
+
 docOfHsDocContext (ClassDeclCtx name) = text "In the declaration for class"     <+> ppr name
 docOfHsDocContext ExprWithTySigCtx = text "In an expression type signature"
 docOfHsDocContext TypBrCtx = ptext (sLit "In a Template-Haskell quoted type")
