@@ -2271,10 +2271,10 @@ dynamic_flags = [
     -- -ticky enables ticky-ticky code generation, and also implies -debug which
     -- is required to get the RTS ticky support.
 
-  , Flag "parpvm"         (NoArg (addWay WayParPvm) )
-  , Flag "parmpi"         (NoArg (addWay WayParMPI) )
-  , Flag "parcp"          (NoArg (addWay WayParCp) )
-  , Flag "parms"          (NoArg (addWay WayParMSlot) )
+  , defGhcFlag "parpvm"         (NoArg (addWay WayParPvm) )
+  , defGhcFlag "parmpi"         (NoArg (addWay WayParMPI) )
+  , defGhcFlag "parcp"          (NoArg (addWay WayParCp) )
+  , defGhcFlag "parms"          (NoArg (addWay WayParMSlot) )
 
         ----- Linker --------------------------------------------------------
   , defGhcFlag "static"         (NoArg removeWayDyn)
