@@ -1602,41 +1602,41 @@ getLocation src_flavour mod_name = do
 runPhase_MoveBinary :: DynFlags -> FilePath -> IO ()
 runPhase_MoveBinary dflags input_fn
 -- Parallel Haskell Support, Eden group Marburg
---  PVM: move to $PVM_ROOT, generate start script 
+--  PVM: move to $PVM_ROOT, generate start script
 --  MPI: rename program, generate start script (using mpirun)
     | needsScript = do
         user <- getEnv uservar
-	current <- getCurrentDirectory
+        current <- getCurrentDirectory
         let (subdir,basename) = splitFileName input_fn
-	    executable_base = user ++ '=':basename
-	    copypath = if WayParPvm `elem` (ways dflags)-- is for PVM
+            executable_base = user ++ '=':basename
+            copypath = if WayParPvm `elem` (ways dflags)-- is for PVM
                           then cPVM_Root ++ "/bin/" ++ cPVM_Arch
                           else joinPath [current, subdir]
         let executable = joinPath [copypath, executable_base]
-	Exception.catchIO (do 
+        Exception.catchIO (do
                -- move the newly created binary into PVM land
                -- look out, SysTools:copy does not preserve permissions
                ps <- getPermissions input_fn
                copy dflags "copying parallel executable" input_fn executable
                setPermissions executable ps
                removeFile input_fn)
-           (\e -> liftIO $ throwGhcExceptionIO (InstallationError 
-                            ("Cannot move parallel executable " 
+           (\e -> liftIO $ throwGhcExceptionIO (InstallationError
+                            ("Cannot move parallel executable "
                              ++ executable_base ++ ": " ++ show e)))
-	-- generate a wrapper script for running a parallel prg.
-	Exception.catchIO (do ps <- getPermissions executable
-                              writeFile script_name 
-                                  (mkWrapperScript os (ways dflags) 
+        -- generate a wrapper script for running a parallel prg.
+        Exception.catchIO (do ps <- getPermissions executable
+                              writeFile script_name
+                                  (mkWrapperScript os (ways dflags)
                                             executable executable_base)
                               setPermissions script_name ps)
-           (\e -> liftIO $ throwGhcExceptionIO (InstallationError 
-                            ("Cannot generate start script " 
+           (\e -> liftIO $ throwGhcExceptionIO (InstallationError
+                            ("Cannot generate start script "
                              ++ input_fn ++ ": " ++ show e)))
     | otherwise = return ()
   where needsScript = WayParPvm `elem` (ways dflags)
                      || WayParMPI `elem` (ways dflags)
         os = platformOS (targetPlatform dflags)
-        (uservar, script_name) 
+        (uservar, script_name)
             = case os of
                 OSMinGW32 -> ("USERNAME" , replaceExtension input_fn ".vbs")
                 _         -> ("USER" ,     input_fn) -- Unix-like systems
@@ -1826,19 +1826,19 @@ mkWrapperScript OSMinGW32 ways executable _ -- executable_base unused
   "Set WshShell = CreateObject(\"WScript.Shell\")",
   "WshShell.Run \"%COMSPEC% /k \" & \"\"\"\"\"\" & executable & \"\"\"\"\"\" & \" \" & nprocessors & \" \" & non_script_args, 10, true",
   ""] ++ trace_processing
-mkWrapperScript _ ways executable executable_base 
-    = let  runCmd | WayParPvm `elem` ways  = 
-		     "$executable $debug$nprocessors @nonPVM_args"
-		 | WayParMPI `elem` ways  = 
-		 -- currently not very extensive. Assuming shared directory!
-		     "mpirun $npstring $machinefile $executable $nprocessors @nonPVM_args"
-		 | otherwise = panic "Something wrong with compiler ways"
+mkWrapperScript _ ways executable executable_base
+    = let  runCmd | WayParPvm `elem` ways  =
+                      "$executable $debug$nprocessors @nonPVM_args"
+                  | WayParMPI `elem` ways  =
+                    -- currently not very extensive. Assuming shared directory!
+                      "mpirun $npstring $machinefile $executable $nprocessors @nonPVM_args"
+                  | otherwise = panic "Something wrong with compiler ways"
            trace_processing | not (WayEventLog `elem` ways) = []
-                            | otherwise = 
+                            | otherwise =
             ["# trace post-processing",
              "if ($dotrace) {",
              "  print \"Trace post-processing...\\n\";"] ++
-            (if (WayParPvm `elem` ways) 
+            (if (WayParPvm `elem` ways)
              then ["  # wait for trace files to be completed", "  sleep(2);"]
              else []) ++
             ["# trace copying or archive creation ",
@@ -1903,7 +1903,7 @@ mkWrapperScript _ ways executable executable_base
   "        };",
   "        $machinefile = \"\";",
   "      }",
-  "",  
+  "",
   "if ( $nprocessors ) { $npstring = \"-np \" . $nprocessors",
   "} else { $npstring = \"\" }",
   "",
@@ -2170,12 +2170,12 @@ linkBinary' staticLink dflags o_files dep_packages = do
     -- Parallel Haskell support, Eden group Marburg
     -- For parallel versions, generates a run script and moves/renames
     -- the real program, to be called by the script: For a PVM-based
-    -- parallel program (WayParPVM), the binary is moved 
+    -- parallel program (WayParPVM), the binary is moved
     -- to $PVM_ROOT/bin/$PVM_ARCH. For an MPI-based parallel program
     -- (WayParMPI), the binary is kept in the current directory, but
     -- renamed. In both cases, the real binary is prefixed with "=",
     -- and a script to run it is generated.  runPhase_MoveBinary
-    -- selects what to do from the dynamic flags. Another functionality 
+    -- selects what to do from the dynamic flags. Another functionality
     -- of moveBinary is for dynamic linking.
 
     runPhase_MoveBinary dflags output_fn
