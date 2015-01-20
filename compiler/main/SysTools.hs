@@ -40,7 +40,7 @@ module SysTools (
 
         -- Temporary-file management
         setTmpDir,
-        newTempName,
+        newTempName, newTempLibName,
         cleanTempDirs, cleanTempFiles, cleanTempFilesExcept,
         addFilesToClean,
 
@@ -221,6 +221,7 @@ initSysTools mbMinusB
                                  Just v -> return v
                                  Nothing -> pgmError ("Failed to read " ++ show key ++ " value " ++ show xs)
                              Nothing -> pgmError ("No entry for " ++ show key ++ " in " ++ show settingsFile)
+       crossCompiling <- getBooleanSetting "cross compiling"
        targetArch <- readSetting "target arch"
        targetOS <- readSetting "target os"
        targetWordSize <- readSetting "target word size"
@@ -309,7 +310,8 @@ initSysTools mbMinusB
                           platformUnregisterised = targetUnregisterised,
                           platformHasGnuNonexecStack = targetHasGnuNonexecStack,
                           platformHasIdentDirective = targetHasIdentDirective,
-                          platformHasSubsectionsViaSymbols = targetHasSubsectionsViaSymbols
+                          platformHasSubsectionsViaSymbols = targetHasSubsectionsViaSymbols,
+                          platformIsCrossCompiling = crossCompiling
                       }
 
        return $ Settings {
@@ -1074,6 +1076,24 @@ newTempName dflags extn
                 else do -- clean it up later
                         consIORef (filesToClean dflags) filename
                         return filename
+
+newTempLibName :: DynFlags -> Suffix -> IO (FilePath, FilePath, String)
+newTempLibName dflags extn
+  = do d <- getTempDir dflags
+       x <- getProcessID
+       findTempName d ("ghc" ++ show x ++ "_")
+  where
+    findTempName :: FilePath -> String -> IO (FilePath, FilePath, String)
+    findTempName dir prefix
+      = do n <- newTempSuffix dflags
+           let libname = prefix ++ show n
+               filename = dir </> "lib" ++ libname <.> extn
+           b <- doesFileExist filename
+           if b then findTempName dir prefix
+                else do -- clean it up later
+                        consIORef (filesToClean dflags) filename
+                        return (filename, dir, libname)
+
 
 -- Return our temporary directory within tmp_dir, creating one if we
 -- don't have one yet.

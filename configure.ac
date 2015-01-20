@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Parallel Haskell Compilation System], [7.9], [eden@mathematik.uni-marburg.de], [ghc])
+AC_INIT([The Parallel Haskell Compilation System], [7.11], [eden@mathematik.uni-marburg.de], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=NO}
@@ -354,62 +354,6 @@ then
         AC_MSG_NOTICE([In-tree perl tree created])
     fi
 fi
-
-# system libffi
-
-AC_ARG_WITH([system-libffi],
-[AC_HELP_STRING([--with-system-libffi],
-  [Use system provided libffi for RTS [default=no]])
-])
-
-AS_IF([test "x$with_system_libffi" = "xyes"],
-  [UseSystemLibFFI="YES"], [UseSystemLibFFI="NO"]
-)
-
-
-AC_SUBST(UseSystemLibFFI)
-
-AC_ARG_WITH([ffi-includes],
-[AC_HELP_STRING([--with-ffi-includes=ARG],
-  [Find includes for libffi in ARG [default=system default]])
-],
-[
- if test "x$UseSystemLibFFI" != "xYES"; then
-    AC_MSG_WARN([--with-ffi-includes will be ignored, --with-system-libffi not set])
- else
-    FFIIncludeDir="$withval"
-    LIBFFI_CFLAGS="-I$withval"
- fi
-])
-
-AC_SUBST(FFIIncludeDir)
-
-AC_ARG_WITH([ffi-libraries],
-[AC_HELP_STRING([--with-ffi-libraries=ARG],
-  [Find libffi in ARG [default=system default]])
-],
-[
- if test "x$UseSystemLibFFI" != "xYES"; then
-    AC_MSG_WARN([--with-ffi-libraries will be ignored, --with-system-libffi not set])
- else
-    FFILibDir="$withval" LIBFFI_LDFLAGS="-L$withval"
- fi
-])
-
-AC_SUBST(FFILibDir)
-
-AS_IF([test "$UseSystemLibFFI" = "YES"], [
- CFLAGS2="$CFLAGS"
- CFLAGS="$LIBFFI_CFLAGS $CFLAGS"
- LDFLAGS2="$LDFLAGS"
- LDFLAGS="$LIBFFI_LDFLAGS $LDFLAGS"
- AC_CHECK_LIB(ffi, ffi_call,
-  [AC_CHECK_HEADERS([ffi.h], [break], [])
-   AC_DEFINE([HAVE_LIBFFI], [1], [Define to 1 if you have libffi.])],
-  [AC_MSG_ERROR([Cannot find system libffi])])
- CFLAGS="$CFLAGS2"
- LDFLAGS="$LDFLAGS2"
-])
 
 FP_ICONV
 FP_GMP
@@ -854,6 +798,62 @@ FP_BFD_SUPPORT
 dnl ################################################################
 dnl Check for libraries
 dnl ################################################################
+
+# system libffi
+
+AC_ARG_WITH([system-libffi],
+[AC_HELP_STRING([--with-system-libffi],
+  [Use system provided libffi for RTS [default=no]])
+])
+
+AS_IF([test "x$with_system_libffi" = "xyes"],
+  [UseSystemLibFFI="YES"], [UseSystemLibFFI="NO"]
+)
+
+
+AC_SUBST(UseSystemLibFFI)
+
+AC_ARG_WITH([ffi-includes],
+[AC_HELP_STRING([--with-ffi-includes=ARG],
+  [Find includes for libffi in ARG [default=system default]])
+],
+[
+ if test "x$UseSystemLibFFI" != "xYES"; then
+    AC_MSG_WARN([--with-ffi-includes will be ignored, --with-system-libffi not set])
+ else
+    FFIIncludeDir="$withval"
+    LIBFFI_CFLAGS="-I$withval"
+ fi
+])
+
+AC_SUBST(FFIIncludeDir)
+
+AC_ARG_WITH([ffi-libraries],
+[AC_HELP_STRING([--with-ffi-libraries=ARG],
+  [Find libffi in ARG [default=system default]])
+],
+[
+ if test "x$UseSystemLibFFI" != "xYES"; then
+    AC_MSG_WARN([--with-ffi-libraries will be ignored, --with-system-libffi not set])
+ else
+    FFILibDir="$withval" LIBFFI_LDFLAGS="-L$withval"
+ fi
+])
+
+AC_SUBST(FFILibDir)
+
+AS_IF([test "$UseSystemLibFFI" = "YES"], [
+ CFLAGS2="$CFLAGS"
+ CFLAGS="$LIBFFI_CFLAGS $CFLAGS"
+ LDFLAGS2="$LDFLAGS"
+ LDFLAGS="$LIBFFI_LDFLAGS $LDFLAGS"
+ AC_CHECK_LIB(ffi, ffi_call,
+  [AC_CHECK_HEADERS([ffi.h], [break], [])
+   AC_DEFINE([HAVE_LIBFFI], [1], [Define to 1 if you have libffi.])],
+  [AC_MSG_ERROR([Cannot find system libffi])])
+ CFLAGS="$CFLAGS2"
+ LDFLAGS="$LDFLAGS2"
+])
 
 dnl ** check whether we need -ldl to get dlopen()
 AC_CHECK_LIB(dl, dlopen)

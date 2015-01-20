@@ -53,7 +53,7 @@ module TcRnTypes(
         isEmptyCts, isCTyEqCan, isCFunEqCan,
         isCDictCan_Maybe, isCFunEqCan_maybe,
         isCIrredEvCan, isCNonCanonical, isWantedCt, isDerivedCt,
-        isGivenCt, isHoleCt, isTypedHoleCt, isPartialTypeSigCt,
+        isGivenCt, isHoleCt, isExprHoleCt, isTypeHoleCt,
         ctEvidence, ctLoc, ctPred, ctFlavour, ctEqRel,
         mkNonCanonical, mkNonCanonicalCt,
         ctEvPred, ctEvLoc, ctEvEqRel,
@@ -61,13 +61,13 @@ module TcRnTypes(
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
         andWC, unionsWC, addSimples, addImplics, mkSimpleWC, addInsols,
-        dropDerivedWC,
+        dropDerivedWC, insolubleImplic, trulyInsoluble,
 
-        Implication(..),
+        Implication(..), ImplicStatus(..), isInsolubleStatus,
         SubGoalCounter(..),
         SubGoalDepth, initialSubGoalDepth, maxSubGoalDepth,
         bumpSubGoalDepth, subGoalCounterValue, subGoalDepthExceeded,
-        CtLoc(..), ctLocSpan, ctLocEnv, ctLocOrigin,
+        CtLoc(..), ctLocSpan, ctLocEnv, ctLocLevel, ctLocOrigin,
         ctLocDepth, bumpCtLocDepth,
         setCtLocOrigin, setCtLocEnv, setCtLocSpan,
         CtOrigin(..), pprCtOrigin,
@@ -602,7 +602,7 @@ Why?  Because they are now Ids not TcIds.  This final GlobalEnv is
 data TcLclEnv           -- Changes as we move inside an expression
                         -- Discarded after typecheck/rename; not passed on to desugarer
   = TcLclEnv {
-        tcl_loc        :: SrcSpan,         -- Source span
+        tcl_loc        :: RealSrcSpan,     -- Source span
         tcl_ctxt       :: [ErrCtxt],       -- Error context, innermost on top
         tcl_tclvl      :: TcLevel,         -- Birthplace for new unification variables
 
@@ -1135,8 +1135,9 @@ data Ct
       cc_ev  :: CtEvidence
     }
 
-  | CHoleCan {             -- Treated as an "insoluble" constraint
-                           -- See Note [Insoluble constraints]
+  | CHoleCan {             -- See Note [Hole constraints]
+       -- Treated as an "insoluble" constraint
+       -- See Note [Insoluble constraints]
       cc_ev   :: CtEvidence,
       cc_occ  :: OccName,   -- The name of this hole
       cc_hole :: HoleSort   -- The sort of this hole (expr, type, ...)
@@ -1147,6 +1148,18 @@ data HoleSort = ExprHole  -- ^ A hole in an expression (TypedHoles)
               | TypeHole  -- ^ A hole in a type (PartialTypeSignatures)
 
 {-
+Note [Hole constraints]
+~~~~~~~~~~~~~~~~~~~~~~~
+CHoleCan constraints are used for two kinds of holes,
+distinguished by cc_hole:
+
+  * For holes in expressions
+    e.g.   f x = g _ x
+
+  * For holes in type signatures
+    e.g.   f :: _ -> _
+           f x = [x,True]
+
 Note [Kind orientation for CTyEqCan]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Given an equality (t:* ~ s:Open), we can't solve it by updating t:=s,
@@ -1324,13 +1337,13 @@ isHoleCt:: Ct -> Bool
 isHoleCt (CHoleCan {}) = True
 isHoleCt _ = False
 
-isTypedHoleCt :: Ct -> Bool
-isTypedHoleCt (CHoleCan { cc_hole = ExprHole }) = True
-isTypedHoleCt _ = False
+isExprHoleCt :: Ct -> Bool
+isExprHoleCt (CHoleCan { cc_hole = ExprHole }) = True
+isExprHoleCt _ = False
 
-isPartialTypeSigCt :: Ct -> Bool
-isPartialTypeSigCt (CHoleCan { cc_hole = TypeHole }) = True
-isPartialTypeSigCt _ = False
+isTypeHoleCt :: Ct -> Bool
+isTypeHoleCt (CHoleCan { cc_hole = TypeHole }) = True
+isTypeHoleCt _ = False
 
 instance Outputable Ct where
   ppr ct = ppr (cc_ev ct) <+> parens (text ct_sort)
@@ -1400,21 +1413,15 @@ data WantedConstraints
 emptyWC :: WantedConstraints
 emptyWC = WC { wc_simple = emptyBag, wc_impl = emptyBag, wc_insol = emptyBag }
 
-mkSimpleWC :: [Ct] -> WantedConstraints
+mkSimpleWC :: [CtEvidence] -> WantedConstraints
 mkSimpleWC cts
-  = WC { wc_simple = listToBag cts, wc_impl = emptyBag, wc_insol = emptyBag }
+  = WC { wc_simple = listToBag (map mkNonCanonical cts)
+       , wc_impl = emptyBag
+       , wc_insol = emptyBag }
 
 isEmptyWC :: WantedConstraints -> Bool
 isEmptyWC (WC { wc_simple = f, wc_impl = i, wc_insol = n })
   = isEmptyBag f && isEmptyBag i && isEmptyBag n
-
-insolubleWC :: WantedConstraints -> Bool
--- True if there are any insoluble constraints in the wanted bag. Ignore
--- constraints arising from PartialTypeSignatures to solve as much of the
--- constraints as possible before reporting the holes.
-insolubleWC wc = not (isEmptyBag (filterBag (not . isPartialTypeSigCt)
-                                  (wc_insol wc)))
-               || anyBag ic_insol (wc_impl wc)
 
 andWC :: WantedConstraints -> WantedConstraints -> WantedConstraints
 andWC (WC { wc_simple = f1, wc_impl = i1, wc_insol = n1 })
@@ -1436,6 +1443,24 @@ addImplics wc implic = wc { wc_impl = wc_impl wc `unionBags` implic }
 addInsols :: WantedConstraints -> Bag Ct -> WantedConstraints
 addInsols wc cts
   = wc { wc_insol = wc_insol wc `unionBags` cts }
+
+isInsolubleStatus :: ImplicStatus -> Bool
+isInsolubleStatus IC_Insoluble = True
+isInsolubleStatus _            = False
+
+insolubleImplic :: Implication -> Bool
+insolubleImplic ic = isInsolubleStatus (ic_status ic)
+
+insolubleWC :: WantedConstraints -> Bool
+insolubleWC (WC { wc_impl = implics, wc_insol = insols })
+  =  anyBag trulyInsoluble  insols
+  || anyBag insolubleImplic implics
+
+trulyInsoluble :: Ct -> Bool
+-- The constraint is in the wc_insol set, but we do not
+-- treat type-holes, arising from PartialTypeSignatures,
+-- as "truly insoluble". Yuk.
+trulyInsoluble insol = not (isTypeHoleCt insol)
 
 instance Outputable WantedConstraints where
   ppr (WC {wc_simple = s, wc_impl = i, wc_insol = n})
@@ -1475,32 +1500,63 @@ data Implication
                                  -- False <=> ic_givens might have equalities
 
       ic_env   :: TcLclEnv,      -- Gives the source location and error context
-                                 -- for the implicatdion, and hence for all the
+                                 -- for the implication, and hence for all the
                                  -- given evidence variables
 
       ic_wanted :: WantedConstraints,  -- The wanted
-      ic_insol  :: Bool,               -- True iff insolubleWC ic_wanted is true
 
-      ic_binds  :: EvBindsVar   -- Points to the place to fill in the
-                                -- abstraction and bindings
+      ic_binds  :: EvBindsVar,    -- Points to the place to fill in the
+                                  -- abstraction and bindings
+
+      ic_status   :: ImplicStatus
     }
+
+data ImplicStatus
+  = IC_Solved     -- All wanteds in the tree are solved, all the way down
+       { ics_need :: VarSet     -- Evidence variables needed by this implication
+       , ics_dead :: [EvVar] }  -- Subset of ic_given that are not needed
+         -- See Note [Tracking redundant constraints] in TcSimplify
+
+  | IC_Insoluble  -- At least one insoluble constraint in the tree
+
+  | IC_Unsolved   -- Neither of the above; might go either way
 
 instance Outputable Implication where
   ppr (Implic { ic_tclvl = tclvl, ic_skols = skols
               , ic_given = given, ic_no_eqs = no_eqs
-              , ic_wanted = wanted, ic_insol = insol
+              , ic_wanted = wanted, ic_status = status
               , ic_binds = binds, ic_info = info })
    = hang (ptext (sLit "Implic") <+> lbrace)
         2 (sep [ ptext (sLit "TcLevel =") <+> ppr tclvl
                , ptext (sLit "Skolems =") <+> pprTvBndrs skols
                , ptext (sLit "No-eqs =") <+> ppr no_eqs
-               , ptext (sLit "Insol =") <+> ppr insol
+               , ptext (sLit "Status =") <+> ppr status
                , hang (ptext (sLit "Given ="))  2 (pprEvVars given)
                , hang (ptext (sLit "Wanted =")) 2 (ppr wanted)
                , ptext (sLit "Binds =") <+> ppr binds
                , pprSkolInfo info ] <+> rbrace)
 
+instance Outputable ImplicStatus where
+  ppr IC_Insoluble   = ptext (sLit "Insoluble")
+  ppr IC_Unsolved    = ptext (sLit "Unsolved")
+  ppr (IC_Solved { ics_need = vs, ics_dead = dead })
+    = ptext (sLit "Solved")
+      <+> (braces $ vcat [ ptext (sLit "Dead givens =") <+> ppr dead
+                         , ptext (sLit "Needed =") <+> ppr vs ])
+
 {-
+Note [Needed evidence variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Th ic_need_evs field holds the free vars of ic_binds, and all the
+ic_binds in nested implications.
+
+  * Main purpose: if one of the ic_givens is not mentioned in here, it
+    is redundant.
+
+  * solveImplication may drop an implication altogether if it has no
+    remaining 'wanteds'. But we still track the free vars of its
+    evidence binds, even though it has now disappeared.
+
 Note [Shadowing in a constraint]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We assume NO SHADOWING in a constraint.  Specifically
@@ -1755,9 +1811,9 @@ subGoalCounterValue CountTyFunApps   (SubGoalDepth _ f) = f
 
 subGoalDepthExceeded :: SubGoalDepth -> SubGoalDepth -> Maybe SubGoalCounter
 subGoalDepthExceeded (SubGoalDepth mc mf) (SubGoalDepth c f)
-        | c > mc    = Just CountConstraints
-        | f > mf    = Just CountTyFunApps
-        | otherwise = Nothing
+  | c > mc    = Just CountConstraints
+  | f > mf    = Just CountTyFunApps
+  | otherwise = Nothing
 
 -- | Checks whether the evidence can be used to solve a goal with the given minimum depth
 -- See Note [Preventing recursive dictionaries]
@@ -1808,7 +1864,7 @@ data CtLoc = CtLoc { ctl_origin :: CtOrigin
                    , ctl_env    :: TcLclEnv
                    , ctl_depth  :: !SubGoalDepth }
   -- The TcLclEnv includes particularly
-  --    source location:  tcl_loc   :: SrcSpan
+  --    source location:  tcl_loc   :: RealSrcSpan
   --    context:          tcl_ctxt  :: [ErrCtxt]
   --    binder stack:     tcl_bndrs :: [TcIdBinders]
   --    level:            tcl_tclvl :: TcLevel
@@ -1822,16 +1878,19 @@ mkGivenLoc tclvl skol_info env
 ctLocEnv :: CtLoc -> TcLclEnv
 ctLocEnv = ctl_env
 
+ctLocLevel :: CtLoc -> TcLevel
+ctLocLevel loc = tcl_tclvl (ctLocEnv loc)
+
 ctLocDepth :: CtLoc -> SubGoalDepth
 ctLocDepth = ctl_depth
 
 ctLocOrigin :: CtLoc -> CtOrigin
 ctLocOrigin = ctl_origin
 
-ctLocSpan :: CtLoc -> SrcSpan
+ctLocSpan :: CtLoc -> RealSrcSpan
 ctLocSpan (CtLoc { ctl_env = lcl}) = tcl_loc lcl
 
-setCtLocSpan :: CtLoc -> SrcSpan -> CtLoc
+setCtLocSpan :: CtLoc -> RealSrcSpan -> CtLoc
 setCtLocSpan ctl@(CtLoc { ctl_env = lcl }) loc = setCtLocEnv ctl (lcl { tcl_loc = loc })
 
 bumpCtLocDepth :: SubGoalCounter -> CtLoc -> CtLoc
@@ -1916,41 +1975,51 @@ instance Outputable SkolemInfo where
 
 pprSkolInfo :: SkolemInfo -> SDoc
 -- Complete the sentence "is a rigid type variable bound by..."
-pprSkolInfo (SigSkol (FunSigCtxt f) ty)
-                            = hang (ptext (sLit "the type signature for"))
-                                 2 (pprPrefixOcc f <+> dcolon <+> ppr ty)
-pprSkolInfo (SigSkol cx ty) = hang (pprUserTypeCtxt cx <> colon)
-                                 2 (ppr ty)
-pprSkolInfo (IPSkol ips)    = ptext (sLit "the implicit-parameter binding") <> plural ips <+> ptext (sLit "for")
-                              <+> pprWithCommas ppr ips
-pprSkolInfo (ClsSkol cls)   = ptext (sLit "the class declaration for") <+> quotes (ppr cls)
-pprSkolInfo InstSkol        = ptext (sLit "the instance declaration")
-pprSkolInfo DataSkol        = ptext (sLit "the data type declaration")
-pprSkolInfo FamInstSkol     = ptext (sLit "the family instance declaration")
-pprSkolInfo BracketSkol     = ptext (sLit "a Template Haskell bracket")
-pprSkolInfo (RuleSkol name) = ptext (sLit "the RULE") <+> doubleQuotes (ftext name)
-pprSkolInfo ArrowSkol       = ptext (sLit "the arrow form")
-pprSkolInfo (PatSkol cl mc) = case cl of
-    RealDataCon dc -> sep [ ptext (sLit "a pattern with constructor")
-                          , nest 2 $ ppr dc <+> dcolon
-                            <+> pprType (dataConUserType dc) <> comma
-                            -- pprType prints forall's regardless of -fprint-explict-foralls
-                            -- which is what we want here, since we might be saying
-                            -- type variable 't' is bound by ...
-                          , ptext (sLit "in") <+> pprMatchContext mc ]
-    PatSynCon ps -> sep [ ptext (sLit "a pattern with pattern synonym")
-                        , nest 2 $ ppr ps <+> dcolon
-                          <+> pprType (patSynType ps) <> comma
-                        , ptext (sLit "in") <+> pprMatchContext mc ]
-pprSkolInfo (InferSkol ids) = sep [ ptext (sLit "the inferred type of")
-                                  , vcat [ ppr name <+> dcolon <+> ppr ty
-                                         | (name,ty) <- ids ]]
+pprSkolInfo (SigSkol ctxt ty) = pprSigSkolInfo ctxt ty
+pprSkolInfo (IPSkol ips)      = ptext (sLit "the implicit-parameter binding") <> plural ips <+> ptext (sLit "for")
+                                <+> pprWithCommas ppr ips
+pprSkolInfo (ClsSkol cls)     = ptext (sLit "the class declaration for") <+> quotes (ppr cls)
+pprSkolInfo InstSkol          = ptext (sLit "the instance declaration")
+pprSkolInfo DataSkol          = ptext (sLit "a data type declaration")
+pprSkolInfo FamInstSkol       = ptext (sLit "a family instance declaration")
+pprSkolInfo BracketSkol       = ptext (sLit "a Template Haskell bracket")
+pprSkolInfo (RuleSkol name)   = ptext (sLit "the RULE") <+> doubleQuotes (ftext name)
+pprSkolInfo ArrowSkol         = ptext (sLit "an arrow form")
+pprSkolInfo (PatSkol cl mc)   = sep [ pprPatSkolInfo cl
+                                    , ptext (sLit "in") <+> pprMatchContext mc ]
+pprSkolInfo (InferSkol ids)   = sep [ ptext (sLit "the inferred type of")
+                                    , vcat [ ppr name <+> dcolon <+> ppr ty
+                                           | (name,ty) <- ids ]]
 pprSkolInfo (UnifyForAllSkol tvs ty) = ptext (sLit "the type") <+> ppr (mkForAllTys tvs ty)
 
 -- UnkSkol
 -- For type variables the others are dealt with by pprSkolTvBinding.
 -- For Insts, these cases should not happen
 pprSkolInfo UnkSkol = WARN( True, text "pprSkolInfo: UnkSkol" ) ptext (sLit "UnkSkol")
+
+pprSigSkolInfo :: UserTypeCtxt -> Type -> SDoc
+pprSigSkolInfo ctxt ty
+  = case ctxt of
+       FunSigCtxt f _ -> pp_sig f
+       _              -> hang (pprUserTypeCtxt ctxt <> colon)
+                            2 (ppr ty)
+  where
+    pp_sig f = sep [ ptext (sLit "the type signature for:")
+                   , pprPrefixOcc f <+> dcolon <+> ppr ty ]
+
+pprPatSkolInfo :: ConLike -> SDoc
+pprPatSkolInfo (RealDataCon dc)
+  = sep [ ptext (sLit "a pattern with constructor:")
+        , nest 2 $ ppr dc <+> dcolon
+          <+> pprType (dataConUserType dc) <> comma ]
+          -- pprType prints forall's regardless of -fprint-explict-foralls
+          -- which is what we want here, since we might be saying
+          -- type variable 't' is bound by ...
+
+pprPatSkolInfo (PatSynCon ps)
+  = sep [ ptext (sLit "a pattern with pattern synonym:")
+        , nest 2 $ ppr ps <+> dcolon
+                   <+> pprType (patSynType ps) <> comma ]
 
 {-
 ************************************************************************
@@ -1964,10 +2033,11 @@ data CtOrigin
   = GivenOrigin SkolemInfo
 
   -- All the others are for *wanted* constraints
-  | OccurrenceOf Name           -- Occurrence of an overloaded identifier
-  | AppOrigin                   -- An application of some kind
+  | OccurrenceOf Name              -- Occurrence of an overloaded identifier
+  | AppOrigin                      -- An application of some kind
 
-  | SpecPragOrigin Name         -- Specialisation pragma for identifier
+  | SpecPragOrigin UserTypeCtxt    -- Specialisation pragma for 
+                                   -- function or instance
 
   | TypeEqOrigin { uo_actual   :: TcType
                  , uo_expected :: TcType }
@@ -2028,6 +2098,12 @@ pprCtOrigin :: CtOrigin -> SDoc
 
 pprCtOrigin (GivenOrigin sk) = ctoHerald <+> ppr sk
 
+pprCtOrigin (SpecPragOrigin ctxt) 
+  = case ctxt of
+       FunSigCtxt n _ -> ptext (sLit "a SPECIALISE pragma for") <+> quotes (ppr n)
+       SpecInstCtxt   -> ptext (sLit "a SPECIALISE INSTANCE pragma")
+       _              -> ptext (sLit "a SPECIALISE pragma")  -- Never happens I think
+
 pprCtOrigin (FunDepOrigin1 pred1 loc1 pred2 loc2)
   = hang (ctoHerald <+> ptext (sLit "a functional dependency between constraints:"))
        2 (vcat [ hang (quotes (ppr pred1)) 2 (pprArisingAt loc1)
@@ -2071,7 +2147,6 @@ pprCtOrigin simple_origin
 pprCtO :: CtOrigin -> SDoc  -- Ones that are short one-liners
 pprCtO (OccurrenceOf name)   = hsep [ptext (sLit "a use of"), quotes (ppr name)]
 pprCtO AppOrigin             = ptext (sLit "an application")
-pprCtO (SpecPragOrigin name) = hsep [ptext (sLit "a specialisation pragma for"), quotes (ppr name)]
 pprCtO (IPOccOrigin name)    = hsep [ptext (sLit "a use of implicit parameter"), quotes (ppr name)]
 pprCtO RecordUpdOrigin       = ptext (sLit "a record update")
 pprCtO ExprSigOrigin         = ptext (sLit "an expression type signature")

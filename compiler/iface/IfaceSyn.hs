@@ -114,7 +114,7 @@ data IfaceDecl
                                                    -- the tycon)
                    ifFamFlav :: IfaceFamTyConFlav }
 
-  | IfaceClass { ifCtxt    :: IfaceContext,             -- Context...
+  | IfaceClass { ifCtxt    :: IfaceContext,             -- Superclasses
                  ifName    :: IfaceTopBndr,             -- Name of the class TyCon
                  ifTyVars  :: [IfaceTvBndr],            -- Type variables
                  ifRoles   :: [Role],                   -- Roles
@@ -205,7 +205,8 @@ data IfaceConDecl
 
 type IfaceEqSpec = [(IfLclName,IfaceType)]
 
-data IfaceBang
+data IfaceBang  -- This corresponds to an HsImplBang; that is, the final
+                -- implementation decision about the data constructor arg
   = IfNoBang | IfStrict | IfUnpack | IfUnpackCo IfaceCoercion
 
 data IfaceClsInst
@@ -298,7 +299,7 @@ data IfaceUnfolding
 data IfaceIdDetails
   = IfVanillaId
   | IfRecSelId IfaceTyCon Bool
-  | IfDFunId Int          -- Number of silent args
+  | IfDFunId
 
 {-
 Note [Versioning of instances]
@@ -993,7 +994,7 @@ instance Outputable IfaceIdDetails where
                           <+> if b
                                 then ptext (sLit "<naughty>")
                                 else Outputable.empty
-  ppr (IfDFunId ns)     = ptext (sLit "DFunId") <> brackets (int ns)
+  ppr IfDFunId          = ptext (sLit "DFunId")
 
 instance Outputable IfaceIdInfo where
   ppr NoInfo       = Outputable.empty
@@ -1600,13 +1601,13 @@ instance Binary IfaceAnnotation where
 instance Binary IfaceIdDetails where
     put_ bh IfVanillaId      = putByte bh 0
     put_ bh (IfRecSelId a b) = putByte bh 1 >> put_ bh a >> put_ bh b
-    put_ bh (IfDFunId n)     = do { putByte bh 2; put_ bh n }
+    put_ bh IfDFunId         = putByte bh 2
     get bh = do
         h <- getByte bh
         case h of
             0 -> return IfVanillaId
             1 -> do { a <- get bh; b <- get bh; return (IfRecSelId a b) }
-            _ -> do { n <- get bh; return (IfDFunId n) }
+            _ -> return IfDFunId 
 
 instance Binary IfaceIdInfo where
     put_ bh NoInfo      = putByte bh 0

@@ -183,16 +183,16 @@ rnExpr expr@(SectionR {})
   = do  { addErr (sectionErr expr); rnSection expr }
 
 ---------------------------------------------
-rnExpr (HsCoreAnn ann expr)
+rnExpr (HsCoreAnn src ann expr)
   = do { (expr', fvs_expr) <- rnLExpr expr
-       ; return (HsCoreAnn ann expr', fvs_expr) }
+       ; return (HsCoreAnn src ann expr', fvs_expr) }
 
-rnExpr (HsSCC lbl expr)
+rnExpr (HsSCC src lbl expr)
   = do { (expr', fvs_expr) <- rnLExpr expr
-       ; return (HsSCC lbl expr', fvs_expr) }
-rnExpr (HsTickPragma info expr)
+       ; return (HsSCC src lbl expr', fvs_expr) }
+rnExpr (HsTickPragma src info expr)
   = do { (expr', fvs_expr) <- rnLExpr expr
-       ; return (HsTickPragma info expr', fvs_expr) }
+       ; return (HsTickPragma src info expr', fvs_expr) }
 
 rnExpr (HsLam matches)
   = do { (matches', fvMatch) <- rnMatchGroup LambdaExpr rnLExpr matches
@@ -313,10 +313,19 @@ rnExpr e@(ELazyPat {}) = patSynErr e
 
 For the static form we check that the free variables are all top-level
 value bindings. This is done by checking that the name is external or
-wired-in. See the Note about the NameSorts in Name.lhs.
+wired-in. See the Notes about the NameSorts in Name.hs.
 -}
 
 rnExpr e@(HsStatic expr) = do
+    target <- fmap hscTarget getDynFlags
+    case target of
+      -- SPT entries are expected to exist in object code so far, and this is
+      -- not the case in interpreted mode. See bug #9878.
+      HscInterpreted -> addErr $ sep
+        [ text "The static form is not supported in interpreted mode."
+        , text "Please use -fobject-code."
+        ]
+      _ -> return ()
     (expr',fvExpr) <- rnLExpr expr
     stage <- getStage
     case stage of
@@ -550,7 +559,7 @@ methodNamesMatch :: MatchGroup Name (LHsCmd Name) -> FreeVars
 methodNamesMatch (MG { mg_alts = ms })
   = plusFVs (map do_one ms)
  where
-    do_one (L _ (Match _ _ grhss)) = methodNamesGRHSs grhss
+    do_one (L _ (Match _ _ _ grhss)) = methodNamesGRHSs grhss
 
 -------------------------------------------------
 -- gaw 2004

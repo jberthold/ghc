@@ -32,7 +32,7 @@ import VarSet
 import VarEnv
 import NameEnv
 import Bag
-import ErrUtils         ( ErrMsg, makeIntoWarning, pprLocErrMsg, isWarning )
+import ErrUtils         ( ErrMsg, pprLocErrMsg )
 import BasicTypes
 import Util
 import FastString
@@ -99,36 +99,42 @@ reportUnsolved :: WantedConstraints -> TcM (Bag EvBind)
 reportUnsolved wanted
   = do { binds_var <- newTcEvBinds
        ; defer_errors <- goptM Opt_DeferTypeErrors
+
        ; defer_holes <- goptM Opt_DeferTypedHoles
-       ; warn_holes <- woptM Opt_WarnTypedHoles
+       ; warn_holes  <- woptM Opt_WarnTypedHoles
+       ; let expr_holes | not defer_holes = HoleError
+                        | warn_holes      = HoleWarn
+                        | otherwise       = HoleDefer
+
+       ; partial_sigs      <- xoptM Opt_PartialTypeSignatures
        ; warn_partial_sigs <- woptM Opt_WarnPartialTypeSignatures
-       ; report_unsolved (Just binds_var) defer_errors defer_holes
-             warn_holes warn_partial_sigs wanted
+       ; let type_holes | not partial_sigs  = HoleError
+                        | warn_partial_sigs = HoleWarn
+                        | otherwise         = HoleDefer
+
+       ; report_unsolved (Just binds_var) defer_errors expr_holes type_holes wanted
        ; getTcEvBinds binds_var }
 
 reportAllUnsolved :: WantedConstraints -> TcM ()
--- Report all unsolved goals, even if -fdefer-type-errors is on
+-- Report *all* unsolved goals as errors, even if -fdefer-type-errors is on
 -- See Note [Deferring coercion errors to runtime]
-reportAllUnsolved wanted = do
-    warn_holes <- woptM Opt_WarnTypedHoles
-    warn_partial_sigs <- woptM Opt_WarnPartialTypeSignatures
-    report_unsolved Nothing False False warn_holes warn_partial_sigs wanted
+reportAllUnsolved wanted
+  = report_unsolved Nothing False HoleError HoleError wanted
 
 report_unsolved :: Maybe EvBindsVar  -- cec_binds
                 -> Bool              -- cec_defer_type_errors
-                -> Bool              -- cec_defer_holes
-                -> Bool              -- cec_warn_holes
-                -> Bool              -- cec_warn_partial_type_signatures
+                -> HoleChoice        -- Expression holes
+                -> HoleChoice        -- Type holes
                 -> WantedConstraints -> TcM ()
 -- Important precondition:
 -- WantedConstraints are fully zonked and unflattened, that is,
 -- zonkWC has already been applied to these constraints.
-report_unsolved mb_binds_var defer_errors defer_holes warn_holes
-                warn_partial_sigs wanted
+report_unsolved mb_binds_var defer_errors expr_holes type_holes wanted
   | isEmptyWC wanted
   = return ()
   | otherwise
   = do { traceTc "reportUnsolved (before unflattening)" (ppr wanted)
+       ; warn_redundant <- woptM Opt_WarnRedundantConstraints
 
        ; env0 <- tcInitTidyEnv
 
@@ -139,10 +145,10 @@ report_unsolved mb_binds_var defer_errors defer_holes warn_holes
              err_ctxt = CEC { cec_encl  = []
                             , cec_tidy  = tidy_env
                             , cec_defer_type_errors = defer_errors
-                            , cec_defer_holes = defer_holes
-                            , cec_warn_holes = warn_holes
-                            , cec_warn_partial_type_signatures = warn_partial_sigs
+                            , cec_expr_holes = expr_holes
+                            , cec_type_holes = type_holes
                             , cec_suppress = False -- See Note [Suppressing error messages]
+                            , cec_warn_redundant = warn_redundant
                             , cec_binds    = mb_binds_var }
 
        ; traceTc "reportUnsolved (after unflattening):" $
@@ -154,6 +160,11 @@ report_unsolved mb_binds_var defer_errors defer_holes warn_holes
 --------------------------------------------
 --      Internal functions
 --------------------------------------------
+
+data HoleChoice
+  = HoleError     -- A hole is a compile-time error
+  | HoleWarn      -- Defer to runtime, emit a compile-time warning
+  | HoleDefer     -- Defer to runtime, no warning
 
 data ReportErrCtxt
     = CEC { cec_encl :: [Implication]  -- Enclosing implications
@@ -170,16 +181,11 @@ data ReportErrCtxt
                                           -- Defer type errors until runtime
                                           -- Irrelevant if cec_binds = Nothing
 
-          , cec_defer_holes :: Bool     -- True <=> -fdefer-typed-holes
-                                        -- Turn typed holes into runtime errors
-                                        -- Irrelevant if cec_binds = Nothing
+          , cec_expr_holes :: HoleChoice  -- Holes in expressions
+          , cec_type_holes :: HoleChoice  -- Holes in types
 
-          , cec_warn_holes :: Bool  -- True <=> -fwarn-typed-holes
-                                    -- Controls whether typed holes produce warnings
-          , cec_warn_partial_type_signatures :: Bool
-                                    -- True <=> -fwarn-partial-type-signatures
-                                    -- Controls whether holes in partial type
-                                    -- signatures produce warnings
+          , cec_warn_redundant :: Bool    -- True <=> -fwarn-redundant-constraints
+
           , cec_suppress :: Bool    -- True <=> More important errors have occurred,
                                     --          so create bindings if need be, but
                                     --          don't issue any more errors/warnings
@@ -189,8 +195,9 @@ data ReportErrCtxt
 {-
 Note [Suppressing error messages]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The cec_suppress flag says "don't report any errors.  Instead, just create
+The cec_suppress flag says "don't report any errors".  Instead, just create
 evidence bindings (as usual).  It's used when more important errors have occurred.
+
 Specifically (see reportWanteds)
   * If there are insoluble Givens, then we are in unreachable code and all bets
     are off.  So don't report any further errors.
@@ -202,15 +209,20 @@ Specifically (see reportWanteds)
 reportImplic :: ReportErrCtxt -> Implication -> TcM ()
 reportImplic ctxt implic@(Implic { ic_skols = tvs, ic_given = given
                                  , ic_wanted = wanted, ic_binds = evb
-                                 , ic_insol = ic_insoluble, ic_info = info })
+                                 , ic_status = status, ic_info = info
+                                 , ic_env = tcl_env })
   | BracketSkol <- info
-  , not ic_insoluble -- For Template Haskell brackets report only
-  = return ()        -- definite errors. The whole thing will be re-checked
+  , not (isInsolubleStatus status)
+  = return ()        -- For Template Haskell brackets report only
+                     -- definite errors. The whole thing will be re-checked
                      -- later when we plug it in, and meanwhile there may
                      -- certainly be un-satisfied constraints
 
   | otherwise
-  = reportWanteds ctxt' wanted
+  = do { reportWanteds ctxt' wanted
+       ; traceTc "reportImplic" (ppr implic)
+       ; when (cec_warn_redundant ctxt) $
+         warnRedundantConstraints ctxt' tcl_env info' dead_givens }
   where
     (env1, tvs') = mapAccumL tidyTyVarBndr (cec_tidy ctxt) tvs
     (env2, info') = tidySkolemInfo env1 info
@@ -222,12 +234,43 @@ reportImplic ctxt implic@(Implic { ic_skols = tvs, ic_given = given
                  , cec_binds = case cec_binds ctxt of
                                  Nothing -> Nothing
                                  Just {} -> Just evb }
+    dead_givens = case status of
+                    IC_Solved { ics_dead = dead } -> dead
+                    _                             -> []
+
+warnRedundantConstraints :: ReportErrCtxt -> TcLclEnv -> SkolemInfo -> [EvVar] -> TcM ()
+warnRedundantConstraints ctxt env info ev_vars
+ | null ev_vars
+ = return ()
+
+ | SigSkol {} <- info
+ = setLclEnv env $  -- We want to add "In the type signature for f"
+                    -- to the error context, which is a bit tiresome
+   addErrCtxt (ptext (sLit "In") <+> ppr info) $
+   do { env <- getLclEnv
+      ; msg <- mkErrorMsg ctxt env doc
+      ; reportWarning msg }
+
+ | otherwise  -- But for InstSkol there already *is* a surrounding
+              -- "In the instance declaration for Eq [a]" context
+              -- and we don't want to say it twice. Seems a bit ad-hoc
+ = do { msg <- mkErrorMsg ctxt env doc
+      ; reportWarning msg }
+ where
+   doc = ptext (sLit "Redundant constraint") <> plural ev_vars <> colon
+         <+> pprEvVarTheta ev_vars
 
 reportWanteds :: ReportErrCtxt -> WantedConstraints -> TcM ()
-reportWanteds ctxt wanted@(WC { wc_simple = simples, wc_insol = insols, wc_impl = implics })
-  = do { reportSimples ctxt  (mapBag (tidyCt env) insol_given)
-       ; reportSimples ctxt1 (mapBag (tidyCt env) insol_wanted)
-       ; reportSimples ctxt2 (mapBag (tidyCt env) simples)
+reportWanteds ctxt (WC { wc_simple = simples, wc_insol = insols, wc_impl = implics })
+  = do { ctxt1 <- reportSimples ctxt  (mapBag (tidyCt env) insol_given)
+       ; ctxt2 <- reportSimples ctxt1 (mapBag (tidyCt env) insol_wanted)
+
+         -- For the simple wanteds, suppress them if there are any
+         -- insolubles in the tree, to avoid unnecessary clutter
+       ; let ctxt2' = ctxt { cec_suppress = cec_suppress ctxt2
+                                         || anyBag insolubleImplic implics }
+       ; _ <- reportSimples ctxt2'  (mapBag (tidyCt env) simples)
+
             -- All the Derived ones have been filtered out of simples
             -- by the constraint solver. This is ok; we don't want
             -- to report unsolved Derived goals as errors
@@ -235,28 +278,22 @@ reportWanteds ctxt wanted@(WC { wc_simple = simples, wc_insol = insols, wc_impl 
        ; mapBagM_ (reportImplic ctxt1) implics }
             -- NB ctxt1: don't suppress inner insolubles if there's only a
             -- wanted insoluble here; but do suppress inner insolubles
-            -- if there's a given insoluble here (= inaccessible code)
+            -- if there's a *given* insoluble here (= inaccessible code)
  where
-    (insol_given, insol_wanted) = partitionBag isGivenCt insols
     env = cec_tidy ctxt
+    (insol_given, insol_wanted) = partitionBag isGivenCt insols
 
-      -- See Note [Suppressing error messages]
-    suppress0 = cec_suppress ctxt
-    suppress1 = suppress0 || not (isEmptyBag insol_given)
-    suppress2 = suppress0 || insolubleWC wanted
-    ctxt1     = ctxt { cec_suppress = suppress1 }
-    ctxt2     = ctxt { cec_suppress = suppress2 }
-
-reportSimples :: ReportErrCtxt -> Cts -> TcM ()
+reportSimples :: ReportErrCtxt -> Cts -> TcM ReportErrCtxt
 reportSimples ctxt simples    -- Here 'simples' includes insolble goals
   =  traceTc "reportSimples" (vcat [ ptext (sLit "Simples =") <+> ppr simples
                                    , ptext (sLit "Suppress =") <+> ppr (cec_suppress ctxt)])
-  >> tryReporters
+  >> tryReporters ctxt
       [ -- First deal with things that are utterly wrong
         -- Like Int ~ Bool (incl nullary TyCons)
         -- or  Int ~ t a   (AppTy on one side)
-        ("Utterly wrong",  utterly_wrong,   True,  mkGroupReporter mkEqErr)
-      , ("Holes",          is_hole,         False, mkHoleReporter mkHoleError)
+        ("Utterly wrong (given)",  utterly_wrong_given, True,  mkGroupReporter mkEqErr)
+      , ("Utterly wrong (other)",  utterly_wrong_other, True,  mkGroupReporter mkEqErr)
+      , ("Holes",          is_hole,         False, mkHoleReporter)
 
         -- Report equalities of form (a~ty).  They are usually
         -- skolem-equalities, and they cause confusing knock-on
@@ -270,15 +307,19 @@ reportSimples ctxt simples    -- Here 'simples' includes insolble goals
       , ("Irreds",          is_irred,    False, mkGroupReporter mkIrredErr)
       , ("Dicts",           is_dict,     False, mkGroupReporter mkDictErr)
       ]
-      panicReporter ctxt (bagToList simples)
+      (bagToList simples)
           -- TuplePreds should have been expanded away by the constraint
           -- simplifier, so they shouldn't show up at this point
   where
-    utterly_wrong, skolem_eq, is_hole, is_dict,
+    utterly_wrong_given, utterly_wrong_other, skolem_eq, is_hole, is_dict,
       is_equality, is_ip, is_irred :: Ct -> PredTree -> Bool
 
-    utterly_wrong _ (EqPred _ ty1 ty2) = isRigid ty1 && isRigid ty2
-    utterly_wrong _ _ = False
+    utterly_wrong_given ct (EqPred _ ty1 ty2)
+      | isGivenCt ct = isRigid ty1 && isRigid ty2
+    utterly_wrong_given _ _ = False
+
+    utterly_wrong_other _ (EqPred _ ty1 ty2) = isRigid ty1 && isRigid ty2
+    utterly_wrong_other _ _ = False
 
     is_hole ct _ = isHoleCt ct
 
@@ -328,11 +369,6 @@ type ReporterSpec
     , Bool                       -- True <=> suppress subsequent reporters
     , Reporter)                  -- The reporter itself
 
-panicReporter :: Reporter
-panicReporter _ cts
-  | null cts  = return ()
-  | otherwise =  pprPanic "reportSimples" (ppr cts)
-
 mkSkolReporter :: Reporter
 -- Suppress duplicates with the same LHS
 mkSkolReporter ctxt cts
@@ -344,12 +380,12 @@ mkSkolReporter ctxt cts
              (eq_rel1 `compare` eq_rel2) `thenCmp` (ty1 `cmpType` ty2)
            _ -> pprPanic "mkSkolReporter" (ppr ct1 $$ ppr ct2)
 
-mkHoleReporter :: (ReportErrCtxt -> Ct -> TcM ErrMsg) -> Reporter
+mkHoleReporter :: Reporter
 -- Reports errors one at a time
-mkHoleReporter mk_err ctxt
+mkHoleReporter ctxt
   = mapM_ $ \ct ->
-    do { err <- mk_err ctxt ct
-       ; maybeReportHoleError ctxt err
+    do { err <- mkHoleError ctxt ct
+       ; maybeReportHoleError ctxt ct err
        ; maybeAddDeferredHoleBinding ctxt err ct }
 
 mkGroupReporter :: (ReportErrCtxt -> [Ct] -> TcM ErrMsg)
@@ -371,27 +407,34 @@ reportGroup mk_err ctxt cts
                -- Add deferred bindings for all
                -- But see Note [Always warn with -fdefer-type-errors]
 
-maybeReportHoleError :: ReportErrCtxt -> ErrMsg -> TcM ()
-maybeReportHoleError ctxt err
+maybeReportHoleError :: ReportErrCtxt -> Ct -> ErrMsg -> TcM ()
+maybeReportHoleError ctxt ct err
   -- When -XPartialTypeSignatures is on, warnings (instead of errors) are
   -- generated for holes in partial type signatures. Unless
   -- -fwarn_partial_type_signatures is not on, in which case the messages are
   -- discarded.
-  | isWarning err
-  = when (cec_warn_partial_type_signatures ctxt)
-            (reportWarning err)
-  | cec_defer_holes ctxt
-  = when (cec_warn_holes ctxt)
-            (reportWarning (makeIntoWarning err))
+  | isTypeHoleCt ct
+  = -- For partial type signatures, generate warnings only, and do that
+    -- only if -fwarn_partial_type_signatures is on
+    case cec_type_holes ctxt of
+       HoleError -> reportError err
+       HoleWarn  -> reportWarning err
+       HoleDefer -> return ()
+
+  -- Otherwise this is a typed hole in an expression
   | otherwise
-  = reportError err
+  = -- If deferring, report a warning only if -fwarn-typed-holds is on
+    case cec_expr_holes ctxt of
+       HoleError -> reportError err
+       HoleWarn  -> reportWarning err
+       HoleDefer -> return ()
 
 maybeReportError :: ReportErrCtxt -> ErrMsg -> TcM ()
 -- Report the error and/or make a deferred binding for it
 maybeReportError ctxt err
   -- See Note [Always warn with -fdefer-type-errors]
   | cec_defer_type_errors ctxt
-  = reportWarning (makeIntoWarning err)
+  = reportWarning err
   | cec_suppress ctxt
   = return ()
   | otherwise
@@ -409,16 +452,20 @@ addDeferredBinding ctxt err ct
                        err_msg $$ text "(deferred type error)"
 
          -- Create the binding
-       ; addTcEvBind ev_binds_var ev_id (EvDelayedError pred err_fs) }
+       ; addTcEvBind ev_binds_var (mkWantedEvBind ev_id (EvDelayedError pred err_fs)) }
 
   | otherwise   -- Do not set any evidence for Given/Derived
   = return ()
 
 maybeAddDeferredHoleBinding :: ReportErrCtxt -> ErrMsg -> Ct -> TcM ()
 maybeAddDeferredHoleBinding ctxt err ct
-    | cec_defer_holes ctxt && isTypedHoleCt ct
-    = addDeferredBinding ctxt err ct
-    | otherwise
+    | isExprHoleCt ct
+    , case cec_expr_holes ctxt of
+        HoleDefer -> True
+        HoleWarn  -> True
+        HoleError -> False
+    = addDeferredBinding ctxt err ct  -- Only add bindings for holes in expressions
+    | otherwise                       -- not for holes in partial type signatures
     = return ()
 
 maybeAddDeferredBinding :: ReportErrCtxt -> ErrMsg -> Ct -> TcM ()
@@ -428,14 +475,18 @@ maybeAddDeferredBinding ctxt err ct
     | otherwise
     = return ()
 
-tryReporters :: [ReporterSpec] -> Reporter -> Reporter
+tryReporters :: ReportErrCtxt -> [ReporterSpec] -> [Ct] -> TcM ReportErrCtxt
 -- Use the first reporter in the list whose predicate says True
-tryReporters reporters deflt ctxt cts
+tryReporters ctxt reporters cts
   = do { traceTc "tryReporters {" (ppr cts)
-       ; go ctxt reporters cts
-       ; traceTc "tryReporters }" empty }
+       ; ctxt' <- go ctxt reporters cts
+       ; traceTc "tryReporters }" empty
+       ; return ctxt' }
   where
-    go ctxt [] cts = deflt ctxt cts
+    go ctxt [] cts
+      | null cts  = return ctxt
+      | otherwise = pprPanic "tryReporters" (ppr cts)
+
     go ctxt ((str, pred, suppress_after, reporter) : rs) cts
       | null yeses  = do { traceTc "tryReporters: no" (text str)
                          ; go ctxt rs cts }
@@ -474,13 +525,16 @@ pprWithArising (ct:cts)
     ppr_one ct' = hang (parens (pprType (ctPred ct')))
                      2 (pprArisingAt (ctLoc ct'))
 
-mkErrorMsg :: ReportErrCtxt -> Ct -> SDoc -> TcM ErrMsg
-mkErrorMsg ctxt ct msg
-  = do { let tcl_env = ctLocEnv (ctLoc ct)
-       ; err_info <- mkErrInfo (cec_tidy ctxt) (tcl_ctxt tcl_env)
-       ; mkLongErrAt (tcl_loc tcl_env) msg err_info }
+mkErrorMsgFromCt :: ReportErrCtxt -> Ct -> SDoc -> TcM ErrMsg
+mkErrorMsgFromCt ctxt ct msg
+  = mkErrorMsg ctxt (ctLocEnv (ctLoc ct)) msg
 
-type UserGiven = ([EvVar], SkolemInfo, Bool, SrcSpan)
+mkErrorMsg :: ReportErrCtxt -> TcLclEnv -> SDoc -> TcM ErrMsg
+mkErrorMsg ctxt tcl_env msg
+  = do { err_info <- mkErrInfo (cec_tidy ctxt) (tcl_ctxt tcl_env)
+       ; mkLongErrAt (RealSrcSpan (tcl_loc tcl_env)) msg err_info }
+
+type UserGiven = ([EvVar], SkolemInfo, Bool, RealSrcSpan)
 
 getUserGivens :: ReportErrCtxt -> [UserGiven]
 -- One item for each enclosing implication
@@ -559,16 +613,16 @@ solve it.
 
 
 ************************************************************************
-*                  *
+*                                                                      *
                 Irreducible predicate errors
-*                  *
+*                                                                      *
 ************************************************************************
 -}
 
 mkIrredErr :: ReportErrCtxt -> [Ct] -> TcM ErrMsg
 mkIrredErr ctxt cts
-  = do { (ctxt, binds_msg) <- relevantBindings True ctxt ct1
-       ; mkErrorMsg ctxt ct1 (msg $$ binds_msg) }
+  = do { (ctxt, binds_msg, _) <- relevantBindings True ctxt ct1
+       ; mkErrorMsgFromCt ctxt ct1 (msg $$ binds_msg) }
   where
     (ct1:_) = cts
     orig    = ctLocOrigin (ctLoc ct1)
@@ -577,23 +631,24 @@ mkIrredErr ctxt cts
 
 ----------------
 mkHoleError :: ReportErrCtxt -> Ct -> TcM ErrMsg
-mkHoleError ctxt ct@(CHoleCan { cc_occ = occ })
-  = do { partial_sigs <- xoptM Opt_PartialTypeSignatures
-       ; let tyvars = varSetElems (tyVarsOfCt ct)
+mkHoleError ctxt ct@(CHoleCan { cc_occ = occ, cc_hole = hole_sort })
+  = do { let tyvars = varSetElems (tyVarsOfCt ct)
              tyvars_msg = map loc_msg tyvars
              msg = vcat [ hang (ptext (sLit "Found hole") <+> quotes (ppr occ))
                              2 (ptext (sLit "with type:") <+> pprType (ctEvPred (ctEvidence ct)))
                         , ppUnless (null tyvars_msg) (ptext (sLit "Where:") <+> vcat tyvars_msg)
-                        , if in_typesig && not partial_sigs then pts_hint else empty ]
-       ; (ctxt, binds_doc) <- relevantBindings False ctxt ct
-               -- The 'False' means "don't filter the bindings; see Trac #8191
-       ; errMsg <- mkErrorMsg ctxt ct (msg $$ binds_doc)
-       ; if in_typesig && partial_sigs
-           then return $ makeIntoWarning errMsg
-           else return errMsg }
+                        , pts_hint ]
+       ; (ctxt, binds_doc, _) <- relevantBindings False ctxt ct
+               -- The 'False' means "don't filter the bindings"; see Trac #8191
+       ; mkErrorMsgFromCt ctxt ct (msg $$ binds_doc) }
   where
-    in_typesig = not $ isTypedHoleCt ct
-    pts_hint = ptext (sLit "To use the inferred type, enable PartialTypeSignatures")
+    pts_hint
+      | TypeHole  <- hole_sort
+      , HoleError <- cec_type_holes ctxt
+      = ptext (sLit "To use the inferred type, enable PartialTypeSignatures")
+      | otherwise
+      = empty
+
     loc_msg tv
        = case tcTyVarDetails tv of
           SkolemTv {} -> quotes (ppr tv) <+> skol_msg
@@ -607,8 +662,8 @@ mkHoleError _ ct = pprPanic "mkHoleError" (ppr ct)
 ----------------
 mkIPErr :: ReportErrCtxt -> [Ct] -> TcM ErrMsg
 mkIPErr ctxt cts
-  = do { (ctxt, bind_msg) <- relevantBindings True ctxt ct1
-       ; mkErrorMsg ctxt ct1 (msg $$ bind_msg) }
+  = do { (ctxt, bind_msg, _) <- relevantBindings True ctxt ct1
+       ; mkErrorMsgFromCt ctxt ct1 (msg $$ bind_msg) }
   where
     (ct1:_) = cts
     orig    = ctLocOrigin (ctLoc ct1)
@@ -657,7 +712,7 @@ mkEqErr1 :: ReportErrCtxt -> Ct -> TcM ErrMsg
 -- Wanted constraints only!
 mkEqErr1 ctxt ct
   | isGiven ev
-  = do { (ctxt, binds_msg) <- relevantBindings True ctxt ct
+  = do { (ctxt, binds_msg, _) <- relevantBindings True ctxt ct
        ; let (given_loc, given_msg) = mk_given (cec_encl ctxt)
        ; dflags <- getDynFlags
        ; mkEqErr_help dflags ctxt (given_msg $$ binds_msg)
@@ -665,8 +720,7 @@ mkEqErr1 ctxt ct
                       Nothing ty1 ty2 }
 
   | otherwise   -- Wanted or derived
-  = do { (ctxt, binds_msg) <- relevantBindings True ctxt ct
-       ; (env1, tidy_orig) <- zonkTidyOrigin (cec_tidy ctxt) (ctLocOrigin loc)
+  = do { (ctxt, binds_msg, tidy_orig) <- relevantBindings True ctxt ct
        ; rdr_env <- getGlobalRdrEnv
        ; fam_envs <- tcGetFamInstEnvs
        ; let (is_oriented, wanted_msg) = mk_wanted_extra tidy_orig
@@ -675,8 +729,7 @@ mkEqErr1 ctxt ct
                ReprEq -> mkCoercibleExplanation rdr_env fam_envs ty1 ty2
        ; dflags <- getDynFlags
        ; traceTc "mkEqErr1" (ppr ct $$ pprCtOrigin (ctLocOrigin loc) $$ pprCtOrigin tidy_orig)
-       ; mkEqErr_help dflags (ctxt {cec_tidy = env1})
-                      (wanted_msg $$ coercible_msg $$ binds_msg)
+       ; mkEqErr_help dflags ctxt (wanted_msg $$ coercible_msg $$ binds_msg)
                       ct is_oriented ty1 ty2 }
   where
     ev         = ctEvidence ct
@@ -804,8 +857,8 @@ reportEqErr :: ReportErrCtxt -> SDoc
             -> TcType -> TcType -> TcM ErrMsg
 reportEqErr ctxt extra1 ct oriented ty1 ty2
   = do { let extra2 = mkEqInfoMsg ct ty1 ty2
-       ; mkErrorMsg ctxt ct (vcat [ misMatchOrCND ctxt ct oriented ty1 ty2
-                                   , extra2, extra1]) }
+       ; mkErrorMsgFromCt ctxt ct (vcat [ misMatchOrCND ctxt ct oriented ty1 ty2
+                                        , extra2, extra1]) }
 
 mkTyVarEqErr :: DynFlags -> ReportErrCtxt -> SDoc -> Ct
              -> Maybe SwapFlag -> TcTyVar -> TcType -> TcM ErrMsg
@@ -815,29 +868,29 @@ mkTyVarEqErr dflags ctxt extra ct oriented tv1 ty2
                             -- be oriented the other way round;
                             -- see TcCanonical.canEqTyVarTyVar
   || isSigTyVar tv1 && not (isTyVarTy ty2)
-  = mkErrorMsg ctxt ct (vcat [ misMatchOrCND ctxt ct oriented ty1 ty2
-                             , extraTyVarInfo ctxt tv1 ty2
-                             , extra ])
+  = mkErrorMsgFromCt ctxt ct (vcat [ misMatchOrCND ctxt ct oriented ty1 ty2
+                                   , extraTyVarInfo ctxt tv1 ty2
+                                   , extra ])
 
   -- So tv is a meta tyvar (or started that way before we
   -- generalised it).  So presumably it is an *untouchable*
   -- meta tyvar or a SigTv, else it'd have been unified
   | not (k2 `tcIsSubKind` k1)            -- Kind error
-  = mkErrorMsg ctxt ct $ (kindErrorMsg (mkTyVarTy tv1) ty2 $$ extra)
+  = mkErrorMsgFromCt ctxt ct $ (kindErrorMsg (mkTyVarTy tv1) ty2 $$ extra)
 
   | OC_Occurs <- occ_check_expand
   , NomEq <- ctEqRel ct      -- reporting occurs check for Coercible is strange
   = do { let occCheckMsg = hang (text "Occurs check: cannot construct the infinite type:")
                               2 (sep [ppr ty1, char '~', ppr ty2])
              extra2 = mkEqInfoMsg ct ty1 ty2
-       ; mkErrorMsg ctxt ct (occCheckMsg $$ extra2 $$ extra) }
+       ; mkErrorMsgFromCt ctxt ct (occCheckMsg $$ extra2 $$ extra) }
 
   | OC_Forall <- occ_check_expand
   = do { let msg = vcat [ ptext (sLit "Cannot instantiate unification variable")
                           <+> quotes (ppr tv1)
                         , hang (ptext (sLit "with a type involving foralls:")) 2 (ppr ty2)
                         , nest 2 (ptext (sLit "Perhaps you want ImpredicativeTypes")) ]
-       ; mkErrorMsg ctxt ct msg }
+       ; mkErrorMsgFromCt ctxt ct msg }
 
   -- If the immediately-enclosing implication has 'tv' a skolem, and
   -- we know by now its an InferSkol kind of skolem, then presumably
@@ -846,9 +899,9 @@ mkTyVarEqErr dflags ctxt extra ct oriented tv1 ty2
   | (implic:_) <- cec_encl ctxt
   , Implic { ic_skols = skols } <- implic
   , tv1 `elem` skols
-  = mkErrorMsg ctxt ct (vcat [ misMatchMsg oriented eq_rel ty1 ty2
-                             , extraTyVarInfo ctxt tv1 ty2
-                             , extra ])
+  = mkErrorMsgFromCt ctxt ct (vcat [ misMatchMsg oriented eq_rel ty1 ty2
+                                   , extraTyVarInfo ctxt tv1 ty2
+                                   , extra ])
 
   -- Check for skolem escape
   | (implic:_) <- cec_encl ctxt   -- Get the innermost context
@@ -868,7 +921,7 @@ mkTyVarEqErr dflags ctxt extra ct oriented tv1 ty2
                                <+> ptext (sLit "bound by")
                              , nest 2 $ ppr skol_info
                              , nest 2 $ ptext (sLit "at") <+> ppr (tcl_loc env) ] ]
-       ; mkErrorMsg ctxt ct (msg $$ tv_extra $$ extra) }
+       ; mkErrorMsgFromCt ctxt ct (msg $$ tv_extra $$ extra) }
 
   -- Nastiest case: attempt to unify an untouchable variable
   | (implic:_) <- cec_encl ctxt   -- Get the innermost context
@@ -877,12 +930,12 @@ mkTyVarEqErr dflags ctxt extra ct oriented tv1 ty2
              tclvl_extra
                 = nest 2 $
                   sep [ quotes (ppr tv1) <+> ptext (sLit "is untouchable")
-                      , nest 2 $ ptext (sLit "inside the constraints") <+> pprEvVarTheta given
+                      , nest 2 $ ptext (sLit "inside the constraints:") <+> pprEvVarTheta given
                       , nest 2 $ ptext (sLit "bound by") <+> ppr skol_info
                       , nest 2 $ ptext (sLit "at") <+> ppr (tcl_loc env) ]
              tv_extra = extraTyVarInfo ctxt tv1 ty2
              add_sig  = suggestAddSig ctxt ty1 ty2
-       ; mkErrorMsg ctxt ct (vcat [msg, tclvl_extra, tv_extra, add_sig, extra]) }
+       ; mkErrorMsgFromCt ctxt ct (vcat [msg, tclvl_extra, tv_extra, add_sig, extra]) }
 
   | otherwise
   = reportEqErr ctxt extra ct oriented (mkTyVarTy tv1) ty2
@@ -948,15 +1001,15 @@ misMatchOrCND ctxt ct oriented ty1 ty2
 
 couldNotDeduce :: [UserGiven] -> (ThetaType, CtOrigin) -> SDoc
 couldNotDeduce givens (wanteds, orig)
-  = vcat [ addArising orig (ptext (sLit "Could not deduce") <+> pprTheta wanteds)
+  = vcat [ addArising orig (ptext (sLit "Could not deduce:") <+> pprTheta wanteds)
          , vcat (pp_givens givens)]
 
 pp_givens :: [UserGiven] -> [SDoc]
 pp_givens givens
    = case givens of
          []     -> []
-         (g:gs) ->      ppr_given (ptext (sLit "from the context")) g
-                 : map (ppr_given (ptext (sLit "or from"))) gs
+         (g:gs) ->      ppr_given (ptext (sLit "from the context:")) g
+                 : map (ppr_given (ptext (sLit "or from:"))) gs
     where
        ppr_given herald (gs, skol_info, _, loc)
            = hang (herald <+> pprEvVarTheta gs)
@@ -1152,7 +1205,7 @@ mkDictErr ctxt cts
        -- have the same source-location origin, to try avoid a cascade
        -- of error from one location
        ; (ctxt, err) <- mk_dict_err ctxt (head (no_inst_cts ++ overlap_cts))
-       ; mkErrorMsg ctxt ct1 err }
+       ; mkErrorMsgFromCt ctxt ct1 err }
   where
     no_givens = null (getUserGivens ctxt)
 
@@ -1184,7 +1237,7 @@ mk_dict_err :: ReportErrCtxt -> (Ct, ClsInstLookupResult)
 mk_dict_err ctxt (ct, (matches, unifiers, safe_haskell))
   | null matches  -- No matches but perhaps several unifiers
   = do { let (is_ambig, ambig_msg) = mkAmbigMsg ct
-       ; (ctxt, binds_msg) <- relevantBindings True ctxt ct
+       ; (ctxt, binds_msg, _) <- relevantBindings True ctxt ct
        ; traceTc "mk_dict_err" (ppr ct $$ ppr is_ambig $$ ambig_msg)
        ; return (ctxt, cannot_resolve_msg is_ambig binds_msg ambig_msg) }
 
@@ -1238,7 +1291,7 @@ mk_dict_err ctxt (ct, (matches, unifiers, safe_haskell))
       = ptext (sLit "No instance for")
         <+> pprParendType pred
         $$ if type_has_arrow pred
-            then nest 2 $ ptext (sLit "(maybe you haven't applied enough arguments to a function?)")
+            then nest 2 $ ptext (sLit "(maybe you haven't applied a function to enough arguments?)")
             else empty
 
       | otherwise
@@ -1334,14 +1387,21 @@ usefulContext ctxt pred
     pred_tvs = tyVarsOfType pred
     go [] = []
     go (ic : ics)
-       = case ic_info ic of
-               -- Do not suggest adding constraints to an *inferred* type signature!
-           SigSkol (InfSigCtxt {}) _ -> rest
-           info                      -> info : rest
+       | implausible ic = rest
+       | otherwise      = ic_info ic : rest
        where
           -- Stop when the context binds a variable free in the predicate
           rest | any (`elemVarSet` pred_tvs) (ic_skols ic) = []
                | otherwise                                 = go ics
+
+    implausible ic
+      | null (ic_skols ic)            = True
+      | implausible_info (ic_info ic) = True
+      | otherwise                     = False
+
+    implausible_info (SigSkol (InfSigCtxt {}) _) = True
+    implausible_info _                           = False
+    -- Do not suggest adding constraints to an *inferred* type signature!
 
 show_fixes :: [SDoc] -> SDoc
 show_fixes []     = empty
@@ -1479,17 +1539,31 @@ getSkolemInfo (implic:implics) tv
 relevantBindings :: Bool  -- True <=> filter by tyvar; False <=> no filtering
                           -- See Trac #8191
                  -> ReportErrCtxt -> Ct
-                 -> TcM (ReportErrCtxt, SDoc)
+                 -> TcM (ReportErrCtxt, SDoc, CtOrigin)
+-- Also returns the zonked and tidied CtOrigin of the constraint
 relevantBindings want_filtering ctxt ct
   = do { dflags <- getDynFlags
+       ; (env1, tidy_orig) <- zonkTidyOrigin (cec_tidy ctxt) (ctLocOrigin loc)
+       ; let ct_tvs    = tyVarsOfCt ct `unionVarSet` extra_tvs
+
+             -- For *kind* errors, report the relevant bindings of the
+             -- enclosing *type* equality, because that's more useful for the programmer
+             extra_tvs = case tidy_orig of
+                             KindEqOrigin t1 t2 _ -> tyVarsOfTypes [t1,t2]
+                             _                    -> emptyVarSet
+       ; traceTc "relevantBindings" $
+           vcat [ ppr ct
+                , pprCtOrigin (ctLocOrigin loc)
+                , ppr ct_tvs
+                , ppr [id | TcIdBndr id _ <- tcl_bndrs lcl_env] ]
+
        ; (tidy_env', docs, discards)
-              <- go (cec_tidy ctxt) (maxRelevantBinds dflags)
+              <- go env1 ct_tvs (maxRelevantBinds dflags)
                     emptyVarSet [] False
                     (tcl_bndrs lcl_env)
          -- tcl_bndrs has the innermost bindings first,
          -- which are probably the most relevant ones
 
-       ; traceTc "relevantBindings" (ppr ct $$ ppr [id | TcIdBndr id _ <- tcl_bndrs lcl_env])
        ; let doc = hang (ptext (sLit "Relevant bindings include"))
                       2 (vcat docs $$ max_msg)
              max_msg | discards
@@ -1497,19 +1571,11 @@ relevantBindings want_filtering ctxt ct
                      | otherwise = empty
 
        ; if null docs
-         then return (ctxt, empty)
-         else do { traceTc "rb" doc
-                 ; return (ctxt { cec_tidy = tidy_env' }, doc) } }
+         then return (ctxt,                          empty, tidy_orig)
+         else return (ctxt { cec_tidy = tidy_env' }, doc,   tidy_orig) }
   where
     loc       = ctLoc ct
     lcl_env   = ctLocEnv loc
-    ct_tvs    = tyVarsOfCt ct `unionVarSet` extra_tvs
-
-    -- For *kind* errors, report the relevant bindings of the
-    -- enclosing *type* equality, because that's more useful for the programmer
-    extra_tvs = case ctLocOrigin loc of
-                  KindEqOrigin t1 t2 _ -> tyVarsOfTypes [t1,t2]
-                  _                    -> emptyVarSet
 
     run_out :: Maybe Int -> Bool
     run_out Nothing = False
@@ -1518,14 +1584,14 @@ relevantBindings want_filtering ctxt ct
     dec_max :: Maybe Int -> Maybe Int
     dec_max = fmap (\n -> n - 1)
 
-    go :: TidyEnv -> Maybe Int -> TcTyVarSet -> [SDoc]
+    go :: TidyEnv -> TcTyVarSet -> Maybe Int -> TcTyVarSet -> [SDoc]
        -> Bool                          -- True <=> some filtered out due to lack of fuel
        -> [TcIdBinder]
        -> TcM (TidyEnv, [SDoc], Bool)   -- The bool says if we filtered any out
                                         -- because of lack of fuel
-    go tidy_env _ _ docs discards []
+    go tidy_env _ _ _ docs discards []
        = return (tidy_env, reverse docs, discards)
-    go tidy_env n_left tvs_seen docs discards (TcIdBndr id top_lvl : tc_bndrs)
+    go tidy_env ct_tvs n_left tvs_seen docs discards (TcIdBndr id top_lvl : tc_bndrs)
        = do { (tidy_env', tidy_ty) <- zonkTidyTcType tidy_env (idType id)
             ; traceTc "relevantBindings 1" (ppr id <+> dcolon <+> ppr tidy_ty)
             ; let id_tvs = tyVarsOfType tidy_ty
@@ -1538,30 +1604,30 @@ relevantBindings want_filtering ctxt ct
                                  && id_tvs `disjointVarSet` ct_tvs)
                        -- We want to filter out this binding anyway
                        -- so discard it silently
-              then go tidy_env n_left tvs_seen docs discards tc_bndrs
+              then go tidy_env ct_tvs n_left tvs_seen docs discards tc_bndrs
 
               else if isTopLevel top_lvl && not (isNothing n_left)
                        -- It's a top-level binding and we have not specified
                        -- -fno-max-relevant-bindings, so discard it silently
-              then go tidy_env n_left tvs_seen docs discards tc_bndrs
+              then go tidy_env ct_tvs n_left tvs_seen docs discards tc_bndrs
 
               else if run_out n_left && id_tvs `subVarSet` tvs_seen
                        -- We've run out of n_left fuel and this binding only
                        -- mentions aleady-seen type variables, so discard it
-              then go tidy_env n_left tvs_seen docs True tc_bndrs
+              then go tidy_env ct_tvs n_left tvs_seen docs True tc_bndrs
 
                        -- Keep this binding, decrement fuel
-              else go tidy_env' (dec_max n_left) new_seen (doc:docs) discards tc_bndrs }
+              else go tidy_env' ct_tvs (dec_max n_left) new_seen (doc:docs) discards tc_bndrs }
 
 -----------------------
-warnDefaulting :: Cts -> Type -> TcM ()
+warnDefaulting :: [Ct] -> Type -> TcM ()
 warnDefaulting wanteds default_ty
   = do { warn_default <- woptM Opt_WarnTypeDefaults
        ; env0 <- tcInitTidyEnv
        ; let tidy_env = tidyFreeTyVars env0 $
-                        tyVarsOfCts wanteds
-             tidy_wanteds = mapBag (tidyCt tidy_env) wanteds
-             (loc, ppr_wanteds) = pprWithArising (bagToList tidy_wanteds)
+                        foldr (unionVarSet . tyVarsOfCt) emptyVarSet wanteds
+             tidy_wanteds = map (tidyCt tidy_env) wanteds
+             (loc, ppr_wanteds) = pprWithArising tidy_wanteds
              warn_msg  = hang (ptext (sLit "Defaulting the following constraint(s) to type")
                                 <+> quotes (ppr default_ty))
                             2 ppr_wanteds

@@ -560,10 +560,13 @@ deriveAutoTypeable auto_typeable done_specs tycl_decls
         -- omitted because the user had manually requested an instance
 
     do_one cls (L _ decl)
+      | isClassDecl decl  -- Traverse into class declarations to check if they have ATs (#9999)
+      = concatMapM (do_one cls) (map (fmap FamDecl) (tcdATs decl))
+      | otherwise
       = do { tc <- tcLookupTyCon (tcdName decl)
            ; if (isTypeSynonymTyCon tc || isTypeFamilyTyCon tc
                                        || tyConName tc `elemNameSet` done_tcs)
-                 -- Do not derive Typeable for type synonyms or type families
+                     -- Do not derive Typeable for type synonyms or type families
              then return []
              else mkPolyKindedTypeableEqn cls tc }
 
@@ -1396,7 +1399,7 @@ cond_functorOK allowFunctions (_, rep_tc, _)
 
   | not (null bad_stupid_theta)
   = NotValid (ptext (sLit "Data type") <+> quotes (ppr rep_tc)
-              <+> ptext (sLit "must not have a class context") <+> pprTheta bad_stupid_theta)
+              <+> ptext (sLit "must not have a class context:") <+> pprTheta bad_stupid_theta)
 
   | otherwise
   = allValid (map check_con data_cons)
@@ -1857,7 +1860,7 @@ simplifyDeriv pred tvs theta
              skol_set   = mkVarSet tvs_skols
              doc = ptext (sLit "deriving") <+> parens (ppr pred)
 
-       ; wanted <- mapM (\(PredOrigin t o) -> newSimpleWanted o (substTy skol_subst t)) theta
+       ; wanted <- mapM (\(PredOrigin t o) -> newWanted o (substTy skol_subst t)) theta
 
        ; traceTc "simplifyDeriv" $
          vcat [ pprTvBndrs tvs $$ ppr theta $$ ppr wanted, doc ]

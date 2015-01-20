@@ -120,13 +120,15 @@ else:
 test('T3294',
      [
       compiler_stats_num_field('max_bytes_used', # Note [residency]
-          [(wordsize(32), 19882188, 15),
+          [(wordsize(32), 26525384, 15),
              #            17725476 (x86/OS X)
              #            14593500 (Windows)
              # 2013-02-10 20651576 (x86/Windows)
              # 2013-02-10 20772984 (x86/OSX)
              # 2013-11-13 24009436 (x86/Windows, 64bit machine)
              # 2014-04-24 19882188 (x86/Windows, 64bit machine)
+             # 2014-12-22 26525384 (x86/Windows) Increase due to silent superclasses?
+
            (wordsize(64), 40000000, 15)]),
              # prev:           25753192 (amd64/Linux)
              # 29/08/2012:     37724352 (amd64/Linux)
@@ -235,11 +237,12 @@ test('T4801',
 test('T3064',
      [# expect_broken( 3064 ),
       compiler_stats_num_field('peak_megabytes_allocated',# Note [residency]
-          [(wordsize(32), 23, 20),
+          [(wordsize(32), 16, 20),
             # expected value: 14 (x86/Linux 28-06-2012):
             # 2013-11-13:     18 (x86/Windows, 64bit machine)
             # 2014-01-22:     23 (x86/Linux)
-           (wordsize(64), 38, 20)]),
+            # 2014-12-22:     23 (x86/Linux) death to silent superclasses
+           (wordsize(64), 27, 20)]),
             # (amd64/Linux):            18
             # (amd64/Linux) 2012-02-07: 26
             # (amd64/Linux) 2013-02-12: 23; increased range to 10%
@@ -250,16 +253,18 @@ test('T3064',
             # (amd64/Linux) 2013-09-11: 37; better arity analysis (weird)
             # (amd64/Linux) (09/09/2014): 42, AMP changes (larger interfaces, more loading)
             # (amd64/Linux) 2014-10-13: 38: Stricter seqDmdType
+            # (amd64/Linux) 2014-12-22: 27: death to silent superclasses
 
       compiler_stats_num_field('bytes allocated',
-          [(wordsize(32), 188697088, 10),
+          [(wordsize(32), 122836340, 10),
             # 2011-06-28: 56380288  (x86/Linux)
             # 2012-10-30: 111189536 (x86/Windows)
             # 2013-11-13: 146626504 (x86/Windows, 64bit machine)
             # 2014-01-22: 162457940 (x86/Linux)
             # 2014-12-01: 162457940 (Windows)
+            # 2014-12-22: 122836340 (Windows) Death to silent superclasses
 
-           (wordsize(64), 350418600, 5)]),
+           (wordsize(64), 243670824, 5)]),
             # (amd64/Linux) (28/06/2011):  73259544
             # (amd64/Linux) (07/02/2013): 224798696
             # (amd64/Linux) (02/08/2013): 236404384, increase from roles
@@ -274,6 +279,8 @@ test('T3064',
             # (amd64/Linux) (14/09/2014): 385145080, BPP changes (more NoImplicitPrelude in base)
             # (amd64/Linux) (10/12/2014): 363103840, improvements in constraint solver
             # (Mac)         (18/12/2014): 350418600, improvements to flattener
+            # (amd64/Linux) (22/12/2014): 243670824, Ha! Death to superclass constraints, makes
+            #                                        much less code for Monad instances
 
 ###################################
 # deactivated for now, as this metric became too volatile recently
@@ -372,12 +379,13 @@ test('T783',
      [ only_ways(['normal']),  # no optimisation for this one
       # expected value: 175,569,928 (x86/Linux)
       compiler_stats_num_field('bytes allocated',
-          [(wordsize(32), 223377364, 5),
+          [(wordsize(32), 235002220, 5),
             # 2012-10-08: 226907420 (x86/Linux)
             # 2013-02-10: 329202116 (x86/Windows)
             # 2013-02-10: 338465200 (x86/OSX)
             # 2014-04-04: 319179104 (x86 Windows, 64 bit machine)
-            # 2014-09-03: 223377364 (Windows, better specialisation, raft of core-to-core optimisations)
+            # 2014-09-03: 223377364 (Windows) better specialisation, raft of core-to-core optimisations
+            # 2014-12-22: 235002220 (Windows) not sure why
 
            (wordsize(64), 441932632, 10)]),
             # prev:       349263216 (amd64/Linux)
@@ -506,7 +514,7 @@ test('T6048',
             # 2014-09-03: 56315812 (x86 Windows, w/w for INLINEAVBLE)
             # 2014-12-01: 49987836 (x86 Windows)
 
-           (wordsize(64), 88186056, 12)])
+           (wordsize(64),  95946688, 12)])
              # 18/09/2012  97247032 amd64/Linux
              # 16/01/2014 108578664 amd64/Linux (unknown, likely foldl-via-foldr)
              # 18/01/2014  95960720 amd64/Linux Call Arity improvements
@@ -515,6 +523,7 @@ test('T6048',
              # 14/07/2014 125431448 amd64/Linux unknown reason. Even worse in GHC-7.8.3. *shurg*
              # 29/08/2014 108354472 amd64/Linux w/w for INLINABLE things
              # 14/09/2014  88186056 amd64/Linux BPP part1 change (more NoImplicitPreludes in base)
+             # 08/01/2014  95946688 amd64/Linux Mostly 4c834fd. Occasional spikes to 103822120!
       ],
       compile,[''])
 
@@ -540,6 +549,7 @@ test('T9675',
           # 2014-10-13    26570896   seq the DmdEnv in seqDmdType as well
           # 2014-10-13    18582472   different machines giving different results..
           # 2014-10-13    22220552   use the mean
+           (wordsize(32), 11220552, 25)
           ]),
        compiler_stats_num_field('peak_megabytes_allocated',
           [(wordsize(64), 53, 15),
@@ -547,6 +557,7 @@ test('T9675',
           # 2014-10-13    58         seq the DmdEnv in seqDmdType as well
           # 2014-10-13    49         different machines giving different results...
           # 2014-10-13    53         use the mean
+            (wordsize(32), 25, 15)
           ]),
        compiler_stats_num_field('bytes allocated',
           [(wordsize(64), 544489040, 10)
@@ -560,10 +571,11 @@ test('T9675',
 test('T9872a',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 2680733672, 5)
+          [(wordsize(64), 2680733672, 5),
           # 2014-12-10    5521332656    Initally created
           # 2014-12-16    5848657456    Flattener parameterized over roles
           # 2014-12-18    2680733672    Reduce type families even more eagerly
+           (wordsize(32), 1400000000, 5)
           ]),
       ],
      compile_fail,
@@ -572,10 +584,11 @@ test('T9872a',
 test('T9872b',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 3480212048, 5)
+          [(wordsize(64), 3480212048, 5),
           # 2014-12-10    6483306280    Initally created
           # 2014-12-16    6892251912    Flattener parameterized over roles
           # 2014-12-18    3480212048    Reduce type families even more eagerly
+           (wordsize(32), 1700000000, 5)
           ]),
       ],
      compile_fail,
@@ -583,10 +596,11 @@ test('T9872b',
 test('T9872c',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 2963554096, 5)
+          [(wordsize(64), 2963554096, 5),
           # 2014-12-10    5495850096    Initally created
           # 2014-12-16    5842024784    Flattener parameterized over roles
           # 2014-12-18    2963554096    Reduce type families even more eagerly
+           (wordsize(32), 1500000000, 5)
           ]),
       ],
      compile_fail,
@@ -594,10 +608,22 @@ test('T9872c',
 test('T9872d',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 739189056, 5)
+          [(wordsize(64), 687562440, 5),
           # 2014-12-18    796071864   Initally created
           # 2014-12-18    739189056   Reduce type families even more eagerly
+          # 2015-01-07    687562440   TrieMap leaf compression
+           (wordsize(32), 353644844, 5)
           ]),
       ],
      compile,
      [''])
+
+test('T9961',
+     [ only_ways(['normal']),
+       compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 772510192, 5)
+          # 2015-01-12    807117816   Initally created
+          ]),
+      ],
+     compile,
+     ['-O'])

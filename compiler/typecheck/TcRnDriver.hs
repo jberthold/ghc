@@ -24,7 +24,7 @@ module TcRnDriver (
     ) where
 
 #ifdef GHCI
-import {-# SOURCE #-} TcSplice ( runQuasi )
+import {-# SOURCE #-} TcSplice ( runQuasi, traceSplice, SpliceInfo(..) )
 import RnSplice ( rnTopSpliceDecls )
 #endif
 
@@ -123,22 +123,30 @@ tcRnModule :: HscEnv
 
 tcRnModule hsc_env hsc_src save_rn_syntax
    parsedModule@HsParsedModule {hpm_module=L loc this_module}
+ | RealSrcSpan real_loc <- loc
  = do { showPass (hsc_dflags hsc_env) "Renamer/typechecker" ;
 
-      ; let { this_pkg = thisPackage (hsc_dflags hsc_env)
-            ; pair@(this_mod,_)
-                = case hsmodName this_module of
-                    Nothing -- 'module M where' is omitted
-                        ->  (mAIN, srcLocSpan (srcSpanStart loc))
-
-                    Just (L mod_loc mod)  -- The normal case
-                        -> (mkModule this_pkg mod, mod_loc) } ;
-
-      ; res <- initTc hsc_env hsc_src save_rn_syntax this_mod $
+      ; initTc hsc_env hsc_src save_rn_syntax this_mod real_loc $
                withTcPlugins hsc_env $
-        tcRnModuleTcRnM hsc_env hsc_src parsedModule pair
-      ; return res
-      }
+               tcRnModuleTcRnM hsc_env hsc_src parsedModule pair }
+
+  | otherwise
+  = return ((emptyBag, unitBag err_msg), Nothing)
+
+  where
+    err_msg = mkPlainErrMsg (hsc_dflags hsc_env) loc $
+              text "Module does not have a RealSrcSpan:" <+> ppr this_mod
+
+    this_pkg = thisPackage (hsc_dflags hsc_env)
+
+    pair :: (Module, SrcSpan)
+    pair@(this_mod,_)
+      | Just (L mod_loc mod) <- hsmodName this_module
+      = (mkModule this_pkg mod, mod_loc)
+
+      | otherwise   -- 'module M where' is omitted
+      = (mAIN, srcLocSpan (srcSpanStart loc))
+
 
 -- To be called at the beginning of renaming hsig files.
 -- If we're processing a signature, load up the RdrEnv
@@ -559,9 +567,12 @@ tc_rn_src_decls boot_details ds
                       rnTopSrcDecls extra_deps th_group
 
                     -- Dump generated top-level declarations
-                    ; loc <- getSrcSpanM
-                    ; traceSplice (vcat [ppr loc <> colon <+> text "Splicing top-level declarations added with addTopDecls ",
-                                   nest 2 (nest 2 (ppr th_rn_decls))])
+                    ; let msg = "top-level declarations added with addTopDecls"
+                    ; traceSplice $ SpliceInfo True
+                                               msg
+                                               Nothing
+                                               Nothing
+                                               (ppr th_rn_decls)
 
                     ; return (tcg_env, appendGroups rn_decls th_rn_decls)
                     }
@@ -998,7 +1009,7 @@ checkBootTyCon tc1 tc2
                (text "The fixities of" <+> pname1 <+>
                 text "differ") `andThenCheck`
          check (eqListBy eqHsBang
-                         (dataConStrictMarks c1) (dataConStrictMarks c2))
+                         (dataConSrcBangs c1) (dataConSrcBangs c2))
                (text "The strictness annotations for" <+> pname1 <+>
                 text "differ") `andThenCheck`
          check (dataConFieldLabels c1 == dataConFieldLabels c2)
@@ -1189,7 +1200,8 @@ tcTopSrcDecls boot_details
                 -- bindings, rules, foreign decls
             ; tcg_env' = tcg_env { tcg_binds   = tcg_binds tcg_env `unionBags` all_binds
                                  , tcg_sigs    = tcg_sigs tcg_env `unionNameSet` sig_names
-                                 , tcg_rules   = tcg_rules tcg_env ++ rules
+                                 , tcg_rules   = tcg_rules tcg_env
+                                                      ++ flattenRuleDecls rules
                                  , tcg_vects   = tcg_vects tcg_env ++ vects
                                  , tcg_anns    = tcg_anns tcg_env ++ annotations
                                  , tcg_ann_env = extendAnnEnvList (tcg_ann_env tcg_env) annotations
@@ -1741,7 +1753,8 @@ tcRnExpr :: HscEnv
          -> IO (Messages, Maybe Type)
 -- Type checks the expression and returns its most general type
 tcRnExpr hsc_env rdr_expr
-  = runTcInteractive hsc_env $ do {
+  = runTcInteractive hsc_env $
+    do {
 
     (rn_expr, _fvs) <- rnLExpr rdr_expr ;
     failIfErrsM ;
@@ -1750,9 +1763,8 @@ tcRnExpr hsc_env rdr_expr
         -- it might have a rank-2 type (e.g. :t runST)
     uniq <- newUnique ;
     let { fresh_it  = itName uniq (getLoc rdr_expr) } ;
-    (((_tc_expr, res_ty), tclvl), lie) <- captureConstraints $
-                                          captureTcLevel     $
-                                          tcInferRho rn_expr ;
+    ((_tc_expr, res_ty), tclvl, lie) <- pushLevelAndCaptureConstraints $
+                                        tcInferRho rn_expr ;
     ((qtvs, dicts, _, _), lie_top) <- captureConstraints $
                                       {-# SCC "simplifyInfer" #-}
                                       simplifyInfer tclvl
@@ -1792,12 +1804,16 @@ tcRnType :: HscEnv
 tcRnType hsc_env normalise rdr_type
   = runTcInteractive hsc_env $
     setXOptM Opt_PolyKinds $   -- See Note [Kind-generalise in tcRnType]
-    do { (rn_type, _fvs) <- rnLHsType GHCiCtx rdr_type
+    do { (wcs, rdr_type') <- extractWildcards rdr_type
+       ; (rn_type, wcs)   <- bindLocatedLocalsRn wcs $ \wcs_new -> do {
+       ; (rn_type, _fvs)  <- rnLHsType GHCiCtx rdr_type'
        ; failIfErrsM
+       ; return (rn_type, wcs_new) }
 
         -- Now kind-check the type
         -- It can have any rank or kind
-       ; ty <- tcHsSigType GhciCtxt rn_type ;
+       ; nwc_tvs <- mapM newWildcardVarMetaKind wcs
+       ; ty <- tcExtendTyVarEnv nwc_tvs $ tcHsSigType GhciCtxt rn_type
 
        ; ty' <- if normalise
                 then do { fam_envs <- tcGetFamInstEnvs
@@ -1891,10 +1907,12 @@ getModuleInterface hsc_env mod
   = runTcInteractive hsc_env $
     loadModuleInterface (ptext (sLit "getModuleInterface")) mod
 
-tcRnLookupRdrName :: HscEnv -> RdrName -> IO (Messages, Maybe [Name])
+tcRnLookupRdrName :: HscEnv -> Located RdrName 
+                  -> IO (Messages, Maybe [Name])
 -- ^ Find all the Names that this RdrName could mean, in GHCi
-tcRnLookupRdrName hsc_env rdr_name
+tcRnLookupRdrName hsc_env (L loc rdr_name)
   = runTcInteractive hsc_env $
+    setSrcSpan loc           $
     do {   -- If the identifier is a constructor (begins with an
            -- upper-case letter), then we need to consider both
            -- constructor and type class identifiers.

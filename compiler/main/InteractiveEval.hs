@@ -75,7 +75,6 @@ import BreakArray
 import RtClosureInspect
 import Outputable
 import FastString
-import MonadUtils
 
 import System.Mem.Weak
 import System.Directory
@@ -427,7 +426,7 @@ rethrow dflags io = Exception.catch io $ \se -> do
 -- resets everything when the computation has stopped running.  This
 -- is a not-very-good way to ensure that only the interactive
 -- evaluation should generate breakpoints.
-withBreakAction :: (ExceptionMonad m, MonadIO m) =>
+withBreakAction :: (ExceptionMonad m) =>
                    Bool -> DynFlags -> MVar () -> MVar Status -> m a -> m a
 withBreakAction step dflags breakMVar statusMVar act
  = gbracket (liftIO setBreakAction) (liftIO . resetBreakAction) (\_ -> act)
@@ -950,9 +949,9 @@ greToRdrNames GRE{ gre_name = name, gre_prov = prov }
 -- | Parses a string as an identifier, and returns the list of 'Name's that
 -- the identifier can refer to in the current interactive context.
 parseName :: GhcMonad m => String -> m [Name]
-parseName str = withSession $ \hsc_env -> do
-   (L _ rdr_name) <- liftIO $ hscParseIdentifier hsc_env str
-   liftIO $ hscTcRnLookupRdrName hsc_env rdr_name
+parseName str = withSession $ \hsc_env -> liftIO $
+   do { lrdr_name <- hscParseIdentifier hsc_env str
+      ; hscTcRnLookupRdrName hsc_env lrdr_name }
 
 -- -----------------------------------------------------------------------------
 -- Getting the type of an expression
@@ -991,6 +990,7 @@ dynCompileExpr :: GhcMonad m => String -> m Dynamic
 dynCompileExpr expr = do
     iis <- getContext
     let importDecl = ImportDecl {
+                         ideclSourceSrc = Nothing,
                          ideclName = noLoc (mkModuleName "Data.Dynamic"),
                          ideclPkgQual = Nothing,
                          ideclSource = False,

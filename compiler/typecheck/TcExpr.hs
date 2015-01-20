@@ -161,17 +161,17 @@ tcExpr (HsLit lit)   res_ty = do { let lit_ty = hsLitType lit
 tcExpr (HsPar expr)  res_ty = do { expr' <- tcMonoExprNC expr res_ty
                                  ; return (HsPar expr') }
 
-tcExpr (HsSCC lbl expr) res_ty
+tcExpr (HsSCC src lbl expr) res_ty
   = do { expr' <- tcMonoExpr expr res_ty
-       ; return (HsSCC lbl expr') }
+       ; return (HsSCC src lbl expr') }
 
-tcExpr (HsTickPragma info expr) res_ty
+tcExpr (HsTickPragma src info expr) res_ty
   = do { expr' <- tcMonoExpr expr res_ty
-       ; return (HsTickPragma info expr') }
+       ; return (HsTickPragma src info expr') }
 
-tcExpr (HsCoreAnn lbl expr) res_ty
+tcExpr (HsCoreAnn src lbl expr) res_ty
   = do  { expr' <- tcMonoExpr expr res_ty
-        ; return (HsCoreAnn lbl expr') }
+        ; return (HsCoreAnn src lbl expr') }
 
 tcExpr (HsOverLit lit) res_ty
   = do  { lit' <- newOverloadedLit (LiteralOrigin lit) lit res_ty
@@ -196,10 +196,8 @@ tcExpr (HsIPVar x) res_ty
        ; tcWrapResult (fromDict ipClass ip_name ip_ty (HsVar ip_var)) ip_ty res_ty }
   where
   -- Coerces a dictionary for `IP "x" t` into `t`.
-  fromDict ipClass x ty =
-    case unwrapNewTyCon_maybe (classTyCon ipClass) of
-      Just (_,_,ax) -> HsWrap $ mkWpCast $ mkTcUnbranchedAxInstCo Representational ax [x,ty]
-      Nothing       -> panic "The dictionary for `IP` is not a newtype?"
+  fromDict ipClass x ty = HsWrap $ mkWpCast $ TcCoercion $
+                          unwrapIP $ mkClassPred ipClass [x,ty]
 
 tcExpr (HsLam match) res_ty
   = do  { (co_fn, match') <- tcMatchLambda match res_ty
@@ -1416,7 +1414,7 @@ checkMissingFields data_con rbinds
                           field_labels
                           field_strs
 
-    field_strs = dataConStrictMarks data_con
+    field_strs = dataConSrcBangs data_con
 
 {-
 ************************************************************************

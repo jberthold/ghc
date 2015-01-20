@@ -1056,10 +1056,10 @@
             <entry><option>-XNoNamedFieldPuns</option></entry>
           </row>
           <row>
-            <entry><option>-XNamedWildcards</option></entry>
+            <entry><option>-XNamedWildCards</option></entry>
             <entry>Enable <link linkend="named-wildcards">named wildcards</link>.</entry>
             <entry>dynamic</entry>
-            <entry><option>-XNoNamedWildcards</option></entry>
+            <entry><option>-XNoNamedWildCards</option></entry>
           </row>
           <row>
             <entry><option>-XNegativeLiterals</option></entry>
@@ -3097,6 +3097,12 @@
           <row>
             <entry><option>-ddump-tc</option></entry>
             <entry>Dump typechecker output</entry>
+            <entry>dynamic</entry>
+            <entry>-</entry>
+          </row>
+          <row>
+            <entry><option>-dth-dec-file</option></entry>
+            <entry>Show evaluated TH declarations in a .th.hs file</entry>
             <entry>dynamic</entry>
             <entry>-</entry>
           </row>

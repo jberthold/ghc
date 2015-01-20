@@ -12,7 +12,7 @@ module TcUnify (
   -- Full-blown subsumption
   tcWrapResult, tcGen,
   tcSubType, tcSubType_NC, tcSubTypeDS, tcSubTypeDS_NC,
-  checkConstraints, newImplication,
+  checkConstraints,
 
   -- Various unifications
   unifyType, unifyTypeList, unifyTheta,
@@ -565,17 +565,9 @@ checkConstraints skol_info skol_tvs given thing_inside
       -- tcPolyExpr, which uses tcGen and hence checkConstraints.
 
   | otherwise
-  = newImplication skol_info skol_tvs given thing_inside
-
-newImplication :: SkolemInfo -> [TcTyVar]
-               -> [EvVar] -> TcM result
-               -> TcM (TcEvBinds, result)
-newImplication skol_info skol_tvs given thing_inside
   = ASSERT2( all isTcTyVar skol_tvs, ppr skol_tvs )
     ASSERT2( all isSkolemTyVar skol_tvs, ppr skol_tvs )
-    do { ((result, tclvl), wanted) <- captureConstraints  $
-                                      captureTcLevel $
-                                      thing_inside
+    do { (result, tclvl, wanted) <- pushLevelAndCaptureConstraints thing_inside
 
        ; if isEmptyWC wanted && null given
             -- Optimisation : if there are no wanteds, and no givens
@@ -592,7 +584,7 @@ newImplication skol_info skol_tvs given thing_inside
                                   , ic_no_eqs = False
                                   , ic_given = given
                                   , ic_wanted = wanted
-                                  , ic_insol  = insolubleWC wanted
+                                  , ic_status  = IC_Unsolved
                                   , ic_binds = ev_binds_var
                                   , ic_env = env
                                   , ic_info = skol_info }

@@ -30,7 +30,7 @@ module DriverPipeline (
    runPhase, exeFileName,
    mkExtraObjToLinkIntoBinary, mkNoteObjsToLinkIntoBinary,
    maybeCreateManifest, runPhase_MoveBinary,
-   linkingNeeded, checkLinkInfo
+   linkingNeeded, checkLinkInfo, writeInterfaceOnlyMode
   ) where
 
 #include "HsVersions.h"
@@ -171,7 +171,7 @@ compileOne' m_tc_result mHscMessage
    -- -fforce-recomp should also work with --make
    let force_recomp = gopt Opt_ForceRecomp dflags
        source_modified
-         | force_recomp || isNothing maybe_old_linkable = SourceModified
+         | force_recomp = SourceModified
          | otherwise = source_modified0
        object_filename = ml_obj_file location
 
@@ -935,6 +935,11 @@ runPhase (RealPhase (Hsc src_flavour)) input_fn dflags0
         location <- getLocation src_flavour mod_name
 
         let o_file = ml_obj_file location -- The real object file
+            hi_file = ml_hi_file location
+            dest_file | writeInterfaceOnlyMode dflags
+                            = hi_file
+                      | otherwise
+                            = o_file
 
   -- Figure out if the source has changed, for recompilation avoidance.
   --
@@ -952,10 +957,10 @@ runPhase (RealPhase (Hsc src_flavour)) input_fn dflags0
                 --      (b) we aren't going all the way to .o file (e.g. ghc -S)
              then return SourceModified
                 -- Otherwise look at file modification dates
-             else do o_file_exists <- doesFileExist o_file
-                     if not o_file_exists
+             else do dest_file_exists <- doesFileExist dest_file
+                     if not dest_file_exists
                         then return SourceModified       -- Need to recompile
-                        else do t2 <- getModificationUTCTime o_file
+                        else do t2 <- getModificationUTCTime dest_file
                                 if t2 > src_timestamp
                                   then return SourceUnmodified
                                   else return SourceModified
@@ -975,6 +980,7 @@ runPhase (RealPhase (Hsc src_flavour)) input_fn dflags0
                                         ms_location  = location,
                                         ms_hs_date   = src_timestamp,
                                         ms_obj_date  = Nothing,
+                                        ms_iface_date   = Nothing,
                                         ms_textual_imps = imps,
                                         ms_srcimps      = src_imps }
 
@@ -2407,6 +2413,11 @@ joinObjectFiles dflags o_files output_fn = do
 
 -- -----------------------------------------------------------------------------
 -- Misc.
+
+writeInterfaceOnlyMode :: DynFlags -> Bool
+writeInterfaceOnlyMode dflags =
+ gopt Opt_WriteInterface dflags &&
+ HscNothing == hscTarget dflags
 
 -- | What phase to run after one of the backend code generators has run
 hscPostBackendPhase :: DynFlags -> HscSource -> HscTarget -> Phase

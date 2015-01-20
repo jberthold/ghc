@@ -22,7 +22,7 @@ test('simpl019', normal, compile, [''])
 test('simpl020',
      extra_clean(['Simpl020_A.hi', 'Simpl020_A.o']),
      multimod_compile,
-     ['simpl020', '-v0 -XFlexibleInstances -XUndecidableInstances'])
+     ['simpl020', '-v0'])
 
 test('simpl-T1370', normal, compile, [''])
 test('T2520', normal, compile, [''])
@@ -209,3 +209,4 @@ test('T6056', only_ways(['optasm']), multimod_compile, ['T6056', '-v0 -ddump-rul
 test('T9400', only_ways(['optasm']), compile, ['-O0 -ddump-simpl -dsuppress-uniques'])
 test('T9583', only_ways(['optasm']), compile, [''])
 test('T9565', only_ways(['optasm']), compile, [''])
+test('T5821', only_ways(['optasm']), compile, [''])

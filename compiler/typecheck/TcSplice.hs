@@ -21,7 +21,7 @@ module TcSplice(
      -- These ones are defined only in stage2, and are
      -- called only in stage2 (ie GHCI is on)
      runMetaE, runMetaP, runMetaT, runMetaD, runQuasi,
-     tcTopSpliceExpr, lookupThName_maybe,
+     tcTopSpliceExpr, lookupThName_maybe, traceSplice, SpliceInfo(..),
      defaultRunMeta, runMeta'
 #endif
       ) where
@@ -460,7 +460,7 @@ tcTopSplice expr res_ty
 
          -- Run the expression
        ; expr2 <- runMetaE zonked_q_expr
-       ; showSplice "expression" expr (ppr expr2)
+       ; showSplice False "expression" expr (ppr expr2)
 
          -- Rename and typecheck the spliced-in expression,
          -- making sure it has type res_ty
@@ -660,7 +660,7 @@ runQuasiQuote (HsQuasiQuote quoter q_span quote) quote_selector meta_ty descr me
 
         -- Run the expression
         ; result <- runMeta meta_req zonked_q_expr
-        ; showSplice descr quoteExpr (ppr result)
+        ; showSplice (descr == "declarations") descr quoteExpr (ppr result)
 
         ; return result }
 
@@ -967,18 +967,61 @@ instance TH.Quasi (IOEnv (Env TcGblEnv TcLclEnv)) where
 ************************************************************************
 -}
 
-showSplice :: String -> LHsExpr Name -> SDoc -> TcM ()
 -- Note that 'before' is *renamed* but not *typechecked*
 -- Reason (a) less typechecking crap
 --        (b) data constructors after type checking have been
 --            changed to their *wrappers*, and that makes them
 --            print always fully qualified
-showSplice what before after
-  = do { loc <- getSrcSpanM
-       ; traceSplice (vcat [ppr loc <> colon <+> text "Splicing" <+> text what,
-                            nest 2 (sep [nest 2 (ppr before),
-                                         text "======>",
-                                         nest 2 after])]) }
+showSplice :: Bool -> String -> LHsExpr Name -> SDoc -> TcM ()
+showSplice isDec what before after =
+    traceSplice $ SpliceInfo isDec what Nothing (Just $ ppr before) after
+
+-- | The splice data to be logged
+--
+-- duplicates code in RnSplice.lhs
+data SpliceInfo
+  = SpliceInfo
+    { spliceIsDeclaration :: Bool
+    , spliceDescription   :: String
+    , spliceLocation      :: Maybe SrcSpan
+    , spliceSource        :: Maybe SDoc
+    , spliceGenerated     :: SDoc
+    }
+
+-- | outputs splice information for 2 flags which have different output formats:
+-- `-ddump-splices` and `-dth-dec-file`
+--
+-- This duplicates code in RnSplice.lhs
+traceSplice :: SpliceInfo -> TcM ()
+traceSplice sd = do
+    loc <- case sd of
+        SpliceInfo { spliceLocation = Nothing }  -> getSrcSpanM
+        SpliceInfo { spliceLocation = Just loc } -> return loc
+    traceOptTcRn Opt_D_dump_splices (spliceDebugDoc loc sd)
+    when (spliceIsDeclaration sd) $ do
+        dflags <- getDynFlags
+        liftIO $ dumpIfSet_dyn_printer alwaysQualify dflags Opt_D_th_dec_file
+                                       (spliceCodeDoc loc sd)
+  where
+    -- `-ddump-splices`
+    spliceDebugDoc :: SrcSpan -> SpliceInfo -> SDoc
+    spliceDebugDoc loc sd
+      = let code = case spliceSource sd of
+                Nothing -> ending
+                Just b  -> nest 2 b : ending
+            ending = [ text "======>", nest 2 (spliceGenerated sd) ]
+        in  (vcat [   ppr loc <> colon
+                  <+> text "Splicing" <+> text (spliceDescription sd)
+                  , nest 2 (sep code)
+                  ])
+
+    -- `-dth-dec-file`
+    spliceCodeDoc :: SrcSpan -> SpliceInfo -> SDoc
+    spliceCodeDoc loc sd
+      = (vcat [    text "--" <+> ppr loc <> colon
+               <+> text "Splicing" <+> text (spliceDescription sd)
+              , sep [spliceGenerated sd]
+              ])
 
 {-
 ************************************************************************
@@ -1268,7 +1311,7 @@ reifyDataCon tys dc
              (subst', ex_tvs') = mapAccumL substTyVarBndr subst (dropList tys tvs)
              theta'   = substTheta subst' theta
              arg_tys' = substTys subst' arg_tys
-             stricts  = map reifyStrict (dataConStrictMarks dc)
+             stricts  = map reifyStrict (dataConSrcBangs dc)
              fields   = dataConFieldLabels dc
              name     = reifyName dc
 
@@ -1352,7 +1395,7 @@ reifyClassInstance :: [Bool]  -- True <=> the corresponding tv is poly-kinded
                               -- variables, not *kind* variables
                    -> ClsInst -> TcM TH.Dec
 reifyClassInstance is_poly_tvs i
-  = do { cxt <- reifyCxt (drop n_silent theta)
+  = do { cxt <- reifyCxt theta
        ; let types_only = filterOut isKind types
        ; thtypes <- reifyTypes types_only
        ; annot_thtypes <- zipWith3M annotThType is_poly_tvs types_only thtypes
@@ -1360,8 +1403,7 @@ reifyClassInstance is_poly_tvs i
        ; return $ (TH.InstanceD cxt head_ty []) }
   where
      (_tvs, theta, cls, types) = tcSplitDFunTy (idType dfun)
-     dfun     = instanceDFunId i
-     n_silent = dfunNSilent dfun
+     dfun = instanceDFunId i
 
 ------------------------------
 reifyFamilyInstances :: TyCon -> [FamInst] -> TcM [TH.Dec]
@@ -1621,13 +1663,13 @@ reifyFixity name
       conv_dir BasicTypes.InfixL = TH.InfixL
       conv_dir BasicTypes.InfixN = TH.InfixN
 
-reifyStrict :: DataCon.HsBang -> TH.Strict
-reifyStrict HsNoBang                      = TH.NotStrict
-reifyStrict (HsUserBang _ False)          = TH.NotStrict
-reifyStrict (HsUserBang (Just True) True) = TH.Unpacked
-reifyStrict (HsUserBang _     True)       = TH.IsStrict
-reifyStrict HsStrict                      = TH.IsStrict
-reifyStrict (HsUnpack {})                 = TH.Unpacked
+reifyStrict :: DataCon.HsSrcBang -> TH.Strict
+reifyStrict HsNoBang                       = TH.NotStrict
+reifyStrict (HsSrcBang _ _ False)          = TH.NotStrict
+reifyStrict (HsSrcBang _ (Just True) True) = TH.Unpacked
+reifyStrict (HsSrcBang _ _     True)       = TH.IsStrict
+reifyStrict HsStrict                       = TH.IsStrict
+reifyStrict (HsUnpack {})                  = TH.Unpacked
 
 ------------------------------
 lookupThAnnLookup :: TH.AnnLookup -> TcM CoreAnnTarget

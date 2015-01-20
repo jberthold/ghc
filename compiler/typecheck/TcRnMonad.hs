@@ -32,7 +32,6 @@ import InstEnv
 import FamInstEnv
 import PrelNames
 
-import Var
 import Id
 import VarSet
 import VarEnv
@@ -74,12 +73,13 @@ initTc :: HscEnv
        -> HscSource
        -> Bool          -- True <=> retain renamed syntax trees
        -> Module
+       -> RealSrcSpan
        -> TcM r
        -> IO (Messages, Maybe r)
                 -- Nothing => error thrown by the thing inside
                 -- (error messages should have been printed already)
 
-initTc hsc_env hsc_src keep_rn_syntax mod do_this
+initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
  = do { errs_var     <- newIORef (emptyBag, emptyBag) ;
         tvs_var      <- newIORef emptyVarSet ;
         keep_var     <- newIORef emptyNameSet ;
@@ -167,7 +167,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod do_this
              } ;
              lcl_env = TcLclEnv {
                 tcl_errs       = errs_var,
-                tcl_loc        = mkGeneralSrcSpan (fsLit "Top level"),
+                tcl_loc        = loc,     -- Should be over-ridden very soon!
                 tcl_ctxt       = [],
                 tcl_rdr        = emptyLocalRdrEnv,
                 tcl_th_ctxt    = topStage,
@@ -210,18 +210,19 @@ initTcInteractive :: HscEnv -> TcM a -> IO (Messages, Maybe a)
 initTcInteractive hsc_env thing_inside
   = initTc hsc_env HsSrcFile False
            (icInteractiveModule (hsc_IC hsc_env))
+           (realSrcLocSpan interactive_src_loc)
            thing_inside
+  where
+    interactive_src_loc = mkRealSrcLoc (fsLit "<interactive>") 1 1
 
 initTcForLookup :: HscEnv -> TcM a -> IO a
 -- The thing_inside is just going to look up something
 -- in the environment, so we don't need much setup
 initTcForLookup hsc_env thing_inside
-    = do (msgs, m) <- initTc hsc_env HsSrcFile False
-                             (icInteractiveModule (hsc_IC hsc_env))  -- Irrelevant really
-                             thing_inside
-         case m of
+  = do { (msgs, m) <- initTcInteractive hsc_env thing_inside
+       ; case m of
              Nothing -> throwIO $ mkSrcErr $ snd msgs
-             Just x -> return x
+             Just x -> return x }
 
 {-
 ************************************************************************
@@ -501,15 +502,12 @@ traceTc herald doc = traceTcN 1 (hang (text herald) 2 doc)
 -- | Typechecker trace
 traceTcN :: Int -> SDoc -> TcRn ()
 traceTcN level doc
-    = do { dflags <- getDynFlags
-         ; when (level <= traceLevel dflags) $
-           traceOptTcRn Opt_D_dump_tc_trace doc }
+    = do dflags <- getDynFlags
+         when (level <= traceLevel dflags && not opt_NoDebugOutput) $
+             traceOptTcRn Opt_D_dump_tc_trace doc
 
 traceRn :: SDoc -> TcRn ()
-traceRn doc = traceOptTcRn Opt_D_dump_rn_trace doc
-
-traceSplice :: SDoc -> TcRn ()
-traceSplice doc = traceOptTcRn Opt_D_dump_splices doc
+traceRn = traceOptTcRn Opt_D_dump_rn_trace -- Renamer Trace
 
 -- | Output a doc if the given 'DumpFlag' is set.
 --
@@ -640,11 +638,11 @@ addDependentFiles fs = do
 
 getSrcSpanM :: TcRn SrcSpan
         -- Avoid clash with Name.getSrcLoc
-getSrcSpanM = do { env <- getLclEnv; return (tcl_loc env) }
+getSrcSpanM = do { env <- getLclEnv; return (RealSrcSpan (tcl_loc env)) }
 
 setSrcSpan :: SrcSpan -> TcRn a -> TcRn a
-setSrcSpan loc@(RealSrcSpan _) thing_inside
-    = updLclEnv (\env -> env { tcl_loc = loc }) thing_inside
+setSrcSpan (RealSrcSpan real_loc) thing_inside
+    = updLclEnv (\env -> env { tcl_loc = real_loc }) thing_inside
 -- Don't overwrite useful info with useless:
 setSrcSpan (UnhelpfulSpan _) thing_inside = thing_inside
 
@@ -752,11 +750,16 @@ reportError err
          writeTcRef errs_var (warns, errs `snocBag` err) }
 
 reportWarning :: ErrMsg -> TcRn ()
-reportWarning warn
-  = do { traceTc "Adding warning:" (pprLocErrMsg warn) ;
-         errs_var <- getErrsVar ;
-         (warns, errs) <- readTcRef errs_var ;
-         writeTcRef errs_var (warns `snocBag` warn, errs) }
+reportWarning err
+  = do { let warn = makeIntoWarning err
+                    -- 'err' was build by mkLongErrMsg or something like that,
+                    -- so it's of error severity.  For a warning we downgrade
+                    -- its severity to SevWarning
+
+       ; traceTc "Adding warning:" (pprLocErrMsg warn)
+       ; errs_var <- getErrsVar
+       ; (warns, errs) <- readTcRef errs_var
+       ; writeTcRef errs_var (warns `snocBag` warn, errs) }
 
 try_m :: TcRn r -> TcRn (Either IOEnvFailure r)
 -- Does try_m, with a debug-trace on failure
@@ -892,10 +895,11 @@ failIfErrsM :: TcRn ()
 -- Useful to avoid error cascades
 failIfErrsM = ifErrsM failM (return ())
 
-checkTH :: Outputable a => a -> String -> TcRn ()
 #ifdef GHCI
+checkTH :: a -> String -> TcRn ()
 checkTH _ _ = return () -- OK
 #else
+checkTH :: Outputable a => a -> String -> TcRn ()
 checkTH e what = failTH e what  -- Raise an error in a stage-1 compiler
 #endif
 
@@ -947,9 +951,9 @@ getCtLoc origin
 setCtLoc :: CtLoc -> TcM a -> TcM a
 -- Set the SrcSpan and error context from the CtLoc
 setCtLoc (CtLoc { ctl_env = lcl }) thing_inside
-  = updLclEnv (\env -> env { tcl_loc = tcl_loc lcl
+  = updLclEnv (\env -> env { tcl_loc   = tcl_loc lcl
                            , tcl_bndrs = tcl_bndrs lcl
-                           , tcl_ctxt = tcl_ctxt lcl })
+                           , tcl_ctxt  = tcl_ctxt lcl })
               thing_inside
 
 {-
@@ -1094,13 +1098,12 @@ newTcEvBinds = do { ref <- newTcRef emptyEvBindMap
                   ; uniq <- newUnique
                   ; return (EvBindsVar ref uniq) }
 
-addTcEvBind :: EvBindsVar -> EvVar -> EvTerm -> TcM ()
+addTcEvBind :: EvBindsVar -> EvBind -> TcM ()
 -- Add a binding to the TcEvBinds by side effect
-addTcEvBind (EvBindsVar ev_ref _) ev_id ev_tm
-  = do { traceTc "addTcEvBind" $ vcat [ text "ev_id =" <+> ppr ev_id
-                                      , text "ev_tm =" <+> ppr ev_tm ]
+addTcEvBind (EvBindsVar ev_ref _) ev_bind
+  = do { traceTc "addTcEvBind" $ ppr ev_bind
        ; bnds <- readTcRef ev_ref
-       ; writeTcRef ev_ref (extendEvBinds bnds ev_id ev_tm) }
+       ; writeTcRef ev_ref (extendEvBinds bnds ev_bind) }
 
 getTcEvBinds :: EvBindsVar -> TcM (Bag EvBind)
 getTcEvBinds (EvBindsVar ev_ref _)
@@ -1163,24 +1166,31 @@ captureConstraints thing_inside
          lie <- readTcRef lie_var ;
          return (res, lie) }
 
-captureTcLevel :: TcM a -> TcM (a, TcLevel)
-captureTcLevel thing_inside
+pushLevelAndCaptureConstraints :: TcM a -> TcM (a, TcLevel, WantedConstraints)
+pushLevelAndCaptureConstraints thing_inside
   = do { env <- getLclEnv
+       ; lie_var <- newTcRef emptyWC ;
        ; let tclvl' = pushTcLevel (tcl_tclvl env)
-       ; res <- setLclEnv (env { tcl_tclvl = tclvl' })
+       ; res <- setLclEnv (env { tcl_tclvl = tclvl'
+                               , tcl_lie   = lie_var })
                 thing_inside
-       ; return (res, tclvl') }
+       ; lie <- readTcRef lie_var
+       ; return (res, tclvl', lie) }
 
-pushTcLevelM :: TcM a -> TcM a
+pushTcLevelM_ :: TcM a -> TcM a
+pushTcLevelM_ = updLclEnv (\ env -> env { tcl_tclvl = pushTcLevel (tcl_tclvl env) })
+
+pushTcLevelM :: TcM a -> TcM (a, TcLevel)
 pushTcLevelM thing_inside
   = do { env <- getLclEnv
        ; let tclvl' = pushTcLevel (tcl_tclvl env)
-       ; setLclEnv (env { tcl_tclvl = tclvl' })
-                   thing_inside }
+       ; res <- setLclEnv (env { tcl_tclvl = tclvl' })
+                          thing_inside
+       ; return (res, tclvl') }
 
 getTcLevel :: TcM TcLevel
 getTcLevel = do { env <- getLclEnv
-                     ; return (tcl_tclvl env) }
+                ; return (tcl_tclvl env) }
 
 setTcLevel :: TcLevel -> TcM a -> TcM a
 setTcLevel tclvl thing_inside
@@ -1214,7 +1224,12 @@ emitWildcardHoleConstraints :: [(Name, TcTyVar)] -> TcM ()
 emitWildcardHoleConstraints wcs
   = do { ctLoc <- getCtLoc HoleOrigin
        ; forM_ wcs $ \(name, tv) -> do {
-       ; let ctLoc' = setCtLocSpan ctLoc (nameSrcSpan name)
+       ; let real_span = case nameSrcSpan name of
+                           RealSrcSpan span  -> span
+                           UnhelpfulSpan str -> pprPanic "emitWildcardHoleConstraints"
+                                                      (ppr name <+> quotes (ftext str))
+               -- Wildcards are defined locally, and so have RealSrcSpans
+             ctLoc' = setCtLocSpan ctLoc real_span
              ty     = mkTyVarTy tv
              ev     = mkLocalId name ty
              can    = CHoleCan { cc_ev   = CtWanted ty ev ctLoc'

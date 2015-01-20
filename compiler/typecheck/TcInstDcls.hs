@@ -17,7 +17,7 @@ import TcBinds
 import TcTyClsDecls
 import TcClassDcl( tcClassDecl2,
                    HsSigFun, lookupHsSig, mkHsSigFun,
-                   findMethodBind, instantiateMethod, tcInstanceMethodBody )
+                   findMethodBind, instantiateMethod )
 import TcPat      ( addInlinePrags )
 import TcRnMonad
 import TcValidity
@@ -32,7 +32,7 @@ import TcDeriv
 import TcEnv
 import TcHsType
 import TcUnify
-import Coercion   ( pprCoAxiom )
+import Coercion   ( pprCoAxiom, isReflCo, mkSymCo, mkSubCo )
 import MkCore     ( nO_METHOD_BINDING_ERROR_ID )
 import Type
 import TcEvidence
@@ -60,7 +60,7 @@ import Util
 import BooleanFormula ( isUnsatisfied, pprBooleanFormulaNice )
 
 import Control.Monad
-import Maybes     ( isNothing, isJust, whenIsJust )
+import Maybes     ( isNothing, isJust, whenIsJust, catMaybes )
 import Data.List  ( mapAccumL, partition )
 
 {-
@@ -432,7 +432,9 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
               -- (deriving can't be used there)
       && not (isHsBootOrSig (tcg_src env))
 
-    overlapCheck ty = overlapMode (is_flag $ iSpec ty) /= NoOverlap
+    overlapCheck ty = case overlapMode (is_flag $ iSpec ty) of
+                        NoOverlap _ -> False
+                        _           -> True
     genInstCheck ty = is_cls_nm (iSpec ty) `elem` genericClassNames
     genInstErr i = hang (ptext (sLit $ "Generic instances can only be "
                             ++ "derived in Safe Haskell.") $+$
@@ -817,26 +819,53 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
     addErrCtxt (instDeclCtxt2 (idType dfun_id)) $
     do {  -- Instantiate the instance decl with skolem constants
        ; (inst_tyvars, dfun_theta, inst_head) <- tcSkolDFunType (idType dfun_id)
+       ; dfun_ev_vars <- newEvVars dfun_theta
                      -- We instantiate the dfun_id with superSkolems.
                      -- See Note [Subtle interaction of recursion and overlap]
                      -- and Note [Binding when looking up instances]
+
        ; let (clas, inst_tys) = tcSplitDFunHead inst_head
              (class_tyvars, sc_theta, _, op_items) = classBigSig clas
              sc_theta' = substTheta (zipOpenTvSubst class_tyvars inst_tys) sc_theta
 
-       ; dfun_ev_vars <- newEvVars dfun_theta
+       ; traceTc "tcInstDecl2" (vcat [ppr inst_tyvars, ppr inst_tys, ppr dfun_theta, ppr sc_theta'])
 
-       ; sc_ev_vars <- tcSuperClasses dfun_id inst_tyvars dfun_ev_vars sc_theta'
-
-       -- Deal with 'SPECIALISE instance' pragmas
-       -- See Note [SPECIALISE instance pragmas]
+                      -- Deal with 'SPECIALISE instance' pragmas
+                      -- See Note [SPECIALISE instance pragmas]
        ; spec_inst_info@(spec_inst_prags,_) <- tcSpecInstPrags dfun_id ibinds
 
-        -- Typecheck the methods
-       ; (meth_ids, meth_binds)
-           <- tcInstanceMethods dfun_id clas inst_tyvars dfun_ev_vars
-                                inst_tys spec_inst_info
-                                op_items ibinds
+         -- Typecheck superclasses and methods
+         -- See Note [Typechecking plan for instance declarations]
+       ; dfun_ev_binds_var <- newTcEvBinds
+       ; let dfun_ev_binds = TcEvBinds dfun_ev_binds_var
+       ; ((sc_meth_ids, sc_meth_binds, sc_meth_implics), tclvl)
+             <- pushTcLevelM $
+                do { fam_envs <- tcGetFamInstEnvs
+                   ; (sc_ids, sc_binds, sc_implics)
+                        <- tcSuperClasses dfun_id clas inst_tyvars dfun_ev_vars
+                                          inst_tys dfun_ev_binds fam_envs
+                                          sc_theta'
+
+                      -- Typecheck the methods
+                   ; (meth_ids, meth_binds, meth_implics)
+                        <- tcMethods dfun_id clas inst_tyvars dfun_ev_vars
+                                     inst_tys dfun_ev_binds spec_inst_info
+                                     op_items ibinds
+
+                   ; return ( sc_ids     ++          meth_ids
+                            , sc_binds   `unionBags` meth_binds
+                            , sc_implics `unionBags` meth_implics ) }
+
+       ; env <- getLclEnv
+       ; emitImplication $ Implic { ic_tclvl  = tclvl
+                                  , ic_skols  = inst_tyvars
+                                  , ic_no_eqs = False
+                                  , ic_given  = dfun_ev_vars
+                                  , ic_wanted = addImplics emptyWC sc_meth_implics
+                                  , ic_status = IC_Unsolved
+                                  , ic_binds  = dfun_ev_binds_var
+                                  , ic_env    = env
+                                  , ic_info   = InstSkol }
 
        -- Create the result bindings
        ; self_dict <- newDict clas inst_tys
@@ -855,8 +884,7 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
                      --    con_app_args = MkD ty1 ty2 sc1 sc2 op1 op2
              con_app_tys  = wrapId (mkWpTyApps inst_tys)
                                    (dataConWrapId dict_constr)
-             con_app_scs  = mkHsWrap (mkWpEvApps (map EvId sc_ev_vars)) con_app_tys
-             con_app_args = foldl app_to_meth con_app_scs meth_ids
+             con_app_args = foldl app_to_meth con_app_tys sc_meth_ids
 
              app_to_meth :: HsExpr Id -> Id -> HsExpr Id
              app_to_meth fun meth_id = L loc fun `HsApp` L loc (wrapId arg_wrapper meth_id)
@@ -878,49 +906,581 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
              main_bind = AbsBinds { abs_tvs = inst_tyvars
                                   , abs_ev_vars = dfun_ev_vars
                                   , abs_exports = [export]
-                                  , abs_ev_binds = emptyTcEvBinds
+                                  , abs_ev_binds = []
                                   , abs_binds = unitBag dict_bind }
 
-       ; return (unitBag (L loc main_bind) `unionBags`
-                 listToBag meth_binds)
+       ; return (unitBag (L loc main_bind) `unionBags` sc_meth_binds)
        }
  where
    dfun_id = instanceDFunId ispec
    loc     = getSrcSpan dfun_id
 
-------------------------------
-tcSuperClasses :: DFunId -> [TcTyVar] -> [EvVar] -> TcThetaType
-               -> TcM [EvVar]
--- See Note [Silent superclass arguments]
-tcSuperClasses dfun_id inst_tyvars dfun_ev_vars sc_theta
-  | null inst_tyvars && null dfun_ev_vars
-  = emitWanteds ScOrigin sc_theta
+wrapId :: HsWrapper -> id -> HsExpr id
+wrapId wrapper id = mkHsWrap wrapper (HsVar id)
 
-  | otherwise
-  = do {   -- Check that all superclasses can be deduced from
-           -- the originally-specified dfun arguments
-       ; _ <- checkConstraints InstSkol inst_tyvars orig_ev_vars $
-              emitWanteds ScOrigin sc_theta
+{- Note [Typechecking plan for instance declarations]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For intance declarations we generate the following bindings and implication
+constraints.  Example:
 
-       ; return (map (find dfun_ev_vars) sc_theta) }
+   instance Ord a => Ord [a] where compare = <compare-rhs>
+
+generates this:
+
+   Bindings:
+      -- Method bindings
+      $ccompare :: forall a. Ord a => a -> a -> Ordering
+      $ccompare = /\a \(d:Ord a). let <meth-ev-binds> in ...
+
+      -- Superclass bindings
+      $cp1Ord :: forall a. Ord a => Eq [a]
+      $cp1Ord = /\a \(d:Ord a). let <sc-ev-binds>
+               in dfEqList (dw :: Eq a)
+
+   Constraints:
+      forall a. Ord a =>
+                -- Method constraint
+             (forall. (empty) => <constraints from compare-rhs>)
+                -- Superclass constraint
+          /\ (forall. (empty) => dw :: Eq a)
+
+Notice that
+
+ * Per-meth/sc implication.  There is one inner implication per
+   superclass or method, with no skolem variables or givens.  The only
+   reason for this one is to gather the evidence bindings privately
+   for this superclass or method.  This implication is generated
+   by checkInstConstraints.
+
+ * Overall instance implication. There is an overall enclosing
+   implication for the whole instance declaratation, with the expected
+   skolems and givens.  We need this to get the correct "redundant
+   constraint" warnings, gathering all the uses from all the methods
+   and superclasses.  See TcSimplify Note [Tracking redundant
+   constraints]
+
+ * The given constraints in the outer implication may generate
+   evidence, notably by superclass selection.  Since the method and
+   superclass bindings are top-level, we want that evidence copied
+   into *every* method or superclass definition.  (Some of it will
+   be usused in some, but dead-code elimination will drop it.)
+
+   We achieve this by putting the the evidence variable for the overall
+   instance implicaiton into the AbsBinds for each method/superclass.
+   Hence the 'dfun_ev_binds' passed into tcMethods and tcSuperClasses.
+   (And that in turn is why the abs_ev_binds field of AbBinds is a
+   [TcEvBinds] rather than simply TcEvBinds.
+
+   This is a bit of a hack, but works very nicely in practice.
+
+ * Note that if a method has a locally-polymorhic binding, there will
+   be yet another implication for that, generated by tcPolyCheck
+   in tcMethodBody. E.g.
+          class C a where
+            foo :: forall b. Ord b => blah
+
+
+************************************************************************
+*                                                                      *
+      Type-checking superclases
+*                                                                      *
+************************************************************************
+-}
+
+tcSuperClasses :: DFunId -> Class -> [TcTyVar] -> [EvVar] -> [TcType]
+               -> TcEvBinds -> FamInstEnvs
+               -> TcThetaType
+               -> TcM ([EvVar], LHsBinds Id, Bag Implication)
+-- Make a new top-level function binding for each superclass,
+-- something like
+--    $Ordp1 :: forall a. Ord a => Eq [a]
+--    $Ordp1 = /\a \(d:Ord a). dfunEqList a (sc_sel d)
+--
+-- See Note [Recursive superclasses] for why this is so hard!
+-- In effect, be build a special-purpose solver for the first step
+-- of solving each superclass constraint
+tcSuperClasses dfun_id cls tyvars dfun_evs inst_tys dfun_ev_binds fam_envs sc_theta
+  = do { traceTc "tcSuperClasses" (ppr cls $$ ppr inst_tys $$ ppr given_cls_preds)
+       ; (ids, binds, implics) <- mapAndUnzip3M tc_super (zip sc_theta [fIRST_TAG..])
+       ; return (ids, listToBag binds, listToBag implics) }
   where
-    n_silent     = dfunNSilent dfun_id
-    orig_ev_vars = drop n_silent dfun_ev_vars
+    loc     = getSrcSpan dfun_id
+    head_size = sizeTypes inst_tys
 
-    find [] pred
-      = pprPanic "tcInstDecl2" (ppr dfun_id $$ ppr (idType dfun_id) $$ ppr pred)
-    find (ev:evs) pred
-      | pred `eqPred` evVarPred ev = ev
-      | otherwise                  = find evs pred
+    ------------
+    given_cls_preds :: [(EvTerm, TcType)] -- (ev_term, type of that ev_term)
+    -- given_cls_preds is the list of (ev_term, type) that can be derived
+    -- from the dfun_evs, using the rules (sc1) and (sc3) of
+    -- Note [Recursive superclasses] below
+    -- When solving for superclasses, we search this list
+    given_cls_preds
+      = [ ev_pr | dfun_ev <- dfun_evs
+                , ev_pr <- super_classes (EvId dfun_ev, idType dfun_ev) ]
 
-----------------------
+    ------------
+    super_classes ev_pair
+      | (ev_tm, pred) <- normalise_pr ev_pair
+      , ClassPred cls tys <- classifyPredType pred
+      = (ev_tm, pred) : super_classes_help ev_tm cls tys
+      | otherwise
+      = []
+
+    ------------
+    super_classes_help :: EvTerm -> Class -> [TcType] -> [(EvTerm, TcType)]
+    super_classes_help ev_tm cls tys  -- ev_tm :: cls tys
+      | sizeTypes tys >= head_size  -- Here is where we test for
+      = []                          -- a smaller dictionary
+      | otherwise
+      = concatMap super_classes ([EvSuperClass ev_tm i | i <- [0..]]
+                                 `zip` immSuperClasses cls tys)
+
+    ------------
+    normalise_pr :: (EvTerm, TcPredType) -> (EvTerm, TcPredType)
+    -- Normalise type functions as much as possible
+    normalise_pr (ev_tm, pred)
+      | isReflCo norm_co = (ev_tm,                pred)
+      | otherwise        = (mkEvCast ev_tm tc_co, norm_pred)
+      where
+        (norm_co, norm_pred) = normaliseType fam_envs Nominal pred
+        tc_co = TcCoercion (mkSubCo norm_co)
+
+    ------------
+    tc_super (sc_pred, n)
+      = do { (sc_implic, sc_ev_id) <- checkInstConstraints $
+                                      emit_sc_pred fam_envs sc_pred
+
+           ; sc_top_name <- newName (mkSuperDictAuxOcc n (getOccName cls))
+           ; let sc_top_ty = mkForAllTys tyvars (mkPiTypes dfun_evs sc_pred)
+                 sc_top_id = mkLocalId sc_top_name sc_top_ty
+                 export = ABE { abe_wrap = idHsWrapper, abe_poly = sc_top_id
+                              , abe_mono = sc_ev_id
+                              , abe_prags = SpecPrags [] }
+                 local_ev_binds = TcEvBinds (ic_binds sc_implic)
+                 bind = AbsBinds { abs_tvs      = tyvars
+                                 , abs_ev_vars  = dfun_evs
+                                 , abs_exports  = [export]
+                                 , abs_ev_binds = [dfun_ev_binds, local_ev_binds]
+                                 , abs_binds    = emptyBag }
+           ; return (sc_top_id, L loc bind, sc_implic) }
+
+    -------------------
+    emit_sc_pred fam_envs sc_pred ev_binds
+      | (sc_co, norm_sc_pred) <- normaliseType fam_envs Nominal sc_pred
+                                 -- sc_co :: sc_pred ~ norm_sc_pred
+      , ClassPred cls tys <- classifyPredType norm_sc_pred
+      = do { sc_ev_tm <- emit_sc_cls_pred norm_sc_pred cls tys
+           ; sc_ev_id <- newEvVar sc_pred
+           ; let tc_co = TcCoercion (mkSubCo (mkSymCo sc_co))
+           ; addTcEvBind ev_binds (mkWantedEvBind sc_ev_id (mkEvCast sc_ev_tm tc_co))
+               -- This is where we set the evidence for the superclass, and do so
+               -- (very unusually) *outside the solver*.  That's why
+               -- checkInstConstraints passes in the evidence bindings
+           ; return sc_ev_id }
+
+      | otherwise
+      = do { sc_ev_id <- emitWanted ScOrigin sc_pred
+           ; traceTc "tcSuperClass 4" (ppr sc_pred $$ ppr sc_ev_id)
+           ; return sc_ev_id }
+
+    -------------------
+    emit_sc_cls_pred sc_pred cls tys
+      | (ev_tm:_) <- [ ev_tm | (ev_tm, ev_ty) <- given_cls_preds
+                             , ev_ty `tcEqType` sc_pred ]
+      = do { traceTc "tcSuperClass 1" (ppr sc_pred $$ ppr ev_tm)
+           ; return ev_tm }
+
+      | otherwise
+      = do { inst_envs <- tcGetInstEnvs
+           ; case lookupInstEnv inst_envs cls tys of
+               ([(ispec, dfun_inst_tys)], [], _) -- A single match
+                 -> do { let dfun_id = instanceDFunId ispec
+                       ; (inst_tys, inst_theta) <- instDFunType dfun_id dfun_inst_tys
+                       ; arg_evs  <- emitWanteds ScOrigin inst_theta
+                       ; let dict_app = EvDFunApp dfun_id inst_tys (map EvId arg_evs)
+                       ; traceTc "tcSuperClass 2" (ppr sc_pred $$ ppr dict_app)
+                       ; return dict_app }
+
+               _ -> -- No instance, so we want to report an error
+                    -- Emitting it as an 'insoluble' prevents the solver
+                    -- attempting to solve it (which might, wrongly, succeed)
+                    do { sc_ev <- newWanted ScOrigin sc_pred
+                       ; emitInsoluble (mkNonCanonical sc_ev)
+                       ; traceTc "tcSuperClass 3" (ppr sc_pred $$ ppr sc_ev)
+                       ; return (ctEvTerm sc_ev) } }
+
+-------------------
+checkInstConstraints :: (EvBindsVar -> TcM result)
+                     -> TcM (Implication, result)
+-- See Note [Typechecking plan for instance declarations]
+-- The thing_inside is also passed the EvBindsVar,
+-- so that emit_sc_pred can add evidence for the superclass
+-- (not used for methods)
+checkInstConstraints thing_inside
+  = do { ev_binds_var <- newTcEvBinds
+       ; env <- getLclEnv
+       ; (result, tclvl, wanted) <- pushLevelAndCaptureConstraints  $
+                                    thing_inside ev_binds_var
+
+       ; let implic = Implic { ic_tclvl  = tclvl
+                             , ic_skols  = []
+                             , ic_no_eqs = False
+                             , ic_given  = []
+                             , ic_wanted = wanted
+                             , ic_status = IC_Unsolved
+                             , ic_binds  = ev_binds_var
+                             , ic_env    = env
+                             , ic_info   = InstSkol }
+
+       ; return (implic, result) }
+
+{-
+Note [Recursive superclasses]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+See Trac #3731, #4809, #5751, #5913, #6117, #6161, which all
+describe somewhat more complicated situations, but ones
+encountered in practice.
+
+See also tests tcrun020, tcrun021, tcrun033
+
+
+----- THE PROBLEM --------
+The problem is that it is all too easy to create a class whose
+superclass is bottom when it should not be.
+
+Consider the following (extreme) situation:
+        class C a => D a where ...
+        instance D [a] => D [a] where ...   (dfunD)
+        instance C [a] => C [a] where ...   (dfunC)
+Although this looks wrong (assume D [a] to prove D [a]), it is only a
+more extreme case of what happens with recursive dictionaries, and it
+can, just about, make sense because the methods do some work before
+recursing.
+
+To implement the dfunD we must generate code for the superclass C [a],
+which we had better not get by superclass selection from the supplied
+argument:
+       dfunD :: forall a. D [a] -> D [a]
+       dfunD = \d::D [a] -> MkD (scsel d) ..
+
+Otherwise if we later encounter a situation where
+we have a [Wanted] dw::D [a] we might solve it thus:
+     dw := dfunD dw
+Which is all fine except that now ** the superclass C is bottom **!
+
+The instance we want is:
+       dfunD :: forall a. D [a] -> D [a]
+       dfunD = \d::D [a] -> MkD (dfunC (scsel d)) ...
+
+----- THE SOLUTION --------
+The basic solution is simple: be very careful about using superclass
+selection to generate a superclass witness in a dictionary function
+definition.  More precisely:
+
+  Superclass Invariant: in every class dictionary,
+                        every superclass dictionary field
+                        is non-bottom
+
+To achieve the Superclass Invariant, in a dfun definition we can
+generate a guaranteed-non-bottom superclass witness from:
+  (sc1) one of the dictionary arguments itself (all non-bottom)
+  (sc2) a call of a dfun (always returns a dictionary constructor)
+  (sc3) an immediate superclass of a smaller dictionary
+
+The tricky case is (sc3).  We proceed by induction on the size of
+the (type of) the dictionary, defined by TcValidity.sizePred.
+Let's suppose we are building a dictionary of size 3, and
+suppose the Superclass Invariant holds of smaller dictionaries.
+Then if we have a smaller dictionary, its immediate superclasses
+will be non-bottom by induction.
+
+What does "we have a smaller dictionary" mean?  It might be
+one of the arguments of the instance, or one of its superclasses.
+Here is an example, taken from CmmExpr:
+       class Ord r => UserOfRegs r a where ...
+(i1)   instance UserOfRegs r a => UserOfRegs r (Maybe a) where
+(i2)   instance (Ord r, UserOfRegs r CmmReg) => UserOfRegs r CmmExpr where
+
+For (i1) we can get the (Ord r) superclass by selection from (UserOfRegs r a),
+since it is smaller than the thing we are building (UserOfRegs r (Maybe a).
+
+But for (i2) that isn't the case, so we must add an explicit, and
+perhaps surprising, (Ord r) argument to the instance declaration.
+
+Here's another example from Trac #6161:
+
+       class       Super a => Duper a  where ...
+       class Duper (Fam a) => Foo a    where ...
+(i3)   instance Foo a => Duper (Fam a) where ...
+(i4)   instance              Foo Float where ...
+
+It would be horribly wrong to define
+   dfDuperFam :: Foo a -> Duper (Fam a)  -- from (i3)
+   dfDuperFam d = MkDuper (sc_sel1 (sc_sel2 d)) ...
+
+   dfFooFloat :: Foo Float               -- from (i4)
+   dfFooFloat = MkFoo (dfDuperFam dfFooFloat) ...
+
+Now the Super superclass of Duper is definitely bottom!
+
+This won't happen because when processing (i3) we can use the
+superclasses of (Foo a), which is smaller, namely Duper (Fam a).  But
+that is *not* smaller than the target so we can't take *its*
+superclasses.  As a result the program is rightly rejected, unless you
+add (Super (Fam a)) to the context of (i3).
+
+Note [Silent superclass arguments] (historical interest)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+NB1: this note describes our *old* solution to the
+     recursive-superclass problem. I'm keeping the Note
+     for now, just as institutional memory.
+     However, the code for silent superclass arguments
+     was removed in late Dec 2014
+
+NB2: the silent-superclass solution introduced new problems
+     of its own, in the form of instance overlap.  Tests
+     SilentParametersOverlapping, T5051, and T7862 are examples
+
+NB3: the silent-superclass solution also generated tons of
+     extra dictionaries.  For example, in monad-transformer
+     code, when constructing a Monad dictionary you had to pass
+     an Applicative dictionary; and to construct that you neede
+     a Functor dictionary. Yet these extra dictionaries were
+     often never used.  Test T3064 compiled *far* faster after
+     silent superclasses were eliminated.
+
+Our solution to this problem "silent superclass arguments".  We pass
+to each dfun some ``silent superclass arguments’’, which are the
+immediate superclasses of the dictionary we are trying to
+construct. In our example:
+       dfun :: forall a. C [a] -> D [a] -> D [a]
+       dfun = \(dc::C [a]) (dd::D [a]) -> DOrd dc ...
+Notice the extra (dc :: C [a]) argument compared to the previous version.
+
+This gives us:
+
+     -----------------------------------------------------------
+     DFun Superclass Invariant
+     ~~~~~~~~~~~~~~~~~~~~~~~~
+     In the body of a DFun, every superclass argument to the
+     returned dictionary is
+       either   * one of the arguments of the DFun,
+       or       * constant, bound at top level
+     -----------------------------------------------------------
+
+This net effect is that it is safe to treat a dfun application as
+wrapping a dictionary constructor around its arguments (in particular,
+a dfun never picks superclasses from the arguments under the
+dictionary constructor). No superclass is hidden inside a dfun
+application.
+
+The extra arguments required to satisfy the DFun Superclass Invariant
+always come first, and are called the "silent" arguments.  You can
+find out how many silent arguments there are using Id.dfunNSilent;
+and then you can just drop that number of arguments to see the ones
+that were in the original instance declaration.
+
+DFun types are built (only) by MkId.mkDictFunId, so that is where we
+decide what silent arguments are to be added.
+-}
+
+{-
+************************************************************************
+*                                                                      *
+      Type-checking an instance method
+*                                                                      *
+************************************************************************
+
+tcMethod
+- Make the method bindings, as a [(NonRec, HsBinds)], one per method
+- Remembering to use fresh Name (the instance method Name) as the binder
+- Bring the instance method Ids into scope, for the benefit of tcInstSig
+- Use sig_fn mapping instance method Name -> instance tyvars
+- Ditto prag_fn
+- Use tcValBinds to do the checking
+-}
+
+tcMethods :: DFunId -> Class
+          -> [TcTyVar] -> [EvVar]
+          -> [TcType]
+          -> TcEvBinds
+          -> ([Located TcSpecPrag], PragFun)
+          -> [(Id, DefMeth)]
+          -> InstBindings Name
+          -> TcM ([Id], LHsBinds Id, Bag Implication)
+        -- The returned inst_meth_ids all have types starting
+        --      forall tvs. theta => ...
+tcMethods dfun_id clas tyvars dfun_ev_vars inst_tys
+                  dfun_ev_binds prags@(spec_inst_prags,_) op_items
+                  (InstBindings { ib_binds      = binds
+                                , ib_tyvars     = lexical_tvs
+                                , ib_pragmas    = sigs
+                                , ib_extensions = exts
+                                , ib_derived    = is_derived })
+  = tcExtendTyVarEnv2 (lexical_tvs `zip` tyvars) $
+       -- The lexical_tvs scope over the 'where' part
+    do { traceTc "tcInstMeth" (ppr sigs $$ ppr binds)
+       ; checkMinimalDefinition
+       ; (ids, binds, mb_implics) <- set_exts exts $
+                                     mapAndUnzip3M tc_item op_items
+       ; return (ids, listToBag binds, listToBag (catMaybes mb_implics)) }
+  where
+    set_exts :: [ExtensionFlag] -> TcM a -> TcM a
+    set_exts es thing = foldr setXOptM thing es
+
+    hs_sig_fn = mkHsSigFun sigs
+    inst_loc  = getSrcSpan dfun_id
+
+    ----------------------
+    tc_item :: (Id, DefMeth) -> TcM (Id, LHsBind Id, Maybe Implication)
+    tc_item (sel_id, dm_info)
+      | Just (user_bind, bndr_loc) <- findMethodBind (idName sel_id) binds
+      = tcMethodBody clas tyvars dfun_ev_vars inst_tys
+                              dfun_ev_binds is_derived hs_sig_fn prags
+                              sel_id user_bind bndr_loc
+      | otherwise
+      = do { traceTc "tc_def" (ppr sel_id)
+           ; tc_default sel_id dm_info }
+
+    ----------------------
+    tc_default :: Id -> DefMeth -> TcM (TcId, LHsBind Id, Maybe Implication)
+
+    tc_default sel_id (GenDefMeth dm_name)
+      = do { meth_bind <- mkGenericDefMethBind clas inst_tys sel_id dm_name
+           ; tcMethodBody clas tyvars dfun_ev_vars inst_tys
+                                  dfun_ev_binds is_derived hs_sig_fn prags
+                                  sel_id meth_bind inst_loc }
+
+    tc_default sel_id NoDefMeth     -- No default method at all
+      = do { traceTc "tc_def: warn" (ppr sel_id)
+           ; (meth_id, _, _) <- mkMethIds hs_sig_fn clas tyvars dfun_ev_vars
+                                          inst_tys sel_id
+           ; dflags <- getDynFlags
+           ; let meth_bind = mkVarBind meth_id $
+                             mkLHsWrap lam_wrapper (error_rhs dflags)
+           ; return (meth_id, meth_bind, Nothing) }
+      where
+        error_rhs dflags = L inst_loc $ HsApp error_fun (error_msg dflags)
+        error_fun    = L inst_loc $ wrapId (WpTyApp meth_tau) nO_METHOD_BINDING_ERROR_ID
+        error_msg dflags = L inst_loc (HsLit (HsStringPrim ""
+                                    (unsafeMkByteString (error_string dflags))))
+        meth_tau     = funResultTy (applyTys (idType sel_id) inst_tys)
+        error_string dflags = showSDoc dflags (hcat [ppr inst_loc, text "|", ppr sel_id ])
+        lam_wrapper  = mkWpTyLams tyvars <.> mkWpLams dfun_ev_vars
+
+    tc_default sel_id (DefMeth dm_name) -- A polymorphic default method
+      = do {     -- Build the typechecked version directly,
+                 -- without calling typecheck_method;
+                 -- see Note [Default methods in instances]
+                 -- Generate   /\as.\ds. let self = df as ds
+                 --                      in $dm inst_tys self
+                 -- The 'let' is necessary only because HsSyn doesn't allow
+                 -- you to apply a function to a dictionary *expression*.
+
+           ; self_dict <- newDict clas inst_tys
+           ; let self_ev_bind = mkWantedEvBind self_dict
+                                   (EvDFunApp dfun_id (mkTyVarTys tyvars) (map EvId dfun_ev_vars))
+
+           ; (meth_id, local_meth_sig, hs_wrap)
+                   <- mkMethIds hs_sig_fn clas tyvars dfun_ev_vars inst_tys sel_id
+           ; dm_id <- tcLookupId dm_name
+           ; let dm_inline_prag = idInlinePragma dm_id
+                 rhs = HsWrap (mkWpEvVarApps [self_dict] <.> mkWpTyApps inst_tys) $
+                       HsVar dm_id
+
+                 local_meth_id = sig_id local_meth_sig
+                 meth_bind = mkVarBind local_meth_id (L inst_loc rhs)
+                 meth_id1 = meth_id `setInlinePragma` dm_inline_prag
+                        -- Copy the inline pragma (if any) from the default
+                        -- method to this version. Note [INLINE and default methods]
+
+
+                 export = ABE { abe_wrap = hs_wrap, abe_poly = meth_id1
+                              , abe_mono = local_meth_id
+                              , abe_prags = mk_meth_spec_prags meth_id1 spec_inst_prags [] }
+                 bind = AbsBinds { abs_tvs = tyvars, abs_ev_vars = dfun_ev_vars
+                                 , abs_exports = [export]
+                                 , abs_ev_binds = [EvBinds (unitBag self_ev_bind)]
+                                 , abs_binds    = unitBag meth_bind }
+             -- Default methods in an instance declaration can't have their own
+             -- INLINE or SPECIALISE pragmas. It'd be possible to allow them, but
+             -- currently they are rejected with
+             --           "INLINE pragma lacks an accompanying binding"
+
+           ; return (meth_id1, L inst_loc bind, Nothing) }
+
+    ----------------------
+    -- Check if one of the minimal complete definitions is satisfied
+    checkMinimalDefinition
+      = whenIsJust (isUnsatisfied methodExists (classMinimalDef clas)) $
+          warnUnsatisifiedMinimalDefinition
+      where
+      methodExists meth = isJust (findMethodBind meth binds)
+
+------------------------
+tcMethodBody :: Class -> [TcTyVar] -> [EvVar] -> [TcType]
+             -> TcEvBinds -> Bool
+             -> HsSigFun
+             -> ([LTcSpecPrag], PragFun)
+             -> Id -> LHsBind Name -> SrcSpan
+             -> TcM (TcId, LHsBind Id, Maybe Implication)
+tcMethodBody clas tyvars dfun_ev_vars inst_tys
+                     dfun_ev_binds is_derived
+                     sig_fn (spec_inst_prags, prag_fn)
+                     sel_id (L bind_loc meth_bind) bndr_loc
+  = add_meth_ctxt $
+    do { traceTc "tcMethodBody" (ppr sel_id <+> ppr (idType sel_id))
+       ; (global_meth_id, local_meth_sig, hs_wrap)
+              <- setSrcSpan bndr_loc $
+                 mkMethIds sig_fn clas tyvars dfun_ev_vars
+                           inst_tys sel_id
+
+       ; let prags         = prag_fn (idName sel_id)
+             local_meth_id = sig_id local_meth_sig
+             lm_bind       = meth_bind { fun_id = L bndr_loc (idName local_meth_id) }
+                             -- Substitute the local_meth_name for the binder
+                             -- NB: the binding is always a FunBind
+
+       ; global_meth_id <- addInlinePrags global_meth_id prags
+       ; spec_prags     <- tcSpecPrags global_meth_id prags
+       ; (meth_implic, (tc_bind, _, _))
+               <- checkInstConstraints $ \ _ev_binds ->
+                  tcPolyCheck NonRecursive no_prag_fn local_meth_sig
+                              (L bind_loc lm_bind)
+
+        ; let specs  = mk_meth_spec_prags global_meth_id spec_inst_prags spec_prags
+              export = ABE { abe_poly  = global_meth_id
+                           , abe_mono  = local_meth_id
+                           , abe_wrap  = hs_wrap
+                           , abe_prags = specs }
+
+              local_ev_binds = TcEvBinds (ic_binds meth_implic)
+              full_bind = AbsBinds { abs_tvs      = tyvars
+                                   , abs_ev_vars  = dfun_ev_vars
+                                   , abs_exports  = [export]
+                                   , abs_ev_binds = [dfun_ev_binds, local_ev_binds]
+                                   , abs_binds    = tc_bind }
+
+        ; return (global_meth_id, L bind_loc full_bind, Just meth_implic) }
+  where
+        -- For instance decls that come from deriving clauses
+        -- we want to print out the full source code if there's an error
+        -- because otherwise the user won't see the code at all
+    add_meth_ctxt thing
+      | is_derived = addLandmarkErrCtxt (derivBindCtxt sel_id clas inst_tys) thing
+      | otherwise  = thing
+
+    no_prag_fn  _ = []          -- No pragmas for local_meth_id;
+                                -- they are all for meth_id
+
+
+------------------------
 mkMethIds :: HsSigFun -> Class -> [TcTyVar] -> [EvVar]
           -> [TcType] -> Id -> TcM (TcId, TcSigInfo, HsWrapper)
 mkMethIds sig_fn clas tyvars dfun_ev_vars inst_tys sel_id
   = do  { poly_meth_name  <- newName (mkClassOpAuxOcc sel_occ)
         ; local_meth_name <- newName sel_occ
                   -- Base the local_meth_name on the selector name, because
-                  -- type errors from tcInstanceMethodBody come from here
+                  -- type errors from tcMethodBody come from here
         ; let poly_meth_id  = mkLocalId poly_meth_name  poly_meth_ty
               local_meth_id = mkLocalId local_meth_name local_meth_ty
 
@@ -930,11 +1490,11 @@ mkMethIds sig_fn clas tyvars dfun_ev_vars inst_tys sel_id
                -> setSrcSpan (getLoc lhs_ty) $
                   do { inst_sigs <- xoptM Opt_InstanceSigs
                      ; checkTc inst_sigs (misplacedInstSig sel_name lhs_ty)
-                     ; sig_ty  <- tcHsSigType (FunSigCtxt sel_name) lhs_ty
+                     ; sig_ty  <- tcHsSigType (FunSigCtxt sel_name True) lhs_ty
                      ; let poly_sig_ty = mkSigmaTy tyvars theta sig_ty
                      ; tc_sig  <- instTcTySig lhs_ty sig_ty Nothing [] local_meth_name
                      ; hs_wrap <- addErrCtxtM (methSigCtxt sel_name poly_sig_ty poly_meth_ty) $
-                                  tcSubType (FunSigCtxt sel_name) poly_sig_ty poly_meth_ty
+                                  tcSubType (FunSigCtxt sel_name False) poly_sig_ty poly_meth_ty
                      ; return (poly_meth_id, tc_sig, hs_wrap) }
 
             Nothing     -- No type signature
@@ -970,15 +1530,6 @@ misplacedInstSig name hs_ty
                     2 (dcolon <+> ppr hs_ty))
          , ptext (sLit "(Use InstanceSigs to allow this)") ]
 
-------------------------------
-tcSpecInstPrags :: DFunId -> InstBindings Name
-                -> TcM ([Located TcSpecPrag], PragFun)
-tcSpecInstPrags dfun_id (InstBindings { ib_binds = binds, ib_pragmas = uprags })
-  = do { spec_inst_prags <- mapM (wrapLocM (tcSpecInst dfun_id)) $
-                            filter isSpecInstLSig uprags
-             -- The filter removes the pragmas for methods
-       ; return (spec_inst_prags, mkPragFun uprags binds) }
-
 {-
 Note [Instance method signatures]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -998,7 +1549,7 @@ singature should scope over the method body.
 
 We achieve this by building a TcSigInfo for the method, whether or not
 there is an instance method signature, and using that to typecheck
-the declaration (in tcInstanceMethodBody).  That means, conveniently,
+the declaration (in tcMethodBody).  That means, conveniently,
 that the type variables bound in the signature will scope over the body.
 
 What about the check that the instance method signature is more
@@ -1006,337 +1557,31 @@ polymorphic than the instantiated class method type?  We just do a
 tcSubType call in mkMethIds, and use the HsWrapper thus generated in
 the method AbsBind.  It's very like the tcSubType impedence-matching
 call in mkExport.  We have to pass the HsWrapper into
-tcInstanceMethodBody.
-
-
-Note [Silent superclass arguments]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-See Trac #3731, #4809, #5751, #5913, #6117, which all
-describe somewhat more complicated situations, but ones
-encountered in practice.
-
-      THE PROBLEM
-
-The problem is that it is all too easy to create a class whose
-superclass is bottom when it should not be.
-
-Consider the following (extreme) situation:
-        class C a => D a where ...
-        instance D [a] => D [a] where ...   (dfunD)
-        instance C [a] => C [a] where ...   (dfunC)
-Although this looks wrong (assume D [a] to prove D [a]), it is only a
-more extreme case of what happens with recursive dictionaries, and it
-can, just about, make sense because the methods do some work before
-recursing.
-
-To implement the dfunD we must generate code for the superclass C [a],
-which we had better not get by superclass selection from the supplied
-argument:
-       dfunD :: forall a. D [a] -> D [a]
-       dfunD = \d::D [a] -> MkD (scsel d) ..
-
-Otherwise if we later encounter a situation where
-we have a [Wanted] dw::D [a] we might solve it thus:
-     dw := dfunD dw
-Which is all fine except that now ** the superclass C is bottom **!
-
-The instance we want is:
-       dfunD :: forall a. D [a] -> D [a]
-       dfunD = \d::D [a] -> MkD (dfunC (scsel d)) ...
-
-      THE SOLUTION
-
-Our solution to this problem "silent superclass arguments".  We pass
-to each dfun some ``silent superclass arguments’’, which are the
-immediate superclasses of the dictionary we are trying to
-construct. In our example:
-       dfun :: forall a. C [a] -> D [a] -> D [a]
-       dfun = \(dc::C [a]) (dd::D [a]) -> DOrd dc ...
-Notice the extra (dc :: C [a]) argument compared to the previous version.
-
-This gives us:
-
-     -----------------------------------------------------------
-     DFun Superclass Invariant
-     ~~~~~~~~~~~~~~~~~~~~~~~~
-     In the body of a DFun, every superclass argument to the
-     returned dictionary is
-       either   * one of the arguments of the DFun,
-       or       * constant, bound at top level
-     -----------------------------------------------------------
-
-This net effect is that it is safe to treat a dfun application as
-wrapping a dictionary constructor around its arguments (in particular,
-a dfun never picks superclasses from the arguments under the
-dictionary constructor). No superclass is hidden inside a dfun
-application.
-
-The extra arguments required to satisfy the DFun Superclass Invariant
-always come first, and are called the "silent" arguments.  You can
-find out how many silent arguments there are using Id.dfunNSilent;
-and then you can just drop that number of arguments to see the ones
-that were in the original instance declaration.
-
-DFun types are built (only) by MkId.mkDictFunId, so that is where we
-decide what silent arguments are to be added.
-
-In our example, if we had  [Wanted] dw :: D [a] we would get via the instance:
-    dw := dfun d1 d2
-    [Wanted] (d1 :: C [a])
-    [Wanted] (d2 :: D [a])
-
-And now, though we *can* solve:
-     d2 := dw
-That's fine; and we solve d1:C[a] separately.
-
-Test case SCLoop tests this fix.
-
-Note [SPECIALISE instance pragmas]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Consider
-
-   instance (Ix a, Ix b) => Ix (a,b) where
-     {-# SPECIALISE instance Ix (Int,Int) #-}
-     range (x,y) = ...
-
-We make a specialised version of the dictionary function, AND
-specialised versions of each *method*.  Thus we should generate
-something like this:
-
-  $dfIxPair :: (Ix a, Ix b) => Ix (a,b)
-  {-# DFUN [$crangePair, ...] #-}
-  {-# SPECIALISE $dfIxPair :: Ix (Int,Int) #-}
-  $dfIxPair da db = Ix ($crangePair da db) (...other methods...)
-
-  $crange :: (Ix a, Ix b) -> ((a,b),(a,b)) -> [(a,b)]
-  {-# SPECIALISE $crange :: ((Int,Int),(Int,Int)) -> [(Int,Int)] #-}
-  $crange da db = <blah>
-
-The SPECIALISE pragmas are acted upon by the desugarer, which generate
-
-  dii :: Ix Int
-  dii = ...
-
-  $s$dfIxPair :: Ix ((Int,Int),(Int,Int))
-  {-# DFUN [$crangePair di di, ...] #-}
-  $s$dfIxPair = Ix ($crangePair di di) (...)
-
-  {-# RULE forall (d1,d2:Ix Int). $dfIxPair Int Int d1 d2 = $s$dfIxPair #-}
-
-  $s$crangePair :: ((Int,Int),(Int,Int)) -> [(Int,Int)]
-  $c$crangePair = ...specialised RHS of $crangePair...
-
-  {-# RULE forall (d1,d2:Ix Int). $crangePair Int Int d1 d2 = $s$crangePair #-}
-
-Note that
-
-  * The specialised dictionary $s$dfIxPair is very much needed, in case we
-    call a function that takes a dictionary, but in a context where the
-    specialised dictionary can be used.  See Trac #7797.
-
-  * The ClassOp rule for 'range' works equally well on $s$dfIxPair, because
-    it still has a DFunUnfolding.  See Note [ClassOp/DFun selection]
-
-  * A call (range ($dfIxPair Int Int d1 d2)) might simplify two ways:
-       --> {ClassOp rule for range}     $crangePair Int Int d1 d2
-       --> {SPEC rule for $crangePair}  $s$crangePair
-    or thus:
-       --> {SPEC rule for $dfIxPair}    range $s$dfIxPair
-       --> {ClassOpRule for range}      $s$crangePair
-    It doesn't matter which way.
-
-  * We want to specialise the RHS of both $dfIxPair and $crangePair,
-    but the SAME HsWrapper will do for both!  We can call tcSpecPrag
-    just once, and pass the result (in spec_inst_info) to tcInstanceMethods.
+tcMethodBody.
 -}
 
-tcSpecInst :: Id -> Sig Name -> TcM TcSpecPrag
-tcSpecInst dfun_id prag@(SpecInstSig hs_ty)
-  = addErrCtxt (spec_ctxt prag) $
-    do  { (tyvars, theta, clas, tys) <- tcHsInstHead SpecInstCtxt hs_ty
-        ; let (_, spec_dfun_ty) = mkDictFunTy tyvars theta clas tys
-
-        ; co_fn <- tcSubType SpecInstCtxt (idType dfun_id) spec_dfun_ty
-        ; return (SpecPrag dfun_id co_fn defaultInlinePragma) }
-  where
-    spec_ctxt prag = hang (ptext (sLit "In the SPECIALISE pragma")) 2 (ppr prag)
-
-tcSpecInst _  _ = panic "tcSpecInst"
-
-{-
-************************************************************************
-*                                                                      *
-      Type-checking an instance method
-*                                                                      *
-************************************************************************
-
-tcInstanceMethod
-- Make the method bindings, as a [(NonRec, HsBinds)], one per method
-- Remembering to use fresh Name (the instance method Name) as the binder
-- Bring the instance method Ids into scope, for the benefit of tcInstSig
-- Use sig_fn mapping instance method Name -> instance tyvars
-- Ditto prag_fn
-- Use tcValBinds to do the checking
--}
-
-tcInstanceMethods :: DFunId -> Class -> [TcTyVar]
-                  -> [EvVar]
-                  -> [TcType]
-                  -> ([Located TcSpecPrag], PragFun)
-                  -> [(Id, DefMeth)]
-                  -> InstBindings Name
-                  -> TcM ([Id], [LHsBind Id])
-        -- The returned inst_meth_ids all have types starting
-        --      forall tvs. theta => ...
-tcInstanceMethods dfun_id clas tyvars dfun_ev_vars inst_tys
-                  (spec_inst_prags, prag_fn)
-                  op_items (InstBindings { ib_binds = binds
-                                         , ib_tyvars = lexical_tvs
-                                         , ib_pragmas = sigs
-                                         , ib_extensions = exts
-                                         , ib_derived    = is_derived })
-  = tcExtendTyVarEnv2 (lexical_tvs `zip` tyvars) $
-       -- The lexical_tvs scope over the 'where' part
-    do { traceTc "tcInstMeth" (ppr sigs $$ ppr binds)
-       ; let hs_sig_fn = mkHsSigFun sigs
-       ; checkMinimalDefinition
-       ; set_exts exts $ mapAndUnzipM (tc_item hs_sig_fn) op_items }
-  where
-    set_exts :: [ExtensionFlag] -> TcM a -> TcM a
-    set_exts es thing = foldr setXOptM thing es
-
-    ----------------------
-    tc_item :: HsSigFun -> (Id, DefMeth) -> TcM (Id, LHsBind Id)
-    tc_item sig_fn (sel_id, dm_info)
-      = case findMethodBind (idName sel_id) binds of
-            Just (user_bind, bndr_loc)
-                     -> tc_body sig_fn sel_id user_bind bndr_loc
-            Nothing  -> do { traceTc "tc_def" (ppr sel_id)
-                           ; tc_default sig_fn sel_id dm_info }
-
-    ----------------------
-    tc_body :: HsSigFun -> Id -> LHsBind Name
-            -> SrcSpan -> TcM (TcId, LHsBind Id)
-    tc_body sig_fn sel_id rn_bind bndr_loc
-      = add_meth_ctxt sel_id rn_bind $
-        do { traceTc "tc_item" (ppr sel_id <+> ppr (idType sel_id))
-           ; (meth_id, local_meth_sig, hs_wrap)
-                  <- setSrcSpan bndr_loc $
-                     mkMethIds sig_fn clas tyvars dfun_ev_vars
-                               inst_tys sel_id
-           ; let prags = prag_fn (idName sel_id)
-           ; meth_id1 <- addInlinePrags meth_id prags
-           ; spec_prags <- tcSpecPrags meth_id1 prags
-           ; bind <- tcInstanceMethodBody InstSkol
-                          tyvars dfun_ev_vars
-                          meth_id1 local_meth_sig hs_wrap
-                          (mk_meth_spec_prags meth_id1 spec_prags)
-                          rn_bind
-           ; return (meth_id1, bind) }
-
-    ----------------------
-    tc_default :: HsSigFun -> Id -> DefMeth -> TcM (TcId, LHsBind Id)
-
-    tc_default sig_fn sel_id (GenDefMeth dm_name)
-      = do { meth_bind <- mkGenericDefMethBind clas inst_tys sel_id dm_name
-           ; tc_body sig_fn sel_id meth_bind inst_loc }
-
-    tc_default sig_fn sel_id NoDefMeth     -- No default method at all
-      = do { traceTc "tc_def: warn" (ppr sel_id)
-           ; (meth_id, _, _) <- mkMethIds sig_fn clas tyvars dfun_ev_vars
-                                          inst_tys sel_id
-           ; dflags <- getDynFlags
-           ; return (meth_id,
-                     mkVarBind meth_id $
-                       mkLHsWrap lam_wrapper (error_rhs dflags)) }
-      where
-        error_rhs dflags = L inst_loc $ HsApp error_fun (error_msg dflags)
-        error_fun    = L inst_loc $ wrapId (WpTyApp meth_tau) nO_METHOD_BINDING_ERROR_ID
-        error_msg dflags = L inst_loc (HsLit (HsStringPrim ""
-                                    (unsafeMkByteString (error_string dflags))))
-        meth_tau     = funResultTy (applyTys (idType sel_id) inst_tys)
-        error_string dflags = showSDoc dflags (hcat [ppr inst_loc, text "|", ppr sel_id ])
-        lam_wrapper  = mkWpTyLams tyvars <.> mkWpLams dfun_ev_vars
-
-    tc_default sig_fn sel_id (DefMeth dm_name) -- A polymorphic default method
-      = do {     -- Build the typechecked version directly,
-                 -- without calling typecheck_method;
-                 -- see Note [Default methods in instances]
-                 -- Generate   /\as.\ds. let self = df as ds
-                 --                      in $dm inst_tys self
-                 -- The 'let' is necessary only because HsSyn doesn't allow
-                 -- you to apply a function to a dictionary *expression*.
-
-           ; self_dict <- newDict clas inst_tys
-           ; let self_ev_bind = EvBind self_dict
-                                (EvDFunApp dfun_id (mkTyVarTys tyvars) (map EvId dfun_ev_vars))
-
-           ; (meth_id, local_meth_sig, hs_wrap)
-                   <- mkMethIds sig_fn clas tyvars dfun_ev_vars inst_tys sel_id
-           ; dm_id <- tcLookupId dm_name
-           ; let dm_inline_prag = idInlinePragma dm_id
-                 rhs = HsWrap (mkWpEvVarApps [self_dict] <.> mkWpTyApps inst_tys) $
-                       HsVar dm_id
-
-                 local_meth_id = sig_id local_meth_sig
-                 meth_bind = mkVarBind local_meth_id (L inst_loc rhs)
-                 meth_id1 = meth_id `setInlinePragma` dm_inline_prag
-                        -- Copy the inline pragma (if any) from the default
-                        -- method to this version. Note [INLINE and default methods]
-
-
-                 export = ABE { abe_wrap = hs_wrap, abe_poly = meth_id1
-                              , abe_mono = local_meth_id
-                              , abe_prags = mk_meth_spec_prags meth_id1 [] }
-                 bind = AbsBinds { abs_tvs = tyvars, abs_ev_vars = dfun_ev_vars
-                                 , abs_exports = [export]
-                                 , abs_ev_binds = EvBinds (unitBag self_ev_bind)
-                                 , abs_binds    = unitBag meth_bind }
-             -- Default methods in an instance declaration can't have their own
-             -- INLINE or SPECIALISE pragmas. It'd be possible to allow them, but
-             -- currently they are rejected with
-             --           "INLINE pragma lacks an accompanying binding"
-
-           ; return (meth_id1, L inst_loc bind) }
-
-    ----------------------
-    mk_meth_spec_prags :: Id -> [LTcSpecPrag] -> TcSpecPrags
+----------------------
+mk_meth_spec_prags :: Id -> [LTcSpecPrag] -> [LTcSpecPrag] -> TcSpecPrags
         -- Adapt the 'SPECIALISE instance' pragmas to work for this method Id
         -- There are two sources:
         --   * spec_prags_for_me: {-# SPECIALISE op :: <blah> #-}
         --   * spec_prags_from_inst: derived from {-# SPECIALISE instance :: <blah> #-}
         --     These ones have the dfun inside, but [perhaps surprisingly]
         --     the correct wrapper.
-    mk_meth_spec_prags meth_id spec_prags_for_me
-      = SpecPrags (spec_prags_for_me ++ spec_prags_from_inst)
-      where
-        spec_prags_from_inst
-           | isInlinePragma (idInlinePragma meth_id)
-           = []  -- Do not inherit SPECIALISE from the instance if the
-                 -- method is marked INLINE, because then it'll be inlined
-                 -- and the specialisation would do nothing. (Indeed it'll provoke
-                 -- a warning from the desugarer
-           | otherwise
-           = [ L inst_loc (SpecPrag meth_id wrap inl)
-             | L inst_loc (SpecPrag _ wrap inl) <- spec_inst_prags]
+        -- See Note [Handling SPECIALISE pragmas] in TcBinds
+mk_meth_spec_prags meth_id spec_inst_prags spec_prags_for_me
+  = SpecPrags (spec_prags_for_me ++ spec_prags_from_inst)
+  where
+    spec_prags_from_inst
+       | isInlinePragma (idInlinePragma meth_id)
+       = []  -- Do not inherit SPECIALISE from the instance if the
+             -- method is marked INLINE, because then it'll be inlined
+             -- and the specialisation would do nothing. (Indeed it'll provoke
+             -- a warning from the desugarer
+       | otherwise
+       = [ L inst_loc (SpecPrag meth_id wrap inl)
+         | L inst_loc (SpecPrag _ wrap inl) <- spec_inst_prags]
 
-    inst_loc = getSrcSpan dfun_id
-
-        -- For instance decls that come from deriving clauses
-        -- we want to print out the full source code if there's an error
-        -- because otherwise the user won't see the code at all
-    add_meth_ctxt sel_id rn_bind thing
-      | is_derived = addLandmarkErrCtxt (derivBindCtxt sel_id clas inst_tys rn_bind) thing
-      | otherwise  = thing
-
-    ----------------------
-
-    -- check if one of the minimal complete definitions is satisfied
-    checkMinimalDefinition
-      = whenIsJust (isUnsatisfied methodExists (classMinimalDef clas)) $
-          warnUnsatisifiedMinimalDefinition
-      where
-      methodExists meth = isJust (findMethodBind meth binds)
 
 mkGenericDefMethBind :: Class -> [Type] -> Id -> Name -> TcM (LHsBind Name)
 mkGenericDefMethBind clas inst_tys sel_id dm_name
@@ -1354,12 +1599,9 @@ mkGenericDefMethBind clas inst_tys sel_id dm_name
     rhs = nlHsVar dm_name
 
 ----------------------
-wrapId :: HsWrapper -> id -> HsExpr id
-wrapId wrapper id = mkHsWrap wrapper (HsVar id)
-
-derivBindCtxt :: Id -> Class -> [Type ] -> LHsBind Name -> SDoc
-derivBindCtxt sel_id clas tys _bind
-   = vcat [ ptext (sLit "When typechecking the code for ") <+> quotes (ppr sel_id)
+derivBindCtxt :: Id -> Class -> [Type ] -> SDoc
+derivBindCtxt sel_id clas tys
+   = vcat [ ptext (sLit "When typechecking the code for") <+> quotes (ppr sel_id)
           , nest 2 (ptext (sLit "in a derived instance for")
                     <+> quotes (pprClassPred clas tys) <> colon)
           , nest 2 $ ptext (sLit "To see the code I am typechecking, use -ddump-deriv") ]
@@ -1486,6 +1728,93 @@ Note carefully:
   in TcSpecPrags.
 
 
+************************************************************************
+*                                                                      *
+        Specialise instance pragmas
+*                                                                      *
+************************************************************************
+
+Note [SPECIALISE instance pragmas]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+
+   instance (Ix a, Ix b) => Ix (a,b) where
+     {-# SPECIALISE instance Ix (Int,Int) #-}
+     range (x,y) = ...
+
+We make a specialised version of the dictionary function, AND
+specialised versions of each *method*.  Thus we should generate
+something like this:
+
+  $dfIxPair :: (Ix a, Ix b) => Ix (a,b)
+  {-# DFUN [$crangePair, ...] #-}
+  {-# SPECIALISE $dfIxPair :: Ix (Int,Int) #-}
+  $dfIxPair da db = Ix ($crangePair da db) (...other methods...)
+
+  $crange :: (Ix a, Ix b) -> ((a,b),(a,b)) -> [(a,b)]
+  {-# SPECIALISE $crange :: ((Int,Int),(Int,Int)) -> [(Int,Int)] #-}
+  $crange da db = <blah>
+
+The SPECIALISE pragmas are acted upon by the desugarer, which generate
+
+  dii :: Ix Int
+  dii = ...
+
+  $s$dfIxPair :: Ix ((Int,Int),(Int,Int))
+  {-# DFUN [$crangePair di di, ...] #-}
+  $s$dfIxPair = Ix ($crangePair di di) (...)
+
+  {-# RULE forall (d1,d2:Ix Int). $dfIxPair Int Int d1 d2 = $s$dfIxPair #-}
+
+  $s$crangePair :: ((Int,Int),(Int,Int)) -> [(Int,Int)]
+  $c$crangePair = ...specialised RHS of $crangePair...
+
+  {-# RULE forall (d1,d2:Ix Int). $crangePair Int Int d1 d2 = $s$crangePair #-}
+
+Note that
+
+  * The specialised dictionary $s$dfIxPair is very much needed, in case we
+    call a function that takes a dictionary, but in a context where the
+    specialised dictionary can be used.  See Trac #7797.
+
+  * The ClassOp rule for 'range' works equally well on $s$dfIxPair, because
+    it still has a DFunUnfolding.  See Note [ClassOp/DFun selection]
+
+  * A call (range ($dfIxPair Int Int d1 d2)) might simplify two ways:
+       --> {ClassOp rule for range}     $crangePair Int Int d1 d2
+       --> {SPEC rule for $crangePair}  $s$crangePair
+    or thus:
+       --> {SPEC rule for $dfIxPair}    range $s$dfIxPair
+       --> {ClassOpRule for range}      $s$crangePair
+    It doesn't matter which way.
+
+  * We want to specialise the RHS of both $dfIxPair and $crangePair,
+    but the SAME HsWrapper will do for both!  We can call tcSpecPrag
+    just once, and pass the result (in spec_inst_info) to tcMethods.
+-}
+
+tcSpecInstPrags :: DFunId -> InstBindings Name
+                -> TcM ([Located TcSpecPrag], PragFun)
+tcSpecInstPrags dfun_id (InstBindings { ib_binds = binds, ib_pragmas = uprags })
+  = do { spec_inst_prags <- mapM (wrapLocM (tcSpecInst dfun_id)) $
+                            filter isSpecInstLSig uprags
+             -- The filter removes the pragmas for methods
+       ; return (spec_inst_prags, mkPragFun uprags binds) }
+
+------------------------------
+tcSpecInst :: Id -> Sig Name -> TcM TcSpecPrag
+tcSpecInst dfun_id prag@(SpecInstSig _ hs_ty)
+  = addErrCtxt (spec_ctxt prag) $
+    do  { (tyvars, theta, clas, tys) <- tcHsInstHead SpecInstCtxt hs_ty
+        ; let spec_dfun_ty = mkDictFunTy tyvars theta clas tys
+        ; co_fn <- tcSpecWrapper SpecInstCtxt (idType dfun_id) spec_dfun_ty
+        ; return (SpecPrag dfun_id co_fn defaultInlinePragma) }
+  where
+    spec_ctxt prag = hang (ptext (sLit "In the SPECIALISE pragma")) 2 (ppr prag)
+
+tcSpecInst _  _ = panic "tcSpecInst"
+
+{-
 ************************************************************************
 *                                                                      *
 \subsection{Error messages}

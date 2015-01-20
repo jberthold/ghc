@@ -1408,7 +1408,54 @@ foreign import "&amp;f" f :: FunPtr t
           The warning will indicate the duplicated <literal>Eq a</literal> constraint.
           </para>
 
-          <para>This option is on by default.</para>
+          <para>This option is now deprecated in favour of <option>-fwarn-redundant-constraints</option>.</para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term><option>-fwarn-redundant-constraints</option>:</term>
+        <listitem>
+          <indexterm><primary><option>-fwarn-redundant-constraints</option></primary></indexterm>
+          <indexterm><primary>redundant constraints, warning</primary></indexterm>
+
+          <para>Have the compiler warn about redundant constraints in a type signature. 
+          In particular:
+          <itemizedlist>
+          <listitem><para>
+          A redundant constraint within the type signature itself:
+          <programlisting>
+             f :: (Eq a, Ord a) => a -> a
+          </programlisting>
+          The warning will indicate the redundant <literal>Eq a</literal> constraint:
+          it is subsumed by the <literal>Ord a</literal> constraint.
+          </para></listitem>
+          <listitem><para>
+          A constraint in the type signature is not used in the code it covers:
+          <programlisting>
+             f :: Eq a => a -> a -> Bool
+             f x y = True
+          </programlisting>
+          The warning will indicate the redundant <literal>Eq a</literal> constraint:
+          : it is not used by the definition of <literal>f</literal>.)
+          </para></listitem>
+          </itemizedlist>
+          Similar warnings are given for a redundant constraint in an instance declaration.
+          </para>
+          <para>This option is on by default.  As usual you can suppress it on a per-module basis
+          with <option>-fno-warn-redundant-constraints</option>.  Occasionally you may specifically
+          want a function to have a more constrained signature than necessary, perhaps to
+          leave yourself wiggle-rooom for changing the implementation without changing the
+          API.  In that case, you can suppress the warning on a per-function basis, using a
+          call in a dead binding.  For example:
+          <programlisting>
+             f :: Eq a => a -> a -> Bool
+             f x y = True
+                where
+                  _ = x == x  -- Suppress the redundant-constraint warning for (Eq a)
+          </programlisting>
+          Here the call to <literal>(==)</literal> makes GHC think that the <literal>(Eq a)</literal>
+          constraint is needed, so no warning is issued.
+          </para>
         </listitem>
       </varlistentry>
 
@@ -1815,7 +1862,7 @@ data Vec n s where
             and <function>Succ</function> are not written as <function>'Zero</function> and
             <function>'Succ</function>.
             </para>
-            <para>This warning is off by default.</para>
+            <para>This warning is is enabled by default in <literal>-Wall</literal> mode.</para>
         </listitem>
       </varlistentry>
 
@@ -3261,13 +3308,29 @@ data D = D !C
           <listitem>
             <para><indexterm><primary><option>-N<replaceable>x</replaceable></option></primary><secondary>RTS option</secondary></indexterm>
               Use <replaceable>x</replaceable> simultaneous threads when
-              running the program.  Normally <replaceable>x</replaceable>
-              should be chosen to match the number of CPU cores on the
-              machine<footnote><para>Whether hyperthreading cores should be counted or not is an
-              open question; please feel free to experiment and let us know what
-                  results you find.</para></footnote>.  For example,
-              on a dual-core machine we would probably use
-              <literal>+RTS -N2 -RTS</literal>.</para>
+              running the program.</para>
+
+              <para>The runtime manages a set of virtual processors,
+              which we call <emphasis>capabilities</emphasis>, the
+              number of which is determined by the <option>-N</option>
+              option.  Each capability can run one Haskell thread at a
+              time, so the number of capabilities is equal to the
+              number of Haskell threads that can run physically in
+              parallel.  A capability is animated by one or more OS
+              threads; the runtime manages a pool of OS threads for
+              each capability, so that if a Haskell thread makes a
+              foreign call (see <xref linkend="ffi-threads" />)
+              another OS thread can take over that capability.
+              </para>
+
+              <para>Normally <replaceable>x</replaceable> should be
+              chosen to match the number of CPU cores on the
+              machine<footnote><para>Whether hyperthreading cores
+              should be counted or not is an open question; please
+              feel free to experiment and let us know what results you
+              find.</para></footnote>.  For example, on a dual-core
+              machine we would probably use <literal>+RTS -N2
+              -RTS</literal>.</para>
 
             <para>Omitting <replaceable>x</replaceable>,
               i.e. <literal>+RTS -N -RTS</literal>, lets the runtime
@@ -3284,10 +3347,11 @@ data D = D !C
               <xref linkend="rts-options-gc" />).</para>
 
             <para>The current value of the <option>-N</option> option
-              is available to the Haskell program
-              via <literal>Control.Concurrent.getNumCapabilities</literal>, and
-              it may be changed while the program is running by
-              calling <literal>Control.Concurrent.setNumCapabilities</literal>.</para>
+            is available to the Haskell program via
+            <literal>Control.Concurrent.getNumCapabilities</literal>,
+            and it may be changed while the program is running by
+            calling
+            <literal>Control.Concurrent.setNumCapabilities</literal>.</para>
           </listitem>
         </varlistentry>
       </variablelist>
@@ -3302,9 +3366,18 @@ data D = D !C
           option</secondary></indexterm>
           <listitem>
             <para>Use the OS's affinity facilities to try to pin OS
-              threads to CPU cores.  This is an experimental feature,
-              and may or may not be useful.  Please let us know
-              whether it helps for you!</para>
+            threads to CPU cores.</para>
+
+            <para>When this option is enabled, the OS threads for a
+            capability <emphasis>i</emphasis> are bound to the CPU
+            core <emphasis>i</emphasis> using the API provided by the
+            OS for setting thread affinity.  e.g. on Linux
+            GHC uses <literal>sched_setaffinity()</literal>.</para>
+
+            <para>Depending on your workload and the other activity on
+            the machine, this may or may not result in a performance
+            improvement.  We recommend trying it out and measuring the
+            difference.</para>
           </listitem>
         </varlistentry>
         <varlistentry>

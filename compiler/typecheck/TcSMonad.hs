@@ -23,15 +23,13 @@ module TcSMonad (
     wrapErrTcS, wrapWarnTcS,
 
     -- Evidence creation and transformation
-    XEvTerm(..),
     Freshness(..), freshGoals, isFresh,
 
     newTcEvBinds, newWantedEvVar, newWantedEvVarNC,
     setWantedTyBind, reportUnifications,
-    setEvBind,
+    setEvBind, setWantedEvBind, setEvBindIfWanted,
     newEvVar, newGivenEvVar, newGivenEvVars,
     newDerived, emitNewDerived,
-    instDFunConstraints,
 
     getInstEnvs, getFamInstEnvs,                -- Getting the environments
     getTopEnv, getGblEnv, getTcEvBinds, getTcLevel,
@@ -93,7 +91,7 @@ module TcSMonad (
 
 import HscTypes
 
-import Inst
+import qualified Inst as TcM
 import InstEnv
 import FamInst
 import FamInstEnv
@@ -123,7 +121,6 @@ import UniqSupply
 
 import FastString
 import Util
-import Id
 import TcRnTypes
 
 import Unique
@@ -380,6 +377,165 @@ Type-family equations, of form (ev : F tys ~ ty), live in three places
     using w3 itself!
 
   * The inert_funeqs are un-solved but fully processed and in the InertCans.
+
+Note [Solved dictionaries]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we apply a top-level instance declararation, we add the "solved"
+dictionary to the inert_solved_dicts.  In general, we use it to avoid
+creating a new EvVar when we have a new goal that we have solved in
+the past.
+
+But in particular, we can use it to create *recursive* dicationaries.
+The simplest, degnerate case is
+    instance C [a] => C [a] where ...
+If we have
+    [W] d1 :: C [x]
+then we can apply the instance to get
+    d1 = $dfCList d
+    [W] d2 :: C [x]
+Now 'd1' goes in inert_solved_dicts, and we can solve d2 directly from d1.
+    d1 = $dfCList d
+    d2 = d1
+
+See Note [Example of recursive dictionaries]
+Other notes about solved dictionaries
+
+* See also Note [Do not add superclasses of solved dictionaries]
+
+* The inert_solved_dicts field is not rewritten by equalities, so it may
+  get out of date.
+
+Note [Do not add superclasses of solved dictionaries]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Every member of inert_solved_dicts is the result of applying a dictionary
+function, NOT of applying superclass selection to anything.
+Consider
+
+        class Ord a => C a where
+        instance Ord [a] => C [a] where ...
+
+Suppose we are trying to solve
+  [G] d1 : Ord a
+  [W] d2 : C [a]
+
+Then we'll use the instance decl to give
+
+  [G] d1 : Ord a     Solved: d2 : C [a] = $dfCList d3
+  [W] d3 : Ord [a]
+
+We must not add d4 : Ord [a] to the 'solved' set (by taking the
+superclass of d2), otherwise we'll use it to solve d3, without ever
+using d1, which would be a catastrophe.
+
+Solution: when extending the solved dictionaries, do not add superclasses.
+That's why each element of the inert_solved_dicts is the result of applying
+a dictionary function.
+
+Note [Example of recursive dictionaries]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--- Example 1
+
+    data D r = ZeroD | SuccD (r (D r));
+
+    instance (Eq (r (D r))) => Eq (D r) where
+        ZeroD     == ZeroD     = True
+        (SuccD a) == (SuccD b) = a == b
+        _         == _         = False;
+
+    equalDC :: D [] -> D [] -> Bool;
+    equalDC = (==);
+
+We need to prove (Eq (D [])). Here's how we go:
+
+   [W] d1 : Eq (D [])
+By instance decl of Eq (D r):
+   [W] d2 : Eq [D []]      where   d1 = dfEqD d2
+By instance decl of Eq [a]:
+   [W] d3 : Eq (D [])      where   d2 = dfEqList d3
+                                   d1 = dfEqD d2
+Now this wanted can interact with our "solved" d1 to get:
+    d3 = d1
+
+-- Example 2:
+This code arises in the context of "Scrap Your Boilerplate with Class"
+
+    class Sat a
+    class Data ctx a
+    instance  Sat (ctx Char)             => Data ctx Char       -- dfunData1
+    instance (Sat (ctx [a]), Data ctx a) => Data ctx [a]        -- dfunData2
+
+    class Data Maybe a => Foo a
+
+    instance Foo t => Sat (Maybe t)                             -- dfunSat
+
+    instance Data Maybe a => Foo a                              -- dfunFoo1
+    instance Foo a        => Foo [a]                            -- dfunFoo2
+    instance                 Foo [Char]                         -- dfunFoo3
+
+Consider generating the superclasses of the instance declaration
+         instance Foo a => Foo [a]
+
+So our problem is this
+    [G] d0 : Foo t
+    [W] d1 : Data Maybe [t]   -- Desired superclass
+
+We may add the given in the inert set, along with its superclasses
+  Inert:
+    [G] d0 : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
+  WorkList
+    [W] d1 : Data Maybe [t]
+
+Solve d1 using instance dfunData2; d1 := dfunData2 d2 d3
+  Inert:
+    [G] d0 : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
+  Solved:
+        d1 : Data Maybe [t]
+  WorkList:
+    [W] d2 : Sat (Maybe [t])
+    [W] d3 : Data Maybe t
+
+Now, we may simplify d2 using dfunSat; d2 := dfunSat d4
+  Inert:
+    [G] d0 : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
+  Solved:
+        d1 : Data Maybe [t]
+        d2 : Sat (Maybe [t])
+  WorkList:
+    [W] d3 : Data Maybe t
+    [W] d4 : Foo [t]
+
+Now, we can just solve d3 from d01; d3 := d01
+  Inert
+    [G] d0 : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
+  Solved:
+        d1 : Data Maybe [t]
+        d2 : Sat (Maybe [t])
+  WorkList
+    [W] d4 : Foo [t]
+
+Now, solve d4 using dfunFoo2;  d4 := dfunFoo2 d5
+  Inert
+    [G] d0  : Foo t
+    [G] d01 : Data Maybe t   -- Superclass of d0
+  Solved:
+        d1 : Data Maybe [t]
+        d2 : Sat (Maybe [t])
+        d4 : Foo [t]
+  WorkList:
+    [W] d5 : Foo t
+
+Now, d5 can be solved! d5 := d0
+
+Result
+   d1 := dfunData2 d2 d3
+   d2 := dfunSat d4
+   d3 := d01
+   d4 := dfunFoo2 d5
+   d5 := d0
 -}
 
 -- All Given (fully known) or Wanted or Derived
@@ -437,11 +593,8 @@ data InertSet
 
        , inert_solved_dicts   :: DictMap CtEvidence
               -- Of form ev :: C t1 .. tn
-              -- Always the result of using a top-level instance declaration
-              -- - Used to avoid creating a new EvVar when we have a new goal
-              --   that we have solved in the past
-              -- - Stored not necessarily as fully rewritten
-              --   (ToDo: rewrite lazily when we lookup)
+              -- See Note [Solved dictionaries]
+              -- and Note [Do not add superclasses of solved dictionaries]
        }
 
 instance Outputable InertCans where
@@ -516,6 +669,7 @@ insertInertItemTcS item
 
 addSolvedDict :: CtEvidence -> Class -> [Type] -> TcS ()
 -- Add a new item in the solved set of the monad
+-- See Note [Solved dictionaries]
 addSolvedDict item cls tys
   | isIPPred (ctEvPred item)    -- Never cache "solved" implicit parameters (not sure why!)
   = return ()
@@ -674,7 +828,7 @@ getNoGivenEqs tclvl skol_tvs
     -- i.e. the current level
     ev_given_here ev
       =  isGiven ev
-      && tclvl == tcl_tclvl (ctl_env (ctEvLoc ev))
+      && tclvl == ctLocLevel (ctEvLoc ev)
 
     add_fsk :: Ct -> VarSet -> VarSet
     add_fsk ct fsks | CFunEqCan { cc_fsk = tv, cc_ev = ev } <- ct
@@ -1201,10 +1355,11 @@ checkForCyclicBinds ev_binds
     cycles = [c | CyclicSCC c <- stronglyConnCompFromEdgedVertices edges]
 
     coercion_cycles = [c | c <- cycles, any is_co_bind c]
-    is_co_bind (EvBind b _) = isEqVar b
+    is_co_bind (EvBind { eb_lhs = b }) = isEqVar b
 
     edges :: [(EvBind, EvVar, [EvVar])]
-    edges = [(bind, bndr, varSetElems (evVarsOfTerm rhs)) | bind@(EvBind bndr rhs) <- bagToList ev_binds]
+    edges = [(bind, bndr, varSetElems (evVarsOfTerm rhs)) 
+            | bind@(EvBind { eb_lhs = bndr, eb_rhs = rhs }) <- bagToList ev_binds]
 #endif
 
 nestImplicTcS :: EvBindsVar -> TcLevel -> TcS a -> TcS a
@@ -1405,7 +1560,7 @@ getDefaultInfo = wrapTcS TcM.tcGetDefaultTys
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 getInstEnvs :: TcS InstEnvs
-getInstEnvs = wrapTcS $ Inst.tcGetInstEnvs
+getInstEnvs = wrapTcS $ TcM.tcGetInstEnvs
 
 getFamInstEnvs :: TcS (FamInstEnv, FamInstEnv)
 getFamInstEnvs = wrapTcS $ FamInst.tcGetFamInstEnvs
@@ -1556,24 +1711,9 @@ extendFlatCache tc xi_args stuff
 -- Instantiations
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-instDFunType :: DFunId -> [DFunInstType] -> TcS ([TcType], TcType)
-instDFunType dfun_id mb_inst_tys
-  = wrapTcS $ go dfun_tvs mb_inst_tys (mkTopTvSubst [])
-  where
-    (dfun_tvs, dfun_phi) = tcSplitForAllTys (idType dfun_id)
-
-    go :: [TyVar] -> [DFunInstType] -> TvSubst -> TcM ([TcType], TcType)
-    go [] [] subst = return ([], substTy subst dfun_phi)
-    go (tv:tvs) (Just ty : mb_tys) subst
-      = do { (tys, phi) <- go tvs mb_tys (extendTvSubst subst tv ty)
-           ; return (ty : tys, phi) }
-    go (tv:tvs) (Nothing : mb_tys) subst
-      = do { ty <- instFlexiTcSHelper (tyVarName tv) (substTy subst (tyVarKind tv))
-                         -- Don't forget to instantiate the kind!
-                         -- cf TcMType.tcInstTyVarX
-           ; (tys, phi) <- go tvs mb_tys (extendTvSubst subst tv ty)
-           ; return (ty : tys, phi) }
-    go _ _ _ = pprPanic "instDFunTypes" (ppr dfun_id $$ ppr mb_inst_tys)
+instDFunType :: DFunId -> [DFunInstType] -> TcS ([TcType], TcThetaType)
+instDFunType dfun_id inst_tys
+  = wrapTcS $ TcM.instDFunType dfun_id inst_tys
 
 newFlexiTcSTy :: Kind -> TcS TcType
 newFlexiTcSTy knd = wrapTcS (TcM.newFlexiTyVarTy knd)
@@ -1612,14 +1752,6 @@ instFlexiTcSHelperTcS n k = wrapTcS (instFlexiTcSHelper n k)
 -- Creating and setting evidence variables and CtFlavors
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-data XEvTerm
-  = XEvTerm { ev_preds  :: [PredType]           -- New predicate types
-            , ev_comp   :: [EvTerm] -> EvTerm   -- How to compose evidence
-            , ev_decomp :: EvTerm -> [EvTerm]   -- How to decompose evidence
-            -- In both ev_comp and ev_decomp, the [EvTerm] is 1-1 with ev_preds
-            -- and each EvTerm has type of the corresponding EvPred
-            }
-
 data Freshness = Fresh | Cached
 
 isFresh :: Freshness -> Bool
@@ -1629,10 +1761,19 @@ isFresh Cached = False
 freshGoals :: [(CtEvidence, Freshness)] -> [CtEvidence]
 freshGoals mns = [ ctev | (ctev, Fresh) <- mns ]
 
-setEvBind :: EvVar -> EvTerm -> TcS ()
-setEvBind the_ev tm
+setEvBind :: EvBind -> TcS ()
+setEvBind ev_bind
   = do { tc_evbinds <- getTcEvBinds
-       ; wrapTcS $ TcM.addTcEvBind tc_evbinds the_ev tm }
+       ; wrapTcS $ TcM.addTcEvBind tc_evbinds ev_bind }
+
+setWantedEvBind :: EvVar -> EvTerm -> TcS ()
+setWantedEvBind ev_id tm = setEvBind (mkWantedEvBind ev_id tm)
+
+setEvBindIfWanted :: CtEvidence -> EvTerm -> TcS ()
+setEvBindIfWanted ev tm
+  = case ev of
+      CtWanted { ctev_evar = ev_id } -> setWantedEvBind ev_id tm
+      _                              -> return ()
 
 newTcEvBinds :: TcS EvBindsVar
 newTcEvBinds = wrapTcS TcM.newTcEvBinds
@@ -1649,7 +1790,7 @@ newGivenEvVar :: CtLoc -> (TcPredType, EvTerm) -> TcS CtEvidence
 newGivenEvVar loc (pred, rhs)
   = ASSERT2( not (isKindEquality pred), ppr pred $$ pprCtOrigin (ctLocOrigin loc) )
     do { new_ev <- newEvVar pred
-       ; setEvBind new_ev rhs
+       ; setEvBind (mkGivenEvBind new_ev rhs)
        ; return (CtGiven { ctev_pred = pred, ctev_evtm = EvId new_ev, ctev_loc = loc }) }
 
 newGivenEvVars :: CtLoc -> [(TcPredType, EvTerm)] -> TcS [CtEvidence]
@@ -1734,9 +1875,6 @@ newDerived loc pred
                     Just {} -> Nothing
                     Nothing -> Just (CtDerived { ctev_pred = pred, ctev_loc = loc })) }
 
-instDFunConstraints :: CtLoc -> TcThetaType -> TcS [(CtEvidence, Freshness)]
-instDFunConstraints loc = mapM (newWantedEvVar loc)
-
 
 matchFam :: TyCon -> [Type] -> TcS (Maybe (TcCoercion, TcType))
 matchFam tycon args = wrapTcS $ matchFamTcM tycon args
@@ -1792,15 +1930,15 @@ deferTcSForAllEq role loc (tvs1,body1) (tvs2,body2)
                          ; let wc = WC { wc_simple = singleCt new_ct
                                        , wc_impl   = emptyBag
                                        , wc_insol  = emptyCts }
-                               imp = Implic { ic_tclvl  = new_tclvl
-                                            , ic_skols  = skol_tvs
-                                            , ic_no_eqs = True
-                                            , ic_given  = []
-                                            , ic_wanted = wc
-                                            , ic_insol  = False
-                                            , ic_binds  = ev_binds_var
-                                            , ic_env    = env
-                                            , ic_info   = skol_info }
+                               imp = Implic { ic_tclvl    = new_tclvl
+                                            , ic_skols    = skol_tvs
+                                            , ic_no_eqs   = True
+                                            , ic_given    = []
+                                            , ic_wanted   = wc
+                                            , ic_status   = IC_Unsolved
+                                            , ic_binds    = ev_binds_var
+                                            , ic_env      = env
+                                            , ic_info     = skol_info }
                          ; updWorkListTcS (extendWorkListImplic imp)
                          ; return (TcLetCo ev_binds new_co) }
 

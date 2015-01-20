@@ -27,7 +27,6 @@ import DataCon ( dataConName )
 import Name( isSystemName, nameOccName )
 import OccName( OccName )
 import Outputable
-import Control.Monad
 import DynFlags( DynFlags )
 import VarSet
 import RdrName
@@ -186,12 +185,26 @@ canEvNC ev
 -}
 
 canTuple :: CtEvidence -> [PredType] -> TcS (StopOrContinue Ct)
-canTuple ev tys
-  = do { traceTcS "can_pred" (text "TuplePred!")
-       ; let xcomp = EvTupleMk
-             xdecomp x = zipWith (\_ i -> EvTupleSel x i) tys [0..]
-       ; xCtEvidence ev (XEvTerm tys xcomp xdecomp)
+canTuple ev preds
+  | CtWanted { ctev_evar = evar, ctev_loc = loc } <- ev
+  = do { new_evars <- mapM (newWantedEvVar loc) preds
+       ; setWantedEvBind evar (EvTupleMk (map (ctEvTerm . fst) new_evars))
+       ; emitWorkNC (freshGoals new_evars)
+         -- Note the "NC": these are fresh goals, not necessarily canonical
        ; stopWith ev "Decomposed tuple constraint" }
+
+  | CtGiven { ctev_evtm = tm, ctev_loc = loc } <- ev
+  = do { let mk_pr pred i = (pred, EvTupleSel tm i)
+       ; given_evs <- newGivenEvVars loc (zipWith mk_pr preds [0..])
+       ; emitWorkNC given_evs
+       ; stopWith ev "Decomposed tuple constraint" }
+
+  | CtDerived { ctev_loc = loc } <- ev
+  = do { mapM_ (emitNewDerived loc) preds
+       ; stopWith ev "Decomposed tuple constraint" }
+
+  | otherwise = panic "canTuple"
+
 
 {-
 ************************************************************************
@@ -218,7 +231,7 @@ canClassNC ev cls tys
 canClass ev cls tys
   =   -- all classes do *nominal* matching
     ASSERT2( ctEvRole ev == Nominal, ppr ev $$ ppr cls $$ ppr tys )
-    do { (xis, cos) <- flattenMany FM_FlattenAll ev (repeat Nominal) tys
+    do { (xis, cos) <- flattenManyNom ev tys
        ; let co = mkTcTyConAppCo Nominal (classTyCon cls) cos
              xi = mkClassPred cls xis
              mk_ct new_ev = CDictCan { cc_ev = new_ev
@@ -242,67 +255,95 @@ emitSuperclasses _ = panic "emit_superclasses of non-class!"
 {-
 Note [Adding superclasses]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
+
 Since dictionaries are canonicalized only once in their lifetime, the
-place to add their superclasses is canonicalisation (The alternative
-would be to do it during constraint solving, but we'd have to be
-extremely careful to not repeatedly introduced the same superclass in
-our worklist). Here is what we do:
+place to add their superclasses is canonicalisation.  See Note [Add
+superclasses only during canonicalisation].  Here is what we do:
 
-For Givens:
-       We add all their superclasses as Givens.
+  Deriveds: Do nothing.
 
-For Wanteds:
-       Generally speaking we want to be able to add superclasses of
-       wanteds for two reasons:
+  Givens:   Add all their superclasses as Givens.
 
-       (1) Oportunities for improvement. Example:
-                  class (a ~ b) => C a b
-           Wanted constraint is: C alpha beta
-           We'd like to simply have C alpha alpha. Similar
-           situations arise in relation to functional dependencies.
+  Wanteds:  Add all their superclasses as Derived.
+            Not as Wanted: we don't need a proof.
+            Nor as Given: that leads to superclass loops.
 
-       (2) To have minimal constraints to quantify over:
-           For instance, if our wanted constraint is (Eq a, Ord a)
-           we'd only like to quantify over Ord a.
+We also want to ensure minimal constraints to quantify over.  For
+instance, if our wanted constraint is (Eq a, Ord a) we'd only like to
+quantify over Ord a.  But we deal with that completely independently
+in TcSimplify. See Note [Minimize by SuperClasses] in TcSimplify.
 
-       To deal with (1) above we only add the superclasses of wanteds
-       which may lead to improvement, that is: equality superclasses or
-       superclasses with functional dependencies.
+Examples of how adding superclasses as Derived is useful
 
-       We deal with (2) completely independently in TcSimplify. See
-       Note [Minimize by SuperClasses] in TcSimplify.
+    --- Example 1
+        class C a b | a -> b
+    Suppose we want to solve
+         [G] C a b
+         [W] C a beta
+    Then adding [D] beta~b will let us solve it.
+
+    -- Example 2 (similar but using a type-equality superclass)
+        class (F a ~ b) => C a b
+    And try to sllve:
+         [G] C a b
+         [W] C a beta
+    Follow the superclass rules to add
+         [G] F a ~ b
+         [D] F a ~ beta
+    Now we we get [D] beta ~ b, and can solve that.
+
+Example of why adding superclass of a Wanted as a Given would
+be terrible, see Note [Do not add superclasses of solved dictionaries]
+in TcSMonad, which has this example:
+        class Ord a => C a where
+        instance Ord [a] => C [a] where ...
+Suppose we are trying to solve
+  [G] d1 : Ord a
+  [W] d2 : C [a]
+If we (bogusly) added the superclass of d2 as Gievn we'd have
+  [G] d1 : Ord a
+  [W] d2 : C [a]
+  [G] d3 : Ord [a]   -- Superclass of d2, bogus
+
+Then we'll use the instance decl to give
+  [G] d1 : Ord a     Solved: d2 : C [a] = $dfCList d4
+  [G] d3 : Ord [a]   -- Superclass of d2, bogus
+  [W] d4: Ord [a]
+
+ANd now we could bogusly solve d4 from d3.
 
 
-       Moreover, in all cases the extra improvement constraints are
-       Derived. Derived constraints have an identity (for now), but
-       we don't do anything with their evidence. For instance they
-       are never used to rewrite other constraints.
+Note [Add superclasses only during canonicalisation]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We add superclasses only during canonicalisation, on the passage
+from CNonCanonical to CDictCan.  A class constraint can be repeatedly
+rewritten, and there's no point in repeatedly adding its superclasses.
 
-       See also [New Wanted Superclass Work] in TcInteract.
-
-
-For Deriveds:
-       We do nothing.
-
-Here's an example that demonstrates why we chose to NOT add
-superclasses during simplification: [Comes from ticket #4497]
+Here's a serious, but now out-dated example, from Trac #4497:
 
    class Num (RealOf t) => Normed t
    type family RealOf x
 
 Assume the generated wanted constraint is:
-   RealOf e ~ e, Normed e
-If we were to be adding the superclasses during simplification we'd get:
-   Num uf, Normed e, RealOf e ~ e, RealOf e ~ uf
-==>
-   e ~ uf, Num uf, Normed e, RealOf e ~ e
-==> [Spontaneous solve]
-   Num uf, Normed uf, RealOf uf ~ uf
+   [W] RealOf e ~ e
+   [W] Normed e
 
-While looks exactly like our original constraint. If we add the superclass again we'd loop.
-By adding superclasses definitely only once, during canonicalisation, this situation can't
+If we were to be adding the superclasses during simplification we'd get:
+   [W] RealOf e ~ e
+   [W] Normed e
+   [D] RealOf e ~ fuv
+   [D] Num fuv
+==>
+   e := fuv, Num fuv, Normed fuv, RealOf fuv ~ fuv
+
+While looks exactly like our original constraint. If we add the
+superclass of (Normed fuv) again we'd loop.  By adding superclasses
+definitely only once, during canonicalisation, this situation can't
 happen.
--}
+
+Mind you, now that Wanteds cannot rewrite Derived, I think this particular
+situation can't happen.
+  -}
 
 newSCWorkFromFlavored :: CtEvidence -> Class -> [Xi] -> TcS ()
 -- Returns superclasses, see Note [Adding superclasses]
@@ -311,13 +352,11 @@ newSCWorkFromFlavored flavor cls xis
   = return ()  -- Deriveds don't yield more superclasses because we will
                -- add them transitively in the case of wanteds.
 
-  | isGiven flavor
+  | CtGiven { ctev_evtm = ev_tm, ctev_loc = loc } <- flavor
   = do { let sc_theta = immSuperClasses cls xis
-             xev_decomp x = zipWith (\_ i -> EvSuperClass x i) sc_theta [0..]
-             xev = XEvTerm { ev_preds  =  sc_theta
-                           , ev_comp   = panic "Can't compose for given!"
-                           , ev_decomp = xev_decomp }
-       ; xCtEvidence flavor xev }
+             mk_pr sc_pred i = (sc_pred, EvSuperClass ev_tm i)
+       ; given_evs <- newGivenEvVars loc (zipWith mk_pr sc_theta [0..])
+       ; emitWorkNC given_evs }
 
   | isEmptyVarSet (tyVarsOfTypes xis)
   = return () -- Wanteds with no variables yield no deriveds.
@@ -445,9 +484,8 @@ can_eq_nc' _rdr_env _envs ev eq_rel ty1 ps_ty1 (TyVarTy tv2) _
 -- Literals
 can_eq_nc' _rdr_env _envs ev eq_rel ty1@(LitTy l1) _ (LitTy l2) _
  | l1 == l2
-  = do { when (isWanted ev) $
-         setEvBind (ctev_evar ev) (EvCoercion $
-                                   mkTcReflCo (eqRelRole eq_rel) ty1)
+  = do { setEvBindIfWanted ev (EvCoercion $
+                               mkTcReflCo (eqRelRole eq_rel) ty1)
        ; stopWith ev "Equal LitTy" }
 
 -- Decomposable type constructor applications
@@ -483,19 +521,19 @@ can_eq_nc' _rdr_env _envs ev eq_rel s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
           do { traceTcS "Creating implication for polytype equality" $ ppr ev
              ; ev_term <- deferTcSForAllEq (eqRelRole eq_rel)
                                            loc (tvs1,body1) (tvs2,body2)
-             ; setEvBind orig_ev ev_term
+             ; setWantedEvBind orig_ev ev_term
              ; stopWith ev "Deferred polytype equality" } }
  | otherwise
  = do { traceTcS "Ommitting decomposition of given polytype equality" $
         pprEq s1 s2    -- See Note [Do not decompose given polytype equalities]
       ; stopWith ev "Discard given polytype equality" }
 
-can_eq_nc' _rdr_env _envs ev eq_rel (AppTy {}) ps_ty1 _ ps_ty2
-  | isGiven ev = try_decompose_app ev eq_rel ps_ty1 ps_ty2
-  | otherwise  = can_eq_wanted_app ev eq_rel ps_ty1 ps_ty2
-can_eq_nc' _rdr_env _envs ev eq_rel _ ps_ty1 (AppTy {}) ps_ty2
-  | isGiven ev = try_decompose_app ev eq_rel ps_ty1 ps_ty2
-  | otherwise  = can_eq_wanted_app ev eq_rel ps_ty1 ps_ty2
+can_eq_nc' _rdr_env _envs ev eq_rel ty1@(AppTy {}) _ ty2 _
+  | isGiven ev = try_decompose_app ev eq_rel ty1 ty2
+  | otherwise  = can_eq_wanted_app ev eq_rel ty1 ty2
+can_eq_nc' _rdr_env _envs ev eq_rel ty1 _ ty2@(AppTy {}) _
+  | isGiven ev = try_decompose_app ev eq_rel ty1 ty2
+  | otherwise  = can_eq_wanted_app ev eq_rel ty1 ty2
 
 -- Everything else is a definite type error, eg LitTy ~ TyConApp
 can_eq_nc' _rdr_env _envs ev eq_rel _ ps_ty1 _ ps_ty2
@@ -620,29 +658,38 @@ can_eq_wanted_app ev eq_rel ty1 ty2
           `andWhenContinue` \ new_ev ->
           try_decompose_app new_ev eq_rel xi1 xi2 }
 
+---------
 try_decompose_app :: CtEvidence -> EqRel
                   -> TcType -> TcType -> TcS (StopOrContinue Ct)
--- Preconditions: neither is a type variable
+-- Preconditions: one or the other is an App;
+--                but neither is a type variable
 --                so can't turn it into an application if it
 --                   doesn't look like one already
 -- See Note [Canonicalising type applications]
-try_decompose_app ev NomEq  ty1 ty2
-  = try_decompose_nom_app ev ty1 ty2
+try_decompose_app ev eq_rel ty1 ty2
+  = case eq_rel of
+      NomEq  -> try_decompose_nom_app  ev ty1 ty2
+      ReprEq -> try_decompose_repr_app ev ty1 ty2
 
-try_decompose_app ev ReprEq ty1 ty2
+---------
+try_decompose_repr_app :: CtEvidence
+                       -> TcType -> TcType -> TcS (StopOrContinue Ct)
+-- Preconditions: like try_decompose_app, but also
+--                ev has a representational
+try_decompose_repr_app ev ty1 ty2
   | ty1 `eqType` ty2   -- See Note [AppTy reflexivity check]
   = canEqReflexive ev ReprEq ty1
 
   | otherwise
   = canEqFailure ev ReprEq ty1 ty2
 
+---------
 try_decompose_nom_app :: CtEvidence
                       -> TcType -> TcType -> TcS (StopOrContinue Ct)
 -- Preconditions: like try_decompose_app, but also
 --                ev has a nominal role
--- See Note [Canonicalising type applications]
 try_decompose_nom_app ev ty1 ty2
-   | AppTy s1 t1  <- ty1
+   | AppTy s1 t1 <- ty1
    = case tcSplitAppTy_maybe ty2 of
        Nothing      -> canEqHardFailure ev NomEq ty1 ty2
        Just (s2,t2) -> do_decompose s1 t1 s2 t2
@@ -652,11 +699,16 @@ try_decompose_nom_app ev ty1 ty2
        Nothing      -> canEqHardFailure ev NomEq ty1 ty2
        Just (s1,t1) -> do_decompose s1 t1 s2 t2
 
-   | otherwise  -- Neither is an AppTy
-   = canEqNC ev NomEq ty1 ty2
+   | otherwise  -- Neither is an AppTy; but one or other started that way
+                -- (precondition to can_eq_wanted_app)
+                -- So presumably one has become a TyConApp, which
+                -- is good: See Note [Canonicalising type applications]
+   = ASSERT2( isJust (tcSplitTyConApp_maybe ty1) || isJust (tcSplitTyConApp_maybe ty2)
+            , ppr ty1 $$ ppr ty2 )  -- If this assertion fails, we may fall
+                                    -- into an inifinite loop (Trac #9971)
+     canEqNC ev NomEq ty1 ty2
    where
-     -- do_decompose is like xCtEvidence, but recurses
-     -- to try_decompose_nom_app to decompose a chain of AppTys
+     -- Recurses to try_decompose_nom_app to decompose a chain of AppTys
      do_decompose s1 t1 s2 t2
        | CtDerived { ctev_loc = loc } <- ev
        = do { emitNewDerived loc (mkTcEqPred t1 t2)
@@ -665,7 +717,7 @@ try_decompose_nom_app ev ty1 ty2
        = do { ev_s <- newWantedEvVarNC loc (mkTcEqPred s1 s2)
             ; co_t <- unifyWanted loc Nominal t1 t2
             ; let co = mkTcAppCo (ctEvCoercion ev_s) co_t
-            ; setEvBind evar (EvCoercion co)
+            ; setWantedEvBind evar (EvCoercion co)
             ; canEqNC ev_s NomEq s1 s2 }
        | CtGiven { ctev_evtm = ev_tm, ctev_loc = loc } <- ev
        = do { let co   = evTermCoercion ev_tm
@@ -728,7 +780,7 @@ canDecomposableTyConAppOK ev eq_rel tc tys1 tys2
 
      CtWanted { ctev_evar = evar, ctev_loc = loc }
         -> do { cos <- zipWith3M (unifyWanted loc) tc_roles tys1 tys2
-              ; setEvBind evar (EvCoercion (mkTcTyConAppCo role tc cos)) }
+              ; setWantedEvBind evar (EvCoercion (mkTcTyConAppCo role tc cos)) }
 
      CtGiven { ctev_evtm = ev_tm, ctev_loc = loc }
         -> do { let ev_co = evTermCoercion ev_tm
@@ -827,8 +879,9 @@ decompose the application eagerly, yielding
 we get an error        "Can't match Array ~ Maybe",
 but we'd prefer to get "Can't match Array b ~ Maybe c".
 
-So instead can_eq_wanted_app flattens the LHS and RHS before using
-try_decompose_app to decompose it.
+So instead can_eq_wanted_app flattens the LHS and RHS, in the hope of
+replacing (a b) by (Array b), before using try_decompose_app to
+decompose it.
 
 Note [Make sure that insolubles are fully rewritten]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -894,7 +947,7 @@ canCFunEqCan :: CtEvidence
 -- and the RHS is a fsk, which we must *not* substitute.
 -- So just substitute in the LHS
 canCFunEqCan ev fn tys fsk
-  = do { (tys', cos) <- flattenMany FM_FlattenAll ev (repeat Nominal) tys
+  = do { (tys', cos) <- flattenManyNom ev tys
                         -- cos :: tys' ~ tys
        ; let lhs_co  = mkTcTyConAppCo Nominal fn cos
                         -- :: F tys' ~ F tys
@@ -915,8 +968,7 @@ canEqTyVar :: CtEvidence -> EqRel -> SwapFlag
 -- A TyVar on LHS, but so far un-zonked
 canEqTyVar ev eq_rel swapped tv1 ty2 ps_ty2              -- ev :: tv ~ s2
   = do { traceTcS "canEqTyVar" (ppr tv1 $$ ppr ty2 $$ ppr swapped)
-       ; let fmode = mkFlattenEnv FM_FlattenAll ev  -- the FM_ param is ignored
-       ; mb_yes <- flattenTyVarOuter fmode tv1
+       ; mb_yes <- flattenTyVar ev tv1
        ; case mb_yes of
          { Right (ty1, co1) -> -- co1 :: ty1 ~ tv1
              do { traceTcS "canEqTyVar2"
@@ -1024,9 +1076,8 @@ canEqTyVarTyVar :: CtEvidence           -- tv1 ~ orhs (or orhs ~ tv1, if swapped
 -- See Note [Canonical orientation for tyvar/tyvar equality constraints]
 canEqTyVarTyVar ev eq_rel swapped tv1 tv2 co2
   | tv1 == tv2
-  = do { when (isWanted ev) $
-         ASSERT( tcCoercionRole co2 == eqRelRole eq_rel )
-         setEvBind (ctev_evar ev) (EvCoercion (maybeSym swapped co2))
+  = do { ASSERT( tcCoercionRole co2 == eqRelRole eq_rel )
+         setEvBindIfWanted ev (EvCoercion (maybeSym swapped co2))
        ; stopWith ev "Equal tyvars" }
 
   | incompat_kind   = incompat
@@ -1112,9 +1163,8 @@ canEqReflexive :: CtEvidence    -- ty ~ ty
                -> TcType        -- ty
                -> TcS (StopOrContinue Ct)   -- always Stop
 canEqReflexive ev eq_rel ty
-  = do { when (isWanted ev) $
-         setEvBind (ctev_evar ev) (EvCoercion $
-                                   mkTcReflCo (eqRelRole eq_rel) ty)
+  = do { setEvBindIfWanted ev (EvCoercion $
+                               mkTcReflCo (eqRelRole eq_rel) ty)
        ; stopWith ev "Solved by reflexivity" }
 
 incompatibleKind :: CtEvidence         -- t1~t2
@@ -1331,31 +1381,6 @@ itself, and so on.  See Note [Occurs check expansion] in TcType
 -}
 
 {-
-Note [xCtEvidence]
-~~~~~~~~~~~~~~~~~~
-A call might look like this:
-
-    xCtEvidence ev evidence-transformer
-
-  ev is Given   => use ev_decomp to create new Givens for ev_preds,
-                   and return them
-
-  ev is Wanted  => create new wanteds for ev_preds,
-                   use ev_comp to bind ev,
-                   return fresh wanteds (ie ones not cached in inert_cans or solved)
-
-  ev is Derived => create new deriveds for ev_preds
-                      (unless cached in inert_cans or solved)
-
-Note: The [CtEvidence] returned is a subset of the subgoal-preds passed in
-      Ones that are already cached are not returned
-
-Example
-    ev : Tree a b ~ Tree c d
-    xCtEvidence ev [a~c, b~d] (XEvTerm { ev_comp = \[c1 c2]. <Tree> c1 c2
-                                       , ev_decomp = \c. [nth 1 c, nth 2 c] })
-              (\fresh-goals.  stuff)
-
 Note [Bind new Givens immediately]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For Givens we make new EvVars and bind them immediately. We don't worry
@@ -1370,26 +1395,6 @@ But that superclass selector can't (yet) appear in a coercion
 See Note [Coercion evidence terms] in TcEvidence.
 -}
 
-xCtEvidence :: CtEvidence            -- Original evidence
-            -> XEvTerm               -- Instructions about how to manipulate evidence
-            -> TcS ()
-
-xCtEvidence (CtWanted { ctev_evar = evar, ctev_loc = loc })
-            (XEvTerm { ev_preds = ptys, ev_comp = comp_fn })
-  = do { new_evars <- mapM (newWantedEvVar loc) ptys
-       ; setEvBind evar (comp_fn (map (ctEvTerm . fst) new_evars))
-       ; emitWorkNC (freshGoals new_evars) }
-         -- Note the "NC": these are fresh goals, not necessarily canonical
-
-xCtEvidence (CtGiven { ctev_evtm = tm, ctev_loc = loc })
-            (XEvTerm { ev_preds = ptys, ev_decomp = decomp_fn })
-  = ASSERT( equalLength ptys (decomp_fn tm) )
-    do { given_evs <- newGivenEvVars loc (ptys `zip` decomp_fn tm)
-       ; emitWorkNC given_evs }
-
-xCtEvidence (CtDerived { ctev_loc = loc })
-            (XEvTerm { ev_preds = ptys })
-  = mapM_ (emitNewDerived loc) ptys
 
 -----------------------------
 data StopOrContinue a
@@ -1491,8 +1496,8 @@ rewriteEvidence ev@(CtGiven { ctev_evtm = old_tm , ctev_loc = loc }) new_pred co
 rewriteEvidence ev@(CtWanted { ctev_evar = evar, ctev_loc = loc }) new_pred co
   = do { (new_ev, freshness) <- newWantedEvVar loc new_pred
        ; MASSERT( tcCoercionRole co == ctEvRole ev )
-       ; setEvBind evar (mkEvCast (ctEvTerm new_ev)
-                           (tcDowngradeRole Representational (ctEvRole ev) co))
+       ; setWantedEvBind evar (mkEvCast (ctEvTerm new_ev)
+                                 (tcDowngradeRole Representational (ctEvRole ev) co))
        ; case freshness of
             Fresh  -> continueWith new_ev
             Cached -> stopWith ev "Cached wanted" }
@@ -1548,7 +1553,7 @@ rewriteEqEvidence old_ev eq_rel swapped nlhs nrhs lhs_co rhs_co
                   mkTcSymCo lhs_co
                   `mkTcTransCo` ctEvCoercion new_evar
                   `mkTcTransCo` rhs_co
-       ; setEvBind evar (EvCoercion co)
+       ; setWantedEvBind evar (EvCoercion co)
        ; traceTcS "rewriteEqEvidence" (vcat [ppr old_ev, ppr nlhs, ppr nrhs, ppr co])
        ; return (ContinueWith new_evar) }
 

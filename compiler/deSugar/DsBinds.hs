@@ -13,7 +13,7 @@ lower levels it is preserved with @let@/@letrec@s).
 {-# LANGUAGE CPP #-}
 
 module DsBinds ( dsTopLHsBinds, dsLHsBinds, decomposeRuleLhs, dsSpec,
-                 dsHsWrapper, dsTcEvBinds, dsEvBinds
+                 dsHsWrapper, dsTcEvBinds, dsTcEvBinds_s, dsEvBinds
   ) where
 
 #include "HsVersions.h"
@@ -36,19 +36,19 @@ import CoreArity ( etaExpand )
 import CoreUnfold
 import CoreFVs
 import UniqSupply
-import Unique( Unique )
 import Digraph
 
-
+import PrelNames
 import TyCon      ( isTupleTyCon, tyConDataCons_maybe )
 import TcEvidence
 import TcType
 import Type
 import Coercion hiding (substCo)
-import TysWiredIn ( eqBoxDataCon, coercibleDataCon, tupleCon )
+import TysWiredIn ( eqBoxDataCon, coercibleDataCon, tupleCon, mkListTy
+                  , mkBoxedTupleTy, stringTy )
 import Id
 import Class
-import DataCon  ( dataConWorkId )
+import DataCon  ( dataConTyCon, dataConWorkId )
 import Name
 import MkId     ( seqId )
 import IdInfo   ( IdDetails(..) )
@@ -57,6 +57,7 @@ import VarSet
 import Rules
 import VarEnv
 import Outputable
+import Module
 import SrcLoc
 import Maybes
 import OrdList
@@ -137,9 +138,9 @@ dsHsBind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dicts
   | ABE { abe_wrap = wrap, abe_poly = global
         , abe_mono = local, abe_prags = prags } <- export
   = do  { dflags <- getDynFlags
-        ; bind_prs    <- ds_lhs_binds binds
-        ; let   core_bind = Rec (fromOL bind_prs)
-        ; ds_binds <- dsTcEvBinds ev_binds
+        ; bind_prs <- ds_lhs_binds binds
+        ; let core_bind = Rec (fromOL bind_prs)
+        ; ds_binds <- dsTcEvBinds_s ev_binds
         ; rhs <- dsHsWrapper wrap $  -- Usually the identity
                             mkLams tyvars $ mkLams dicts $
                             mkCoreLets ds_binds $
@@ -167,7 +168,7 @@ dsHsBind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dicts
               locals       = map abe_mono exports
               tup_expr     = mkBigCoreVarTup locals
               tup_ty       = exprType tup_expr
-        ; ds_binds <- dsTcEvBinds ev_binds
+        ; ds_binds <- dsTcEvBinds_s ev_binds
         ; let poly_tup_rhs = mkLams tyvars $ mkLams dicts $
                              mkCoreLets ds_binds $
                              Let core_bind $
@@ -215,7 +216,7 @@ makeCorePair dflags gbl_id is_default_method dict_arity rhs
   | is_default_method                 -- Default methods are *always* inlined
   = (gbl_id `setIdUnfolding` mkCompulsoryUnfolding rhs, rhs)
 
-  | DFunId _ is_newtype <- idDetails gbl_id
+  | DFunId is_newtype <- idDetails gbl_id
   = (mk_dfun_w_stuff is_newtype, rhs)
 
   | otherwise
@@ -389,42 +390,6 @@ gotten from the binding for fromT_1.
 
 It might be better to have just one level of AbsBinds, but that requires more
 thought!
-
-Note [Implementing SPECIALISE pragmas]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Example:
-        f :: (Eq a, Ix b) => a -> b -> Bool
-        {-# SPECIALISE f :: (Ix p, Ix q) => Int -> (p,q) -> Bool #-}
-        f = <poly_rhs>
-
-From this the typechecker generates
-
-    AbsBinds [ab] [d1,d2] [([ab], f, f_mono, prags)] binds
-
-    SpecPrag (wrap_fn :: forall a b. (Eq a, Ix b) => XXX
-                      -> forall p q. (Ix p, Ix q) => XXX[ Int/a, (p,q)/b ])
-
-Note that wrap_fn can transform *any* function with the right type prefix
-    forall ab. (Eq a, Ix b) => XXX
-regardless of XXX.  It's sort of polymorphic in XXX.  This is
-useful: we use the same wrapper to transform each of the class ops, as
-well as the dict.
-
-From these we generate:
-
-    Rule:       forall p, q, (dp:Ix p), (dq:Ix q).
-                    f Int (p,q) dInt ($dfInPair dp dq) = f_spec p q dp dq
-
-    Spec bind:  f_spec = wrap_fn <poly_rhs>
-
-Note that
-
-  * The LHS of the rule may mention dictionary *expressions* (eg
-    $dfIxPair dp dq), and that is essential because the dp, dq are
-    needed on the RHS.
-
-  * The RHS of f_spec, <poly_rhs> has a *copy* of 'binds', so that it
-    can fully specialise it.
 -}
 
 ------------------------
@@ -432,7 +397,7 @@ dsSpecs :: CoreExpr     -- Its rhs
         -> TcSpecPrags
         -> DsM ( OrdList (Id,CoreExpr)  -- Binding for specialised Ids
                , [CoreRule] )           -- Rules for the Global Ids
--- See Note [Implementing SPECIALISE pragmas]
+-- See Note [Handling SPECIALISE pragmas] in TcBinds
 dsSpecs _ IsDefaultMethod = return (nilOL, [])
 dsSpecs poly_rhs (SpecPrags sps)
   = do { pairs <- mapMaybeM (dsSpec (Just poly_rhs)) sps
@@ -698,7 +663,7 @@ drop_dicts drops dictionary bindings on the LHS where possible.
          Here we want to end up with
             RULE forall d:Eq a.  f ($dfEqList d) = f_spec d
          Of course, the ($dfEqlist d) in the pattern makes it less likely
-         to match, but ther is no other way to get d:Eq a
+         to match, but there is no other way to get d:Eq a
 
    NB 2: We do drop_dicts *before* simplOptEpxr, so that we expect all
          the evidence bindings to be wrapped around the outside of the
@@ -714,7 +679,7 @@ drop_dicts drops dictionary bindings on the LHS where possible.
              useAbstractMonad :: MonadAbstractIOST m => m Int
          Here, deriving (MonadAbstractIOST (ReaderST s)) is a lot of code
          but the RHS uses no dictionaries, so we want to end up with
-             RULE forall s (d :: MonadBstractIOST (ReaderT s)).
+             RULE forall s (d :: MonadAbstractIOST (ReaderT s)).
                 useAbstractMonad (ReaderT s) d = $suseAbstractMonad s
 
    Trac #8848 is a good example of where there are some intersting
@@ -832,6 +797,11 @@ dsHsWrapper (WpTyLam tv)      e = return $ Lam tv e
 dsHsWrapper (WpEvApp    tm)   e = liftM (App e) (dsEvTerm tm)
 
 --------------------------------------
+dsTcEvBinds_s :: [TcEvBinds] -> DsM [CoreBind]
+dsTcEvBinds_s []       = return []
+dsTcEvBinds_s (b:rest) = ASSERT( null rest )  -- Zonker ensures null
+                         dsTcEvBinds b
+
 dsTcEvBinds :: TcEvBinds -> DsM [CoreBind]
 dsTcEvBinds (TcEvBinds {}) = panic "dsEvBinds"    -- Zonker has got rid of this
 dsTcEvBinds (EvBinds bs)   = dsEvBinds bs
@@ -839,10 +809,11 @@ dsTcEvBinds (EvBinds bs)   = dsEvBinds bs
 dsEvBinds :: Bag EvBind -> DsM [CoreBind]
 dsEvBinds bs = mapM ds_scc (sccEvBinds bs)
   where
-    ds_scc (AcyclicSCC (EvBind v r)) = liftM (NonRec v) (dsEvTerm r)
-    ds_scc (CyclicSCC bs)            = liftM Rec (mapM ds_pair bs)
+    ds_scc (AcyclicSCC (EvBind { eb_lhs = v, eb_rhs = r }))
+                          = liftM (NonRec v) (dsEvTerm r)
+    ds_scc (CyclicSCC bs) = liftM Rec (mapM ds_pair bs)
 
-    ds_pair (EvBind v r) = liftM ((,) v) (dsEvTerm r)
+    ds_pair (EvBind { eb_lhs = v, eb_rhs = r }) = liftM ((,) v) (dsEvTerm r)
 
 sccEvBinds :: Bag EvBind -> [SCC EvBind]
 sccEvBinds bs = stronglyConnCompFromEdgedVertices edges
@@ -851,7 +822,8 @@ sccEvBinds bs = stronglyConnCompFromEdgedVertices edges
     edges = foldrBag ((:) . mk_node) [] bs
 
     mk_node :: EvBind -> (EvBind, EvVar, [EvVar])
-    mk_node b@(EvBind var term) = (b, var, varSetElems (evVarsOfTerm term))
+    mk_node b@(EvBind { eb_lhs = var, eb_rhs = term })
+       = (b, var, varSetElems (evVarsOfTerm term))
 
 
 ---------------------------------------
@@ -904,6 +876,61 @@ dsEvTerm (EvLit l) =
   case l of
     EvNum n -> mkIntegerExpr n
     EvStr s -> mkStringExprFS s
+
+dsEvTerm (EvCallStack cs) = dsEvCallStack cs
+
+dsEvCallStack :: EvCallStack -> DsM CoreExpr
+-- See Note [Overview of implicit CallStacks] in TcEvidence.hs
+dsEvCallStack cs = do
+  df              <- getDynFlags
+  m               <- getModule
+  srcLocDataCon   <- dsLookupDataCon srcLocDataConName
+  let srcLocTyCon  = dataConTyCon srcLocDataCon
+  let srcLocTy     = mkTyConTy srcLocTyCon
+  let mkSrcLoc l =
+        liftM (mkCoreConApps srcLocDataCon)
+              (sequence [ mkStringExprFS (packageKeyFS $ modulePackageKey m)
+                        , mkStringExprFS (moduleNameFS $ moduleName m)
+                        , mkStringExprFS (srcSpanFile l)
+                        , return $ mkIntExprInt df (srcSpanStartLine l)
+                        , return $ mkIntExprInt df (srcSpanStartCol l)
+                        , return $ mkIntExprInt df (srcSpanEndLine l)
+                        , return $ mkIntExprInt df (srcSpanEndCol l)
+                        ])
+
+  let callSiteTy = mkBoxedTupleTy [stringTy, srcLocTy]
+
+  matchId         <- newSysLocalDs $ mkListTy callSiteTy
+
+  callStackDataCon <- dsLookupDataCon callStackDataConName
+  let callStackTyCon = dataConTyCon callStackDataCon
+  let callStackTy    = mkTyConTy callStackTyCon
+  let emptyCS        = mkCoreConApps callStackDataCon [mkNilExpr callSiteTy]
+  let pushCS name loc rest =
+        mkWildCase rest callStackTy callStackTy
+                   [( DataAlt callStackDataCon
+                    , [matchId]
+                    , mkCoreConApps callStackDataCon
+                       [mkConsExpr callSiteTy
+                                   (mkCoreTup [name, loc])
+                                   (Var matchId)]
+                    )]
+  let mkPush name loc tm = do
+        nameExpr <- mkStringExprFS name
+        locExpr <- mkSrcLoc loc
+        case tm of
+          EvCallStack EvCsEmpty -> return (pushCS nameExpr locExpr emptyCS)
+          _ -> do tmExpr  <- dsEvTerm tm
+                  -- at this point tmExpr :: IP sym CallStack
+                  -- but we need the actual CallStack to pass to pushCS,
+                  -- so we use unwrapIP to strip the dictionary wrapper
+                  -- See Note [Overview of implicit CallStacks]
+                  let ip_co = unwrapIP (exprType tmExpr)
+                  return (pushCS nameExpr locExpr (mkCast tmExpr ip_co))
+  case cs of
+    EvCsTop name loc tm -> mkPush name loc tm
+    EvCsPushCall name loc tm -> mkPush (occNameFS $ getOccName name) loc tm
+    EvCsEmpty -> panic "Cannot have an empty CallStack"
 
 ---------------------------------------
 dsTcCoercion :: TcCoercion -> (Coercion -> CoreExpr) -> DsM CoreExpr
@@ -974,7 +1001,7 @@ ds_tc_coercion subst tc_co
     ds_co_binds eb@(TcEvBinds {}) = pprPanic "ds_co_binds" (ppr eb)
 
     ds_scc :: CvSubst -> SCC EvBind -> CvSubst
-    ds_scc subst (AcyclicSCC (EvBind v ev_term))
+    ds_scc subst (AcyclicSCC (EvBind { eb_lhs = v, eb_rhs = ev_term }))
       = extendCvSubstAndInScope subst v (ds_co_term subst ev_term)
     ds_scc _ (CyclicSCC other) = pprPanic "ds_scc:cyclic" (ppr other $$ ppr tc_co)
 

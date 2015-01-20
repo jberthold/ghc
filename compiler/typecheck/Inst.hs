@@ -9,8 +9,9 @@ The @Inst@ type: dictionaries or method instances
 {-# LANGUAGE CPP #-}
 
 module Inst (
-       deeplySkolemise,
-       deeplyInstantiate, instCall, instStupidTheta,
+       deeplySkolemise, deeplyInstantiate, 
+       instCall, instDFunType, instStupidTheta,
+       newWanted, newWanteds,
        emitWanted, emitWanteds,
 
        newOverloadedLit, mkOverLit,
@@ -62,10 +63,21 @@ import Data.Maybe( isJust )
 {-
 ************************************************************************
 *                                                                      *
-                Emitting constraints
+                Creating and emittind constraints
 *                                                                      *
 ************************************************************************
 -}
+
+newWanted :: CtOrigin -> PredType -> TcM CtEvidence
+newWanted orig pty
+  = do loc <- getCtLoc orig
+       v <- newEvVar pty
+       return $ CtWanted { ctev_evar = v
+                         , ctev_pred = pty
+                         , ctev_loc = loc }
+
+newWanteds :: CtOrigin -> ThetaType -> TcM [CtEvidence]
+newWanteds orig = mapM (newWanted orig)
 
 emitWanteds :: CtOrigin -> TcThetaType -> TcM [EvVar]
 emitWanteds origin theta = mapM (emitWanted origin) theta
@@ -75,7 +87,7 @@ emitWanted origin pred
   = do { loc <- getCtLoc origin
        ; ev  <- newEvVar pred
        ; emitSimple $ mkNonCanonical $
-             CtWanted { ctev_pred = pred, ctev_evar = ev, ctev_loc = loc }
+         CtWanted { ctev_pred = pred, ctev_evar = ev, ctev_loc = loc }
        ; return ev }
 
 newMethodFromName :: CtOrigin -> Name -> TcRhoType -> TcM (HsExpr TcId)
@@ -236,6 +248,25 @@ instCallConstraints orig preds
           | otherwise
           = orig
 
+instDFunType :: DFunId -> [DFunInstType] -> TcM ([TcType], TcThetaType)
+-- See Note [DFunInstType: instantiating types] in InstEnv
+instDFunType dfun_id dfun_inst_tys
+  = do { (subst, inst_tys) <- go (mkTopTvSubst []) dfun_tvs dfun_inst_tys
+       ; return (inst_tys, substTheta subst dfun_theta) }
+  where
+    (dfun_tvs, dfun_theta, _) = tcSplitSigmaTy (idType dfun_id)
+
+    go :: TvSubst -> [TyVar] -> [DFunInstType] -> TcM (TvSubst, [TcType])
+    go subst [] [] = return (subst, [])
+    go subst (tv:tvs) (Just ty : mb_tys)
+      = do { (subst', tys) <- go (extendTvSubst subst tv ty) tvs mb_tys
+           ; return (subst', ty : tys) }
+    go subst (tv:tvs) (Nothing : mb_tys)
+      = do { (subst', tv') <- tcInstTyVarX subst tv
+           ; (subst'', tys) <- go subst' tvs mb_tys
+           ; return (subst'', mkTyVarTy tv' : tys) }
+    go _ _ _ = pprPanic "instDFunTypes" (ppr dfun_id $$ ppr dfun_inst_tys)
+
 ----------------
 instStupidTheta :: CtOrigin -> TcThetaType -> TcM ()
 -- Similar to instCall, but only emit the constraints in the LIE
@@ -395,9 +426,9 @@ getOverlapFlag overlap_mode
               incoherent_ok = xopt Opt_IncoherentInstances  dflags
               use x = OverlapFlag { isSafeOverlap = safeLanguageOn dflags
                                   , overlapMode   = x }
-              default_oflag | incoherent_ok = use Incoherent
-                            | overlap_ok    = use Overlaps
-                            | otherwise     = use NoOverlap
+              default_oflag | incoherent_ok = use (Incoherent "")
+                            | overlap_ok    = use (Overlaps "")
+                            | otherwise     = use (NoOverlap "")
 
               final_oflag = setOverlapModeMaybe default_oflag overlap_mode
         ; return final_oflag }

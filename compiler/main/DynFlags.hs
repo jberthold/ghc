@@ -67,6 +67,7 @@ module DynFlags (
         Settings(..),
         targetPlatform, programName, projectVersion,
         ghcUsagePath, ghciUsagePath, topDir, tmpDir, rawSettings,
+        versionedAppDir,
         extraGccViaCFlags, systemPackageConfig,
         pgm_L, pgm_P, pgm_F, pgm_c, pgm_s, pgm_a, pgm_l, pgm_dll, pgm_T,
         pgm_sysman, pgm_windres, pgm_libtool, pgm_lo, pgm_lc,
@@ -91,6 +92,7 @@ module DynFlags (
         updOptLevel,
         setTmpDir,
         setPackageKey,
+        interpretPackageEnv,
 
         -- ** Parsing DynFlags
         parseDynamicFlagsCmdLine,
@@ -162,7 +164,7 @@ import CmdLineParser
 import Constants
 import Panic
 import Util
-import Maybes           ( orElse )
+import Maybes
 import MonadUtils
 import qualified Pretty
 import SrcLoc
@@ -177,6 +179,7 @@ import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessage )
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.IORef
 import Control.Monad
+import Control.Exception (throwIO)
 
 import Data.Bits
 import Data.Char
@@ -184,11 +187,12 @@ import Data.Int
 import Data.List
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe
 import Data.Set (Set)
 import qualified Data.Set as Set
 import Data.Word
 import System.FilePath
+import System.Directory
+import System.Environment (getEnv)
 import System.IO
 import System.IO.Error
 import Text.ParserCombinators.ReadP hiding (char)
@@ -287,6 +291,7 @@ data DumpFlag
    | Opt_D_dump_if_trace
    | Opt_D_dump_vt_trace
    | Opt_D_dump_splices
+   | Opt_D_th_dec_file
    | Opt_D_dump_BCOs
    | Opt_D_dump_vect
    | Opt_D_dump_ticked
@@ -467,6 +472,7 @@ data WarningFlag =
 -- See Note [Updating flag description in the User's Guide]
      Opt_WarnDuplicateExports
    | Opt_WarnDuplicateConstraints
+   | Opt_WarnRedundantConstraints
    | Opt_WarnHiShadows
    | Opt_WarnImplicitPrelude
    | Opt_WarnIncompletePatterns
@@ -630,7 +636,7 @@ data ExtensionFlag
    | Opt_EmptyCase
    | Opt_PatternSynonyms
    | Opt_PartialTypeSignatures
-   | Opt_NamedWildcards
+   | Opt_NamedWildCards
    | Opt_StaticPointers
    deriving (Eq, Enum, Show)
 
@@ -766,10 +772,12 @@ data DynFlags = DynFlags {
 
   packageFlags          :: [PackageFlag],
         -- ^ The @-package@ and @-hide-package@ flags from the command-line
+  packageEnv            :: Maybe FilePath,
+        -- ^ Filepath to the package environment file (if overriding default)
 
   -- Package state
   -- NB. do not modify this field, it is calculated by
-  -- Packages.initPackages and Packages.updatePackages.
+  -- Packages.initPackages
   pkgDatabase           :: Maybe [PackageConfig],
   pkgState              :: PackageState,
 
@@ -1010,6 +1018,14 @@ opt_lo                :: DynFlags -> [String]
 opt_lo dflags = sOpt_lo (settings dflags)
 opt_lc                :: DynFlags -> [String]
 opt_lc dflags = sOpt_lc (settings dflags)
+
+-- | The directory for this version of ghc in the user's app directory
+-- (typically something like @~/.ghc/x86_64-linux-7.6.3@)
+--
+versionedAppDir :: DynFlags -> IO FilePath
+versionedAppDir dflags = do
+  appdir <- getAppUserDataDirectory (programName dflags)
+  return $ appdir </> (TARGET_ARCH ++ '-':TARGET_OS ++ '-':cProjectVersion)
 
 -- | The target code type of the compilation (if any).
 --
@@ -1515,6 +1531,7 @@ defaultDynFlags mySettings =
 
         extraPkgConfs           = id,
         packageFlags            = [],
+        packageEnv              = Nothing,
         pkgDatabase             = Nothing,
         pkgState                = panic "no package state yet: call GHC.setSessionDynFlags",
         ways                    = defaultWays mySettings,
@@ -1731,6 +1748,7 @@ dopt f dflags = (fromEnum f `IntSet.member` dumpFlags dflags)
           enableIfVerbose Opt_D_verbose_core2core           = False
           enableIfVerbose Opt_D_verbose_stg2stg             = False
           enableIfVerbose Opt_D_dump_splices                = False
+          enableIfVerbose Opt_D_th_dec_file                 = False
           enableIfVerbose Opt_D_dump_rule_firings           = False
           enableIfVerbose Opt_D_dump_rule_rewrites          = False
           enableIfVerbose Opt_D_dump_simpl_trace            = False
@@ -2528,6 +2546,8 @@ dynamic_flags = [
                                             setDumpFlag' Opt_D_dump_cs_trace))
   , defGhcFlag "ddump-vt-trace"          (setDumpFlag Opt_D_dump_vt_trace)
   , defGhcFlag "ddump-splices"           (setDumpFlag Opt_D_dump_splices)
+  , defGhcFlag "dth-dec-file"            (setDumpFlag Opt_D_th_dec_file)
+
   , defGhcFlag "ddump-rn-stats"          (setDumpFlag Opt_D_dump_rn_stats)
   , defGhcFlag "ddump-opt-cmm"           (setDumpFlag Opt_D_dump_opt_cmm)
   , defGhcFlag "ddump-simpl-stats"       (setDumpFlag Opt_D_dump_simpl_stats)
@@ -2770,6 +2790,7 @@ package_flags = [
   , defFlag "package-key"           (HasArg exposePackageKey)
   , defFlag "hide-package"          (HasArg hidePackage)
   , defFlag "hide-all-packages"     (NoArg (setGeneralFlag Opt_HideAllPackages))
+  , defFlag "package-env"           (HasArg setPackageEnv)
   , defFlag "ignore-package"        (HasArg ignorePackage)
   , defFlag "syslib"
       (HasArg (\s -> do exposePackage s
@@ -2779,6 +2800,8 @@ package_flags = [
   , defFlag "trust"                 (HasArg trustPackage)
   , defFlag "distrust"              (HasArg distrustPackage)
   ]
+  where
+    setPackageEnv env = upd $ \s -> s { packageEnv = Just env }
 
 -- | Make a list of flags for shell completion.
 -- Filter all available flags into two groups, for interactive GHC vs all other.
@@ -2877,7 +2900,9 @@ fWarningFlags = [
   flagSpec "warn-dodgy-imports"               Opt_WarnDodgyImports,
   flagSpec "warn-empty-enumerations"          Opt_WarnEmptyEnumerations,
   flagSpec "warn-context-quantification"      Opt_WarnContextQuantification,
-  flagSpec "warn-duplicate-constraints"       Opt_WarnDuplicateConstraints,
+  flagSpec' "warn-duplicate-constraints"      Opt_WarnDuplicateConstraints
+    (\_ -> deprecate "it is subsumed by -fwarn-redundant-constraints"),
+  flagSpec "warn-redundant-constraints"       Opt_WarnRedundantConstraints,
   flagSpec "warn-duplicate-exports"           Opt_WarnDuplicateExports,
   flagSpec "warn-hi-shadowing"                Opt_WarnHiShadows,
   flagSpec "warn-implicit-prelude"            Opt_WarnImplicitPrelude,
@@ -3159,7 +3184,7 @@ xFlags = [
   flagSpec "MultiWayIf"                       Opt_MultiWayIf,
   flagSpec "NPlusKPatterns"                   Opt_NPlusKPatterns,
   flagSpec "NamedFieldPuns"                   Opt_RecordPuns,
-  flagSpec "NamedWildcards"                   Opt_NamedWildcards,
+  flagSpec "NamedWildCards"                   Opt_NamedWildCards,
   flagSpec "NegativeLiterals"                 Opt_NegativeLiterals,
   flagSpec "NondecreasingIndentation"         Opt_NondecreasingIndentation,
   flagSpec' "NullaryTypeClasses"              Opt_NullaryTypeClasses
@@ -3369,7 +3394,7 @@ standardWarnings -- see Note [Documenting warning flags]
         Opt_WarnPartialTypeSignatures,
         Opt_WarnUnrecognisedPragmas,
         Opt_WarnPointlessPragmas,
-        Opt_WarnDuplicateConstraints,
+        Opt_WarnRedundantConstraints,
         Opt_WarnDuplicateExports,
         Opt_WarnOverflowedLiterals,
         Opt_WarnEmptyEnumerations,
@@ -3744,6 +3769,102 @@ exposePackage' p dflags
 
 setPackageKey :: String -> DynFlags -> DynFlags
 setPackageKey p s =  s{ thisPackage = stringToPackageKey p }
+
+-- -----------------------------------------------------------------------------
+-- | Find the package environment (if one exists)
+--
+-- We interpret the package environment as a set of package flags; to be
+-- specific, if we find a package environment
+--
+-- > id1
+-- > id2
+-- > ..
+-- > idn
+--
+-- we interpret this as
+--
+-- > [ -hide-all-packages
+-- > , -package-id id1
+-- > , -package-id id2
+-- > , ..
+-- > , -package-id idn
+-- > ]
+interpretPackageEnv :: DynFlags -> IO DynFlags
+interpretPackageEnv dflags = do
+    mPkgEnv <- runMaybeT $ msum $ [
+                   getCmdLineArg >>= \env -> msum [
+                       loadEnvFile  env
+                     , loadEnvName  env
+                     , cmdLineError env
+                     ]
+                 , getEnvVar >>= \env -> msum [
+                       loadEnvFile env
+                     , loadEnvName env
+                     , envError    env
+                     ]
+                 , loadEnvFile localEnvFile
+                 , loadEnvName defaultEnvName
+                 ]
+    case mPkgEnv of
+      Nothing ->
+        -- No environment found. Leave DynFlags unchanged.
+        return dflags
+      Just ids -> do
+        let setFlags :: DynP ()
+            setFlags = do
+              setGeneralFlag Opt_HideAllPackages
+              mapM_ exposePackageId (lines ids)
+
+            (_, dflags') = runCmdLine (runEwM setFlags) dflags
+
+        return dflags'
+  where
+    -- Loading environments (by name or by location)
+
+    namedEnvPath :: String -> MaybeT IO FilePath
+    namedEnvPath name = do
+     appdir <- liftMaybeT $ versionedAppDir dflags
+     return $ appdir </> "environments" </> name
+
+    loadEnvName :: String -> MaybeT IO String
+    loadEnvName name = loadEnvFile =<< namedEnvPath name
+
+    loadEnvFile :: String -> MaybeT IO String
+    loadEnvFile path = do
+      guard =<< liftMaybeT (doesFileExist path)
+      liftMaybeT $ readFile path
+
+    -- Various ways to define which environment to use
+
+    getCmdLineArg :: MaybeT IO String
+    getCmdLineArg = MaybeT $ return $ packageEnv dflags
+
+    getEnvVar :: MaybeT IO String
+    getEnvVar = do
+      mvar <- liftMaybeT $ try $ getEnv "GHC_ENVIRONMENT"
+      case mvar of
+        Right var -> return var
+        Left err  -> if isDoesNotExistError err then mzero
+                                                else liftMaybeT $ throwIO err
+
+    defaultEnvName :: String
+    defaultEnvName = "default"
+
+    localEnvFile :: FilePath
+    localEnvFile = "./.ghc.environment"
+
+    -- Error reporting
+
+    cmdLineError :: String -> MaybeT IO a
+    cmdLineError env = liftMaybeT . throwGhcExceptionIO . CmdLineError $
+      "Package environment " ++ show env ++ " not found"
+
+    envError :: String -> MaybeT IO a
+    envError env = liftMaybeT . throwGhcExceptionIO . CmdLineError $
+         "Package environment "
+      ++ show env
+      ++ " (specified in GHC_ENVIRIONMENT) not found"
+
 
 -- If we're linking a binary, then only targets that produce object
 -- code are allowed (requests for other target types are ignored).

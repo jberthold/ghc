@@ -156,7 +156,15 @@ ObjectCode *objects = NULL;     /* initially empty */
 ObjectCode *unloaded_objects = NULL; /* initially empty */
 
 #ifdef THREADED_RTS
+/* This protects all the Linker's global state except unloaded_objects */
 Mutex linker_mutex;
+/*
+ * This protects unloaded_objects.  We have a separate mutex for this, because
+ * the GC needs to access unloaded_objects in checkUnload, while the linker only
+ * needs to access unloaded_objects in unloadObj(), so this allows most linker
+ * operations proceed concurrently with the GC. 
+ */
+Mutex linker_unloaded_mutex;
 #endif
 
 /* Type of the initializer */
@@ -1433,6 +1441,7 @@ typedef struct _RtsSymbolVal {
       SymI_HasProto(atomic_dec)                                         \
       SymI_HasProto(hs_spt_lookup)                                      \
       SymI_HasProto(hs_spt_insert)                                      \
+      SymI_HasProto(hs_spt_remove)                                      \
       SymI_HasProto(hs_spt_keys)                                        \
       SymI_HasProto(hs_spt_key_count)                                   \
       RTS_USER_SIGNALS_SYMBOLS                                          \
@@ -1660,6 +1669,7 @@ initLinker_ (int retain_cafs)
 
 #if defined(THREADED_RTS)
     initMutex(&linker_mutex);
+    initMutex(&linker_unloaded_mutex);
 #if defined(OBJFORMAT_ELF) || defined(OBJFORMAT_MACHO)
     initMutex(&dl_mutex);
 #endif
@@ -3247,9 +3257,13 @@ static HsInt unloadObj_ (pathchar *path, rtsBool just_purge)
                 } else {
                     prev->next = oc->next;
                 }
+                ACQUIRE_LOCK(&linker_unloaded_mutex);
                 oc->next = unloaded_objects;
                 unloaded_objects = oc;
                 oc->status = OBJECT_UNLOADED;
+                RELEASE_LOCK(&linker_unloaded_mutex);
+                // We do not own oc any more; it can be released at any time by
+                // the GC in checkUnload().
             } else {
                 prev = oc;
             }

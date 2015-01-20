@@ -24,7 +24,6 @@ import Coercion
 import InstEnv
 import Class
 import Avail
-import PatSyn
 import CoreSyn
 import CoreSubst
 import PprCore
@@ -184,7 +183,7 @@ deSugar hsc_env
                 mg_fam_insts    = fam_insts,
                 mg_inst_env     = inst_env,
                 mg_fam_inst_env = fam_inst_env,
-                mg_patsyns      = filter ((`elemNameSet` export_set) . patSynName) patsyns,
+                mg_patsyns      = patsyns,
                 mg_rules        = ds_rules_for_imps,
                 mg_binds        = ds_binds,
                 mg_foreign      = ds_fords,
@@ -462,12 +461,12 @@ by simpleOptExpr (for the LHS) resp. the simplifiers (for the RHS).
 -}
 
 dsVect :: LVectDecl Id -> DsM CoreVect
-dsVect (L loc (HsVect (L _ v) rhs))
+dsVect (L loc (HsVect _ (L _ v) rhs))
   = putSrcSpanDs loc $
     do { rhs' <- dsLExpr rhs
        ; return $ Vect v rhs'
        }
-dsVect (L _loc (HsNoVect (L _ v)))
+dsVect (L _loc (HsNoVect _ (L _ v)))
   = return $ NoVect v
 dsVect (L _loc (HsVectTypeOut isScalar tycon rhs_tycon))
   = return $ VectType isScalar tycon' rhs_tycon
@@ -475,11 +474,11 @@ dsVect (L _loc (HsVectTypeOut isScalar tycon rhs_tycon))
     tycon' | Just ty <- coreView $ mkTyConTy tycon
            , (tycon', []) <- splitTyConApp ty      = tycon'
            | otherwise                             = tycon
-dsVect vd@(L _ (HsVectTypeIn _ _ _))
+dsVect vd@(L _ (HsVectTypeIn _ _ _ _))
   = pprPanic "Desugar.dsVect: unexpected 'HsVectTypeIn'" (ppr vd)
 dsVect (L _loc (HsVectClassOut cls))
   = return $ VectClass (classTyCon cls)
-dsVect vc@(L _ (HsVectClassIn _))
+dsVect vc@(L _ (HsVectClassIn _ _))
   = pprPanic "Desugar.dsVect: unexpected 'HsVectClassIn'" (ppr vc)
 dsVect (L _loc (HsVectInstOut inst))
   = return $ VectInst (instanceDFunId inst)

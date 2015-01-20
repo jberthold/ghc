@@ -1,0 +1,431 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<sect1 id="release-7-12-1">
+  <title>Release notes for version 7.12.1</title>
+
+  <para>
+      The significant changes to the various parts of the compiler are listed
+      in the following sections. There have also been numerous bug fixes and
+      performance improvements over the 7.10 branch.
+  </para>
+
+  <sect2>
+    <title>Highlights</title>
+
+    <para>
+        The highlights, since the 7.10 branch, are:
+    </para>
+
+    <itemizedlist>
+        <listitem>
+            <para>
+                TODO FIXME
+           </para>
+       </listitem>
+   </itemizedlist>
+  </sect2>
+
+  <sect2>
+    <title>Full details</title>
+    <sect3>
+        <title>Language</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    TODO FIXME.
+               </para>
+           </listitem>
+            <listitem>
+                <para>
+                    Implicit parameters of the new base type
+                    <literal>GHC.Stack.CallStack</literal> are treated
+                    specially, and automatically solved for the current source
+                    location. For example
+                    <programlisting>
+                      f = print (?stk :: CallStack)
+                    </programlisting>
+                    will print the singleton stack containing the occurrence of
+                    <literal>?stk</literal>. If there is another
+                    <literal>CallStack</literal> implicit in-scope, the new location
+                    will be appended to the existing stack, e.g.
+                    <programlisting>
+                      f :: (?stk :: CallStack) => IO ()
+                      f = print (?stk :: CallStack)
+                    </programlisting>
+                    will print the occurrence of <literal>?stk</literal> and the
+                    call-site of <literal>f</literal>. The name of the implicit
+                    parameter does not matter.
+               </para>
+                <para>
+                    See the release notes for base for a description of the
+                    <literal>CallStack</literal> type.
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>Compiler</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Added the option <option>-dth-dec-file</option>.
+
+                    This dumps out a .th.hs file of all Template Haskell declarations in a corresponding .hs file. The idea is that application developers can check this into their repository so that they can grep for identifiers used elsewhere that were defined in Template Haskell.
+                    This is similar to using <option>-ddump-to-file</option> with <option>-ddump-splices</option> but it always generates a file instead of being coupled to <option>-ddump-to-file</option> and only outputs code that does not exist in the .hs file and a comment for the splice location in the original file.
+                </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>GHCi</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    TODO FIXME
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>Template Haskell</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    TODO FIXME.
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>Runtime system</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    TODO FIXME.
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>Build system</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    TODO FIXME.
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>Package system</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    TODO FIXME.
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+  </sect2>
+
+  <sect2>
+    <title>Libraries</title>
+
+    <sect3>
+        <title>array</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 0.5.0.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>base</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 4.7.0.0)
+               </para>
+           </listitem>
+            <listitem>
+                <para>
+                    A new module <literal>GHC.SrcLoc</literal> was added,
+                    exporting a new type <literal>SrcLoc</literal>. A
+                    <literal>SrcLoc</literal> contains package, module,
+                    and file names, as well as start and end positions.
+               </para>
+           </listitem>
+            <listitem>
+                <para>
+                    A new type <literal>CallStack</literal> was added for use
+                    with the new implicit callstack parameters. A
+                    <literal>CallStack</literal> is a
+                    <literal>[(String, SrcLoc)]</literal>, sorted by most-recent
+                    call.
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>bin-package-db</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    This is an internal package, and should not be used.
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>binary</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 0.7.1.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>bytestring</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 0.10.4.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>Cabal</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 1.18.1.3)
+              </para>
+          </listitem>
+      </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>containers</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 0.5.4.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>deepseq</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 1.3.0.2)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>directory</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 1.2.0.2)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>filepath</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 1.3.0.2)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>ghc</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    TODO FIXME.
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>ghc-prim</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 0.3.1.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>haskell98</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 2.0.0.3)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>haskell2010</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 1.1.1.1)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>hoopl</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 3.10.0.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>hpc</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 0.6.0.1)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>integer-gmp</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 0.5.1.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>old-locale</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 1.0.0.6)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>old-time</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 1.1.0.2)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>process</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 1.2.0.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>template-haskell</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 2.9.0.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>time</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 1.4.1)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>unix</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 2.7.0.0)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+
+    <sect3>
+        <title>Win32</title>
+        <itemizedlist>
+            <listitem>
+                <para>
+                    Version number XXXXX (was 2.3.0.1)
+               </para>
+           </listitem>
+       </itemizedlist>
+    </sect3>
+  </sect2>
+
+  <sect2>
+    <title>Known bugs</title>
+    <itemizedlist>
+        <listitem>
+            <para>
+                TODO FIXME
+           </para>
+       </listitem>
+   </itemizedlist>
+  </sect2>
+</sect1>

@@ -97,6 +97,7 @@ import CoreLint         ( lintInteractiveExpr )
 import DsMeta           ( templateHaskellNames )
 import VarEnv           ( emptyTidyEnv )
 import Panic
+import ConLike
 
 import GHC.Exts
 #endif
@@ -270,10 +271,11 @@ ioMsgMaybe' ioA = do
 -- | Lookup things in the compiler's environment
 
 #ifdef GHCI
-hscTcRnLookupRdrName :: HscEnv -> RdrName -> IO [Name]
-hscTcRnLookupRdrName hsc_env0 rdr_name = runInteractiveHsc hsc_env0 $ do
-   hsc_env <- getHscEnv
-   ioMsgMaybe $ tcRnLookupRdrName hsc_env rdr_name
+hscTcRnLookupRdrName :: HscEnv -> Located RdrName -> IO [Name]
+hscTcRnLookupRdrName hsc_env0 rdr_name 
+  = runInteractiveHsc hsc_env0 $ 
+    do { hsc_env <- getHscEnv
+       ; ioMsgMaybe $ tcRnLookupRdrName hsc_env rdr_name }
 #endif
 
 hscTcRcLookupName :: HscEnv -> Name -> IO (Maybe TyThing)
@@ -1083,7 +1085,11 @@ markUnsafeInfer tcg_env whyUnsafe = do
                             text str <+> text "is not allowed in Safe Haskell"]
         | otherwise = []
     badInsts insts = concat $ map badInst insts
-    badInst ins | overlapMode (is_flag ins) /= NoOverlap
+
+    checkOverlap (NoOverlap _) = False
+    checkOverlap _             = True
+
+    badInst ins | checkOverlap (overlapMode (is_flag ins))
                 = [mkLocMessage SevOutput (nameSrcSpan $ getName $ is_dfun ins) $
                       ppr (overlapMode $ is_flag ins) <+>
                       text "overlap mode isn't allowed in Safe Haskell"]
@@ -1505,6 +1511,7 @@ hscDeclsWithLocation hsc_env0 str source linenumber =
     liftIO $ linkDecls hsc_env src_span cbc
 
     let tcs = filterOut isImplicitTyCon (mg_tcs simpl_mg)
+        patsyns = mg_patsyns simpl_mg
 
         ext_ids = [ id | id <- bindersOfBinds core_binds
                        , isExternalName (idName id)
@@ -1515,11 +1522,11 @@ hscDeclsWithLocation hsc_env0 str source linenumber =
             -- The DFunIds are in 'cls_insts' (see Note [ic_tythings] in HscTypes
             -- Implicit Ids are implicit in tcs
 
-        tythings =  map AnId ext_ids ++ map ATyCon tcs
+        tythings =  map AnId ext_ids ++ map ATyCon tcs ++ map (AConLike . PatSynCon) patsyns
 
     let icontext = hsc_IC hsc_env
         ictxt    = extendInteractiveContext icontext ext_ids tcs
-                                            cls_insts fam_insts defaults
+                                            cls_insts fam_insts defaults patsyns
     return (tythings, ictxt)
 
 hscImport :: HscEnv -> String -> IO (ImportDecl RdrName)

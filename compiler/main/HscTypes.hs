@@ -1200,12 +1200,11 @@ The details are a bit tricky though:
    It stays as 'main' (or whatever -this-package-key says), and is the
    package to which :load'ed modules are added to.
 
- * So how do we arrange that declarations at the command prompt get
-   to be in the 'interactive' package?  Simply by setting the tcg_mod
+ * So how do we arrange that declarations at the command prompt get to
+   be in the 'interactive' package?  Simply by setting the tcg_mod
    field of the TcGblEnv to "interactive:Ghci1".  This is done by the
-   call to initTc in initTcInteractive, initTcForLookup, which in
-   turn get the module from it 'icInteractiveModule' field of the
-   interactive context.
+   call to initTc in initTcInteractive, which in turn get the module
+   from it 'icInteractiveModule' field of the interactive context.
 
    The 'thisPackage' field stays as 'main' (or whatever -this-package-key says.
 
@@ -1403,8 +1402,9 @@ extendInteractiveContext :: InteractiveContext
                          -> [Id] -> [TyCon]
                          -> [ClsInst] -> [FamInst]
                          -> Maybe [Type]
+                         -> [PatSyn]
                          -> InteractiveContext
-extendInteractiveContext ictxt ids tcs new_cls_insts new_fam_insts defaults
+extendInteractiveContext ictxt ids tcs new_cls_insts new_fam_insts defaults new_patsyns
   = ictxt { ic_mod_index  = ic_mod_index ictxt + 1
                             -- Always bump this; even instances should create
                             -- a new mod_index (Trac #9426)
@@ -1413,7 +1413,7 @@ extendInteractiveContext ictxt ids tcs new_cls_insts new_fam_insts defaults
           , ic_instances  = (new_cls_insts ++ old_cls_insts, new_fam_insts ++ old_fam_insts)
           , ic_default    = defaults }
   where
-    new_tythings = map AnId ids ++ map ATyCon tcs
+    new_tythings = map AnId ids ++ map ATyCon tcs ++ map (AConLike . PatSynCon) new_patsyns
     old_tythings = filterOut (shadowed_by ids) (ic_tythings ictxt)
 
     -- Discard old instances that have been fully overrridden
@@ -2356,6 +2356,10 @@ data ModSummary
           -- ^ Timestamp of source file
         ms_obj_date     :: Maybe UTCTime,
           -- ^ Timestamp of object, if we have one
+        ms_iface_date   :: Maybe UTCTime,
+          -- ^ Timestamp of hi file, if we *only* are typechecking (it is
+          -- 'Nothing' otherwise.
+          -- See Note [Recompilation checking when typechecking only] and #9243
         ms_srcimps      :: [Located (ImportDecl RdrName)],
           -- ^ Source imports of the module
         ms_textual_imps :: [Located (ImportDecl RdrName)],
@@ -2382,6 +2386,7 @@ ms_imps ms =
     -- text, such as those induced by the use of plugins (the -plgFoo
     -- flag)
     mk_additional_import mod_nm = noLoc $ ImportDecl {
+      ideclSourceSrc = Nothing,
       ideclName      = noLoc mod_nm,
       ideclPkgQual   = Nothing,
       ideclSource    = False,

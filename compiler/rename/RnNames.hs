@@ -181,6 +181,22 @@ rnImportDecl this_mod
     let imp_mod_name = unLoc loc_imp_mod_name
         doc = ppr imp_mod_name <+> ptext (sLit "is directly imported")
 
+    -- Check for self-import, which confuses the typechecker (Trac #9032)
+    -- ghc --make rejects self-import cycles already, but batch-mode may not
+    -- at least not until TcIface.tcHiBootIface, which is too late to avoid
+    -- typechecker crashes.  ToDo: what about indirect self-import?
+    -- But 'import {-# SOURCE #-} M' is ok, even if a bit odd
+    when (not want_boot &&
+          imp_mod_name == moduleName this_mod &&
+          (case mb_pkg of  -- If we have import "<pkg>" M, then we should
+                           -- check that "<pkg>" is "this" (which is magic)
+                           -- or the name of this_mod's package.  Yurgh!
+                           -- c.f. GHC.findModule, and Trac #9997
+             Nothing     -> True
+             Just pkg_fs -> pkg_fs == fsLit "this" ||
+                            fsToPackageKey pkg_fs == modulePackageKey this_mod))
+         (addErr (ptext (sLit "A module cannot import itself:") <+> ppr imp_mod_name))
+
     -- Check for a missing import list (Opt_WarnMissingImportList also
     -- checks for T(..) items but that is done in checkDodgyImport below)
     case imp_details of
@@ -212,9 +228,9 @@ rnImportDecl this_mod
     warnIf (want_boot && any (not.mi_boot) ifaces && isOneShot (ghcMode dflags))
            (warnRedundantSourceImport imp_mod_name)
     when (mod_safe && not (safeImportsOn dflags)) $
-        addErrAt loc (ptext (sLit "safe import can't be used as Safe Haskell isn't on!")
-                  $+$ ptext (sLit $ "please enable Safe Haskell through either "
-                                 ++ "Safe, Trustworthy or Unsafe"))
+        addErr (ptext (sLit "safe import can't be used as Safe Haskell isn't on!")
+                $+$ ptext (sLit $ "please enable Safe Haskell through either "
+                                   ++ "Safe, Trustworthy or Unsafe"))
 
     let
         qual_mod_name = as_mod `orElse` imp_mod_name
@@ -483,14 +499,15 @@ getLocalNonValBinders :: MiniFixityEnv -> HsGroup RdrName
 -- Get all the top-level binders bound the group *except*
 -- for value bindings, which are treated separately
 -- Specifically we return AvailInfo for
---      type decls (incl constructors and record selectors)
---      class decls (including class ops)
---      associated types
---      foreign imports
---      (in hs-boot files) value signatures
+--      * type decls (incl constructors and record selectors)
+--      * class decls (including class ops)
+--      * associated types
+--      * foreign imports
+--      * pattern synonyms
+--      * value signatures (in hs-boot files)
 
 getLocalNonValBinders fixity_env
-     (HsGroup { hs_valds  = val_binds,
+     (HsGroup { hs_valds  = binds,
                 hs_tyclds = tycl_decls,
                 hs_instds = inst_decls,
                 hs_fords  = foreign_decls })
@@ -507,11 +524,11 @@ getLocalNonValBinders fixity_env
         ; nti_avails <- concatMapM new_assoc inst_decls
 
           -- Finish off with value binders:
-          --    foreign decls for an ordinary module
+          --    foreign decls and pattern synonyms for an ordinary module
           --    type sigs in case of a hs-boot file only
         ; is_boot <- tcIsHsBootOrSig
         ; let val_bndrs | is_boot   = hs_boot_sig_bndrs
-                        | otherwise = for_hs_bndrs
+                        | otherwise = for_hs_bndrs ++ patsyn_hs_bndrs
         ; val_avails <- mapM new_simple val_bndrs
 
         ; let avails    = nti_avails ++ val_avails
@@ -521,15 +538,18 @@ getLocalNonValBinders fixity_env
         ; envs <- extendGlobalRdrEnvRn avails fixity_env
         ; return (envs, new_bndrs) } }
   where
+    ValBindsIn val_binds val_sigs = binds
+
     for_hs_bndrs :: [Located RdrName]
-    for_hs_bndrs = [ L decl_loc (unLoc nm)
-                   | L decl_loc (ForeignImport nm _ _ _) <- foreign_decls]
+    for_hs_bndrs = hsForeignDeclsBinders foreign_decls
+
+    patsyn_hs_bndrs :: [Located RdrName]
+    patsyn_hs_bndrs = hsPatSynBinders val_binds
 
     -- In a hs-boot file, the value binders come from the
     --  *signatures*, and there should be no foreign binders
     hs_boot_sig_bndrs = [ L decl_loc (unLoc n)
                         | L decl_loc (TypeSig ns _ _) <- val_sigs, n <- ns]
-    ValBindsIn _ val_sigs = val_binds
 
       -- the SrcSpan attached to the input should be the span of the
       -- declaration, not just the name
@@ -735,7 +755,7 @@ filterImports ifaces decl_spec (Just (want_hiding, L l import_items))
                                        AvailTC parent [name])],
                                      warns)
 
-        IEThingAbs tc
+        IEThingAbs (L l tc)
             | want_hiding   -- hiding ( C )
                        -- Here the 'C' can be a data constructor
                        --  *or* a type/class, or even both
@@ -744,10 +764,10 @@ filterImports ifaces decl_spec (Just (want_hiding, L l import_items))
                in
                case catIELookupM [ tc_name, dc_name ] of
                  []    -> failLookupWith BadImport
-                 names -> return ([mkIEThingAbs name | name <- names], [])
+                 names -> return ([mkIEThingAbs l name | name <- names], [])
             | otherwise
             -> do nameAvail <- lookup_name tc
-                  return ([mkIEThingAbs nameAvail], [])
+                  return ([mkIEThingAbs l nameAvail], [])
 
         IEThingWith (L l rdr_tc) rdr_ns -> do
            (name, AvailTC _ ns, mb_parent) <- lookup_name rdr_tc
@@ -781,8 +801,10 @@ filterImports ifaces decl_spec (Just (want_hiding, L l import_items))
         -- all errors.
 
       where
-        mkIEThingAbs (n, av, Nothing    ) = (IEThingAbs n, trimAvail av n)
-        mkIEThingAbs (n, _,  Just parent) = (IEThingAbs n, AvailTC parent [n])
+        mkIEThingAbs l (n, av, Nothing    ) = (IEThingAbs (L l n),
+                                               trimAvail av n)
+        mkIEThingAbs l (n, _,  Just parent) = (IEThingAbs (L l n),
+                                               AvailTC parent [n])
 
         handle_bad_import m = catchIELookup m $ \err -> case err of
           BadImport | want_hiding -> return ([], [BadImportW])
@@ -1113,11 +1135,11 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
         = do gre <- lookupGreRn rdr
              return (IEVar (L l (gre_name gre)), greExportAvail gre)
 
-    lookup_ie (IEThingAbs rdr)
+    lookup_ie (IEThingAbs (L l rdr))
         = do gre <- lookupGreRn rdr
              let name = gre_name gre
                  avail = greExportAvail gre
-             return (IEThingAbs name, avail)
+             return (IEThingAbs (L l name), avail)
 
     lookup_ie ie@(IEThingAll (L l rdr))
         = do name <- lookupGlobalOccRn rdr
@@ -1397,7 +1419,7 @@ findImportUsage imports rdr_env rdrs
 
         add_unused :: IE Name -> NameSet -> NameSet
         add_unused (IEVar (L _ n))      acc = add_unused_name n acc
-        add_unused (IEThingAbs n)       acc = add_unused_name n acc
+        add_unused (IEThingAbs (L _ n)) acc = add_unused_name n acc
         add_unused (IEThingAll (L _ n)) acc = add_unused_all  n acc
         add_unused (IEThingWith (L _ p) ns) acc
                                           = add_unused_with p (map unLoc ns) acc
@@ -1548,7 +1570,7 @@ printMinimalImports imports_w_usage
     to_ie _ (Avail n)
        = [IEVar (noLoc n)]
     to_ie _ (AvailTC n [m])
-       | n==m = [IEThingAbs n]
+       | n==m = [IEThingAbs (noLoc n)]
     to_ie ifaces (AvailTC n ns)
       = case [xs | iface <- ifaces
                  , AvailTC x xs <- mi_exports iface
@@ -1751,10 +1773,10 @@ missingImportListItem ie
   = ptext (sLit "The import item") <+> quotes (ppr ie) <+> ptext (sLit "does not have an explicit import list")
 
 moduleWarn :: ModuleName -> WarningTxt -> SDoc
-moduleWarn mod (WarningTxt txt)
+moduleWarn mod (WarningTxt _ txt)
   = sep [ ptext (sLit "Module") <+> quotes (ppr mod) <> ptext (sLit ":"),
           nest 2 (vcat (map ppr txt)) ]
-moduleWarn mod (DeprecatedTxt txt)
+moduleWarn mod (DeprecatedTxt _ txt)
   = sep [ ptext (sLit "Module") <+> quotes (ppr mod)
                                 <+> ptext (sLit "is deprecated:"),
           nest 2 (vcat (map ppr txt)) ]
