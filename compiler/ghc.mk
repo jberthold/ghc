@@ -67,6 +67,8 @@ compiler/stage%/build/Config.hs : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo                                                               >> $@
 	@echo 'cProjectName          :: String'                             >> $@
 	@echo 'cProjectName          = "$(ProjectName)"'                    >> $@
+	@echo 'cProjectGitCommitId   :: String'				    >> $@
+	@echo 'cProjectGitCommitId   = "$(ProjectGitCommitId)"'		    >> $@
 	@echo 'cProjectVersion       :: String'                             >> $@
 	@echo 'cProjectVersion       = "$(ProjectVersion)"'                 >> $@
 	@echo 'cProjectVersionInt    :: String'                             >> $@
@@ -272,11 +274,8 @@ compiler_CPP_OPTS += ${GhcCppOpts}
 
 define preprocessCompilerFiles
 # $0 = stage
-compiler/stage$1/build/Parser.y: compiler/parser/Parser.y.pp
-	$$(CPP) -P $$(compiler_CPP_OPTS) -x c $$< | grep -v '^#pragma GCC' > $$@
-
 compiler/stage$1/build/primops.txt: compiler/prelude/primops.txt.pp compiler/stage$1/$$(PLATFORM_H)
-	$$(CPP) -P $$(compiler_CPP_OPTS) -Icompiler/stage$1 -x c $$< | grep -v '^#pragma GCC' > $$@
+	$$(CPP) $$(RAWCPP_FLAGS) -P $$(compiler_CPP_OPTS) -Icompiler/stage$1 -x c $$< | grep -v '^#pragma GCC' > $$@
 
 compiler/stage$1/build/primop-data-decl.hs-incl: compiler/stage$1/build/primops.txt $$$$(genprimopcode_INPLACE)
 	"$$(genprimopcode_INPLACE)" --data-decl          < $$< > $$@
@@ -476,15 +475,14 @@ compiler_stage3_SplitObjs = NO
 compiler_stage2_dll0_START_MODULE = DynFlags
 compiler_stage2_dll0_MODULES = \
 	Annotations \
+	ApiAnnotation \
 	Avail \
 	Bag \
 	BasicTypes \
-	BinIface \
 	Binary \
 	BooleanFormula \
 	BreakArray \
 	BufWrite \
-	BuildTyCl \
 	Class \
 	CmdLineParser \
 	CmmType \
@@ -495,18 +493,17 @@ compiler_stage2_dll0_MODULES = \
 	Constants \
 	CoreArity \
 	CoreFVs \
-	CoreLint \
 	CoreSubst \
 	CoreSyn \
 	CoreTidy \
 	CoreUnfold \
 	CoreUtils \
 	CostCentre \
+	Ctype \
 	DataCon \
 	Demand \
 	Digraph \
 	DriverPhases \
-	DsMonad \
 	DynFlags \
 	Encoding \
 	ErrUtils \
@@ -517,7 +514,6 @@ compiler_stage2_dll0_MODULES = \
 	FastMutInt \
 	FastString \
 	FastTypes \
-	Finder \
 	Fingerprint \
 	FiniteMap \
 	ForeignCall \
@@ -537,16 +533,14 @@ compiler_stage2_dll0_MODULES = \
 	IOEnv \
 	Id \
 	IdInfo \
-	IfaceEnv \
 	IfaceSyn \
 	IfaceType \
 	InstEnv \
 	Kind \
 	Lexeme \
-	ApiAnnotation \
+	Lexer \
 	ListSetOps \
 	Literal \
-	LoadIface \
 	Maybes \
 	MkCore \
 	MkId \
@@ -569,7 +563,6 @@ compiler_stage2_dll0_MODULES = \
 	Platform \
 	PlatformConstants \
 	PprCore \
-	PrelInfo \
 	PrelNames \
 	PrelRules \
 	Pretty \
@@ -581,11 +574,8 @@ compiler_stage2_dll0_MODULES = \
 	StaticFlags \
 	StringBuffer \
 	TcEvidence \
-	TcIface \
-	TcRnMonad \
 	TcRnTypes \
 	TcType \
-	TcTypeNats \
 	TrieMap \
 	TyCon \
 	Type \
@@ -606,7 +596,6 @@ ifeq "$(GhcWithInterpreter)" "YES"
 # These files are reacheable from DynFlags
 # only by GHCi-enabled code (see #9552)
 compiler_stage2_dll0_MODULES += \
-	ApiAnnotation \
 	Bitmap \
 	BlockId \
 	ByteCodeAsm \
@@ -629,13 +618,11 @@ compiler_stage2_dll0_MODULES += \
 	CodeGen.Platform.SPARC \
 	CodeGen.Platform.X86 \
 	CodeGen.Platform.X86_64 \
-	Ctype \
 	FastBool \
 	Hoopl \
 	Hoopl.Dataflow \
 	InteractiveEvalTypes \
 	MkGraph \
-	Lexer \
 	PprCmm \
 	PprCmmDecl \
 	PprCmmExpr \

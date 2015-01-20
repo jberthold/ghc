@@ -1161,6 +1161,7 @@ echo ["
 Configure completed successfully.
 
    Building GHC version  : $ProjectVersion
+          Git commit id  : $ProjectGitCommitId
 
    Build platform        : $BuildPlatform
    Host platform         : $HostPlatform

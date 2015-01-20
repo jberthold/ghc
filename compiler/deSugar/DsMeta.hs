@@ -78,7 +78,7 @@ dsBracket :: HsBracket Name -> [PendingTcSplice] -> DsM CoreExpr
 dsBracket brack splices
   = dsExtendMetaEnv new_bit (do_brack brack)
   where
-    new_bit = mkNameEnv [(n, Splice (unLoc e)) | PendSplice n e <- splices]
+    new_bit = mkNameEnv [(n, DsSplice (unLoc e)) | PendSplice n e <- splices]
 
     do_brack (VarBr _ n) = do { MkC e1  <- lookupOcc n ; return e1 }
     do_brack (ExpBr e)   = do { MkC e1  <- repLE e     ; return e1 }
@@ -184,7 +184,7 @@ repTopDs group@(HsGroup { hs_valds   = valds
 hsSigTvBinders :: HsValBinds Name -> [Name]
 -- See Note [Scoped type variables in bindings]
 hsSigTvBinders binds
-  = [hsLTyVarName tv | L _ (TypeSig _ (L _ (HsForAllTy Explicit qtvs _ _))) <- sigs
+  = [hsLTyVarName tv | L _ (TypeSig _ (L _ (HsForAllTy Explicit _ qtvs _ _)) _) <- sigs
                      , tv <- hsQTvBndrs qtvs]
   where
     sigs = case binds of
@@ -687,7 +687,7 @@ rep_sigs' sigs = do { sigs1 <- mapM rep_sig sigs ;
                      return (concat sigs1) }
 
 rep_sig :: LSig Name -> DsM [(SrcSpan, Core TH.DecQ)]
-rep_sig (L loc (TypeSig nms ty))      = mapM (rep_ty_sig sigDName loc ty) nms
+rep_sig (L loc (TypeSig nms ty _))    = mapM (rep_ty_sig sigDName loc ty) nms
 rep_sig (L _   (PatSynSig {}))        = notHandled "Pattern type signatures" empty
 rep_sig (L loc (GenericSig nms ty))   = mapM (rep_ty_sig defaultSigDName loc ty) nms
 rep_sig d@(L _ (IdSig {}))            = pprPanic "rep_sig IdSig" (ppr d)
@@ -708,7 +708,7 @@ rep_ty_sig mk_sig loc (L _ ty) nm
   where
     -- We must special-case the top-level explicit for-all of a TypeSig
     -- See Note [Scoped type variables in bindings]
-    rep_ty (HsForAllTy Explicit tvs ctxt ty)
+    rep_ty (HsForAllTy Explicit _ tvs ctxt ty)
       = do { let rep_in_scope_tv tv = do { name <- lookupBinder (hsLTyVarName tv)
                                          ; repTyVarBndrWithKind tv name }
            ; bndrs1 <- repList tyVarBndrTyConName rep_in_scope_tv (hsQTvBndrs tvs)
@@ -846,7 +846,7 @@ repLTy :: LHsType Name -> DsM (Core TH.TypeQ)
 repLTy (L _ ty) = repTy ty
 
 repTy :: HsType Name -> DsM (Core TH.TypeQ)
-repTy (HsForAllTy _ tvs ctxt ty)  =
+repTy (HsForAllTy _ _ tvs ctxt ty)  =
   addTyVarBinds tvs $ \bndrs -> do
     ctxt1  <- repLContext ctxt
     ty1    <- repLTy ty
@@ -970,8 +970,8 @@ repSplice :: HsSplice Name -> DsM (Core a)
 repSplice (HsSplice n _)
  = do { mb_val <- dsLookupMetaEnv n
        ; case mb_val of
-           Just (Splice e) -> do { e' <- dsExpr e
-                                 ; return (MkC e') }
+           Just (DsSplice e) -> do { e' <- dsExpr e
+                                   ; return (MkC e') }
            _ -> pprPanic "HsSplice" (ppr n) }
                         -- Should not happen; statically checked
 
@@ -994,8 +994,8 @@ repE (HsVar x)            =
      ; case mb_val of
         Nothing          -> do { str <- globalVar x
                                ; repVarOrCon x str }
-        Just (Bound y)   -> repVarOrCon x (coreVar y)
-        Just (Splice e)  -> do { e' <- dsExpr e
+        Just (DsBound y)   -> repVarOrCon x (coreVar y)
+        Just (DsSplice e)  -> do { e' <- dsExpr e
                                ; return (MkC e') } }
 repE e@(HsIPVar _) = notHandled "Implicit parameters" (ppr e)
 
@@ -1073,7 +1073,7 @@ repE (RecordUpd e flds _ _ _)
         fs <- repFields flds;
         repRecUpd x fs }
 
-repE (ExprWithTySig e ty) = do { e1 <- repLE e; t1 <- repLTy ty; repSigExp e1 t1 }
+repE (ExprWithTySig e ty _) = do { e1 <- repLE e; t1 <- repLTy ty; repSigExp e1 t1 }
 repE (ArithSeq _ _ aseq) =
   case aseq of
     From e              -> do { ds1 <- repLE e; repFrom ds1 }
@@ -1092,6 +1092,7 @@ repE (ArithSeq _ _ aseq) =
                              repFromThenTo ds1 ds2 ds3
 
 repE (HsSpliceE _ splice)  = repSplice splice
+repE (HsStatic e)          = repLE e >>= rep2 staticEName . (:[]) . unC
 repE e@(PArrSeq {})        = notHandled "Parallel arrays" (ppr e)
 repE e@(HsCoreAnn {})      = notHandled "Core annotations" (ppr e)
 repE e@(HsSCC {})          = notHandled "Cost centres" (ppr e)
@@ -1433,7 +1434,7 @@ addBinds :: [GenSymBind] -> DsM a -> DsM a
 -- Add a list of fresh names for locally bound entities to the
 -- meta environment (which is part of the state carried around
 -- by the desugarer monad)
-addBinds bs m = dsExtendMetaEnv (mkNameEnv [(n,Bound id) | (n,id) <- bs]) m
+addBinds bs m = dsExtendMetaEnv (mkNameEnv [(n,DsBound id) | (n,id) <- bs]) m
 
 dupBinder :: (Name, Name) -> DsM (Name, DsMetaVal)
 dupBinder (new, old)
@@ -1468,9 +1469,9 @@ lookupOcc :: Name -> DsM (Core TH.Name)
 lookupOcc n
   = do {  mb_val <- dsLookupMetaEnv n ;
           case mb_val of
-                Nothing         -> globalVar n
-                Just (Bound x)  -> return (coreVar x)
-                Just (Splice _) -> pprPanic "repE:lookupOcc" (ppr n)
+                Nothing           -> globalVar n
+                Just (DsBound x)  -> return (coreVar x)
+                Just (DsSplice _) -> pprPanic "repE:lookupOcc" (ppr n)
     }
 
 globalVar :: Name -> DsM (Core TH.Name)
@@ -2125,7 +2126,7 @@ templateHaskellNames = [
     tupEName, unboxedTupEName,
     condEName, multiIfEName, letEName, caseEName, doEName, compEName,
     fromEName, fromThenEName, fromToEName, fromThenToEName,
-    listEName, sigEName, recConEName, recUpdEName,
+    listEName, sigEName, recConEName, recUpdEName, staticEName,
     -- FieldExp
     fieldExpName,
     -- Body
@@ -2307,7 +2308,7 @@ clauseName = libFun (fsLit "clause") clauseIdKey
 varEName, conEName, litEName, appEName, infixEName, infixAppName,
     sectionLName, sectionRName, lamEName, lamCaseEName, tupEName,
     unboxedTupEName, condEName, multiIfEName, letEName, caseEName,
-    doEName, compEName :: Name
+    doEName, compEName, staticEName :: Name
 varEName        = libFun (fsLit "varE")        varEIdKey
 conEName        = libFun (fsLit "conE")        conEIdKey
 litEName        = libFun (fsLit "litE")        litEIdKey
@@ -2338,6 +2339,7 @@ listEName       = libFun (fsLit "listE")       listEIdKey
 sigEName        = libFun (fsLit "sigE")        sigEIdKey
 recConEName     = libFun (fsLit "recConE")     recConEIdKey
 recUpdEName     = libFun (fsLit "recUpdE")     recUpdEIdKey
+staticEName     = libFun (fsLit "staticE")     staticEIdKey
 
 -- type FieldExp = ...
 fieldExpName :: Name
@@ -2680,7 +2682,7 @@ varEIdKey, conEIdKey, litEIdKey, appEIdKey, infixEIdKey, infixAppIdKey,
     unboxedTupEIdKey, condEIdKey, multiIfEIdKey,
     letEIdKey, caseEIdKey, doEIdKey, compEIdKey,
     fromEIdKey, fromThenEIdKey, fromToEIdKey, fromThenToEIdKey,
-    listEIdKey, sigEIdKey, recConEIdKey, recUpdEIdKey :: Unique
+    listEIdKey, sigEIdKey, recConEIdKey, recUpdEIdKey, staticEIdKey :: Unique
 varEIdKey         = mkPreludeMiscIdUnique 270
 conEIdKey         = mkPreludeMiscIdUnique 271
 litEIdKey         = mkPreludeMiscIdUnique 272
@@ -2707,6 +2709,7 @@ listEIdKey        = mkPreludeMiscIdUnique 292
 sigEIdKey         = mkPreludeMiscIdUnique 293
 recConEIdKey      = mkPreludeMiscIdUnique 294
 recUpdEIdKey      = mkPreludeMiscIdUnique 295
+staticEIdKey      = mkPreludeMiscIdUnique 296
 
 -- type FieldExp = ...
 fieldExpIdKey :: Unique

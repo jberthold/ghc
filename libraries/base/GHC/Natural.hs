@@ -26,7 +26,7 @@
 -- change.  It's recommended use the "Numeric.Natural" module to import
 -- the 'Natural' type.
 --
--- /Since: 4.8.0.0/
+-- @since 4.8.0.0
 -----------------------------------------------------------------------------
 module GHC.Natural
     ( -- * The 'Natural' number type
@@ -41,6 +41,8 @@ module GHC.Natural
     , naturalToWordMaybe
       -- * Checked subtraction
     , minusNaturalMaybe
+      -- * Modular arithmetic
+    , powModNatural
     ) where
 
 #include "MachDeps.h"
@@ -79,7 +81,7 @@ default ()
 -- Operations whose result would be negative
 -- @'throw' ('Underflow' :: 'ArithException')@.
 --
--- /Since: 4.8.0.0/
+-- @since 4.8.0.0
 data Natural = NatS#                 GmpLimb# -- ^ in @[0, maxBound::Word]@
              | NatJ# {-# UNPACK #-} !BigNat   -- ^ in @]maxBound::Word, +inf[@
                                               --
@@ -94,7 +96,7 @@ data Natural = NatS#                 GmpLimb# -- ^ in @[0, maxBound::Word]@
 -- This operation is mostly useful for test-suites and/or code which
 -- constructs 'Integer' values directly.
 --
--- /Since: 4.8.0.0/
+-- @since 4.8.0.0
 isValidNatural :: Natural -> Bool
 isValidNatural (NatS# _)  = True
 isValidNatural (NatJ# bn) = isTrue# (isValidBigNat# bn)
@@ -294,9 +296,9 @@ instance Bits Natural where
     NatJ# n .&. NatJ# m = bigNatToNatural (andBigNat n m)
 
     NatS# n .|. NatS# m = wordToNatural (W# n .|. W# m)
-    NatS# n .|. NatJ# m = NatJ# (andBigNat (wordToBigNat n) m)
-    NatJ# n .|. NatS# m = NatJ# (andBigNat n (wordToBigNat m))
-    NatJ# n .|. NatJ# m = NatJ# (andBigNat n m)
+    NatS# n .|. NatJ# m = NatJ# (orBigNat (wordToBigNat n) m)
+    NatJ# n .|. NatS# m = NatJ# (orBigNat n (wordToBigNat m))
+    NatJ# n .|. NatJ# m = NatJ# (orBigNat n m)
 
     NatS# n `xor` NatS# m = wordToNatural (W# n `xor` W# m)
     NatS# n `xor` NatJ# m = NatJ# (xorBigNat (wordToBigNat n) m)
@@ -379,7 +381,7 @@ minusNatural (NatJ# x) (NatJ# y)
 
 -- | 'Natural' subtraction. Returns 'Nothing's for non-positive results.
 --
--- /Since: 4.8.0.0/
+-- @since 4.8.0.0
 minusNaturalMaybe :: Natural -> Natural -> Maybe Natural
 minusNaturalMaybe x         (NatS# 0##) = Just x
 minusNaturalMaybe (NatS# x) (NatS# y) = case subWordC# x y of
@@ -410,6 +412,10 @@ bigNatToNatural bn
   | isTrue# (isNullBigNat# bn)        = throw Underflow
   | otherwise                         = NatJ# bn
 
+naturalToBigNat :: Natural -> BigNat
+naturalToBigNat (NatS# w#) = wordToBigNat w#
+naturalToBigNat (NatJ# bn) = bn
+
 -- | Convert 'Int' to 'Natural'.
 -- Throws 'Underflow' when passed a negative 'Int'.
 intToNatural :: Int -> Natural
@@ -433,7 +439,7 @@ naturalToInt (NatJ# bn) = I# (bigNatToInt bn)
 -- Operations whose result would be negative
 -- @'throw' ('Underflow' :: 'ArithException')@.
 --
--- /Since: 4.8.0.0/
+-- @since 4.8.0.0
 newtype Natural = Natural Integer -- ^ __Invariant__: non-negative 'Integer'
                 deriving (Eq,Ord,Ix)
 
@@ -442,7 +448,7 @@ newtype Natural = Natural Integer -- ^ __Invariant__: non-negative 'Integer'
 -- This operation is mostly useful for test-suites and/or code which
 -- constructs 'Integer' values directly.
 --
--- /Since: 4.8.0.0/
+-- @since 4.8.0.0
 isValidNatural :: Natural -> Bool
 isValidNatural (Natural i) = i >= 0
 
@@ -473,7 +479,7 @@ instance Num Natural where
 
 -- | 'Natural' subtraction. Returns 'Nothing's for non-positive results.
 --
--- /Since: 4.8.0.0/
+-- @since 4.8.0.0
 minusNaturalMaybe :: Natural -> Natural -> Maybe Natural
 minusNaturalMaybe x y
   | x >= y    = Just (x - y)
@@ -566,7 +572,7 @@ instance Integral Natural where
 
 -- | Construct 'Natural' from 'Word' value.
 --
--- /Since: 4.8.0.0/
+-- @since 4.8.0.0
 wordToNatural :: Word -> Natural
 #if HAVE_GMP_BIGNAT
 wordToNatural (W# w#) = NatS# w#
@@ -577,7 +583,7 @@ wordToNatural w = Natural (fromIntegral w)
 -- | Try downcasting 'Natural' to 'Word' value.
 -- Returns 'Nothing' if value doesn't fit in 'Word'.
 --
--- /Since: 4.8.0.0/
+-- @since 4.8.0.0
 naturalToWordMaybe :: Natural -> Maybe Word
 #if HAVE_GMP_BIGNAT
 naturalToWordMaybe (NatS# w#) = Just (W# w#)
@@ -602,3 +608,37 @@ instance Data Natural where
                     _ -> error $ "Data.Data.gunfold: Constructor " ++ show c
                                  ++ " is not of type Natural"
   dataTypeOf _ = naturalType
+
+-- | \"@'powModNatural' /b/ /e/ /m/@\" computes base @/b/@ raised to
+-- exponent @/e/@ modulo @/m/@.
+--
+-- @since 4.8.0.0
+powModNatural :: Natural -> Natural -> Natural -> Natural
+#if HAVE_GMP_BIGNAT
+powModNatural _           _           (NatS# 0##) = throw DivideByZero
+powModNatural _           _           (NatS# 1##) = NatS# 0##
+powModNatural _           (NatS# 0##) _           = NatS# 1##
+powModNatural (NatS# 0##) _           _           = NatS# 0##
+powModNatural (NatS# 1##) _           _           = NatS# 1##
+powModNatural (NatS# b)   (NatS# e)   (NatS# m)   = NatS# (powModWord b e m)
+powModNatural b           e           (NatS# m)
+  = NatS# (powModBigNatWord (naturalToBigNat b) (naturalToBigNat e) m)
+powModNatural b           e           (NatJ# m)
+  = bigNatToNatural (powModBigNat (naturalToBigNat b) (naturalToBigNat e) m)
+#else
+-- Portable reference fallback implementation
+powModNatural _ _ 0 = throw DivideByZero
+powModNatural _ _ 1 = 0
+powModNatural _ 0 _ = 1
+powModNatural 0 _ _ = 0
+powModNatural 1 _ _ = 1
+powModNatural b0 e0 m = go b0 e0 1
+  where
+    go !b e !r
+      | odd e     = go b' e' (r*b `mod` m)
+      | e == 0    = r
+      | otherwise = go b' e' r
+      where
+        b' = b*b `mod` m
+        e' = e   `unsafeShiftR` 1 -- slightly faster than "e `div` 2"
+#endif

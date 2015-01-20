@@ -44,8 +44,11 @@ module GHC.Integer.GMP.Internals
     , bitInteger
     , popCountInteger
     , gcdInteger
+    , gcdExtInteger
     , lcmInteger
     , sqrInteger
+    , powModInteger
+    , recipModInteger
 
       -- ** Additional conversion operations to 'Integer'
     , wordToNegInteger
@@ -94,6 +97,11 @@ module GHC.Integer.GMP.Internals
     , gcdBigNat
     , gcdBigNatWord
 
+    , powModBigNat
+    , powModBigNatWord
+
+    , recipModBigNat
+
       -- ** 'BigNat' logic operations
     , shiftRBigNat
     , shiftLBigNat
@@ -119,6 +127,17 @@ module GHC.Integer.GMP.Internals
       -- * Miscellaneous GMP-provided operations
     , gcdInt
     , gcdWord
+    , powModWord
+    , recipModWord
+
+      -- * Primality tests
+    , testPrimeInteger
+    , testPrimeBigNat
+    , testPrimeWord#
+
+    , nextPrimeInteger
+    , nextPrimeBigNat
+    , nextPrimeWord#
 
       -- * Import/export functions
       -- ** Compute size of serialisation
@@ -171,7 +190,7 @@ default ()
 -- * \"@'sizeInBaseInteger' /i/ 2#@\" can be used to determine the most
 --   significant bit of @/i/@.
 --
--- /Since: 0.5.1.0/
+-- @since 0.5.1.0
 sizeInBaseInteger :: Integer -> Int# -> Word#
 sizeInBaseInteger (S# i#)  = sizeInBaseWord# (int2Word# (absI# i#))
 sizeInBaseInteger (Jp# bn) = sizeInBaseBigNat bn
@@ -179,7 +198,7 @@ sizeInBaseInteger (Jn# bn) = sizeInBaseBigNat bn
 
 -- | Version of 'sizeInBaseInteger' operating on 'BigNat'
 --
--- /Since: 1.0.0.0/
+-- @since 1.0.0.0
 sizeInBaseBigNat :: BigNat -> Int# -> Word#
 sizeInBaseBigNat bn@(BN# ba#) = c_mpn_sizeinbase# ba# (sizeofBigNat# bn)
 
@@ -188,7 +207,7 @@ foreign import ccall unsafe "integer_gmp_mpn_sizeinbase"
 
 -- | Version of 'sizeInBaseInteger' operating on 'Word#'
 --
--- /Since: 1.0.0.0/
+-- @since 1.0.0.0
 foreign import ccall unsafe "integer_gmp_mpn_sizeinbase1"
   sizeInBaseWord# :: Word# -> Int# -> Word#
 
@@ -198,7 +217,7 @@ foreign import ccall unsafe "integer_gmp_mpn_sizeinbase1"
 --
 -- See description of 'exportIntegerToMutableByteArray' for more details.
 --
--- /Since: 1.0.0.0/
+-- @since 1.0.0.0
 exportIntegerToAddr :: Integer -> Addr# -> Int# -> IO Word
 exportIntegerToAddr (S# i#)  = exportWordToAddr (W# (int2Word# (absI# i#)))
 exportIntegerToAddr (Jp# bn) = exportBigNatToAddr bn
@@ -249,7 +268,7 @@ foreign import ccall unsafe "integer_gmp_mpn_export1"
 -- integers as this function would currently convert those to big
 -- integers in msbf to call @mpz_export()@.
 --
--- /Since: 1.0.0.0/
+-- @since 1.0.0.0
 exportIntegerToMutableByteArray :: Integer -> MutableByteArray# RealWorld
                                 -> Word# -> Int# -> IO Word
 exportIntegerToMutableByteArray (S# i#)
@@ -259,7 +278,7 @@ exportIntegerToMutableByteArray (Jn# bn) = exportBigNatToMutableByteArray bn
 
 -- | Version of 'exportIntegerToMutableByteArray' operating on 'BigNat's.
 --
--- /Since: 1.0.0.0/
+-- @since 1.0.0.0
 exportBigNatToMutableByteArray :: BigNat -> MutableByteArray# RealWorld -> Word#
                                -> Int# -> IO Word
 exportBigNatToMutableByteArray bn@(BN# ba#)
@@ -272,7 +291,7 @@ foreign import ccall unsafe "integer_gmp_mpn_export"
 
 -- | Version of 'exportIntegerToMutableByteArray' operating on 'Word's.
 --
--- /Since: 1.0.0.0/
+-- @since 1.0.0.0
 exportWordToMutableByteArray :: Word -> MutableByteArray# RealWorld -> Word#
                              -> Int# -> IO Word
 exportWordToMutableByteArray (W# w#) = c_mpn_export1ToMutableByteArray# w#
@@ -280,3 +299,64 @@ exportWordToMutableByteArray (W# w#) = c_mpn_export1ToMutableByteArray# w#
 foreign import ccall unsafe "integer_gmp_mpn_export1"
   c_mpn_export1ToMutableByteArray# :: GmpLimb# -> MutableByteArray# RealWorld
                                    -> Word# -> Int# -> IO Word
+
+
+-- | Probalistic Miller-Rabin primality test.
+--
+-- \"@'testPrimeInteger' /n/ /k/@\" determines whether @/n/@ is prime
+-- and returns one of the following results:
+--
+-- * @2#@ is returned if @/n/@ is definitely prime,
+--
+-- * @1#@ if @/n/@ is a /probable prime/, or
+--
+-- * @0#@ if @/n/@ is definitely not a prime.
+--
+-- The @/k/@ argument controls how many test rounds are performed for
+-- determining a /probable prime/. For more details, see
+-- <http://gmplib.org/manual/Number-Theoretic-Functions.html#index-mpz_005fprobab_005fprime_005fp-360 GMP documentation for `mpz_probab_prime_p()`>.
+--
+-- @since 0.5.1.0
+{-# NOINLINE testPrimeInteger #-}
+testPrimeInteger :: Integer -> Int# -> Int#
+testPrimeInteger (S# i#) = testPrimeWord# (int2Word# (absI# i#))
+testPrimeInteger (Jp# n) = testPrimeBigNat n
+testPrimeInteger (Jn# n) = testPrimeBigNat n
+
+-- | Version of 'testPrimeInteger' operating on 'BigNat's
+--
+-- @since 1.0.0.0
+testPrimeBigNat :: BigNat -> Int# -> Int#
+testPrimeBigNat bn@(BN# ba#) = c_integer_gmp_test_prime# ba# (sizeofBigNat# bn)
+
+foreign import ccall unsafe "integer_gmp_test_prime"
+  c_integer_gmp_test_prime# :: ByteArray# -> GmpSize# -> Int# -> Int#
+
+-- | Version of 'testPrimeInteger' operating on 'Word#'s
+--
+-- @since 1.0.0.0
+foreign import ccall unsafe "integer_gmp_test_prime1"
+  testPrimeWord# :: GmpLimb# -> Int# -> Int#
+
+
+-- | Compute next prime greater than @/n/@ probalistically.
+--
+-- According to the GMP documentation, the underlying function
+-- @mpz_nextprime()@ \"uses a probabilistic algorithm to identify
+-- primes. For practical purposes it's adequate, the chance of a
+-- composite passing will be extremely small.\"
+--
+-- @since 0.5.1.0
+{-# NOINLINE nextPrimeInteger #-}
+nextPrimeInteger :: Integer -> Integer
+nextPrimeInteger (S# i#)
+  | isTrue# (i# ># 1#)    = wordToInteger (nextPrimeWord# (int2Word# i#))
+  | True                  = S# 2#
+nextPrimeInteger (Jp# bn) = Jp# (nextPrimeBigNat bn)
+nextPrimeInteger (Jn# _)  = S# 2#
+
+-- | Version of 'nextPrimeInteger' operating on 'Word#'s
+--
+-- @since 1.0.0.0
+foreign import ccall unsafe "integer_gmp_next_prime1"
+  nextPrimeWord# :: GmpLimb# -> GmpLimb#
