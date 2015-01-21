@@ -2553,7 +2553,8 @@ print:
 
         case MVAR_CLEAN:
         case MVAR_DIRTY:
-            if (((StgMVar *)p)->value != END_TSO_QUEUE)
+            // follow MVar contents unless empty (END_TSO_QUEUE is magic)
+            if (((StgMVar *)p)->value != (StgClosure*) END_TSO_QUEUE)
                 graphFingerPrint_(fp, visited, ((StgMVar *)p)->value);
             break;
 

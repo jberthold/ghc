@@ -1202,10 +1202,10 @@ allowed_combination way = and [ x `allowedWith` y
         WayProf `allowedWith` WayNDP            = True
         WayThreaded `allowedWith` WayProf       = True
         WayThreaded `allowedWith` WayEventLog   = True
-	WayEventLog `allowedWith` WayParPvm	= True
-	WayEventLog `allowedWith` WayParMPI	= True
-	WayEventLog `allowedWith` WayParCp	= True
-	WayEventLog `allowedWith` WayParMSlot	= True
+        WayEventLog `allowedWith` WayParPvm     = True
+        WayEventLog `allowedWith` WayParMPI     = True
+        WayEventLog `allowedWith` WayParCp      = True
+        WayEventLog `allowedWith` WayParMSlot   = True
         _ `allowedWith` _                       = False
 
 mkBuildTag :: [Way] -> String

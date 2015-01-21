@@ -103,7 +103,6 @@ void initPackBuffer(void) {
 }
 
 // free allocated pack buffer. Called from ParInit (shutdownParallelSystem)
-#warning (init|free) not used properly
 void freePackBuffer(void) {
     stgFree(globalPackBuffer);
 }
