@@ -22,10 +22,10 @@
 #
 # The ways currently defined.
 #
-ALL_WAYS=v p t l s mp mg debug dyn thr thr_l p_dyn debug_dyn thr_dyn thr_p_dyn thr_debug_dyn thr_p thr_debug debug_p thr_debug_p l_dyn thr_l_dyn  pp debug_pp pm debug_pm pc debug_pc ms debug_ms l_pp l_pm l_pc l_ms
+ALL_WAYS=v p t l s mp debug dyn thr thr_l p_dyn debug_dyn thr_dyn thr_p_dyn thr_debug_dyn thr_p thr_debug debug_p thr_debug_p l_dyn thr_l_dyn  pp debug_pp pm debug_pm pc debug_pc ms debug_ms l_pp l_pm l_pc l_ms
 
 #
-# The following ways currently have treated specially, p t mg,
+# The following ways currently are treated specially,
 # as the driver script treats these guys specially and needs to carefully be told
 # about the options for these. Hence, we hide the required command line options
 # for these in the driver, as this is the only place they are needed.
@@ -47,10 +47,6 @@ WAY_l_HC_OPTS= -static -eventlog
 # Way `mp': 
 WAY_mp_NAME=parallel
 WAY_mp_HC_OPTS= -static -parallel
-
-# Way `mg': 
-WAY_mg_NAME=GranSim
-WAY_mg_HC_OPTS= -static -gransim
 
 #
 # These ways apply to the RTS only:
@@ -118,49 +114,49 @@ WAY_thr_l_dyn_HC_OPTS= -fPIC -dynamic -optc-DTHREADED_RTS -eventlog
 #
 # Way 'pp':
 WAY_pp_NAME=gen.parallel (pvm)
-WAY_pp_HC_OPTS=-parpvm
+WAY_pp_HC_OPTS= -static -parpvm
 
 # Way 'pm':
 WAY_pm_NAME=gen.parallel (mpi)
-WAY_pm_HC_OPTS=-parmpi 
+WAY_pm_HC_OPTS= -static -parmpi 
 
 # Way 'pc':
 WAY_pc_NAME=mcore parallel (copy)
-WAY_pc_HC_OPTS=-parcp
+WAY_pc_HC_OPTS= -static -parcp
 
 # Way 'ms':
 WAY_ms_NAME=mcore parallel(mailslots)
-WAY_ms_HC_OPTS=-parms
+WAY_ms_HC_OPTS= -static -parms
 
 # Way 'debug_pp':
 WAY_debug_pp_NAME=debug for parallel (pvm)
-WAY_debug_pp_HC_OPTS=-optc-DDEBUG -parpvm
+WAY_debug_pp_HC_OPTS= -static -optc-DDEBUG -parpvm
 
 # Way 'debug_pm':
 WAY_debug_pm_NAME=debug for parallel (mpi)
-WAY_debug_pm_HC_OPTS=-optc-DDEBUG -parmpi
+WAY_debug_pm_HC_OPTS= -static -optc-DDEBUG -parmpi
 
 # Way 'debug_pc':
 WAY_debug_pc_NAME=debug for mcore parallel (copy)
-WAY_debug_pc_HC_OPTS=-optc-DDEBUG -parcp
+WAY_debug_pc_HC_OPTS= -static -optc-DDEBUG -parcp
 
 # Way 'debug_ms':
 WAY_debug_ms_NAME=debug for mcore parallel (mailslots)
-WAY_debug_ms_HC_OPTS=-optc-DDEBUG -parms
+WAY_debug_ms_HC_OPTS= -static -optc-DDEBUG -parms
 
 # combined with logging (not for -debug, which always implies it)
 # Way 'l_pp':
 WAY_l_pp_NAME=parallel (pvm) with event logging
-WAY_l_pp_HC_OPTS=-parpvm -eventlog
+WAY_l_pp_HC_OPTS= -static -parpvm -eventlog
 
 # Way 'l_pm':
 WAY_l_pm_NAME=parallel (mpi) with event logging
-WAY_l_pm_HC_OPTS=-parmpi -eventlog
+WAY_l_pm_HC_OPTS= -static -parmpi -eventlog
 
 # Way 'l_pc':
 WAY_l_pc_NAME=parallel (copy) with event logging
-WAY_l_pc_HC_OPTS=-parcp -eventlog
+WAY_l_pc_HC_OPTS= -static -parcp -eventlog
 
 # Way 'l_ms':
 WAY_l_ms_NAME=parallel (mailslots) with event logging
-WAY_l_ms_HC_OPTS=-parms -eventlog
+WAY_l_ms_HC_OPTS= -static -parms -eventlog

@@ -101,8 +101,8 @@ import Unique
 import Pair
 import SrcLoc
 import PrelNames        ( funTyConKey, eqPrimTyConKey, eqReprPrimTyConKey )
-import Control.Applicative hiding ( empty )
 #if __GLASGOW_HASKELL__ < 709
+import Control.Applicative hiding ( empty )
 import Data.Traversable (traverse, sequenceA)
 #endif
 import FastString
@@ -123,7 +123,7 @@ import Control.Arrow ( first )
 -- of two types.
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data Coercion
   -- Each constructor has a "role signature", indicating the way roles are
   -- propagated through coercions. P, N, and R stand for coercions of the
@@ -200,7 +200,7 @@ data Coercion
   deriving (Data.Data, Data.Typeable)
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data LeftOrRight = CLeft | CRight
                  deriving( Eq, Data.Data, Data.Typeable )
 
@@ -942,7 +942,7 @@ mkAppCo :: Coercion -> Coercion -> Coercion
 mkAppCo co1 co2 = mkAppCoFlexible co1 Nominal co2
 -- Note, mkAppCo is careful to maintain invariants regarding
 -- where Refl constructors appear; see the comments in the definition
--- of Coercion and the Note [Refl invariant] in types/TypeRep.lhs.
+-- of Coercion and the Note [Refl invariant] in types/TypeRep.hs.
 
 -- | Apply a 'Coercion' to another 'Coercion'.
 -- The second 'Coercion's role is given, making this more flexible than
@@ -981,7 +981,7 @@ mkAppCos co1 cos = foldl mkAppCo co1 cos
 mkTyConAppCo :: Role -> TyCon -> [Coercion] -> Coercion
 mkTyConAppCo r tc cos
                -- Expand type synonyms
-  | Just (tv_co_prs, rhs_ty, leftover_cos) <- tcExpandTyCon_maybe tc cos
+  | Just (tv_co_prs, rhs_ty, leftover_cos) <- expandSynTyCon_maybe tc cos
   = mkAppCos (liftCoSubst r tv_co_prs rhs_ty) leftover_cos
 
   | Just tys <- traverse isReflCo_maybe cos

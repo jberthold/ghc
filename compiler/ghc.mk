@@ -275,7 +275,7 @@ compiler_CPP_OPTS += ${GhcCppOpts}
 define preprocessCompilerFiles
 # $0 = stage
 compiler/stage$1/build/primops.txt: compiler/prelude/primops.txt.pp compiler/stage$1/$$(PLATFORM_H)
-	$$(CPP) $$(RAWCPP_FLAGS) -P $$(compiler_CPP_OPTS) -Icompiler/stage$1 -x c $$< | grep -v '^#pragma GCC' > $$@
+	$$(HS_CPP) -P $$(compiler_CPP_OPTS) -Icompiler/stage$1 -x c $$< | grep -v '^#pragma GCC' > $$@
 
 compiler/stage$1/build/primop-data-decl.hs-incl: compiler/stage$1/build/primops.txt $$$$(genprimopcode_INPLACE)
 	"$$(genprimopcode_INPLACE)" --data-decl          < $$< > $$@
@@ -451,6 +451,7 @@ compiler_stage1_MUNGED_VERSION = $(subst .$(ProjectPatchLevel),,$(ProjectVersion
 define compiler_PACKAGE_MAGIC
 compiler_stage1_VERSION = $(compiler_stage1_MUNGED_VERSION)
 compiler_stage1_PACKAGE_KEY = $(subst .$(ProjectPatchLevel),,$(compiler_stage1_PACKAGE_KEY))
+compiler_stage1_LIB_NAME = $(subst .$(ProjectPatchLevel),,$(compiler_stage1_LIB_NAME))
 endef
 
 # NB: the PACKAGE_KEY munging has no effect for new-style package keys
@@ -732,11 +733,12 @@ endif
 # Note [munge-stage1-package-config]
 # Strip the date/patchlevel from the version of stage1.  See Note
 # [fiddle-stage1-version] above.
+# NB: The sed expression for hs-libraries is a bit weird to be POSIX-compliant.
 ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
 compiler/stage1/inplace-pkg-config-munged: compiler/stage1/inplace-pkg-config
 	sed -e 's/^\(version: .*\)\.$(ProjectPatchLevel)$$/\1/' \
 	    -e 's/^\(id: .*\)\.$(ProjectPatchLevel)$$/\1/' \
-	    -e 's/^\(hs-libraries: HSghc-.*\)\.$(ProjectPatchLevel)$$/\1/' \
+	    -e 's/^\(hs-libraries: HSghc-.*\)\.$(ProjectPatchLevel)\(-[A-Za-z0-9][A-Za-z0-9]*\)*$$/\1\2/' \
 	  < $< > $@
 	"$(compiler_stage1_GHC_PKG)" update --force $(compiler_stage1_GHC_PKG_OPTS) $@
 

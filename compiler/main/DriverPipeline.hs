@@ -809,7 +809,8 @@ runPhase (RealPhase (Unlit sf)) input_fn dflags
        let flags = [ -- The -h option passes the file name for unlit to
                      -- put in a #line directive
                      SysTools.Option     "-h"
-                   , SysTools.Option $ escape $ normalise input_fn
+                     -- See Note [Don't normalise input filenames].
+                   , SysTools.Option $ escape input_fn
                    , SysTools.FileOption "" input_fn
                    , SysTools.FileOption "" output_fn
                    ]
@@ -821,10 +822,10 @@ runPhase (RealPhase (Unlit sf)) input_fn dflags
        -- escape the characters \, ", and ', but don't try to escape
        -- Unicode or anything else (so we don't use Util.charToC
        -- here).  If we get this wrong, then in
-       -- Coverage.addTicksToBinds where we check that the filename in
+       -- Coverage.isGoodTickSrcSpan where we check that the filename in
        -- a SrcLoc is the same as the source filenaame, the two will
        -- look bogusly different. See test:
-       -- libraries/hpc/tests/function/subdir/tough2.lhs
+       -- libraries/hpc/tests/function/subdir/tough2.hs
        escape ('\\':cs) = '\\':'\\': escape cs
        escape ('\"':cs) = '\\':'\"': escape cs
        escape ('\'':cs) = '\\':'\'': escape cs
@@ -1067,7 +1068,7 @@ runPhase (RealPhase Cmm) input_fn dflags
 -- way too many hacks, and I can't say I've ever used it anyway.
 
 runPhase (RealPhase cc_phase) input_fn dflags
-   | any (cc_phase `eqPhase`) [Cc, Ccpp, HCc, Cobjc, Cobjcpp]
+   | any (cc_phase `eqPhase`) [Cc, Ccxx, HCc, Cobjc, Cobjcxx]
    = do
         let platform = targetPlatform dflags
             hcc = cc_phase `eqPhase` HCc
@@ -1136,9 +1137,9 @@ runPhase (RealPhase cc_phase) input_fn dflags
 
         ghcVersionH <- liftIO $ getGhcVersionPathName dflags
 
-        let gcc_lang_opt | cc_phase `eqPhase` Ccpp    = "c++"
+        let gcc_lang_opt | cc_phase `eqPhase` Ccxx    = "c++"
                          | cc_phase `eqPhase` Cobjc   = "objective-c"
-                         | cc_phase `eqPhase` Cobjcpp = "objective-c++"
+                         | cc_phase `eqPhase` Cobjcxx = "objective-c++"
                          | otherwise                  = "c"
         liftIO $ SysTools.runCc dflags (
                 -- force the C compiler to interpret this file as C when
@@ -1175,7 +1176,7 @@ runPhase (RealPhase cc_phase) input_fn dflags
                            else [])
 
                        -- GCC 4.6+ doesn't like -Wimplicit when compiling C++.
-                       ++ (if (cc_phase /= Ccpp && cc_phase /= Cobjcpp)
+                       ++ (if (cc_phase /= Ccxx && cc_phase /= Cobjcxx)
                              then ["-Wimplicit"]
                              else [])
 
@@ -1714,7 +1715,7 @@ mkNoteObjsToLinkIntoBinary dflags dep_packages = do
 
           -- ALL generated assembly must have this section to disable
           -- executable stacks.  See also
-          -- compiler/nativeGen/AsmCodeGen.lhs for another instance
+          -- compiler/nativeGen/AsmCodeGen.hs for another instance
           -- where we need to do this.
           (if platformHasGnuNonexecStack (targetPlatform dflags)
            then text ".section .note.GNU-stack,\"\",@progbits\n"
@@ -2487,3 +2488,66 @@ getGhcVersionPathName dflags = do
 --       3c:  2f 00 00 00     sethi  %hi(0), %l7
 --    -                       3c: R_SPARC_PC22        _GLOBAL_OFFSET_TABLE_-0x8
 --    +                       3c: R_SPARC_HI22        _GLOBAL_OFFSET_TABLE_-0x8
+
+{- Note [Don't normalise input filenames]
+
+Summary
+  We used to normalise input filenames when starting the unlit phase. This
+  broke hpc in `--make` mode with imported literate modules (#2991).
+
+Introduction
+  1) --main
+  When compiling a module with --main, GHC scans its imports to find out which
+  other modules it needs to compile too. It turns out that there is a small
+  difference between saying `ghc --make A.hs`, when `A` imports `B`, and
+  specifying both modules on the command line with `ghc --make A.hs B.hs`. In
+  the former case, the filename for B is inferred to be './B.hs' instead of
+  'B.hs'.
+
+  2) unlit
+  When GHC compiles a literate haskell file, the source code first needs to go
+  through unlit, which turns it into normal Haskell source code. At the start
+  of the unlit phase, in `Driver.Pipeline.runPhase`, we call unlit with the
+  option `-h` and the name of the original file. We used to normalise this
+  filename using System.FilePath.normalise, which among other things removes
+  an initial './'. unlit then uses that filename in #line directives that it
+  inserts in the transformed source code.
+
+  3) SrcSpan
+  A SrcSpan represents a portion of a source code file. It has fields
+  linenumber, start column, end column, and also a reference to the file it
+  originated from. The SrcSpans for a literate haskell file refer to the
+  filename that was passed to unlit -h.
+
+  4) -fhpc
+  At some point during compilation with -fhpc, in the function
+  `deSugar.Coverage.isGoodTickSrcSpan`, we compare the filename that a
+  `SrcSpan` refers to with the name of the file we are currently compiling.
+  For some reason I don't yet understand, they can sometimes legitimally be
+  different, and then hpc ignores that SrcSpan.
+
+Problem
+  When running `ghc --make -fhpc A.hs`, where `A.hs` imports the literate
+  module `B.lhs`, `B` is inferred to be in the file `./B.lhs` (1). At the
+  start of the unlit phase, the name `./B.lhs` is normalised to `B.lhs` (2).
+  Therefore the SrcSpans of `B` refer to the file `B.lhs` (3), but we are
+  still compiling `./B.lhs`. Hpc thinks these two filenames are different (4),
+  doesn't include ticks for B, and we have unhappy customers (#2991).
+
+Solution
+  Do not normalise `input_fn` when starting the unlit phase.
+
+Alternative solution
+  Another option would be to not compare the two filenames on equality, but to
+  use System.FilePath.equalFilePath. That function first normalises its
+  arguments. The problem is that by the time we need to do the comparison, the
+  filenames have been turned into FastStrings, probably for performance
+  reasons, so System.FilePath.equalFilePath can not be used directly.
+
+Archeology
+  The call to `normalise` was added in a commit called "Fix slash
+  direction on Windows with the new filePath code" (c9b6b5e8). The problem
+  that commit was addressing has since been solved in a different manner, in a
+  commit called "Fix the filename passed to unlit" (1eedbc6b). So the
+  `normalise` is no longer necessary.
+-}

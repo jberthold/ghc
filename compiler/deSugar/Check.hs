@@ -53,7 +53,7 @@ The algorithm is based on the first technique, but there are some differences:
           left-to-right
 \end{itemize}
 (By the way the second technique is really similar to the one used in
- @Match.lhs@ to generate code)
+ @Match.hs@ to generate code)
 
 This function takes the equations of a pattern and returns:
 \begin{itemize}
@@ -153,7 +153,6 @@ untidy b (L loc p) = L loc (untidy' b p)
     untidy' _ (ConPatOut {})         = panic "Check.untidy: ConPatOut"
     untidy' _ (ViewPat {})           = panic "Check.untidy: ViewPat"
     untidy' _ (SplicePat {})         = panic "Check.untidy: SplicePat"
-    untidy' _ (QuasiQuotePat {})     = panic "Check.untidy: QuasiQuotePat"
     untidy' _ (NPat {})              = panic "Check.untidy: NPat"
     untidy' _ (NPlusKPat {})         = panic "Check.untidy: NPlusKPat"
     untidy' _ (SigPatOut {})         = panic "Check.untidy: SigPatOut"
@@ -628,7 +627,7 @@ make_whole_con con | isInfixCon con = nlInfixConPat name
                    Tidying equations
 ------------------------------------------------------------------------
 
-tidy_eqn does more or less the same thing as @tidy@ in @Match.lhs@;
+tidy_eqn does more or less the same thing as @tidy@ in @Match.hs@;
 that is, it removes syntactic sugar, reducing the number of cases that
 must be handled by the main checking algorithm.  One difference is
 that here we can do *all* the tidying at once (recursively), rather
@@ -732,7 +731,6 @@ tidy_pat (LitPat lit)         = tidy_lit_pat lit
 
 tidy_pat (ConPatIn {})        = panic "Check.tidy_pat: ConPatIn"
 tidy_pat (SplicePat {})       = panic "Check.tidy_pat: SplicePat"
-tidy_pat (QuasiQuotePat {})   = panic "Check.tidy_pat: QuasiQuotePat"
 tidy_pat (SigPatIn {})        = panic "Check.tidy_pat: SigPatIn"
 
 tidy_lit_pat :: HsLit -> Pat Id

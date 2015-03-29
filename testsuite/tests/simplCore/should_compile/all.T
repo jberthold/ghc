@@ -191,6 +191,7 @@ test('T8221',
      extra_clean(['T8221a.hi', 'T8221a.o']),
      run_command,
      ['$MAKE -s --no-print-directory T8221'])
+test('T8274', normal, run_command, ['$MAKE -s --no-print-directory T8274'])
 test('T8329', only_ways(['optasm']), multimod_compile, ['T8329','-v0 -O'])
 test('T5996',
      normal,
@@ -198,7 +199,7 @@ test('T5996',
      ['$MAKE -s --no-print-directory T5996'])
 test('T8537', normal, compile, [''])
 test('T8832',
-     normal,
+     expect_fail,
      run_command,
      ['$MAKE -s --no-print-directory T8832 T8832_WORDSIZE_OPTS=' +
       ('-DT8832_WORDSIZE_64' if wordsize(64) else '')])
@@ -210,3 +211,5 @@ test('T9400', only_ways(['optasm']), compile, ['-O0 -ddump-simpl -dsuppress-uniq
 test('T9583', only_ways(['optasm']), compile, [''])
 test('T9565', only_ways(['optasm']), compile, [''])
 test('T5821', only_ways(['optasm']), compile, [''])
+test('T10176', only_ways(['optasm']), compile, [''])
+test('T10180', only_ways(['optasm']), compile, [''])

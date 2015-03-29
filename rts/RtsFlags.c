@@ -863,7 +863,7 @@ error = rtsTrue;
               case 'B':
                 OPTION_UNSAFE;
                 RtsFlags.GcFlags.ringBell = rtsTrue;
-                break;
+                goto check_rest;
 
               case 'c':
                   OPTION_UNSAFE;
@@ -878,7 +878,7 @@ error = rtsTrue;
               case 'w':
                 OPTION_UNSAFE;
                 RtsFlags.GcFlags.sweep = rtsTrue;
-                break;
+                goto check_rest;
 
               case 'F':
                 OPTION_UNSAFE;
@@ -1029,7 +1029,7 @@ error = rtsTrue;
               case 'T':
                   OPTION_SAFE;
                   RtsFlags.GcFlags.giveStats = COLLECT_GC_STATS;
-                  break; /* Don't initialize statistics file. */
+                  goto check_rest; /* Don't initialize statistics file. */
 
               case 'S':
                   OPTION_SAFE; /* but see below */
@@ -1061,7 +1061,7 @@ error = rtsTrue;
               case 'Z':
                 OPTION_UNSAFE;
                 RtsFlags.GcFlags.squeezeUpdFrames = rtsFalse;
-                break;
+                goto check_rest;
 
               /* =========== PROFILING ========================== */
 
@@ -1072,8 +1072,14 @@ error = rtsTrue;
                 switch (rts_argv[arg][2]) {
                   case 'a':
                     RtsFlags.CcFlags.doCostCentres = COST_CENTRES_ALL;
+                    if (rts_argv[arg][3] != '\0') {
+                      errorBelch("flag -Pa given an argument"
+                                 " when none was expected: %s"
+                                ,rts_argv[arg]);
+                      error = rtsTrue;
+                    }
                     break;
-                  default:
+                  case '\0':
                       if (rts_argv[arg][1] == 'P') {
                           RtsFlags.CcFlags.doCostCentres =
                               COST_CENTRES_VERBOSE;
@@ -1082,6 +1088,8 @@ error = rtsTrue;
                               COST_CENTRES_SUMMARY;
                       }
                       break;
+                  default:
+                    goto check_rest;
                 }
                 ) break;
 
@@ -1469,14 +1477,14 @@ error = rtsTrue;
                     PROFILING_BUILD_ONLY(
                         RtsFlags.ProfFlags.showCCSOnException = rtsTrue;
                         );
-                    break;
+                    goto check_rest;
 
                 case 't':  /* Include memory used by TSOs in a heap profile */
                     OPTION_SAFE;
                     PROFILING_BUILD_ONLY(
                         RtsFlags.ProfFlags.includeTSOs = rtsTrue;
                         );
-                    break;
+                    goto check_rest;
 
                   /* The option prefix '-xx' is reserved for future extension.  KSW 1999-11. */
 
@@ -1494,6 +1502,19 @@ error = rtsTrue;
                     break;
                 }
                 break;  /* defensive programming */
+
+            /* check the rest to be sure there is nothing afterwards.*/
+            /* see Trac #9839 */
+            check_rest:
+                {
+                    if (rts_argv[arg][2] != '\0') {
+                      errorBelch("flag -%c given an argument"
+                                 " when none was expected: %s",
+                                 rts_argv[arg][1],rts_argv[arg]);
+                      error = rtsTrue;
+                    }
+                    break;
+                }
 
               /* =========== OH DEAR ============================ */
               default:

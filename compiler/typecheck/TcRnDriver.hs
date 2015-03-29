@@ -3,6 +3,8 @@
 (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 
 \section[TcMovectle]{Typechecking a whole module}
+
+https://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/TypeChecker
 -}
 
 {-# LANGUAGE CPP, NondecreasingIndentation #-}
@@ -24,8 +26,8 @@ module TcRnDriver (
     ) where
 
 #ifdef GHCI
-import {-# SOURCE #-} TcSplice ( runQuasi, traceSplice, SpliceInfo(..) )
-import RnSplice ( rnTopSpliceDecls )
+import {-# SOURCE #-} TcSplice ( runQuasi )
+import RnSplice ( rnTopSpliceDecls, traceSplice, SpliceInfo(..) )
 #endif
 
 import DynFlags
@@ -268,7 +270,7 @@ tcRnModuleTcRnM :: HscEnv
                 -> HsParsedModule
                 -> (Module, SrcSpan)
                 -> TcRn TcGblEnv
--- Factored out separately so that a Core plugin can
+-- Factored out separately from tcRnModule so that a Core plugin can
 -- call the type checker directly
 tcRnModuleTcRnM hsc_env hsc_src
                 (HsParsedModule {
@@ -283,7 +285,7 @@ tcRnModuleTcRnM hsc_env hsc_src
    do { let { dflags = hsc_dflags hsc_env } ;
 
         tcg_env <- tcRnSignature dflags hsc_src ;
-        setGblEnv tcg_env $ do {
+        setGblEnv tcg_env { tcg_mod_name=maybe_mod } $ do {
 
         -- Deal with imports; first add implicit prelude
         implicit_prelude <- xoptM Opt_ImplicitPrelude;
@@ -316,19 +318,13 @@ tcRnModuleTcRnM hsc_env hsc_src
                 -- look for a hi-boot file
         boot_iface <- tcHiBootIface hsc_src this_mod ;
 
-        let { exports_occs =
-                 maybe emptyBag
-                       (listToBag . map (rdrNameOcc . ieName . unLoc) . unLoc)
-                       export_ies
-            } ;
-
                 -- Rename and type check the declarations
         traceRn (text "rn1a") ;
         tcg_env <- if isHsBootOrSig hsc_src then
                         tcRnHsBootDecls hsc_src local_decls
                    else
                         {-# SCC "tcRnSrcDecls" #-}
-                        tcRnSrcDecls boot_iface exports_occs local_decls ;
+                        tcRnSrcDecls boot_iface export_ies local_decls ;
         setGblEnv tcg_env               $ do {
 
                 -- Process the export list
@@ -463,7 +459,10 @@ tcRnImports hsc_env import_decls
 ************************************************************************
 -}
 
-tcRnSrcDecls :: ModDetails -> Bag OccName -> [LHsDecl RdrName] -> TcM TcGblEnv
+tcRnSrcDecls :: ModDetails 
+             -> Maybe (Located [LIE RdrName])   -- Exports
+             -> [LHsDecl RdrName]               -- Declarations
+             -> TcM TcGblEnv
         -- Returns the variables free in the decls
         -- Reason: solely to report unused imports and bindings
 tcRnSrcDecls boot_iface exports decls
@@ -539,7 +538,10 @@ tc_rn_src_decls boot_details ds
 
         -- The extra_deps are needed while renaming type and class declarations
         -- See Note [Extra dependencies from .hs-boot files] in RnSource
-      ; let { extra_deps = map tyConName (typeEnvTyCons (md_types boot_details)) }
+      ; let { tycons = typeEnvTyCons (md_types boot_details)
+            ; extra_deps | null tycons = Nothing
+                         | otherwise   = Just (mkFVs (map tyConName tycons)) }
+
         -- Deal with decls up to, but not including, the first splice
       ; (tcg_env, rn_decls) <- rnTopSrcDecls extra_deps first_group
                 -- rnTopSrcDecls fails if there are any errors
@@ -568,11 +570,10 @@ tc_rn_src_decls boot_details ds
 
                     -- Dump generated top-level declarations
                     ; let msg = "top-level declarations added with addTopDecls"
-                    ; traceSplice $ SpliceInfo True
-                                               msg
-                                               Nothing
-                                               Nothing
-                                               (ppr th_rn_decls)
+                    ; traceSplice $ SpliceInfo { spliceDescription = msg
+                                               , spliceIsDecl    = True
+                                               , spliceSource    = Nothing
+                                               , spliceGenerated = ppr th_rn_decls }
 
                     ; return (tcg_env, appendGroups rn_decls th_rn_decls)
                     }
@@ -638,7 +639,7 @@ tcRnHsBootDecls hsc_src decls
                    hs_ruleds = rule_decls,
                    hs_vects  = vect_decls,
                    hs_annds  = _,
-                   hs_valds  = val_binds }) <- rnTopSrcDecls [] first_group
+                   hs_valds  = val_binds }) <- rnTopSrcDecls Nothing first_group
         -- The empty list is for extra dependencies coming from .hs-boot files
         -- See Note [Extra dependencies from .hs-boot files] in RnSource
         ; (gbl_env, lie) <- captureConstraints $ setGblEnv tcg_env $ do {
@@ -1071,24 +1072,12 @@ instMisMatch is_boot inst
 {-
 ************************************************************************
 *                                                                      *
-        Type-checking the top level of a module
+        Type-checking the top level of a module (continued)
 *                                                                      *
 ************************************************************************
-
-tcRnGroup takes a bunch of top-level source-code declarations, and
- * renames them
- * gets supporting declarations from interface files
- * typechecks them
- * zonks them
- * and augments the TcGblEnv with the results
-
-In Template Haskell it may be called repeatedly for each group of
-declarations.  It expects there to be an incoming TcGblEnv in the
-monad; it augments it and returns the new TcGblEnv.
 -}
 
-------------------------------------------------
-rnTopSrcDecls :: [Name] -> HsGroup RdrName -> TcM (TcGblEnv, HsGroup Name)
+rnTopSrcDecls :: Maybe FreeVars -> HsGroup RdrName -> TcM (TcGblEnv, HsGroup Name)
 -- Fails if there are any errors
 rnTopSrcDecls extra_deps group
  = do { -- Rename the source decls
@@ -1108,14 +1097,6 @@ rnTopSrcDecls extra_deps group
 
         return (tcg_env', rn_decls)
    }
-
-{-
-************************************************************************
-*                                                                      *
-                tcTopSrcDecls
-*                                                                      *
-************************************************************************
--}
 
 tcTopSrcDecls :: ModDetails -> HsGroup Name -> TcM (TcGblEnv, TcLclEnv)
 tcTopSrcDecls boot_details
@@ -1340,10 +1321,12 @@ check_main dflags tcg_env
     mod          = tcg_mod tcg_env
     main_mod     = mainModIs dflags
     main_fn      = getMainFun dflags
+    interactive  = ghcLink dflags == LinkInMemory
+    implicit_mod = isNothing (tcg_mod_name tcg_env)
 
-    complain_no_main | ghcLink dflags == LinkInMemory = return ()
-                     | otherwise = failWithTc noMainMsg
-        -- In interactive mode, don't worry about the absence of 'main'
+    complain_no_main = checkTc (interactive && implicit_mod) noMainMsg
+        -- In interactive mode, without an explicit module header, don't
+        -- worry about the absence of 'main'.
         -- In other modes, fail altogether, so that we don't go on
         -- and complain a second time when processing the export list.
 
@@ -1359,6 +1342,7 @@ getMainFun dflags = case mainFunIs dflags of
                       Just fn -> mkRdrUnqual (mkVarOccFS (mkFastString fn))
                       Nothing -> main_RDR_Unqual
 
+-- If we are in module Main, check that 'main' is exported.
 checkMainExported :: TcGblEnv -> TcM ()
 checkMainExported tcg_env
   = case tcg_main tcg_env of
@@ -1759,7 +1743,7 @@ tcRnExpr hsc_env rdr_expr
     (rn_expr, _fvs) <- rnLExpr rdr_expr ;
     failIfErrsM ;
 
-        -- Now typecheck the expression;
+        -- Now typecheck the expression, and generalise its type
         -- it might have a rank-2 type (e.g. :t runST)
     uniq <- newUnique ;
     let { fresh_it  = itName uniq (getLoc rdr_expr) } ;
@@ -1771,7 +1755,7 @@ tcRnExpr hsc_env rdr_expr
                                                     False {- No MR for now -}
                                                     [(fresh_it, res_ty)]
                                                     lie ;
-    -- wanted constraints from static forms
+    -- Wanted constraints from static forms
     stWC <- tcg_static_wc <$> getGblEnv >>= readTcRef ;
 
     -- Ignore the dictionary bindings
@@ -1813,7 +1797,13 @@ tcRnType hsc_env normalise rdr_type
         -- Now kind-check the type
         -- It can have any rank or kind
        ; nwc_tvs <- mapM newWildcardVarMetaKind wcs
-       ; ty <- tcExtendTyVarEnv nwc_tvs $ tcHsSigType GhciCtxt rn_type
+       ; (ty, kind) <- tcExtendTyVarEnv nwc_tvs $
+                       tcLHsType rn_type
+
+       -- Do kind generalisation; see Note [Kind-generalise in tcRnType]
+       ; kvs <- zonkTcTypeAndFV kind
+       ; kvs <- kindGeneralize kvs
+       ; ty  <- zonkTcTypeToType emptyZonkEnv ty
 
        ; ty' <- if normalise
                 then do { fam_envs <- tcGetFamInstEnvs
@@ -1822,20 +1812,32 @@ tcRnType hsc_env normalise rdr_type
                         -- which we discard, so the Role is irrelevant
                 else return ty ;
 
-       ; return (ty', typeKind ty) }
+       ; return (ty', mkForAllTys kvs (typeKind ty')) }
+
+{- Note [Kind-generalise in tcRnType]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We switch on PolyKinds when kind-checking a user type, so that we will
+kind-generalise the type, even when PolyKinds is not otherwise on.
+This gives the right default behaviour at the GHCi prompt, where if
+you say ":k T", and T has a polymorphic kind, you'd like to see that
+polymorphism. Of course.  If T isn't kind-polymorphic you won't get
+anything unexpected, but the apparent *loss* of polymorphism, for
+types that you know are polymorphic, is quite surprising.  See Trac
+#7688 for a discussion.
+
+Note that the goal is to generalise the *kind of the type*, not
+the type itself! Example:
+  ghci> data T m a = MkT (m a)  -- T :: forall . (k -> *) -> k -> *
+  ghci> :k T
+We instantiate T to get (T kappa).  We do not want to kind-generalise
+that to forall k. T k!  Rather we want to take its kind
+   T kappa :: (kappa -> *) -> kappa -> *
+and now kind-generalise that kind, to forall k. (k->*) -> k -> *
+(It was Trac #10122 that made me realise how wrong the previous
+approach was.) -}
+
 
 {-
-Note [Kind-generalise in tcRnType]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We switch on PolyKinds when kind-checking a user type, so that we will
-kind-generalise the type.  This gives the right default behaviour at
-the GHCi prompt, where if you say ":k T", and T has a polymorphic
-kind, you'd like to see that polymorphism. Of course.  If T isn't
-kind-polymorphic you won't get anything unexpected, but the apparent
-*loss* of polymorphism, for types that you know are polymorphic, is
-quite surprising.  See Trac #7688 for a discussion.
-
-
 ************************************************************************
 *                                                                      *
                  tcRnDeclsi
@@ -1873,7 +1875,7 @@ tcRnDeclsi hsc_env local_decls =
         all_ev_binds = cur_ev_binds `unionBags` new_ev_binds
 
     (bind_ids, ev_binds', binds', fords', imp_specs', rules', vects')
-        <- zonkTopDecls all_ev_binds binds emptyBag sig_ns rules vects
+        <- zonkTopDecls all_ev_binds binds Nothing sig_ns rules vects
                         imp_specs fords
 
     let --global_ids = map globaliseAndTidyId bind_ids
@@ -1999,17 +2001,23 @@ loadUnqualIfaces hsc_env ictxt
   where
     this_pkg = thisPackage (hsc_dflags hsc_env)
 
-    unqual_mods = [ mod
+    unqual_mods = [ nameModule name
                   | gre <- globalRdrEnvElts (ic_rn_gbl_env ictxt)
                   , let name = gre_name gre
-                  , not (isInternalName name)
-                  , let mod = nameModule name
-                  , not (modulePackageKey mod == this_pkg || isInteractiveModule mod)
-                      -- Don't attempt to load an interface for stuff
-                      -- from the command line, or from the home package
+                  , from_external_package name
                   , isTcOcc (nameOccName name)   -- Types and classes only
                   , unQualOK gre ]               -- In scope unqualified
     doc = ptext (sLit "Need interface for module whose export(s) are in scope unqualified")
+
+    from_external_package name  -- True <=> the Name comes from some other package
+                                --          (not the home package, not the interactive package)
+      | Just mod <- nameModule_maybe name
+      , modulePackageKey mod /= this_pkg    -- Not the home package
+      , not (isInteractiveModule mod)       -- Not the 'interactive' package
+      = True
+      | otherwise
+      = False
+
 
 {-
 ************************************************************************
@@ -2131,9 +2139,14 @@ withTcPlugins hsc_env m =
      case plugins of
        [] -> m  -- Common fast case
        _  -> do (solvers,stops) <- unzip `fmap` mapM startPlugin plugins
-                res <- updGblEnv (\e -> e { tcg_tc_plugins = solvers }) m
+                -- This ensures that tcPluginStop is called even if a type
+                -- error occurs during compilation (Fix of #10078)
+                eitherRes <- tryM $ do
+                  updGblEnv (\e -> e { tcg_tc_plugins = solvers }) m
                 mapM_ runTcPluginM stops
-                return res
+                case eitherRes of
+                  Left _ -> failM
+                  Right res -> return res
   where
   startPlugin (TcPlugin start solve stop) =
     do s <- runTcPluginM start

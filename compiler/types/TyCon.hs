@@ -76,7 +76,7 @@ module TyCon(
         tupleTyConBoxity, tupleTyConSort, tupleTyConArity,
 
         -- ** Manipulating TyCons
-        tcExpandTyCon_maybe, coreExpandTyCon_maybe,
+        expandSynTyCon_maybe,
         makeTyConAbstract,
         newTyConCo, newTyConCo_maybe,
         pprPromotionQuote,
@@ -85,6 +85,7 @@ module TyCon(
         PrimRep(..), PrimElemRep(..),
         tyConPrimRep, isVoidRep, isGcPtrRep,
         primRepSizeW, primElemRepSizeB,
+        primRepIsFloat,
 
         -- * Recursion breaking
         RecTcChecker, initRecTc, checkRecTc
@@ -156,7 +157,7 @@ Note [Type synonym families]
 
 Note [Data type families]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
-See also Note [Wrappers for data instance tycons] in MkId.lhs
+See also Note [Wrappers for data instance tycons] in MkId.hs
 
 * Data type families are declared thus
         data family T a :: *
@@ -323,7 +324,7 @@ N.
 -- such as those for function and tuple types.
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data TyCon
   = -- | The function type constructor, @(->)@
     FunTyCon {
@@ -829,8 +830,7 @@ which we need to make the derived instance for Monad Parser.
 Well, yes.  But to see that easily we eta-reduce the RHS type of
 Parser, in this case to ([], Froogle), so that even unsaturated applications
 of Parser will work right.  This eta reduction is done when the type
-constructor is built, and cached in NewTyCon.  The cached field is
-only used in coreExpandTyCon_maybe.
+constructor is built, and cached in NewTyCon.
 
 Here's an example that I think showed up in practice
 Source code:
@@ -845,14 +845,7 @@ Source code:
 
 After desugaring, and discarding the data constructors for the newtypes,
 we get:
-        w2 :: Foo T
-        w2 = w1
-And now Lint complains unless Foo T == Foo [], and that requires T==[]
-
-This point carries over to the newtype coercion, because we need to
-say
         w2 = w1 `cast` Foo CoT
-
 so the coercion tycon CoT must have
         kind:    T ~ []
  and    arity:   0
@@ -987,6 +980,14 @@ primElemRepSizeB Word32ElemRep = 4
 primElemRepSizeB Word64ElemRep = 8
 primElemRepSizeB FloatElemRep  = 4
 primElemRepSizeB DoubleElemRep = 8
+
+-- | Return if Rep stands for floating type,
+-- returns Nothing for vector types.
+primRepIsFloat :: PrimRep -> Maybe Bool
+primRepIsFloat  FloatRep     = Just True
+primRepIsFloat  DoubleRep    = Just True
+primRepIsFloat  (VecRep _ _) = Nothing
+primRepIsFloat  _            = Just False
 
 {-
 ************************************************************************
@@ -1477,7 +1478,7 @@ tyConCType_maybe _ = Nothing
 -----------------------------------------------
 -}
 
-tcExpandTyCon_maybe, coreExpandTyCon_maybe
+expandSynTyCon_maybe
         :: TyCon
         -> [tyco]                 -- ^ Arguments to 'TyCon'
         -> Maybe ([(TyVar,tyco)],
@@ -1487,32 +1488,18 @@ tcExpandTyCon_maybe, coreExpandTyCon_maybe
                                   -- and any arguments remaining from the
                                   -- application
 
--- ^ Used to create the view the /typechecker/ has on 'TyCon's.
--- We expand (closed) synonyms only, cf. 'coreExpandTyCon_maybe'
-tcExpandTyCon_maybe (SynonymTyCon { tyConTyVars = tvs
-                                  , synTcRhs    = rhs }) tys
-   = expand tvs rhs tys
-tcExpandTyCon_maybe _ _ = Nothing
-
----------------
-
--- ^ Used to create the view /Core/ has on 'TyCon's. We expand
--- not only closed synonyms like 'tcExpandTyCon_maybe',
--- but also non-recursive @newtype@s
-coreExpandTyCon_maybe tycon tys = tcExpandTyCon_maybe tycon tys
-
-
-----------------
-expand  :: [TyVar] -> Type                 -- Template
-        -> [a]                             -- Args
-        -> Maybe ([(TyVar,a)], Type, [a])  -- Expansion
-expand tvs rhs tys
+-- ^ Expand a type synonym application, if any
+expandSynTyCon_maybe tc tys
+  | SynonymTyCon { tyConTyVars = tvs, synTcRhs = rhs } <- tc
+  , let n_tvs = length tvs
   = case n_tvs `compare` length tys of
         LT -> Just (tvs `zip` tys, rhs, drop n_tvs tys)
         EQ -> Just (tvs `zip` tys, rhs, [])
         GT -> Nothing
-   where
-     n_tvs = length tvs
+   | otherwise
+   = Nothing
+
+----------------
 
 -- | As 'tyConDataCons_maybe', but returns the empty list of constructors if no
 -- constructors could be found

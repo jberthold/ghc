@@ -32,6 +32,7 @@ module MkId (
         voidPrimId, voidArgId,
         nullAddrId, seqId, lazyId, lazyIdKey,
         coercionTokenId, magicDictId, coerceId,
+        proxyHashId,
 
         -- Re-export error Ids
         module PrelRules
@@ -1184,7 +1185,7 @@ a) Its second arg can have an unboxed type
 b) Its fixity is set in LoadIface.ghcPrimIface
 
 c) It has quite a bit of desugaring magic.
-   See DsUtils.lhs Note [Desugaring seq (1)] and (2) and (3)
+   See DsUtils.hs Note [Desugaring seq (1)] and (2) and (3)
 
 d) There is some special rule handing: Note [User-defined RULES for seq]
 
@@ -1250,7 +1251,6 @@ appears un-applied, we'll end up just calling it.
 
 Note [The oneShot function]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 In the context of making left-folds fuse somewhat okish (see ticket #7994
 and Note [Left folds via right fold]) it was determined that it would be useful
 if library authors could explicitly tell the compiler that a certain lambda is
@@ -1270,9 +1270,11 @@ after unfolding the definition `oneShot = \f \x[oneshot]. f x` we get
  --> \x[oneshot] e[x/y]
 which is what we want.
 
-It is only effective if this bits survives as long as possible and makes it into
-the interface in unfoldings (See Note [Preserve OneShotInfo]). Also see
-https://ghc.haskell.org/trac/ghc/wiki/OneShot.
+It is only effective if the one-shot info survives as long as possible; in
+particular it must make it into the interface in unfoldings. See Note [Preserve
+OneShotInfo] in CoreTidy.
+
+Also see https://ghc.haskell.org/trac/ghc/wiki/OneShot.
 
 
 Note [magicDictId magic]

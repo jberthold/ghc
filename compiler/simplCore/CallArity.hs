@@ -18,6 +18,7 @@ import CoreArity ( typeArity )
 import CoreUtils ( exprIsHNF )
 --import Outputable
 import UnVarGraph
+import Demand
 
 import Control.Arrow ( first, second )
 
@@ -150,7 +151,7 @@ The interesting cases of the analysis:
    Return (alt₁ ∪ alt₂ ∪...)
  * App e₁ e₂ (and analogously Case scrut alts):
    We get the results from both sides. Additionally, anything called by e₁ can
-   possibly called with anything from e₂.
+   possibly be called with anything from e₂.
    Return: C(e₁) ∪ C(e₂) ∪ (fv e₁) × (fv e₂)
  * Let v = rhs in body:
    In addition to the results from the subexpressions, add all co-calls from
@@ -347,7 +348,7 @@ t1) in the follwing code:
       t2 = if ... then go 1 else ...
   in go 0
 
-Detecting this would reqiure finding out what variables are only ever called
+Detecting this would require finding out what variables are only ever called
 from thunks. While this is certainly possible, we yet have to see this to be
 relevant in the wild.
 
@@ -359,6 +360,28 @@ We can eta-expand top-level-binds if they are not exported, as we see all calls
 to them. The plan is as follows: Treat the top-level binds as nested lets around
 a body representing “all external calls”, which returns a pessimistic
 CallArityRes (the co-call graph is the complete graph, all arityies 0).
+
+Note [Trimming arity]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+In the Call Arity papers, we are working on an untyped lambda calculus with no
+other id annotations, where eta-expansion is always possible. But this is not
+the case for Core!
+ 1. We need to ensure the invariant
+      callArity e <= typeArity (exprType e)
+    for the same reasons that exprArity needs this invariant (see Note
+    [exprArity invariant] in CoreArity).
+
+    If we are not doing that, a too-high arity annotation will be stored with
+    the id, confusing the simplifier later on.
+
+ 2. Eta-expanding a right hand side might invalidate existing annotations. In
+    particular, if an id has a strictness annotation of <...><...>b, then
+    passing two arguments to it will definitely bottom out, so the simplifier
+    will throw away additional parameters. This conflicts with Call Arity! So
+    we ensure that we never eta-expand such a value beyond the number of
+    arguments mentioned in the strictness signature.
+    See #10176 for a real-world-example.
 
 -}
 
@@ -443,7 +466,6 @@ callArityAnal arity int (App e1 e2)
   where
     (ae1, e1') = callArityAnal (arity + 1) int e1
     (ae2, e2') = callArityAnal 0           int e2
-    -- See Note [Case and App: Which side to take?]
     final_ae = ae1 `both` ae2
 
 -- Case expression.
@@ -457,7 +479,6 @@ callArityAnal arity int (Case scrut bndr ty alts)
                         in  (ae, (dc, bndrs, e'))
     alt_ae = lubRess alt_aes
     (scrut_ae, scrut') = callArityAnal 0 int scrut
-    -- See Note [Case and App: Which side to take?]
     final_ae = scrut_ae `both` alt_ae
 
 -- For lets, use callArityBind
@@ -508,15 +529,19 @@ callArityBind ae_body int (NonRec v rhs)
     safe_arity | called_once = arity
                | is_thunk    = 0      -- A thunk! Do not eta-expand
                | otherwise   = arity
-    (ae_rhs, rhs') = callArityAnal safe_arity int rhs
+
+    -- See Note [Trimming arity]
+    trimmed_arity = trimArity v safe_arity
+
+    (ae_rhs, rhs') = callArityAnal trimmed_arity int rhs
+
 
     ae_rhs'| called_once     = ae_rhs
            | safe_arity == 0 = ae_rhs -- If it is not a function, its body is evaluated only once
            | otherwise       = calledMultipleTimes ae_rhs
 
     final_ae = callArityNonRecEnv v ae_rhs' ae_body
-    v' = v `setIdCallArity` safe_arity
-
+    v' = v `setIdCallArity` trimmed_arity
 
 
 -- Recursive let. See Note [Recursion and fixpointing]
@@ -560,18 +585,32 @@ callArityBind ae_body int b@(Rec binds)
                   safe_arity | is_thunk    = 0  -- See Note [Thunks in recursive groups]
                              | otherwise   = new_arity
 
-                  (ae_rhs, rhs') = callArityAnal safe_arity int_body rhs
+                  -- See Note [Trimming arity]
+                  trimmed_arity = trimArity i safe_arity
+
+                  (ae_rhs, rhs') = callArityAnal trimmed_arity int_body rhs
 
                   ae_rhs' | called_once     = ae_rhs
                           | safe_arity == 0 = ae_rhs -- If it is not a function, its body is evaluated only once
                           | otherwise       = calledMultipleTimes ae_rhs
 
-              in (True, (i `setIdCallArity` safe_arity, Just (called_once, new_arity, ae_rhs'), rhs'))
+              in (True, (i `setIdCallArity` trimmed_arity, Just (called_once, new_arity, ae_rhs'), rhs'))
           where
             (new_arity, called_once)  = lookupCallArityRes ae i
 
         (changes, ann_binds') = unzip $ map rerun ann_binds
         any_change = or changes
+
+-- See Note [Trimming arity]
+trimArity :: Id -> Arity -> Arity
+trimArity v a = minimum [a, max_arity_by_type, max_arity_by_strsig]
+  where
+    max_arity_by_type = length (typeArity (idType v))
+    max_arity_by_strsig
+        | isBotRes result_info = length demands
+        | otherwise = a
+
+    (demands, result_info) = splitStrictSig (idStrictness v)
 
 -- Combining the results from body and rhs, non-recursive case
 -- See Note [Analysis II: The Co-Called analysis]

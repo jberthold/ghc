@@ -565,6 +565,11 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         $3="$$3 -D_HPUX_SOURCE"
         $5="$$5 -D_HPUX_SOURCE"
         ;;
+    arm*linux*)
+        # On arm/linux and arm/android, tell gcc to link using the gold linker.
+        # Forcing LD to be ld.gold is done in configre.ac.
+        $3="$$3 -fuse-ld=gold"
+        ;;
     esac
 
     # If gcc knows about the stack protector, turn it off.
@@ -1581,6 +1586,7 @@ if test "$RELEASE" = "NO"; then
         dnl less likely to go wrong.
         PACKAGE_VERSION=${PACKAGE_VERSION}.`date +%Y%m%d`
     fi
+fi
 
     AC_MSG_CHECKING([for GHC Git commit id])
     if test -d .git; then
@@ -1598,7 +1604,6 @@ if test "$RELEASE" = "NO"; then
         PACKAGE_GIT_COMMIT_ID="0000000000000000000000000000000000000000"
     fi
 
-fi
 
 # Some renamings
 AC_SUBST([ProjectName], [$PACKAGE_NAME])
@@ -1825,6 +1830,28 @@ AC_DEFUN([FP_GMP],
   AC_SUBST(GMP_INCLUDE_DIRS)
   AC_SUBST(GMP_LIB_DIRS)
 ])# FP_GMP
+
+# FP_CURSES
+# -------------
+AC_DEFUN([FP_CURSES],
+[
+  dnl--------------------------------------------------------------------
+  dnl * Deal with arguments telling us curses is somewhere odd
+  dnl--------------------------------------------------------------------
+
+  AC_ARG_WITH([curses-includes],
+    [AC_HELP_STRING([--with-curses-includes],
+      [directory containing curses headers])],
+      [CURSES_INCLUDE_DIRS=$withval])
+
+  AC_ARG_WITH([curses-libraries],
+    [AC_HELP_STRING([--with-curses-libraries],
+      [directory containing curses libraries])],
+      [CURSES_LIB_DIRS=$withval])
+
+  AC_SUBST(CURSES_INCLUDE_DIRS)
+  AC_SUBST(CURSES_LIB_DIRS)
+])# FP_CURSES
 
 # --------------------------------------------------------------
 # Calculate absolute path to build tree
@@ -2069,27 +2096,42 @@ AC_DEFUN([XCODE_VERSION],[
 # $1 = the variable to set
 # $2 = the with option name
 # $3 = the command to look for
+# $4 = the version of the command to look for
 #
 AC_DEFUN([FIND_LLVM_PROG],[
-    FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL_NOTARGET([$1], [$2], [$3])
+	# Test for program with version name.
+    FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL_NOTARGET([$1], [$2], [$3-$4])
     if test "$$1" = ""; then
-        save_IFS=$IFS
-        IFS=":;"
-        for p in ${PATH}; do
-            if test -d "${p}"; then
-                if test "$windows" = YES; then
-                    $1=`${FindCmd} "${p}" -type f -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' -or -type l -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' | ${SortCmd} -n | tail -1`
-                else
-                    $1=`${FindCmd} "${p}" -type f -perm \111 -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' -or -type l -perm \111 -maxdepth 1 -regex '.*/$3-[[0-9]]\.[[0-9]]' | ${SortCmd} -n | tail -1`
-                fi
-                if test -n "$$1"; then
-                    break
-                fi
-            fi
-        done
-        IFS=$save_IFS
+		# Test for program without version name.
+		FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL_NOTARGET([$1], [$2], [$3])
+		AC_MSG_CHECKING([$$1 is version $4])
+		if test `$$1 --version | grep -c "version $4"` -gt 0 ; then
+            AC_MSG_RESULT(yes)
+        else
+			AC_MSG_RESULT(no)
+			$1=""
+		fi
     fi
 ])
+
+# FIND_GHC_BOOTSTRAP_PROG()
+# --------------------------------
+# Parse the bootstrap GHC's compier settings file for the location of things
+# like the `llc` and `opt` commands.
+#
+# $1 = the variable to set
+# $2 = The bootstrap compiler.
+# $3 = The string to grep for to find the correct line.
+#
+AC_DEFUN([FIND_GHC_BOOTSTRAP_PROG],[
+	BootstrapTmpCmd=`grep $3 $($2 --print-libdir)/settings 2>/dev/null | sed 's/.*", "//;s/".*//'`
+	if test -n "$BootstrapTmpCmd" && test `basename $BootstrapTmpCmd` = $BootstrapTmpCmd ; then
+		AC_PATH_PROG([$1], [$BootstrapTmpCmd], "")
+	else
+		$1=$BootstrapTmpCmd
+	fi
+])
+
 
 # FIND_GCC()
 # --------------------------------
@@ -2146,7 +2188,7 @@ dnl ** what cpp to use?
 dnl --------------------------------------------------------------
 AC_ARG_WITH(hs-cpp,
 [AC_HELP_STRING([--with-hs-cpp=ARG],
-        [Use ARG as the path to cpp [default=autodetect]])],
+      [Path to the (C) preprocessor for Haskell files [default=autodetect]])],
 [
     if test "$HostOS" = "mingw32"
     then
@@ -2157,6 +2199,8 @@ AC_ARG_WITH(hs-cpp,
 ],
 [
 
+    # We can't use $CPP here, since HS_CPP_CMD is expected to be a single
+    # command (no flags), and AC_PROG_CPP defines CPP as "/usr/bin/gcc -E".
     HS_CPP_CMD=$WhatGccIsCalled
 
     SOLARIS_GCC_CPP_BROKEN=NO
@@ -2198,7 +2242,7 @@ dnl ** what cpp flags to use?
 dnl -----------------------------------------------------------
 AC_ARG_WITH(hs-cpp-flags,
   [AC_HELP_STRING([--with-hs-cpp-flags=ARG],
-          [Use ARG as the path to hs cpp [default=autodetect]])],
+      [Flags to the (C) preprocessor for Haskell files [default=autodetect]])],
   [
       if test "$HostOS" = "mingw32"
       then
@@ -2210,11 +2254,11 @@ AC_ARG_WITH(hs-cpp-flags,
 [
   $HS_CPP_CMD -x c /dev/null -dM -E > conftest.txt 2>&1
   if grep "__clang__" conftest.txt >/dev/null 2>&1; then
-    HS_CPP_ARGS="-E -undef -traditional -Wno-invalid-pp-token -Wno-unicode -Wno-trigraphs "
+    HS_CPP_ARGS="-E -undef -traditional -Wno-invalid-pp-token -Wno-unicode -Wno-trigraphs"
   else
       $HS_CPP_CMD  -v > conftest.txt 2>&1
       if  grep "gcc" conftest.txt >/dev/null 2>&1; then
-          HS_CPP_ARGS="-E -undef -traditional "
+          HS_CPP_ARGS="-E -undef -traditional"
         else
           $HS_CPP_CMD  --version > conftest.txt 2>&1
           if grep "cpphs" conftest.txt >/dev/null 2>&1; then

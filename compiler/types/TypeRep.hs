@@ -94,7 +94,7 @@ import qualified Data.Data        as Data hiding ( TyCon )
 -- | The key representation of types within the compiler
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data Type
   = TyVarTy Var -- ^ Vanilla type or kind variable (*never* a coercion variable)
 
@@ -639,7 +639,7 @@ pprSigmaTypeExtraCts :: Bool -> Type -> SDoc
 pprSigmaTypeExtraCts = ppr_sigma_type False
 
 pprUserForAll :: [TyVar] -> SDoc
--- Print a user-level forall; see Note [WHen to print foralls]
+-- Print a user-level forall; see Note [When to print foralls]
 pprUserForAll tvs
   = sdocWithDynFlags $ \dflags ->
     ppWhen (any tv_has_kind_var tvs || gopt Opt_PrintExplicitForalls dflags) $

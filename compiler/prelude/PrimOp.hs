@@ -185,7 +185,7 @@ A @Word#@ is an unsigned @Int#@.
 @decodeDouble#@ is given w/ Integer-stuff (it's similar).
 
 Decoding of floating-point numbers is sorta Integer-related.  Encoding
-is done with plain ccalls now (see PrelNumExtra.lhs).
+is done with plain ccalls now (see PrelNumExtra.hs).
 
 A @Weak@ Pointer is created by the @mkWeak#@ primitive:
 
@@ -277,12 +277,6 @@ Invariants:
         (c) stableNameToInt always returns the same Int for a given
             stable name.
 
-
--- HWL: The first 4 Int# in all par... annotations denote:
---   name, granularity info, size of result, degree of parallelism
---      Same  structure as _seq_ i.e. returns Int#
--- KSW: v, the second arg in parAt# and parAtForNow#, is used only to determine
---   `the processor containing the expression v'; it is not evaluated
 
 These primops are pretty weird.
 
@@ -483,7 +477,7 @@ primOpOkForSideEffects op
 {-
 Note [primOpIsCheap]
 ~~~~~~~~~~~~~~~~~~~~
-@primOpIsCheap@, as used in \tr{SimplUtils.lhs}.  For now (HACK
+@primOpIsCheap@, as used in \tr{SimplUtils.hs}.  For now (HACK
 WARNING), we just borrow some other predicates for a
 what-should-be-good-enough test.  "Cheap" means willing to call it more
 than once, and/or push it inside a lambda.  The latter could change the

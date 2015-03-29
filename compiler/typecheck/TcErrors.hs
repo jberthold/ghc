@@ -240,7 +240,7 @@ reportImplic ctxt implic@(Implic { ic_skols = tvs, ic_given = given
 
 warnRedundantConstraints :: ReportErrCtxt -> TcLclEnv -> SkolemInfo -> [EvVar] -> TcM ()
 warnRedundantConstraints ctxt env info ev_vars
- | null ev_vars
+ | null redundant_evs
  = return ()
 
  | SigSkol {} <- info
@@ -257,8 +257,32 @@ warnRedundantConstraints ctxt env info ev_vars
  = do { msg <- mkErrorMsg ctxt env doc
       ; reportWarning msg }
  where
-   doc = ptext (sLit "Redundant constraint") <> plural ev_vars <> colon
-         <+> pprEvVarTheta ev_vars
+   doc = ptext (sLit "Redundant constraint") <> plural redundant_evs <> colon
+         <+> pprEvVarTheta redundant_evs
+
+   redundant_evs = case info of -- See Note [Redundant constraints in instance decls]
+                     InstSkol -> filterOut improving ev_vars
+                     _        -> ev_vars
+
+   improving ev_var = any isImprovementPred $
+                      transSuperClassesPred (idType ev_var)
+
+{- Note [Redundant constraints in instance decls]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For instance declarations, we don't report unused givens if
+they can give rise to improvement.  Example (Trac #10100):
+    class Add a b ab | a b -> ab, a ab -> b
+    instance Add Zero b b
+    instance Add a b ab => Add (Succ a) b (Succ ab)
+The context (Add a b ab) for the instance is clearly unused in terms
+of evidence, since the dictionary has no feilds.  But it is still
+needed!  With the context, a wanted constraint
+   Add (Succ Zero) beta (Succ Zero)
+we will reduce to (Add Zero beta Zero), and thence we get beta := Zero.
+But without the context we won't find beta := Zero.
+
+This only matters in instance declarations..
+-}
 
 reportWanteds :: ReportErrCtxt -> WantedConstraints -> TcM ()
 reportWanteds ctxt (WC { wc_simple = simples, wc_insol = insols, wc_impl = implics })
@@ -636,16 +660,22 @@ mkHoleError ctxt ct@(CHoleCan { cc_occ = occ, cc_hole = hole_sort })
              tyvars_msg = map loc_msg tyvars
              msg = vcat [ hang (ptext (sLit "Found hole") <+> quotes (ppr occ))
                              2 (ptext (sLit "with type:") <+> pprType (ctEvPred (ctEvidence ct)))
-                        , ppUnless (null tyvars_msg) (ptext (sLit "Where:") <+> vcat tyvars_msg)
-                        , pts_hint ]
+                        , ppUnless (null tyvars) (ptext (sLit "Where:") <+> vcat tyvars_msg)
+                        , hint ]
        ; (ctxt, binds_doc, _) <- relevantBindings False ctxt ct
                -- The 'False' means "don't filter the bindings"; see Trac #8191
        ; mkErrorMsgFromCt ctxt ct (msg $$ binds_doc) }
   where
-    pts_hint
+    hint
       | TypeHole  <- hole_sort
       , HoleError <- cec_type_holes ctxt
       = ptext (sLit "To use the inferred type, enable PartialTypeSignatures")
+
+      | ExprHole <- hole_sort         -- Give hint for, say,   f x = _x
+      , lengthFS (occNameFS occ) > 1  -- Don't give this hint for plain "_", which isn't legal Haskell
+      = ptext (sLit "Or perhaps") <+> quotes (ppr occ)
+        <+> ptext (sLit "is mis-spelled, or not in scope")
+
       | otherwise
       = empty
 
@@ -1648,21 +1678,23 @@ are created by in RtClosureInspect.zonkRTTIType.
 ************************************************************************
 -}
 
-solverDepthErrorTcS :: SubGoalCounter -> CtEvidence -> TcM a
-solverDepthErrorTcS cnt ev
+solverDepthErrorTcS :: CtLoc -> TcType -> TcM a
+solverDepthErrorTcS loc ty
   = setCtLoc loc $
-    do { pred <- zonkTcType (ctEvPred ev)
+    do { ty <- zonkTcType ty
        ; env0 <- tcInitTidyEnv
-       ; let tidy_env  = tidyFreeTyVars env0 (tyVarsOfType pred)
-             tidy_pred = tidyType tidy_env pred
-       ; failWithTcM (tidy_env, hang (msg cnt) 2 (ppr tidy_pred)) }
+       ; let tidy_env     = tidyFreeTyVars env0 (tyVarsOfType ty)
+             tidy_ty      = tidyType tidy_env ty
+             msg
+               = vcat [ text "Reduction stack overflow; size =" <+> ppr depth
+                      , hang (text "When simplifying the following type:")
+                           2 (ppr tidy_ty)
+                      , note ]
+       ; failWithTcM (tidy_env, msg) }
   where
-    loc   = ctEvLoc ev
     depth = ctLocDepth loc
-    value = subGoalCounterValue cnt depth
-    msg CountConstraints =
-        vcat [ ptext (sLit "Context reduction stack overflow; size =") <+> int value
-             , ptext (sLit "Use -fcontext-stack=N to increase stack size to N") ]
-    msg CountTyFunApps =
-        vcat [ ptext (sLit "Type function application stack overflow; size =") <+> int value
-             , ptext (sLit "Use -ftype-function-depth=N to increase stack size to N") ]
+    note = vcat
+      [ text "Use -freduction-depth=0 to disable this check"
+      , text "(any upper bound you could choose might fail unpredictably with"
+      , text " minor updates to GHC, so disabling the check is recommended if"
+      , text " you're sure that type checking should terminate)" ]

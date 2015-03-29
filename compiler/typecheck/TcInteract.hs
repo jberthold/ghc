@@ -14,6 +14,7 @@ import TcCanonical
 import TcFlatten
 import VarSet
 import Type
+import Kind (isKind)
 import Unify
 import InstEnv( DFunInstType, lookupInstEnv, instanceDFunId )
 import CoAxiom(sfInteractTop, sfInteractInert)
@@ -21,7 +22,7 @@ import CoAxiom(sfInteractTop, sfInteractInert)
 import Var
 import TcType
 import PrelNames ( knownNatClassName, knownSymbolClassName, ipClassNameKey,
-                   callStackTyConKey )
+                   callStackTyConKey, typeableClassName )
 import Id( idType )
 import Class
 import TyCon
@@ -38,7 +39,7 @@ import TcSMonad
 import Bag
 
 import Data.List( partition, foldl', deleteFirstsBy )
-
+import SrcLoc
 import VarEnv
 
 import Control.Monad
@@ -170,20 +171,20 @@ solveSimples :: Cts -> TcS ()
 
 solveSimples cts
   = {-# SCC "solveSimples" #-}
-    do { dyn_flags <- getDynFlags
-       ; updWorkListTcS (\wl -> foldrBag extendWorkListCt wl cts)
-       ; solve_loop (maxSubGoalDepth dyn_flags) }
+    do { updWorkListTcS (\wl -> foldrBag extendWorkListCt wl cts)
+       ; solve_loop }
   where
-    solve_loop max_depth
+    solve_loop
       = {-# SCC "solve_loop" #-}
-        do { sel <- selectNextWorkItem max_depth
+        do { sel <- selectNextWorkItem
            ; case sel of
               NoWorkRemaining     -- Done, successfuly (modulo frozen)
                 -> return ()
-              MaxDepthExceeded cnt ct -- Failure, depth exceeded
-                -> wrapErrTcS $ solverDepthErrorTcS cnt (ctEvidence ct)
+              MaxDepthExceeded ct -- Failure, depth exceeded
+                -> wrapErrTcS $ solverDepthErrorTcS (ctLoc ct) (ctPred ct)
               NextWorkItem ct     -- More work, loop around!
-                -> do { runSolverPipeline thePipeline ct; solve_loop max_depth } }
+                -> do { runSolverPipeline thePipeline ct
+                      ; solve_loop } }
 
 
 -- | Extract the (inert) givens and invoke the plugins on them.
@@ -311,26 +312,26 @@ type SimplifierStage = WorkItem -> TcS (StopOrContinue Ct)
 
 data SelectWorkItem
        = NoWorkRemaining      -- No more work left (effectively we're done!)
-       | MaxDepthExceeded SubGoalCounter Ct
+       | MaxDepthExceeded Ct
                               -- More work left to do but this constraint has exceeded
-                              -- the maximum depth for one of the subgoal counters and we
-                              -- must stop
+                              -- the maximum depth and we must stop
        | NextWorkItem Ct      -- More work left, here's the next item to look at
 
-selectNextWorkItem :: SubGoalDepth -- Max depth allowed
-                   -> TcS SelectWorkItem
-selectNextWorkItem max_depth
-  = updWorkListTcS_return pick_next
+selectNextWorkItem :: TcS SelectWorkItem
+selectNextWorkItem
+  = do { dflags <- getDynFlags
+       ; updWorkListTcS_return (pick_next dflags) }
   where
-    pick_next :: WorkList -> (SelectWorkItem, WorkList)
-    pick_next wl
+    pick_next :: DynFlags -> WorkList -> (SelectWorkItem, WorkList)
+    pick_next dflags wl
       = case selectWorkItem wl of
           (Nothing,_)
               -> (NoWorkRemaining,wl)           -- No more work
           (Just ct, new_wl)
-              | Just cnt <- subGoalDepthExceeded max_depth (ctLocDepth (ctLoc ct)) -- Depth exceeded
-              -> (MaxDepthExceeded cnt ct,new_wl)
-          (Just ct, new_wl)
+              | subGoalDepthExceeded dflags (ctLocDepth (ctLoc ct)) 
+              -> (MaxDepthExceeded ct,new_wl)   -- Depth exceeded
+
+              | otherwise
               -> (NextWorkItem ct, new_wl)      -- New workitem and worklist
 
 runSolverPipeline :: [(String,SimplifierStage)] -- The pipeline
@@ -615,7 +616,7 @@ interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs
   , isWanted ev_w
   , Just mkEvCs <- isCallStackIP (ctEvLoc ev_w) cls ty
   = do let ev_cs =
-             case lookupInertDict inerts (ctEvLoc ev_w) cls tys of
+             case lookupInertDict inerts cls tys of
                Just ev | isGiven ev -> mkEvCs (ctEvTerm ev)
                _ -> mkEvCs (EvCallStack EvCsEmpty)
 
@@ -628,7 +629,7 @@ interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs
        setWantedEvBind (ctEvId ev_w) ev_tm
        stopWith ev_w "Wanted CallStack IP"
 
-  | Just ctev_i <- lookupInertDict inerts (ctEvLoc ev_w) cls tys
+  | Just ctev_i <- lookupInertDict inerts cls tys
   = do { (inert_effect, stop_now) <- solveOneFromTheOther ctev_i ev_w
        ; case inert_effect of
            IRKeep    -> return ()
@@ -644,9 +645,13 @@ interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs
   = interactGivenIP inerts workItem
 
   | otherwise
-  = do { mapBagM_ (addFunDepWork workItem) (findDictsByClass (inert_dicts inerts) cls)
-               -- Standard thing: create derived fds and keep on going. Importantly we don't
-               -- throw workitem back in the worklist because this can cause loops (see #5236)
+  = do { mapBagM_ (addFunDepWork workItem) 
+                  (findDictsByClass (inert_dicts inerts) cls)
+               -- Create derived fds and keep on going.
+               -- No need to check flavour; fundeps work between
+               -- any pair of constraints, regardless of flavour
+               -- Importantly we don't throw workitem back in the 
+               -- worklist bebcause this can cause loops (see #5236)
        ; continueWith workItem  }
 
 interactDict _ wi = pprPanic "interactDict" (ppr wi)
@@ -672,17 +677,15 @@ interactGivenIP inerts workItem@(CDictCan { cc_ev = ev, cc_class = cls
 interactGivenIP _ wi = pprPanic "interactGivenIP" (ppr wi)
 
 addFunDepWork :: Ct -> Ct -> TcS ()
+-- Add derived constraints from type-class functional dependencies.
 addFunDepWork work_ct inert_ct
-  = do {  let fd_eqns :: [Equation CtLoc]
-              fd_eqns = [ eqn { fd_loc = derived_loc }
-                        | eqn <- improveFromAnother inert_pred work_pred ]
-       ; rewriteWithFunDeps fd_eqns
+  = emitFunDepDeriveds $
+    improveFromAnother derived_loc inert_pred work_pred
                 -- We don't really rewrite tys2, see below _rewritten_tys2, so that's ok
                 -- NB: We do create FDs for given to report insoluble equations that arise
                 -- from pairs of Givens, and also because of floating when we approximate
                 -- implications. The relevant test is: typecheck/should_fail/FDsFromGivens.hs
                 -- Also see Note [When improvement happens]
-    }
   where
     work_pred  = ctPred work_ct
     inert_pred = ctPred inert_ct
@@ -1124,7 +1127,7 @@ kick_out new_flavour new_eq_rel new_tv (IC { inert_eqs      = tv_eqs
           | can_rewrite ev
           = case eq_rel of
               NomEq  -> not (rhs_ty `eqType` mkTyVarTy new_tv)
-              ReprEq -> isTyVarExposed new_tv rhs_ty
+              ReprEq -> not (isTyVarExposed new_tv rhs_ty)
 
           | otherwise
           = True
@@ -1210,23 +1213,22 @@ constraint right away.  This avoids two dangers
            with the same thing later, and produce the same equality
            again --> termination worries.
 
-To achieve this required some refactoring of FunDeps.lhs (nicer
+To achieve this required some refactoring of FunDeps.hs (nicer
 now!).
 -}
 
-rewriteWithFunDeps :: [Equation CtLoc] -> TcS ()
--- NB: The returned constraints are all Derived
--- Post: returns no trivial equalities (identities) and all EvVars returned are fresh
-rewriteWithFunDeps eqn_pred_locs
- = mapM_ instFunDepEqn eqn_pred_locs
-
-instFunDepEqn :: Equation CtLoc -> TcS ()
--- Post: Returns the position index as well as the corresponding FunDep equality
-instFunDepEqn (FDEqn { fd_qtvs = tvs, fd_eqs = eqs, fd_loc = loc })
-  = do { (subst, _) <- instFlexiTcS tvs  -- Takes account of kind substitution
-       ; mapM_ (do_one subst) eqs }
+emitFunDepDeriveds :: [FunDepEqn CtLoc] -> TcS ()
+emitFunDepDeriveds fd_eqns
+  = mapM_ do_one_FDEqn fd_eqns
   where
-    do_one subst (FDEq { fd_ty_left = ty1, fd_ty_right = ty2 })
+    do_one_FDEqn (FDEqn { fd_qtvs = tvs, fd_eqs = eqs, fd_loc = loc })
+     | null tvs  -- Common shortcut
+     = mapM_ (unifyDerived loc Nominal) eqs
+     | otherwise
+     = do { (subst, _) <- instFlexiTcS tvs  -- Takes account of kind substitution
+          ; mapM_ (do_one_eq loc subst) eqs }
+
+    do_one_eq loc subst (Pair ty1 ty2)
        = unifyDerived loc Nominal $
          Pair (Type.substTy subst ty1) (Type.substTy subst ty2)
 
@@ -1270,20 +1272,22 @@ doTopReactDict inerts work_item@(CDictCan { cc_ev = fl, cc_class = cls
   | not (isWanted fl)   -- Never use instances for Given or Derived constraints
   = try_fundeps_and_return
 
-  | Just ev <- lookupSolvedDict inerts loc cls xis   -- Cached
+  | Just ev <- lookupSolvedDict inerts cls xis   -- Cached
   = do { setWantedEvBind dict_id (ctEvTerm ev);
        ; stopWith fl "Dict/Top (cached)" }
 
   | otherwise  -- Not cached
-   = do { lkup_inst_res <- matchClassInst inerts cls xis loc
+   = do { lkup_inst_res <- matchClassInst inerts cls xis dict_loc
          ; case lkup_inst_res of
                GenInst wtvs ev_term -> do { addSolvedDict fl cls xis
                                           ; solve_from_instance wtvs ev_term }
                NoInstance -> try_fundeps_and_return }
    where
      dict_id = ASSERT( isWanted fl ) ctEvId fl
-     pred = mkClassPred cls xis
-     loc = ctEvLoc fl
+     dict_pred = mkClassPred cls xis
+     dict_loc = ctEvLoc fl
+     dict_origin = ctLocOrigin dict_loc
+     deeper_loc = bumpCtLocDepth dict_loc
 
      solve_from_instance :: [CtEvidence] -> EvTerm -> TcS (StopOrContinue Ct)
       -- Precondition: evidence term matches the predicate workItem
@@ -1294,11 +1298,12 @@ doTopReactDict inerts work_item@(CDictCan { cc_ev = fl, cc_class = cls
              ; setWantedEvBind dict_id ev_term
              ; stopWith fl "Dict/Top (solved, no new work)" }
         | otherwise
-        = do { traceTcS "doTopReact/found non-nullary instance for" $
+        = do { checkReductionDepth deeper_loc dict_pred
+             ; traceTcS "doTopReact/found non-nullary instance for" $
                ppr dict_id
              ; setWantedEvBind dict_id ev_term
              ; let mk_new_wanted ev
-                       = mkNonCanonical (ev {ctev_loc = bumpCtLocDepth CountConstraints loc })
+                     = mkNonCanonical (ev {ctev_loc = deeper_loc })
              ; updWorkListTcS (extendWorkListCts (map mk_new_wanted evs))
              ; stopWith fl "Dict/Top (solved, more work)" }
 
@@ -1309,18 +1314,22 @@ doTopReactDict inerts work_item@(CDictCan { cc_ev = fl, cc_class = cls
      -- so we make sure we get on and solve it first. See Note [Weird fundeps]
      try_fundeps_and_return
        = do { instEnvs <- getInstEnvs
-            ; let fd_eqns :: [Equation CtLoc]
-                  fd_eqns = [ fd { fd_loc = loc { ctl_origin = FunDepOrigin2 pred (ctl_origin loc)
-                                                                             inst_pred inst_loc } }
-                            | fd@(FDEqn { fd_loc = inst_loc, fd_pred1 = inst_pred })
-                            <- improveFromInstEnv instEnvs pred ]
-            ; rewriteWithFunDeps fd_eqns
+            ; emitFunDepDeriveds $
+              improveFromInstEnv instEnvs mk_ct_loc dict_pred
             ; continueWith work_item }
+
+     mk_ct_loc :: PredType   -- From instance decl
+               -> SrcSpan    -- also from instance deol
+               -> CtLoc
+     mk_ct_loc inst_pred inst_loc
+       = dict_loc { ctl_origin = FunDepOrigin2 dict_pred dict_origin
+                                               inst_pred inst_loc }
 
 doTopReactDict _ w = pprPanic "doTopReactDict" (ppr w)
 
 --------------------
 doTopReactFunEq :: Ct -> TcS (StopOrContinue Ct)
+-- Note [Short cut for top-level reaction]
 doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
                                      , cc_tyargs = args , cc_fsk = fsk })
   = ASSERT(isTypeFamilyTyCon fam_tc) -- No associated data families
@@ -1374,7 +1383,7 @@ doTopReactFunEq work_item@(CFunEqCan { cc_ev = old_ev, cc_fun = fam_tc
           ; stopWith old_ev "Fun/Top (wanted)" } } }
   where
     loc = ctEvLoc old_ev
-    deeper_loc = bumpCtLocDepth CountTyFunApps loc
+    deeper_loc = bumpCtLocDepth loc
 
     try_improvement
       | Just ops <- isBuiltInSynFamTyCon_maybe fam_tc
@@ -1388,10 +1397,10 @@ doTopReactFunEq w = pprPanic "doTopReactFunEq" (ppr w)
 
 shortCutReduction :: CtEvidence -> TcTyVar -> TcCoercion
                   -> TyCon -> [TcType] -> TcS (StopOrContinue Ct)
+-- See Note [Top-level reductions for type functions]
 shortCutReduction old_ev fsk ax_co fam_tc tc_args
   | isGiven old_ev
   = ASSERT( ctEvEqRel old_ev == NomEq )
-    runFlatten $
     do { (xis, cos) <- flattenManyNom old_ev tc_args
                -- ax_co :: F args ~ G tc_args
                -- cos   :: xis ~ tc_args
@@ -1405,7 +1414,7 @@ shortCutReduction old_ev fsk ax_co fam_tc tc_args
                                         `mkTcTransCo` ctEvCoercion old_ev) )
 
        ; let new_ct = CFunEqCan { cc_ev = new_ev, cc_fun = fam_tc, cc_tyargs = xis, cc_fsk = fsk }
-       ; emitFlatWork new_ct
+       ; emitWorkCt new_ct
        ; stopWith old_ev "Fun/Top (given, shortcut)" }
 
   | otherwise
@@ -1418,18 +1427,18 @@ shortCutReduction old_ev fsk ax_co fam_tc tc_args
                -- new_ev :: G xis ~ fsk
                -- old_ev :: F args ~ fsk := ax_co ; sym (G cos) ; new_ev
 
-       ; new_ev <- newWantedEvVarNC deeper_loc 
+       ; new_ev <- newWantedEvVarNC deeper_loc
                                     (mkTcEqPred (mkTyConApp fam_tc xis) (mkTyVarTy fsk))
        ; setWantedEvBind (ctEvId old_ev)
                    (EvCoercion (ax_co `mkTcTransCo` mkTcSymCo (mkTcTyConAppCo Nominal fam_tc cos)
                                       `mkTcTransCo` ctEvCoercion new_ev))
 
        ; let new_ct = CFunEqCan { cc_ev = new_ev, cc_fun = fam_tc, cc_tyargs = xis, cc_fsk = fsk }
-       ; emitFlatWork new_ct
+       ; emitWorkCt new_ct
        ; stopWith old_ev "Fun/Top (wanted, shortcut)" }
   where
     loc = ctEvLoc old_ev
-    deeper_loc = bumpCtLocDepth CountTyFunApps loc
+    deeper_loc = bumpCtLocDepth loc
 
 dischargeFmv :: EvVar -> TcTyVar -> TcCoercion -> TcType -> TcS ()
 -- (dischargeFmv x fmv co ty)
@@ -1447,7 +1456,58 @@ dischargeFmv evar fmv co xi
        ; n_kicked <- kickOutRewritable Given NomEq fmv
        ; traceTcS "dischargeFuv" (ppr fmv <+> equals <+> ppr xi $$ ppr_kicked n_kicked) }
 
-{-
+{- Note [Top-level reductions for type functions]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+c.f. Note [The flattening story] in TcFlatten
+
+Suppose we have a CFunEqCan  F tys ~ fmv/fsk, and a matching axiom.
+Here is what we do, in four cases:
+
+* Wanteds: general firing rule
+    (work item) [W]        x : F tys ~ fmv
+    instantiate axiom: ax_co : F tys ~ rhs
+
+   Then:
+      Discharge   fmv := alpha
+      Discharge   x := ax_co ; sym x2
+      New wanted  [W] x2 : alpha ~ rhs  (Non-canonical)
+   This is *the* way that fmv's get unified; even though they are
+   "untouchable".
+
+   NB: it can be the case that fmv appears in the (instantiated) rhs.
+   In that case the new Non-canonical wanted will be loopy, but that's
+   ok.  But it's good reason NOT to claim that it is canonical!
+
+* Wanteds: short cut firing rule
+  Applies when the RHS of the axiom is another type-function application
+      (work item)        [W] x : F tys ~ fmv
+      instantiate axiom: ax_co : F tys ~ G rhs_tys
+
+  It would be a waste to create yet another fmv for (G rhs_tys).
+  Instead (shortCutReduction):
+      - Flatten rhs_tys (cos : rhs_tys ~ rhs_xis)
+      - Add G rhs_xis ~ fmv to flat cache  (note: the same old fmv)
+      - New canonical wanted   [W] x2 : G rhs_xis ~ fmv  (CFunEqCan)
+      - Discharge x := ax_co ; G cos ; x2
+
+* Givens: general firing rule
+      (work item)        [G] g : F tys ~ fsk
+      instantiate axiom: ax_co : F tys ~ rhs
+
+   Now add non-canonical given (since rhs is not flat)
+      [G] (sym g ; ax_co) : fsk ~ rhs  (Non-canonical)
+
+* Givens: short cut firing rule
+  Applies when the RHS of the axiom is another type-function application
+      (work item)        [G] g : F tys ~ fsk
+      instantiate axiom: ax_co : F tys ~ G rhs_tys
+
+  It would be a waste to create yet another fsk for (G rhs_tys).
+  Instead (shortCutReduction):
+     - Flatten rhs_tys: flat_cos : tys ~ flat_tys
+     - Add new Canonical given
+          [G] (sym (G flat_cos) ; co ; g) : G flat_tys ~ fsk   (CFunEqCan)
+
 Note [Cached solved FunEqs]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When trying to solve, say (FunExpensive big-type ~ ty), it's important
@@ -1632,6 +1692,9 @@ matchClassInst _ clas [ ty ] _
     = panicTcS (text "Unexpected evidence for" <+> ppr (className clas)
                      $$ vcat (map (ppr . idType) (classMethods clas)))
 
+matchClassInst _ clas [k,t] loc
+  | className clas == typeableClassName = matchTypeableClass clas k t loc
+
 matchClassInst inerts clas tys loc
    = do { dflags <- getDynFlags
         ; tclvl <- getTcLevel
@@ -1774,3 +1837,58 @@ isCallStackIP loc cls ty
     = ctLocSpan loc
 isCallStackIP _ _ _
   = Nothing
+
+
+
+-- | Assumes that we've checked that this is the 'Typeable' class,
+-- and it was applied to the correc arugment.
+matchTypeableClass :: Class -> Kind -> Type -> CtLoc -> TcS LookupInstResult
+matchTypeableClass clas k t loc
+  | isForAllTy k                               = return NoInstance
+  | Just (tc, ks) <- splitTyConApp_maybe t
+  , all isKind ks                              = doTyCon tc ks
+  | Just (f,kt)       <- splitAppTy_maybe t    = doTyApp f kt
+  | Just _            <- isNumLitTy t          = mkSimpEv (EvTypeableTyLit t)
+  | Just _            <- isStrLitTy t          = mkSimpEv (EvTypeableTyLit t)
+  | otherwise                                  = return NoInstance
+
+  where
+  -- Representation for type constructor applied to some kinds
+  doTyCon tc ks =
+    case mapM kindRep ks of
+      Nothing    -> return NoInstance
+      Just kReps -> mkSimpEv (EvTypeableTyCon tc kReps)
+
+  {- Representation for an application of a type to a type-or-kind.
+  This may happen when the type expression starts with a type variable.
+  Example (ignoring kind parameter):
+    Typeable (f Int Char)                      -->
+    (Typeable (f Int), Typeable Char)          -->
+    (Typeable f, Typeable Int, Typeable Char)  --> (after some simp. steps)
+    Typeable f
+  -}
+  doTyApp f tk
+    | isKind tk = return NoInstance -- We can't solve until we know the ctr.
+    | otherwise =
+      do ct1 <- subGoal f
+         ct2 <- subGoal tk
+         let realSubs = [ c | (c,Fresh) <- [ct1,ct2] ]
+         return $ GenInst realSubs
+                $ EvTypeable $ EvTypeableTyApp (getEv ct1,f) (getEv ct2,tk)
+
+
+  -- Representation for concrete kinds.  We just use the kind itself,
+  -- but first check to make sure that it is "simple" (i.e., made entirely
+  -- out of kind constructors).
+  kindRep ki = do (_,ks) <- splitTyConApp_maybe ki
+                  mapM_ kindRep ks
+                  return ki
+
+  getEv (ct,_fresh) = ctEvTerm ct
+
+  -- Emit a `Typeable` constraint for the given type.
+  subGoal ty = do let goal = mkClassPred clas [ typeKind ty, ty ]
+                  newWantedEvVar loc goal
+
+  mkSimpEv ev = return (GenInst [] (EvTypeable ev))
+

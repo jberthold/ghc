@@ -63,7 +63,7 @@ import qualified ErrUtils as Err
 import Control.Monad
 import Data.Function
 import Data.List        ( sortBy )
-import Data.IORef       ( atomicModifyIORef )
+import Data.IORef       ( atomicModifyIORef' )
 
 {-
 Constructing the TypeEnv, Instances, Rules, VectInfo from which the
@@ -1018,7 +1018,7 @@ tidyTopName mod nc_var maybe_ref occ_env id
   -- Now we get to the real reason that all this is in the IO Monad:
   -- we have to update the name cache in a nice atomic fashion
 
-  | local  && internal = do { new_local_name <- atomicModifyIORef nc_var mk_new_local
+  | local  && internal = do { new_local_name <- atomicModifyIORef' nc_var mk_new_local
                             ; return (occ_env', new_local_name) }
         -- Even local, internal names must get a unique occurrence, because
         -- if we do -split-objs we externalise the name later, in the code generator
@@ -1026,7 +1026,7 @@ tidyTopName mod nc_var maybe_ref occ_env id
         -- Similarly, we must make sure it has a system-wide Unique, because
         -- the byte-code generator builds a system-wide Name->BCO symbol table
 
-  | local  && external = do { new_external_name <- atomicModifyIORef nc_var mk_new_external
+  | local  && external = do { new_external_name <- atomicModifyIORef' nc_var mk_new_external
                             ; return (occ_env', new_external_name) }
 
   | otherwise = panic "tidyTopName"
@@ -1263,7 +1263,7 @@ tidyTopIdInfo dflags rhs_tidy_env name orig_rhs tidy_rhs idinfo show_unfold caf_
     --    the function returns bottom
     -- In this case, show_unfold will be false (we don't expose unfoldings
     -- for bottoming functions), but we might still have a worker/wrapper
-    -- split (see Note [Worker-wrapper for bottoming functions] in WorkWrap.lhs
+    -- split (see Note [Worker-wrapper for bottoming functions] in WorkWrap.hs
 
     --------- Arity ------------
     -- Usually the Id will have an accurate arity on it, because

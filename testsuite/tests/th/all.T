@@ -289,7 +289,9 @@ test('T8028',
      ['T8028', '-v0 ' + config.ghc_th_way_flags])
 
 test('TH_Roles1', normal, compile_fail, ['-v0'])
-test('TH_Roles2', normal, compile, ['-v0 -ddump-tc'])
+test('TH_Roles2', normalise_version('array', 'base', 'deepseq', 'ghc-prim',
+                                    'integer-gmp', 'pretty', 'template-haskell'
+                                    ), compile, ['-v0 -ddump-tc'])
 test('TH_Roles3', normal, compile, ['-v0 -dsuppress-uniques'])
 test('TH_Roles4', normal, compile, ['-v0'])
 
@@ -356,3 +358,5 @@ test('T9824', normal, compile, ['-v0'])
 test('T8031', normal, compile, ['-v0'])
 test('T8624', normal, run_command, ['$MAKE -s --no-print-directory T8624'])
 test('TH_Lift', normal, compile, ['-v0'])
+test('T10047', normal, ghci_script, ['T10047.script'])
+test('T10019', normal, ghci_script, ['T10019.script'])

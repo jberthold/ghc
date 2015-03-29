@@ -38,11 +38,9 @@ import Util
 import PrelNames        ( gHC_PRIM )
 import DynFlags
 import Outputable
-import UniqFM
 import Maybes           ( expectJust )
-import Exception        ( evaluate )
 
-import Data.IORef       ( IORef, writeIORef, readIORef, atomicModifyIORef )
+import Data.IORef       ( IORef, readIORef, atomicModifyIORef' )
 import System.Directory
 import System.FilePath
 import Control.Monad
@@ -69,47 +67,24 @@ type BaseName = String  -- Basename of file
 -- remove all the home modules from the cache; package modules are
 -- assumed to not move around during a session.
 flushFinderCaches :: HscEnv -> IO ()
-flushFinderCaches hsc_env = do
-  -- Ideally the update to both caches be a single atomic operation.
-  writeIORef fc_ref emptyUFM
-  flushModLocationCache this_pkg mlc_ref
+flushFinderCaches hsc_env =
+  atomicModifyIORef' fc_ref $ \fm -> (filterModuleEnv is_ext fm, ())
  where
         this_pkg = thisPackage (hsc_dflags hsc_env)
         fc_ref = hsc_FC hsc_env
-        mlc_ref = hsc_MLC hsc_env
-
-flushModLocationCache :: PackageKey -> IORef ModLocationCache -> IO ()
-flushModLocationCache this_pkg ref = do
-  atomicModifyIORef ref $ \fm -> (filterModuleEnv is_ext fm, ())
-  _ <- evaluate =<< readIORef ref
-  return ()
-  where is_ext mod _ | modulePackageKey mod /= this_pkg = True
+        is_ext mod _ | modulePackageKey mod /= this_pkg = True
                      | otherwise = False
 
-addToFinderCache :: IORef FinderCache -> ModuleName -> FindResult -> IO ()
+addToFinderCache :: IORef FinderCache -> Module -> FindResult -> IO ()
 addToFinderCache ref key val =
-  atomicModifyIORef ref $ \c -> (addToUFM c key val, ())
+  atomicModifyIORef' ref $ \c -> (extendModuleEnv c key val, ())
 
-addToModLocationCache :: IORef ModLocationCache -> Module -> ModLocation -> IO ()
-addToModLocationCache ref key val =
-  atomicModifyIORef ref $ \c -> (extendModuleEnv c key val, ())
-
-removeFromFinderCache :: IORef FinderCache -> ModuleName -> IO ()
+removeFromFinderCache :: IORef FinderCache -> Module -> IO ()
 removeFromFinderCache ref key =
-  atomicModifyIORef ref $ \c -> (delFromUFM c key, ())
+  atomicModifyIORef' ref $ \c -> (delModuleEnv c key, ())
 
-removeFromModLocationCache :: IORef ModLocationCache -> Module -> IO ()
-removeFromModLocationCache ref key =
-  atomicModifyIORef ref $ \c -> (delModuleEnv c key, ())
-
-lookupFinderCache :: IORef FinderCache -> ModuleName -> IO (Maybe FindResult)
+lookupFinderCache :: IORef FinderCache -> Module -> IO (Maybe FindResult)
 lookupFinderCache ref key = do
-   c <- readIORef ref
-   return $! lookupUFM c key
-
-lookupModLocationCache :: IORef ModLocationCache -> Module
-                       -> IO (Maybe ModLocation)
-lookupModLocationCache ref key = do
    c <- readIORef ref
    return $! lookupModuleEnv c key
 
@@ -179,16 +154,8 @@ orIfNotFound this or_this = do
 -- was successful.)
 homeSearchCache :: HscEnv -> ModuleName -> IO FindResult -> IO FindResult
 homeSearchCache hsc_env mod_name do_this = do
-  m <- lookupFinderCache (hsc_FC hsc_env) mod_name
-  case m of
-    Just result -> return result
-    Nothing     -> do
-        result <- do_this
-        addToFinderCache (hsc_FC hsc_env) mod_name result
-        case result of
-           Found loc mod -> addToModLocationCache (hsc_MLC hsc_env) mod loc
-           _other        -> return ()
-        return result
+  let mod = mkModule (thisPackage (hsc_dflags hsc_env)) mod_name
+  modLocationCache hsc_env mod do_this
 
 findExposedPackageModule :: HscEnv -> ModuleName -> Maybe FastString
                          -> IO FindResult
@@ -211,30 +178,24 @@ findExposedPackageModule hsc_env mod_name mb_pkg
 
 modLocationCache :: HscEnv -> Module -> IO FindResult -> IO FindResult
 modLocationCache hsc_env mod do_this = do
-  mb_loc <- lookupModLocationCache mlc mod
-  case mb_loc of
-     Just loc -> return (Found loc mod)
-     Nothing  -> do
+  m <- lookupFinderCache (hsc_FC hsc_env) mod
+  case m of
+    Just result -> return result
+    Nothing     -> do
         result <- do_this
-        case result of
-            Found loc mod -> addToModLocationCache (hsc_MLC hsc_env) mod loc
-            _other -> return ()
+        addToFinderCache (hsc_FC hsc_env) mod result
         return result
-  where
-    mlc = hsc_MLC hsc_env
 
 addHomeModuleToFinder :: HscEnv -> ModuleName -> ModLocation -> IO Module
 addHomeModuleToFinder hsc_env mod_name loc = do
   let mod = mkModule (thisPackage (hsc_dflags hsc_env)) mod_name
-  addToFinderCache (hsc_FC hsc_env) mod_name (Found loc mod)
-  addToModLocationCache (hsc_MLC hsc_env) mod loc
+  addToFinderCache (hsc_FC hsc_env) mod (Found loc mod)
   return mod
 
 uncacheModule :: HscEnv -> ModuleName -> IO ()
 uncacheModule hsc_env mod = do
   let this_pkg = thisPackage (hsc_dflags hsc_env)
-  removeFromFinderCache (hsc_FC hsc_env) mod
-  removeFromModLocationCache (hsc_MLC hsc_env) (mkModule this_pkg mod)
+  removeFromFinderCache (hsc_FC hsc_env) (mkModule this_pkg mod)
 
 -- -----------------------------------------------------------------------------
 --      The internal workers
@@ -304,7 +265,7 @@ findPackageModule hsc_env mod = do
 -- | Look up the interface file associated with module @mod@.  This function
 -- requires a few invariants to be upheld: (1) the 'Module' in question must
 -- be the module identifier of the *original* implementation of a module,
--- not a reexport (this invariant is upheld by @Packages.lhs@) and (2)
+-- not a reexport (this invariant is upheld by @Packages.hs@) and (2)
 -- the 'PackageConfig' must be consistent with the package key in the 'Module'.
 -- The redundancy is to avoid an extra lookup in the package state
 -- for the appropriate config.

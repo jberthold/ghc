@@ -10,7 +10,7 @@
 module HscTypes (
         -- * compilation state
         HscEnv(..), hscEPS,
-        FinderCache, FindResult(..), ModLocationCache,
+        FinderCache, FindResult(..),
         Target(..), TargetId(..), pprTarget, pprTargetId,
         ModuleGraph, emptyMG,
         HscStatus(..),
@@ -140,8 +140,7 @@ import Avail
 import Module
 import InstEnv          ( InstEnv, ClsInst, identicalClsInstHead )
 import FamInstEnv
-import Rules            ( RuleBase )
-import CoreSyn          ( CoreProgram )
+import CoreSyn          ( CoreProgram, RuleBase )
 import Name
 import NameEnv
 import NameSet
@@ -388,9 +387,6 @@ data HscEnv
 
         hsc_FC   :: {-# UNPACK #-} !(IORef FinderCache),
                 -- ^ The cached result of performing finding in the file system
-        hsc_MLC  :: {-# UNPACK #-} !(IORef ModLocationCache),
-                -- ^ This caches the location of modules, so we don't have to
-                -- search the filesystem multiple times. See also 'hsc_FC'.
 
         hsc_type_env_var :: Maybe (Module, IORef TypeEnv)
                 -- ^ Used for one-shot compilation only, to initialise
@@ -673,7 +669,7 @@ prepareAnnotations hsc_env mb_guts = do
 ************************************************************************
 -}
 
--- | The 'FinderCache' maps home module names to the result of
+-- | The 'FinderCache' maps modules to the result of
 -- searching for that module. It records the results of searching for
 -- modules along the search path. On @:load@, we flush the entire
 -- contents of this cache.
@@ -681,7 +677,7 @@ prepareAnnotations hsc_env mb_guts = do
 -- Although the @FinderCache@ range is 'FindResult' for convenience,
 -- in fact it will only ever contain 'Found' or 'NotFound' entries.
 --
-type FinderCache = ModuleNameEnv FindResult
+type FinderCache = ModuleEnv FindResult
 
 -- | The result of searching for an imported module.
 data FindResult
@@ -708,11 +704,6 @@ data FindResult
 
       , fr_suggestions :: [ModuleSuggestion] -- Possible mis-spelled modules
       }
-
--- | Cache that remembers where we found a particular module.  Contains both
--- home modules and package modules.  On @:load@, only home modules are
--- purged from this cache.
-type ModLocationCache = ModuleEnv ModLocation
 
 {-
 ************************************************************************
@@ -1063,7 +1054,7 @@ data ModGuts
                                          -- ^ Family instances declared in this module
         mg_patsyns   :: ![PatSyn],       -- ^ Pattern synonyms declared in this module
         mg_rules     :: ![CoreRule],     -- ^ Before the core pipeline starts, contains
-                                         -- See Note [Overall plumbing for rules] in Rules.lhs
+                                         -- See Note [Overall plumbing for rules] in Rules.hs
         mg_binds     :: !CoreProgram,    -- ^ Bindings for this module
         mg_foreign   :: !ForeignStubs,   -- ^ Foreign exports declared in this module
         mg_warns     :: !Warnings,       -- ^ Warnings declared in the module
@@ -1410,7 +1401,8 @@ extendInteractiveContext ictxt ids tcs new_cls_insts new_fam_insts defaults new_
                             -- a new mod_index (Trac #9426)
           , ic_tythings   = new_tythings ++ old_tythings
           , ic_rn_gbl_env = ic_rn_gbl_env ictxt `icExtendGblRdrEnv` new_tythings
-          , ic_instances  = (new_cls_insts ++ old_cls_insts, new_fam_insts ++ old_fam_insts)
+          , ic_instances  = ( new_cls_insts ++ old_cls_insts
+                            , new_fam_insts ++ old_fam_insts )
           , ic_default    = defaults }
   where
     new_tythings = map AnId ids ++ map ATyCon tcs ++ map (AConLike . PatSynCon) new_patsyns
@@ -2342,14 +2334,13 @@ emptyMG = []
 --
 -- * A regular Haskell source module
 -- * A hi-boot source module
--- * An external-core source module
 --
 data ModSummary
    = ModSummary {
         ms_mod          :: Module,
           -- ^ Identity of the module
         ms_hsc_src      :: HscSource,
-          -- ^ The module source either plain Haskell, hs-boot or external core
+          -- ^ The module source either plain Haskell or hs-boot
         ms_location     :: ModLocation,
           -- ^ Location of the various files belonging to the module
         ms_hs_date      :: UTCTime,
@@ -2706,7 +2697,7 @@ data HsParsedModule = HsParsedModule {
 *                                                                      *
 ************************************************************************
 
-This stuff is in here, rather than (say) in Linker.lhs, because the Linker.lhs
+This stuff is in here, rather than (say) in Linker.hs, because the Linker.hs
 stuff is the *dynamic* linker, and isn't present in a stage-1 compiler
 -}
 

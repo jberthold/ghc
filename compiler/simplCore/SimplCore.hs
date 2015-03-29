@@ -15,7 +15,7 @@ import CoreSyn
 import CoreSubst
 import HscTypes
 import CSE              ( cseProgram )
-import Rules            ( RuleBase, emptyRuleBase, mkRuleBase, unionRuleBase,
+import Rules            ( emptyRuleBase, mkRuleBase, unionRuleBase,
                           extendRuleBaseList, ruleCheckProgram, addSpecInfo, )
 import PprCore          ( pprCoreBindings, pprCoreExpr )
 import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr )
@@ -296,7 +296,7 @@ getCoreToDo dflags
             simpl_phase 0 ["post-liberate-case"] max_iter
             ]),         -- Run the simplifier after LiberateCase to vastly
                         -- reduce the possiblility of shadowing
-                        -- Reason: see Note [Shadowing] in SpecConstr.lhs
+                        -- Reason: see Note [Shadowing] in SpecConstr.hs
 
         runWhen spec_constr CoreDoSpecConstr,
 
@@ -625,13 +625,14 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                        InitialPhase -> (mg_vect_decls guts, vectVars)
                        _            -> ([], vectVars)
                ; tagged_binds = {-# SCC "OccAnal" #-}
-                     occurAnalysePgm this_mod active_rule rules maybeVects maybeVectVars binds
+                     occurAnalysePgm this_mod active_rule rules
+                                     maybeVects maybeVectVars binds
                } ;
            Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
                      (pprCoreBindings tagged_binds);
 
                 -- Get any new rules, and extend the rule base
-                -- See Note [Overall plumbing for rules] in Rules.lhs
+                -- See Note [Overall plumbing for rules] in Rules.hs
                 -- We need to do this regularly, because simplification can
                 -- poke on IdInfo thunks, which in turn brings in new rules
                 -- behind the scenes.  Otherwise there's a danger we'll simply
@@ -646,6 +647,10 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                 -- Simplify the program
            (env1, counts1) <- initSmpl dflags rule_base2 fam_envs us1 sz simpl_binds ;
 
+                -- Apply the substitution to rules defined in this module
+                -- for imported Ids.  Eg  RULE map my_f = blah
+                -- If we have a substitution my_f :-> other_f, we'd better
+                -- apply it to the rule to, or it'll never match
            let  { binds1 = getFloatBinds env1
                 ; rules1 = substRulesForImportedIds (mkCoreSubst (text "imp-rules") env1) rules
                 } ;

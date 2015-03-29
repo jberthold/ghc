@@ -497,7 +497,7 @@ rnBind _ bind@(PatBind { pat_lhs = pat
         -- which (a) is not that different from  _v = rhs
         --       (b) is sometimes used to give a type sig for,
         --           or an occurrence of, a variable on the RHS
-        ; whenWOptM Opt_WarnUnusedBinds $
+        ; whenWOptM Opt_WarnUnusedPatternBinds $
           when (null bndrs && not is_wild_pat) $
           addWarn $ unusedPatBindWarn bind'
 
@@ -595,7 +595,7 @@ rnPatSynBind _sig_fn bind@(PSB { psb_id = L _ name
 
         ; fvs' `seq` -- See Note [Free-variable space leak]
           return (bind', [name], fvs1)
-          -- See Note [Pattern synonym wrappers don't yield dependencies]
+          -- See Note [Pattern synonym builders don't yield dependencies]
       }
   where
     lookupVar = wrapLocM lookupOccRn
@@ -606,10 +606,10 @@ rnPatSynBind _sig_fn bind@(PSB { psb_id = L _ name
            2 (ptext (sLit "Use -XPatternSynonyms to enable this extension"))
 
 {-
-Note [Pattern synonym wrappers don't yield dependencies]
+Note [Pattern synonym builders don't yield dependencies]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When renaming a pattern synonym that has an explicit wrapper,
-references in the wrapper definition should not be used when
+When renaming a pattern synonym that has an explicit builder,
+references in the builder definition should not be used when
 calculating dependencies. For example, consider the following pattern
 synonym definition:
 
@@ -622,9 +622,9 @@ In this case, 'P' needs to be typechecked in two passes:
 
 1. Typecheck the pattern definition of 'P', which fully determines the
 type of 'P'. This step doesn't require knowing anything about 'f',
-since the wrapper definition is not looked at.
+since the builder definition is not looked at.
 
-2. Typecheck the wrapper definition, which needs the typechecked
+2. Typecheck the builder definition, which needs the typechecked
 definition of 'f' to be in scope.
 
 This behaviour is implemented in 'tcValBinds', but it crucially
@@ -978,18 +978,23 @@ rnMatch' :: Outputable (body RdrName) => HsMatchContext Name
          -> (Located (body RdrName) -> RnM (Located (body Name), FreeVars))
          -> Match RdrName (Located (body RdrName))
          -> RnM (Match Name (Located (body Name)), FreeVars)
-rnMatch' ctxt rnBody match@(Match _mf pats maybe_rhs_sig grhss)
+rnMatch' ctxt rnBody match@(Match { m_fun_id_infix = mf, m_pats = pats
+                                  , m_type = maybe_rhs_sig, m_grhss = grhss })
   = do  {       -- Result type signatures are no longer supported
           case maybe_rhs_sig of
                 Nothing -> return ()
                 Just (L loc ty) -> addErrAt loc (resSigErr ctxt match ty)
 
                -- Now the main event
-               -- note that there are no local ficity decls for matches
+               -- Note that there are no local fixity decls for matches
         ; rnPats ctxt pats      $ \ pats' -> do
         { (grhss', grhss_fvs) <- rnGRHSs ctxt rnBody grhss
-
-        ; return (Match Nothing pats' Nothing grhss', grhss_fvs) }}
+        ; let mf' = case (ctxt,mf) of
+                      (FunRhs funid isinfix,Just (L lf _,_))
+                                                    -> Just (L lf funid,isinfix)
+                      _                             -> Nothing
+        ; return (Match { m_fun_id_infix = mf', m_pats = pats'
+                        , m_type = Nothing, m_grhss = grhss'}, grhss_fvs ) }}
 
 emptyCaseErr :: HsMatchContext Name -> SDoc
 emptyCaseErr ctxt = hang (ptext (sLit "Empty list of alternatives in") <+> pp_ctxt)

@@ -301,26 +301,26 @@ tcValBinds :: TopLevelFlag
 
 tcValBinds top_lvl binds sigs thing_inside
   = do  {  -- Typecheck the signature
-        ; (poly_ids, sig_fn, nwc_tvs) <- tcExtendKindEnv2 patsyn_placeholder_kinds $
+        ; (poly_ids, sig_fn) <- tcExtendKindEnv2 patsyn_placeholder_kinds $
                                          -- See Note [Placeholder PatSyn kinds]
-                                         tcTySigs sigs
+                                tcTySigs sigs
 
         ; let prag_fn = mkPragFun sigs (foldr (unionBags . snd) emptyBag binds)
 
-                -- Extend the envt right away with all
-                -- the Ids declared with type signatures
-                -- Use tcExtendIdEnv3 to avoid extending the TcIdBinder stack
-        ; tcExtendIdEnv3 [(idName id, id) | id <- poly_ids] (mkVarSet nwc_tvs) $ do
+                -- Extend the envt right away with all the Ids
+                -- declared with complete type signatures
+                -- Do not extend the TcIdBinderStack; instead
+                -- we extend it on a per-rhs basis in tcExtendForRhs
+        ; tcExtendLetEnvIds top_lvl [(idName id, id) | id <- poly_ids] $ do
             { (binds', (extra_binds', thing)) <- tcBindGroups top_lvl sig_fn prag_fn binds $ do
                    { thing <- thing_inside
-                     -- See Note [Pattern synonym wrappers don't yield dependencies]
-                   ; patsyn_workers <- mapM tcPatSynBuilderBind patsyns
-                   ; let extra_binds = [ (NonRecursive, worker) | worker <- patsyn_workers ]
+                     -- See Note [Pattern synonym builders don't yield dependencies]
+                   ; patsyn_builders <- mapM tcPatSynBuilderBind patsyns
+                   ; let extra_binds = [ (NonRecursive, builder) | builder <- patsyn_builders ]
                    ; return (extra_binds, thing) }
              ; return (binds' ++ extra_binds', thing) }}
   where
-    patsyns
-      = [psb | (_, lbinds) <- binds, L _ (PatSynBind psb) <- bagToList lbinds]
+    patsyns = [psb | (_, lbinds) <- binds, L _ (PatSynBind psb) <- bagToList lbinds]
     patsyn_placeholder_kinds -- See Note [Placeholder PatSyn kinds]
       = [(name, placeholder_patsyn_tything)| PSB{ psb_id = L _ name } <- patsyns ]
     placeholder_patsyn_tything
@@ -386,8 +386,8 @@ tc_group top_lvl sig_fn prag_fn (Recursive, binds) thing_inside
     sccs = stronglyConnCompFromEdgedVertices (mkEdges sig_fn binds)
 
     go :: [SCC (LHsBind Name)] -> TcM (LHsBinds TcId, thing)
-    go (scc:sccs) = do  { (binds1, ids1, closed) <- tc_scc scc
-                        ; (binds2, thing) <- tcExtendLetEnv top_lvl closed ids1 $
+    go (scc:sccs) = do  { (binds1, ids1) <- tc_scc scc
+                        ; (binds2, thing) <- tcExtendLetEnv top_lvl ids1 $
                                              go sccs
                         ; return (binds1 `unionBags` binds2, thing) }
     go []         = do  { thing <- thing_inside; return (emptyBag, thing) }
@@ -424,10 +424,10 @@ tc_single _top_lvl sig_fn _prag_fn (L _ (PatSynBind psb@PSB{ psb_id = L _ name }
         Just                  _  -> panic "tc_single"
 
 tc_single top_lvl sig_fn prag_fn lbind thing_inside
-  = do { (binds1, ids, closed) <- tcPolyBinds top_lvl sig_fn prag_fn
-                                    NonRecursive NonRecursive
-                                    [lbind]
-       ; thing <- tcExtendLetEnv top_lvl closed ids thing_inside
+  = do { (binds1, ids) <- tcPolyBinds top_lvl sig_fn prag_fn
+                                      NonRecursive NonRecursive
+                                      [lbind]
+       ; thing <- tcExtendLetEnv top_lvl ids thing_inside
        ; return (binds1, thing) }
 
 -- | No signature or a partial signature
@@ -461,7 +461,7 @@ tcPolyBinds :: TopLevelFlag -> TcSigFun -> PragFun
             -> RecFlag         -- Whether it's recursive after breaking
                                -- dependencies based on type signatures
             -> [LHsBind Name]  -- None are PatSynBind
-            -> TcM (LHsBinds TcId, [TcId], TopLevelFlag)
+            -> TcM (LHsBinds TcId, [TcId])
 
 -- Typechecks a single bunch of values bindings all together,
 -- and generalises them.  The bunch may be only part of a recursive
@@ -486,10 +486,10 @@ tcPolyBinds top_lvl sig_fn prag_fn rec_group rec_tc bind_list
     ; let plan = decideGeneralisationPlan dflags type_env
                          binder_names bind_list sig_fn
     ; traceTc "Generalisation plan" (ppr plan)
-    ; result@(tc_binds, poly_ids, _) <- case plan of
-         NoGen               -> tcPolyNoGen rec_tc prag_fn sig_fn bind_list
-         InferGen mn cl      -> tcPolyInfer rec_tc prag_fn sig_fn mn cl bind_list
-         CheckGen lbind sig  -> tcPolyCheck rec_tc prag_fn sig lbind
+    ; result@(tc_binds, poly_ids) <- case plan of
+         NoGen              -> tcPolyNoGen rec_tc prag_fn sig_fn bind_list
+         InferGen mn        -> tcPolyInfer rec_tc prag_fn sig_fn mn bind_list
+         CheckGen lbind sig -> tcPolyCheck rec_tc prag_fn sig lbind
 
         -- Check whether strict bindings are ok
         -- These must be non-recursive etc, and are not generalised
@@ -513,14 +513,14 @@ tcPolyNoGen     -- No generalisation whatsoever
                    -- dependencies based on type signatures
   -> PragFun -> TcSigFun
   -> [LHsBind Name]
-  -> TcM (LHsBinds TcId, [TcId], TopLevelFlag)
+  -> TcM (LHsBinds TcId, [TcId])
 
 tcPolyNoGen rec_tc prag_fn tc_sig_fn bind_list
   = do { (binds', mono_infos) <- tcMonoBinds rec_tc tc_sig_fn
                                              (LetGblBndr prag_fn)
                                              bind_list
        ; mono_ids' <- mapM tc_mono_info mono_infos
-       ; return (binds', mono_ids', NotTopLevel) }
+       ; return (binds', mono_ids') }
   where
     tc_mono_info (name, _, mono_id)
       = do { mono_ty' <- zonkTcType (idType mono_id)
@@ -539,21 +539,22 @@ tcPolyCheck :: RecFlag       -- Whether it's recursive after breaking
             -> PragFun
             -> TcSigInfo
             -> LHsBind Name
-            -> TcM (LHsBinds TcId, [TcId], TopLevelFlag)
+            -> TcM (LHsBinds TcId, [TcId])
 -- There is just one binding,
 --   it binds a single variable,
---   it has a signature,
+--   it has a complete type signature,
 tcPolyCheck rec_tc prag_fn
-            sig@(TcSigInfo { sig_id = poly_id, sig_tvs = tvs_w_scoped
+            sig@(TcSigInfo { sig_name = name, sig_poly_id = Just poly_id
+                           , sig_tvs = tvs_w_scoped
                            , sig_nwcs = sig_nwcs, sig_theta = theta
                            , sig_tau = tau, sig_loc = loc
                            , sig_warn_redundant = warn_redundant })
             bind
   = ASSERT( null sig_nwcs ) -- We should be in tcPolyInfer if there are wildcards
     do { ev_vars <- newEvVars theta
-       ; let ctxt      = FunSigCtxt (idName poly_id) warn_redundant
+       ; let ctxt      = FunSigCtxt name warn_redundant
              skol_info = SigSkol ctxt (mkPhiTy theta tau)
-             prag_sigs = prag_fn (idName poly_id)
+             prag_sigs = prag_fn name
              tvs = map snd tvs_w_scoped
        ; (ev_binds, (binds', [mono_info]))
             <- setSrcSpan loc $
@@ -572,9 +573,7 @@ tcPolyCheck rec_tc prag_fn
                         { abs_tvs = tvs
                         , abs_ev_vars = ev_vars, abs_ev_binds = [ev_binds]
                         , abs_exports = [export], abs_binds = binds' }
-             closed | isEmptyVarSet (tyVarsOfType (idType poly_id)) = TopLevel
-                    | otherwise                                     = NotTopLevel
-       ; return (unitBag abs_bind, [poly_id], closed) }
+       ; return (unitBag abs_bind, [poly_id]) }
 
 tcPolyCheck _rec_tc _prag_fn sig _bind
   = pprPanic "tcPolyCheck" (ppr sig)
@@ -585,35 +584,31 @@ tcPolyInfer
                    -- dependencies based on type signatures
   -> PragFun -> TcSigFun
   -> Bool         -- True <=> apply the monomorphism restriction
-  -> Bool         -- True <=> free vars have closed types
   -> [LHsBind Name]
-  -> TcM (LHsBinds TcId, [TcId], TopLevelFlag)
-tcPolyInfer rec_tc prag_fn tc_sig_fn mono closed bind_list
+  -> TcM (LHsBinds TcId, [TcId])
+tcPolyInfer rec_tc prag_fn tc_sig_fn mono bind_list
   = do { ((binds', mono_infos), tclvl, wanted)
              <- pushLevelAndCaptureConstraints  $
                 tcMonoBinds rec_tc tc_sig_fn LetLclBndr bind_list
 
        ; let name_taus = [(name, idType mono_id) | (name, _, mono_id) <- mono_infos]
        ; traceTc "simplifyInfer call" (ppr name_taus $$ ppr wanted)
-       ; (qtvs, givens, mr_bites, ev_binds)
+       ; (qtvs, givens, _mr_bites, ev_binds)
                  <- simplifyInfer tclvl mono name_taus wanted
 
-       ; inferred_theta  <- zonkTcThetaType (map evVarPred givens)
-       ; exports <- checkNoErrs $ mapM (mkExport prag_fn qtvs inferred_theta)
-                                       mono_infos
+       ; let inferred_theta = map evVarPred givens
+       ; exports <- checkNoErrs $
+                    mapM (mkExport prag_fn qtvs inferred_theta) mono_infos
 
        ; loc <- getSrcSpanM
        ; let poly_ids = map abe_poly exports
-             final_closed | closed && not mr_bites = TopLevel
-                          | otherwise              = NotTopLevel
              abs_bind = L loc $
                         AbsBinds { abs_tvs = qtvs
                                  , abs_ev_vars = givens, abs_ev_binds = [ev_binds]
                                  , abs_exports = exports, abs_binds = binds' }
 
-       ; traceTc "Binding:" (ppr final_closed $$
-                             ppr (poly_ids `zip` map idType poly_ids))
-       ; return (unitBag abs_bind, poly_ids, final_closed) }
+       ; traceTc "Binding:" (ppr (poly_ids `zip` map idType poly_ids))
+       ; return (unitBag abs_bind, poly_ids) }
          -- poly_ids are guaranteed zonked by mkExport
 
 --------------
@@ -637,14 +632,15 @@ mkExport :: PragFun
 mkExport prag_fn qtvs inferred_theta (poly_name, mb_sig, mono_id)
   = do  { mono_ty <- zonkTcType (idType mono_id)
 
-        ; poly_id <- case mb_sig of
-              Nothing -> mkInferredPolyId poly_name qtvs inferred_theta mono_ty
-              Just (TcPatSynInfo _) -> panic "mkExport"
-              Just sig | isPartialSig sig
-                       -> do { final_theta <- completeTheta inferred_theta sig
-                             ; mkInferredPolyId poly_name qtvs final_theta mono_ty }
+        ; (poly_id, inferred) <- case mb_sig of
+              Nothing  -> do { poly_id <- mkInferredPolyId poly_name qtvs inferred_theta mono_ty
+                             ; return (poly_id, True) }
+              Just sig | Just poly_id <- completeSigPolyId_maybe sig
+                       -> return (poly_id, False)
                        | otherwise
-                       -> return (sig_id sig)
+                       -> do { final_theta <- completeTheta inferred_theta sig
+                             ; poly_id <- mkInferredPolyId poly_name qtvs final_theta mono_ty
+                             ; return (poly_id, True) }
 
         -- NB: poly_id has a zonked type
         ; poly_id <- addInlinePrags poly_id prag_sigs
@@ -670,9 +666,8 @@ mkExport prag_fn qtvs inferred_theta (poly_name, mb_sig, mono_id)
         ; return (ABE { abe_wrap = mkWpLet (EvBinds ev_binds) <.> wrap
                       , abe_poly = poly_id
                       , abe_mono = mono_id
-                      , abe_prags = SpecPrags spec_prags }) }
+                      , abe_prags = SpecPrags spec_prags}) }
   where
-    inferred = isNothing mb_sig
     prag_sigs = prag_fn poly_name
     sig_ctxt  = InfSigCtxt poly_name
 
@@ -724,8 +719,7 @@ completeTheta :: TcThetaType -> TcSigInfo -> TcM TcThetaType
 completeTheta _ (TcPatSynInfo _)
   = panic "Extra-constraints wildcard not supported in a pattern signature"
 completeTheta inferred_theta
-              sig@(TcSigInfo { sig_id = poly_id
-                             , sig_extra_cts = mb_extra_cts
+              sig@(TcSigInfo { sig_extra_cts = mb_extra_cts
                              , sig_theta = annotated_theta })
   | Just loc <- mb_extra_cts
   = do { annotated_theta <- zonkTcThetaType annotated_theta
@@ -752,7 +746,7 @@ completeTheta inferred_theta
                    2 (text "with inferred constraints:")
                       <+> pprTheta inferred_diff
               , if suppress_hint then empty else pts_hint
-              , typeSigCtxt (idName poly_id) sig ]
+              , typeSigCtxt sig ]
 
 {-
 Note [Partial type signatures and generalisation]
@@ -840,18 +834,17 @@ where F is a non-injective type function.
 -- If typechecking the binds fails, then return with each
 -- signature-less binder given type (forall a.a), to minimise
 -- subsequent error messages
-recoveryCode :: [Name] -> TcSigFun -> TcM (LHsBinds TcId, [Id], TopLevelFlag)
+recoveryCode :: [Name] -> TcSigFun -> TcM (LHsBinds TcId, [Id])
 recoveryCode binder_names sig_fn
   = do  { traceTc "tcBindsWithSigs: error recovery" (ppr binder_names)
-        ; poly_ids <- mapM mk_dummy binder_names
-        ; return (emptyBag, poly_ids, if all is_closed poly_ids
-                                      then TopLevel else NotTopLevel) }
+        ; let poly_ids = map mk_dummy binder_names
+        ; return (emptyBag, poly_ids) }
   where
     mk_dummy name
-        | isJust (sig_fn name) = tcLookupId name        -- Had signature; look it up
-        | otherwise            = return (mkLocalId name forall_a_a)    -- No signature
-
-    is_closed poly_id = isEmptyVarSet (tyVarsOfType (idType poly_id))
+      | Just (TcSigInfo { sig_poly_id = Just poly_id }) <- sig_fn name
+      = poly_id
+      | otherwise
+      = mkLocalId name forall_a_a
 
 forall_a_a :: TcType
 forall_a_a = mkForAllTy openAlphaTyVar (mkTyVarTy openAlphaTyVar)
@@ -1309,7 +1302,7 @@ tcMonoBinds _ sig_fn no_gen binds
 
         ; traceTc "tcMonoBinds" $ vcat [ ppr n <+> ppr id <+> ppr (idType id)
                                        | (n,id) <- rhs_id_env]
-        ; binds' <- tcExtendIdEnv2 rhs_id_env $
+        ; binds' <- tcExtendLetEnvIds NotTopLevel rhs_id_env $
                     mapM (wrapLocM tcRhs) tc_binds
         ; return (listToBag binds', mono_info) }
 
@@ -1341,14 +1334,14 @@ tcLhs :: TcSigFun -> LetBndrSpec -> HsBind Name -> TcM TcMonoBind
 tcLhs sig_fn no_gen (FunBind { fun_id = L nm_loc name, fun_infix = inf, fun_matches = matches })
   | Just sig <- sig_fn name
   = ASSERT2( case no_gen of { LetLclBndr -> True; LetGblBndr {} -> False }
-           , ppr name )  
+           , ppr name )
        -- { f :: ty; f x = e } is always done via CheckGen (full signature)
        --                                      or InferGen (partial signature)
        --               see Note [Partial type signatures and generalisation]
        -- Both InferGen and CheckGen gives rise to LetLclBndr
     do  { mono_name <- newLocalName name
         ; let mono_id = mkLocalId mono_name (sig_tau sig)
-        ; addErrCtxt (typeSigCtxt name sig) $
+        ; addErrCtxt (typeSigCtxt sig) $
           emitWildcardHoleConstraints (sig_nwcs sig)
         ; return (TcFunBind (name, Just sig, mono_id) nm_loc inf matches) }
 
@@ -1357,7 +1350,7 @@ tcLhs sig_fn no_gen (FunBind { fun_id = L nm_loc name, fun_infix = inf, fun_matc
         ; mono_id <- newNoSigLetBndr no_gen name mono_ty
         ; return (TcFunBind (name, Nothing, mono_id) nm_loc inf matches) }
 
--- TODOT: emit Hole Constraints for wildcards
+-- TODO: emit Hole Constraints for wildcards
 tcLhs sig_fn no_gen (PatBind { pat_lhs = pat, pat_rhs = grhss })
   = do  { let tc_pat exp_ty = tcLetPat sig_fn no_gen pat exp_ty $
                               mapM lookup_info (collectPatBinders pat)
@@ -1378,14 +1371,9 @@ tcLhs _ _ other_bind = pprPanic "tcLhs" (ppr other_bind)
 
 -------------------
 tcRhs :: TcMonoBind -> TcM (HsBind TcId)
--- When we are doing pattern bindings, or multiple function bindings at a time
--- we *don't* bring any scoped type variables into scope
--- Wny not?  They are not completely rigid.
--- That's why we have the special case for a single FunBind in tcMonoBinds
-tcRhs (TcFunBind (_, mb_sig, mono_id) loc inf matches)
-  = tcExtendIdBndrs [TcIdBndr mono_id NotTopLevel] $
-    tcExtendTyVarEnv2 tvsAndNwcs $
-            -- NotTopLevel: it's a monomorphic binding
+tcRhs (TcFunBind info@(_, mb_sig, mono_id) loc inf matches)
+  = tcExtendForRhs [info]                           $
+    tcExtendTyVarEnv2 (lexically_scoped_tvs mb_sig) $
     do  { traceTc "tcRhs: fun bind" (ppr mono_id $$ ppr (idType mono_id))
         ; (co_fn, matches') <- tcMatchesFun (idName mono_id) inf
                                             matches (idType mono_id)
@@ -1395,12 +1383,17 @@ tcRhs (TcFunBind (_, mb_sig, mono_id) loc inf matches)
                           , bind_fvs = placeHolderNamesTc
                           , fun_tick = [] }) }
     where
-      tvsAndNwcs = maybe [] (\sig -> [(n, tv) | (Just n, tv) <- sig_tvs sig]
-                                     ++ sig_nwcs sig) mb_sig
+      lexically_scoped_tvs :: Maybe TcSigInfo -> [(Name, TcTyVar)]
+      lexically_scoped_tvs (Just (TcSigInfo { sig_tvs = user_tvs, sig_nwcs = hole_tvs }))
+         = [(n, tv) | (Just n, tv) <- user_tvs] ++ hole_tvs
+      lexically_scoped_tvs _ = []
 
 tcRhs (TcPatBind infos pat' grhss pat_ty)
-  = tcExtendIdBndrs [ TcIdBndr mono_id NotTopLevel | (_,_,mono_id) <- infos ] $
-            -- NotTopLevel: it's a monomorphic binding
+  = -- When we are doing pattern bindings we *don't* bring any scoped
+    -- type variables into scope unlike function bindings
+    -- Wny not?  They are not completely rigid.
+    -- That's why we have the special case for a single FunBind in tcMonoBinds
+    tcExtendForRhs infos        $
     do  { traceTc "tcRhs: pat bind" (ppr pat' $$ ppr pat_ty)
         ; grhss' <- addErrCtxt (patMonoBindsCtxt pat' grhss) $
                     tcGRHSsPat grhss pat_ty
@@ -1408,6 +1401,21 @@ tcRhs (TcPatBind infos pat' grhss pat_ty)
                           , bind_fvs = placeHolderNamesTc
                           , pat_ticks = ([],[]) }) }
 
+tcExtendForRhs :: [MonoBindInfo] -> TcM a -> TcM a
+-- Extend the TcIdBinderStack for the RHS of the binding, with
+-- the monomorphic Id.  That way, if we have, say
+--     f = \x -> blah
+-- and something goes wrong in 'blah', we get a "relevant binding"
+-- looking like  f :: alpha -> beta
+-- This applies if 'f' has a type signature too:
+--    f :: forall a. [a] -> [a]
+--    f x = True
+-- We can't unify True with [a], and a relevant binding is f :: [a] -> [a]
+-- If we had the *polymorphic* version of f in the TcIdBinderStack, it
+-- would not be reported as relevant, because its type is closed
+tcExtendForRhs infos thing_inside
+  = tcExtendIdBndrs [TcIdBndr mono_id NotTopLevel | (_, _, mono_id) <- infos] thing_inside
+    -- NotTopLevel: it's a monomorphic binding
 
 ---------------------
 getMonoBindInfo :: [Located TcMonoBind] -> [MonoBindInfo]
@@ -1502,19 +1510,22 @@ is wrong (eg at the top level of the module),
 which is over-conservative
 -}
 
-tcTySigs :: [LSig Name] -> TcM ([TcId], TcSigFun, [TcTyVar])
+tcTySigs :: [LSig Name] -> TcM ([TcId], TcSigFun)
 tcTySigs hs_sigs
   = checkNoErrs $   -- See Note [Fail eagerly on bad signatures]
-    do { (ty_sigs_s, tyvarsl) <- unzip <$> mapAndRecoverM tcTySig hs_sigs
-       ; let ty_sigs = concat ty_sigs_s
-             poly_ids = [id | TcSigInfo{ sig_id = id } <- ty_sigs]
+    do { ty_sigs_s <- mapAndRecoverM tcTySig hs_sigs
+       ; let ty_sigs  = concat ty_sigs_s
+             poly_ids = mapMaybe completeSigPolyId_maybe ty_sigs
+                        -- The returned [TcId] are the ones for which we have
+                        -- a complete type signature.
+                        -- See Note [Complete and partial type signatures]
              env = mkNameEnv [(getName sig, sig) | sig <- ty_sigs]
-       ; return (poly_ids, lookupNameEnv env, concat tyvarsl) }
+       ; return (poly_ids, lookupNameEnv env) }
 
-tcTySig :: LSig Name -> TcM ([TcSigInfo], [TcTyVar])
+tcTySig :: LSig Name -> TcM [TcSigInfo]
 tcTySig (L _ (IdSig id))
   = do { sig <- instTcTySigFromId id
-       ; return ([sig], []) }
+       ; return [sig] }
 tcTySig (L loc (TypeSig names@(L _ name1 : _) hs_ty wcs))
   = setSrcSpan loc $
     pushTcLevelM_  $  -- When instantiating the signature, do so "one level in"
@@ -1524,9 +1535,8 @@ tcTySig (L loc (TypeSig names@(L _ name1 : _) hs_ty wcs))
 
        ; sigma_ty <- tcExtendTyVarEnv nwc_tvs $ tcHsSigType (FunSigCtxt name1 False) hs_ty
 
-       ; sigs <- mapM (instTcTySig hs_ty sigma_ty (extra_cts hs_ty) (zip wcs nwc_tvs))
-                      (map unLoc names)
-       ; return (sigs, nwc_tvs) }
+       ; mapM (instTcTySig hs_ty sigma_ty (extra_cts hs_ty) (zip wcs nwc_tvs))
+              (map unLoc names) }
   where
      extra_cts (L _ (HsForAllTy _ extra _ _ _)) = extra
      extra_cts _ = Nothing
@@ -1553,20 +1563,21 @@ tcTySig (L loc (PatSynSig (L _ name) (_, qtvs) prov req ty))
                           patsig_univ = univ_tvs,
                           patsig_prov = prov',
                           patsig_req = req' }
-       ; return ([TcPatSynInfo tpsi], []) }}
-tcTySig _ = return ([], [])
+       ; return [TcPatSynInfo tpsi] }}
+
+tcTySig _ = return []
 
 instTcTySigFromId :: Id -> TcM TcSigInfo
 instTcTySigFromId id
   = do { let loc = getSrcSpan id
        ; (tvs, theta, tau) <- tcInstType (tcInstSigTyVarsLoc loc)
                                          (idType id)
-       ; return (TcSigInfo { sig_id = id, sig_loc = loc
+       ; return (TcSigInfo { sig_name = idName id
+                           , sig_poly_id = Just id, sig_loc = loc
                            , sig_tvs = [(Nothing, tv) | tv <- tvs]
                            , sig_nwcs = []
                            , sig_theta = theta, sig_tau = tau
                            , sig_extra_cts = Nothing
-                           , sig_partial = False
                            , sig_warn_redundant = False
                                -- Do not report redundant constraints for
                                -- instance methods and record selectors
@@ -1580,13 +1591,16 @@ instTcTySig :: LHsType Name -> TcType    -- HsType and corresponding TcType
             -> TcM TcSigInfo
 instTcTySig hs_ty@(L loc _) sigma_ty extra_cts nwcs name
   = do { (inst_tvs, theta, tau) <- tcInstType tcInstSigTyVars sigma_ty
-       ; return (TcSigInfo { sig_id  = mkLocalId name sigma_ty
+       ; let mb_poly_id | isNothing extra_cts && null nwcs
+                        = Just $ mkLocalId name sigma_ty  -- non-partial
+                        | otherwise = Nothing  -- partial type signature
+       ; return (TcSigInfo { sig_name = name
+                           , sig_poly_id = mb_poly_id
                            , sig_loc = loc
                            , sig_tvs = findScopedTyVars hs_ty sigma_ty inst_tvs
                            , sig_nwcs = nwcs
                            , sig_theta = theta, sig_tau = tau
                            , sig_extra_cts = extra_cts
-                           , sig_partial = isJust extra_cts || not (null nwcs)
                            , sig_warn_redundant = True
                }) }
 
@@ -1596,8 +1610,6 @@ data GeneralisationPlan
 
   | InferGen            -- Implicit generalisation; there is an AbsBinds
        Bool             --   True <=> apply the MR; generalise only unconstrained type vars
-       Bool             --   True <=> bindings mention only variables with closed types
-                        --            See Note [Bindings with closed types] in TcRnTypes
 
   | CheckGen (LHsBind Name) TcSigInfo
                         -- One binding with a signature
@@ -1608,7 +1620,7 @@ data GeneralisationPlan
 
 instance Outputable GeneralisationPlan where
   ppr NoGen          = ptext (sLit "NoGen")
-  ppr (InferGen b c) = ptext (sLit "InferGen") <+> ppr b <+> ppr c
+  ppr (InferGen b)   = ptext (sLit "InferGen") <+> ppr b
   ppr (CheckGen _ s) = ptext (sLit "CheckGen") <+> ppr s
 
 decideGeneralisationPlan
@@ -1623,7 +1635,7 @@ decideGeneralisationPlan dflags type_env bndr_names lbinds sig_fn
   | mono_local_binds                          = NoGen
   | otherwise                                 = infer_plan
   where
-    infer_plan = InferGen mono_restriction closed_flag
+    infer_plan = InferGen mono_restriction
     bndr_set = mkNameSet bndr_names
     binds = map unLoc lbinds
 
@@ -1657,18 +1669,18 @@ decideGeneralisationPlan dflags type_env bndr_names lbinds sig_fn
         -- These won't be in the local type env.
         -- Ditto class method etc from the current module
 
-    closed_flag = foldr (is_closed_ns . bind_fvs) True binds
-
     mono_local_binds = xopt Opt_MonoLocalBinds dflags
                     && not closed_flag
+
+    closed_flag = foldr (is_closed_ns . bind_fvs) True binds
 
     no_sig n = noCompleteSig (sig_fn n)
 
     -- With OutsideIn, all nested bindings are monomorphic
     -- except a single function binding with a signature
-    one_funbind_with_sig 
+    one_funbind_with_sig
       | [lbind@(L _ (FunBind { fun_id = v }))] <- lbinds
-      , Just sig <- sig_fn (unLoc v) 
+      , Just sig <- sig_fn (unLoc v)
       = Just (lbind, sig)
       | otherwise
       = Nothing
@@ -1723,7 +1735,7 @@ checkStrictBinds top_lvl rec_group orig_binds tc_binds poly_ids
         ; checkTc (not any_pat_looks_lazy)
                   (unliftedMustBeBang orig_binds) }
   | otherwise
-  = traceTc "csb2" (ppr poly_ids) >>
+  = traceTc "csb2" (ppr [(id, idType id) | id <- poly_ids]) >>
     return ()
   where
     unlifted_bndrs     = any is_unlifted poly_ids
@@ -1773,12 +1785,12 @@ patMonoBindsCtxt :: (OutputableBndr id, Outputable body) => LPat id -> GRHSs Nam
 patMonoBindsCtxt pat grhss
   = hang (ptext (sLit "In a pattern binding:")) 2 (pprPatBind pat grhss)
 
-typeSigCtxt :: Name -> TcSigInfo -> SDoc
-typeSigCtxt _    (TcPatSynInfo _)
+typeSigCtxt :: TcSigInfo -> SDoc
+typeSigCtxt (TcPatSynInfo _)
   = panic "Should only be called with a TcSigInfo"
-typeSigCtxt name (TcSigInfo { sig_id = _id, sig_tvs = tvs
-                            , sig_theta = theta, sig_tau = tau
-                            , sig_extra_cts = extra_cts })
+typeSigCtxt (TcSigInfo { sig_name = name, sig_tvs = tvs
+                       , sig_theta = theta, sig_tau = tau
+                       , sig_extra_cts = extra_cts })
   = sep [ text "In" <+> pprUserTypeCtxt (FunSigCtxt name False) <> colon
         , nest 2 (pprSigmaTypeExtraCts (isJust extra_cts)
                   (mkSigmaTy (map snd tvs) theta tau)) ]

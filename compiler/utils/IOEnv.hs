@@ -38,7 +38,7 @@ import Module
 import Panic
 
 import Data.IORef       ( IORef, newIORef, readIORef, writeIORef, modifyIORef,
-                          atomicModifyIORef )
+                          atomicModifyIORef, atomicModifyIORef' )
 import Data.Typeable
 import System.IO.Unsafe ( unsafeInterleaveIO )
 import System.IO        ( fixIO )
@@ -102,7 +102,7 @@ instance ContainsModule env => HasModule (IOEnv env) where
                    return $ extractModule env
 
 ----------------------------------------------------------------------
--- Fundmantal combinators specific to the monad
+-- Fundamental combinators specific to the monad
 ----------------------------------------------------------------------
 
 
@@ -113,9 +113,9 @@ runIOEnv env (IOEnv m) = m env
 
 ---------------------------
 {-# NOINLINE fixM #-}
-  -- Aargh!  Not inlining fixTc alleviates a space leak problem.
-  -- Normally fixTc is used with a lazy tuple match: if the optimiser is
-  -- shown the definition of fixTc, it occasionally transforms the code
+  -- Aargh!  Not inlining fixM alleviates a space leak problem.
+  -- Normally fixM is used with a lazy tuple match: if the optimiser is
+  -- shown the definition of fixM, it occasionally transforms the code
   -- in such a way that the code generator doesn't spot the selector
   -- thunks.  Sigh.
 
@@ -194,10 +194,7 @@ atomicUpdMutVar var upd = liftIO (atomicModifyIORef var upd)
 
 -- | Strict variant of 'atomicUpdMutVar'.
 atomicUpdMutVar' :: IORef a -> (a -> (a, b)) -> IOEnv env b
-atomicUpdMutVar' var upd = do
-  r <- atomicUpdMutVar var upd
-  _ <- liftIO . evaluate =<< readMutVar var
-  return r
+atomicUpdMutVar' var upd = liftIO (atomicModifyIORef' var upd)
 
 ----------------------------------------------------------------------
 -- Accessing the environment
@@ -216,4 +213,3 @@ setEnv new_env (IOEnv m) = IOEnv (\ _ -> m new_env)
 updEnv :: (env -> env') -> IOEnv env' a -> IOEnv env a
 {-# INLINE updEnv #-}
 updEnv upd (IOEnv m) = IOEnv (\ env -> m (upd env))
-

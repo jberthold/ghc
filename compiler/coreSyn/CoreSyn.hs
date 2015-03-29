@@ -71,7 +71,7 @@ module CoreSyn (
         deAnnotate, deAnnotate', deAnnAlt, collectAnnBndrs,
 
         -- * Core rule data types
-        CoreRule(..),   -- CoreSubst, CoreTidy, CoreFVs, PprCore only
+        CoreRule(..), RuleBase,
         RuleName, RuleFun, IdUnfoldingFun, InScopeEnv,
 
         -- ** Operations on 'CoreRule's
@@ -91,6 +91,7 @@ import Var
 import Type
 import Coercion
 import Name
+import NameEnv( NameEnv )
 import Literal
 import DataCon
 import Module
@@ -242,7 +243,7 @@ These data types are the heart of the compiler
 -- *  A coercion
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data Expr b
   = Var   Id
   | Lit   Literal
@@ -265,13 +266,13 @@ type Arg b = Expr b
 -- The default alternative is @(DEFAULT, [], rhs)@
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 type Alt b = (AltCon, [b], Expr b)
 
 -- | A case alternative constructor (i.e. pattern match)
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data AltCon
   = DataAlt DataCon   --  ^ A plain data constructor: @case e of { Foo x -> ... }@.
                       -- Invariant: the 'DataCon' is always from a @data@ type, and never from a @newtype@
@@ -286,7 +287,7 @@ data AltCon
 -- | Binding, used for top level bindings in a module and local bindings in a @let@.
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data Bind b = NonRec b (Expr b)
             | Rec [(b, (Expr b))]
   deriving (Data, Typeable)
@@ -340,7 +341,7 @@ See #letrec_invariant#
 Note [CoreSyn let/app invariant]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The let/app invariant
-     the right hand side of of a non-recursive 'Let', and
+     the right hand side of a non-recursive 'Let', and
      the argument of an 'App',
     /may/ be of unlifted type, but only if
     the expression is ok-for-speculation.
@@ -378,25 +379,20 @@ See #type_let#
 
 Note [Empty case alternatives]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The alternatives of a case expression should be exhaustive.  A case expression
-can have empty alternatives if (and only if) the scrutinee is bound to raise
-an exception or diverge.  So:
-   Case (error Int "Hello") b Bool []
-is fine, and has type Bool.  This is one reason we need a type on
-the case expression: if the alternatives are empty we can't get the type
-from the alternatives!  I'll write this
-   case (error Int "Hello") of Bool {}
-with the return type just before the alternatives.
+The alternatives of a case expression should be exhaustive.
 
-Here's another example:
+A case expression can have empty alternatives if (and only if) the
+scrutinee is bound to raise an exception or diverge. When do we know
+this?  See Note [Bottoming expressions] in CoreUtils.
+
+The possiblity of empty alternatives is one reason we need a type on
+the case expression: if the alternatives are empty we can't get the
+type from the alternatives!
+
+In the case of empty types (see Note [Bottoming expressions]), say
   data T
-  f :: T -> Bool
-  f = \(x:t). case x of Bool {}
-Since T has no data constructors, the case alternatives are of course
-empty.  However note that 'x' is not bound to a visibly-bottom value;
-it's the *type* that tells us it's going to diverge.  Its a bit of a
-degnerate situation but we do NOT want to replace
-   case x of Bool {}   -->   error Bool "Inaccessible case"
+we do NOT want to replace
+   case (x::T) of Bool {}   -->   error Bool "Inaccessible case"
 because x might raise an exception, and *that*'s what we want to see!
 (Trac #6067 is an example.) To preserve semantics we'd have to say
    x `seq` error Bool "Inaccessible case"
@@ -435,7 +431,7 @@ unboxed type.
 -- | Allows attaching extra information to points in expressions
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data Tickish id =
     -- | An @{-# SCC #-}@ profiling annotation, either automatically
     -- added by the desugarer as a result of -auto-all, or added by
@@ -708,6 +704,11 @@ The CoreRule type and its friends are dealt with mainly in CoreRules,
 but CoreFVs, Subst, PprCore, CoreTidy also inspect the representation.
 -}
 
+-- | Gathers a collection of 'CoreRule's. Maps (the name of) an 'Id' to its rules
+type RuleBase = NameEnv [CoreRule]
+        -- The rules are unordered;
+        -- we sort out any overlaps on lookup
+
 -- | A 'CoreRule' is:
 --
 -- * \"Local\" if the function it is a rule for is defined in the
@@ -761,7 +762,7 @@ data CoreRule
                 -- arguments, it simply discards them; the returned 'CoreExpr'
                 -- is just the rewrite of 'ru_fn' applied to the first 'ru_nargs' args
     }
-                -- See Note [Extra args in rule matching] in Rules.lhs
+                -- See Note [Extra args in rule matching] in Rules.hs
 
 type RuleFun = DynFlags -> InScopeEnv -> Id -> [CoreExpr] -> Maybe CoreExpr
 type InScopeEnv = (InScopeSet, IdUnfoldingFun)
@@ -918,7 +919,7 @@ data UnfoldingSource
 
   | InlineCompulsory   -- Something that *has* no binding, so you *must* inline it
                        -- Only a few primop-like things have this property
-                       -- (see MkId.lhs, calls to mkCompulsoryUnfolding).
+                       -- (see MkId.hs, calls to mkCompulsoryUnfolding).
                        -- Inline absolutely always, however boring the context.
 
 
@@ -1097,7 +1098,7 @@ isExpandableUnfolding _                                              = False
 
 expandUnfolding_maybe :: Unfolding -> Maybe CoreExpr
 -- Expand an expandable unfolding; this is used in rule matching
---   See Note [Expanding variables] in Rules.lhs
+--   See Note [Expanding variables] in Rules.hs
 -- The key point here is that CONLIKE things can be expanded
 expandUnfolding_maybe (CoreUnfolding { uf_expandable = True, uf_tmpl = rhs }) = Just rhs
 expandUnfolding_maybe _                                                       = Nothing
@@ -1253,7 +1254,7 @@ a list of CoreBind
 -}
 
 -- If you edit this type, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 type CoreProgram = [CoreBind]   -- See Note [CoreProgram]
 
 -- | The common case for the type of binders and variables when
@@ -1442,7 +1443,7 @@ varsToCoreExprs vs = map varToCoreExpr vs
 -- | Extract every variable by this group
 bindersOf  :: Bind b -> [b]
 -- If you edit this function, you may need to update the GHC formalism
--- See Note [GHC Formalism] in coreSyn/CoreLint.lhs
+-- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 bindersOf (NonRec binder _) = [binder]
 bindersOf (Rec pairs)       = [binder | (binder, _) <- pairs]
 

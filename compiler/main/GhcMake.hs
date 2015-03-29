@@ -427,14 +427,22 @@ guessOutputFile = modifySession $ \env ->
             ml_hs_file (ms_location ms)
         name = fmap dropExtension mainModuleSrcPath
 
+        name_exe = do
 #if defined(mingw32_HOST_OS)
-        -- we must add the .exe extention unconditionally here, otherwise
-        -- when name has an extension of its own, the .exe extension will
-        -- not be added by DriverPipeline.exeFileName.  See #2248
-        name_exe = fmap (<.> "exe") name
+          -- we must add the .exe extention unconditionally here, otherwise
+          -- when name has an extension of its own, the .exe extension will
+          -- not be added by DriverPipeline.exeFileName.  See #2248
+          name' <- fmap (<.> "exe") name
 #else
-        name_exe = name
+          name' <- name
 #endif
+          mainModuleSrcPath' <- mainModuleSrcPath
+          -- #9930: don't clobber input files (unless they ask for it)
+          if name' == mainModuleSrcPath'
+            then throwGhcException . UsageError $
+                 "default output name would overwrite the input file; " ++
+                 "must specify -o explicitly"
+            else Just name'
     in
     case outputFile dflags of
         Just _ -> env
@@ -853,7 +861,7 @@ parUpsweep n_jobs old_hpt stable_mods cleanup sccs = do
   where
     writeLogQueue :: LogQueue -> Maybe (Severity,SrcSpan,PprStyle,MsgDoc) -> IO ()
     writeLogQueue (LogQueue ref sem) msg = do
-        atomicModifyIORef ref $ \msgs -> (msg:msgs,())
+        atomicModifyIORef' ref $ \msgs -> (msg:msgs,())
         _ <- tryPutMVar sem ()
         return ()
 
@@ -869,7 +877,7 @@ parUpsweep n_jobs old_hpt stable_mods cleanup sccs = do
     printLogs !dflags (LogQueue ref sem) = read_msgs
       where read_msgs = do
                 takeMVar sem
-                msgs <- atomicModifyIORef ref $ \xs -> ([], reverse xs)
+                msgs <- atomicModifyIORef' ref $ \xs -> ([], reverse xs)
                 print_loop msgs
 
             print_loop [] = read_msgs
@@ -1021,7 +1029,7 @@ parUpsweep_one mod home_mod_map comp_graph_loops lcl_dflags cleanup par_sem
 
                 -- Prune the old HPT unless this is an hs-boot module.
                 unless (isBootSummary mod) $
-                    atomicModifyIORef old_hpt_var $ \old_hpt ->
+                    atomicModifyIORef' old_hpt_var $ \old_hpt ->
                         (delFromUFM old_hpt this_mod, ())
 
                 -- Update and fetch the global HscEnv.

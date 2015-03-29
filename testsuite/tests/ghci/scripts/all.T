@@ -204,5 +204,6 @@ test('T9878',
     ghci_script, ['T9878.script'])
 test('T9878b',
     [ extra_run_opts('-fobject-code'),
-      extra_clean(['T9878.hi','T9878.o'])],
+      extra_clean(['T9878b.hi','T9878b.o'])],
     ghci_script, ['T9878b.script'])
+test('T10122', normal, ghci_script, ['T10122.script'])

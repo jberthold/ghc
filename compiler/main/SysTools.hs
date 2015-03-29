@@ -469,13 +469,14 @@ askCc dflags args = do
       args2 = args0 ++ args1 ++ args
   mb_env <- getGccEnv args2
   runSomethingWith dflags "gcc" p args2 $ \real_args ->
-    readCreateProcess (proc p real_args){ env = mb_env }
+    readCreateProcessWithExitCode' (proc p real_args){ env = mb_env }
 
--- Version of System.Process.readProcessWithExitCode that takes an environment
-readCreateProcess
+-- Similar to System.Process.readCreateProcessWithExitCode, but stderr is
+-- inherited from the parent process, and output to stderr is not captured.
+readCreateProcessWithExitCode'
     :: CreateProcess
     -> IO (ExitCode, String)    -- ^ stdout
-readCreateProcess proc = do
+readCreateProcessWithExitCode' proc = do
     (_, Just outh, _, pid) <-
         createProcess proc{ std_out = CreatePipe }
 
@@ -689,7 +690,7 @@ in terror).
 
 {- Note [Run-time linker info]
 
-See also: Trac #5240, Trac #6063
+See also: Trac #5240, Trac #6063, Trac #10110
 
 Before 'runLink', we need to be sure to get the relevant information
 about the linker we're using at runtime to see if we need any extra
@@ -715,6 +716,13 @@ Other notes:
 We cache the LinkerInfo inside DynFlags, since clients may link
 multiple times. The definition of LinkerInfo is there to avoid a
 circular dependency.
+
+Some distributions change the link editor's default handling of
+ELF DT_NEEDED tags to include only those shared objects that are
+needed to resolve undefined symbols. For Template Haskell we need
+the last temporary shared library also if it is not needed for the
+currently linked temporary shared library. We specify --no-as-needed
+to override the default. This flag exists in GNU ld and GNU gold.
 
 -}
 
@@ -752,12 +760,14 @@ getLinkerInfo' dflags = do
         | any ("GNU ld" `isPrefixOf`) stdo =
           -- GNU ld specifically needs to use less memory. This especially
           -- hurts on small object files. Trac #5240.
+          -- Set DT_NEEDED for all shared libraries. Trac #10110.
           return (GnuLD $ map Option ["-Wl,--hash-size=31",
-                                      "-Wl,--reduce-memory-overheads"])
+                                      "-Wl,--reduce-memory-overheads",
+                                      "-Wl,--no-as-needed"])
 
         | any ("GNU gold" `isPrefixOf`) stdo =
-          -- GNU gold does not require any special arguments.
-          return (GnuGold [])
+          -- GNU gold only needs --no-as-needed. Trac #10110.
+          return (GnuGold [Option "-Wl,--no-as-needed"])
 
          -- Unknown linker.
         | otherwise = fail "invalid --version output, or linker is unsupported"
@@ -874,7 +884,7 @@ runLink dflags args = do
   linkargs <- neededLinkArgs `fmap` getLinkerInfo dflags
   let (p,args0) = pgm_l dflags
       args1     = map Option (getOpts dflags opt_l)
-      args2     = args0 ++ args1 ++ args ++ linkargs
+      args2     = args0 ++ linkargs ++ args1 ++ args
   mb_env <- getGccEnv args2
   runSomethingFiltered dflags ld_filter "Linker" p args2 mb_env
   where
@@ -1034,7 +1044,7 @@ cleanTempDirs dflags
    = unless (gopt Opt_KeepTmpFiles dflags)
    $ mask_
    $ do let ref = dirsToClean dflags
-        ds <- atomicModifyIORef ref $ \ds -> (Map.empty, ds)
+        ds <- atomicModifyIORef' ref $ \ds -> (Map.empty, ds)
         removeTmpDirs dflags (Map.elems ds)
 
 cleanTempFiles :: DynFlags -> IO ()
@@ -1042,7 +1052,7 @@ cleanTempFiles dflags
    = unless (gopt Opt_KeepTmpFiles dflags)
    $ mask_
    $ do let ref = filesToClean dflags
-        fs <- atomicModifyIORef ref $ \fs -> ([],fs)
+        fs <- atomicModifyIORef' ref $ \fs -> ([],fs)
         removeTmpFiles dflags fs
 
 cleanTempFilesExcept :: DynFlags -> [FilePath] -> IO ()
@@ -1050,7 +1060,7 @@ cleanTempFilesExcept dflags dont_delete
    = unless (gopt Opt_KeepTmpFiles dflags)
    $ mask_
    $ do let ref = filesToClean dflags
-        to_delete <- atomicModifyIORef ref $ \files ->
+        to_delete <- atomicModifyIORef' ref $ \files ->
             let (to_keep,to_delete) = partition (`elem` dont_delete) files
             in  (to_keep,to_delete)
         removeTmpFiles dflags to_delete
@@ -1058,7 +1068,7 @@ cleanTempFilesExcept dflags dont_delete
 
 -- Return a unique numeric temp file suffix
 newTempSuffix :: DynFlags -> IO Int
-newTempSuffix dflags = atomicModifyIORef (nextTempSuffix dflags) $ \n -> (n+1,n)
+newTempSuffix dflags = atomicModifyIORef' (nextTempSuffix dflags) $ \n -> (n+1,n)
 
 -- Find a temporary name that doesn't already exist.
 newTempName :: DynFlags -> Suffix -> IO FilePath
@@ -1120,7 +1130,7 @@ getTempDir dflags = do
 
         -- 2. Update the dirsToClean mapping unless an entry already exists
         -- (i.e. unless another thread beat us to it).
-        their_dir <- atomicModifyIORef dir_ref $ \mapping ->
+        their_dir <- atomicModifyIORef' dir_ref $ \mapping ->
             case Map.lookup tmp_dir mapping of
                 Just dir -> (mapping, Just dir)
                 Nothing  -> (Map.insert tmp_dir our_dir mapping, Nothing)
@@ -1141,7 +1151,7 @@ getTempDir dflags = do
 addFilesToClean :: DynFlags -> [FilePath] -> IO ()
 -- May include wildcards [used by DriverPipeline.run_phase SplitMangle]
 addFilesToClean dflags new_files
-    = atomicModifyIORef (filesToClean dflags) $ \files -> (new_files++files, ())
+    = atomicModifyIORef' (filesToClean dflags) $ \files -> (new_files++files, ())
 
 removeTmpDirs :: DynFlags -> [FilePath] -> IO ()
 removeTmpDirs dflags ds

@@ -34,7 +34,7 @@ module TcType (
   MetaDetails(Flexi, Indirect), MetaInfo(..),
   isImmutableTyVar, isSkolemTyVar, isMetaTyVar,  isMetaTyVarTy, isTyVarTy,
   isSigTyVar, isOverlappableTyVar,  isTyConableTyVar,
-  isFskTyVar, isFmvTyVar, isFlattenTyVar,
+  isFskTyVar, isFmvTyVar, isFlattenTyVar, isReturnTyVar,
   isAmbiguousTyVar, metaTvRef, metaTyVarInfo,
   isFlexi, isIndirect, isRuntimeUnkSkol,
   isTypeVar, isKindVar,
@@ -80,7 +80,9 @@ module TcType (
 
   ---------------------------------
   -- Predicate types
-  mkMinimalBySCs, transSuperClasses, immSuperClasses,
+  mkMinimalBySCs, transSuperClasses, transSuperClassesPred, 
+  immSuperClasses,
+  isImprovementPred,
 
   -- * Finding type instances
   tcTyFamInsts,
@@ -256,8 +258,8 @@ A TcRhoType has no foralls or contexts at the top, or to the right of an arrow
 
 TyVarDetails gives extra info about type variables, used during type
 checking.  It's attached to mutable type variables only.
-It's knot-tied back to Var.lhs.  There is no reason in principle
-why Var.lhs shouldn't actually have the definition, but it "belongs" here.
+It's knot-tied back to Var.hs.  There is no reason in principle
+why Var.hs shouldn't actually have the definition, but it "belongs" here.
 
 Note [Signature skolems]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -686,7 +688,7 @@ isImmutableTyVar tv
 
 isTyConableTyVar, isSkolemTyVar, isOverlappableTyVar,
   isMetaTyVar, isAmbiguousTyVar,
-  isFmvTyVar, isFskTyVar, isFlattenTyVar :: TcTyVar -> Bool
+  isFmvTyVar, isFskTyVar, isFlattenTyVar, isReturnTyVar :: TcTyVar -> Bool
 
 isTyConableTyVar tv
         -- True of a meta-type variable that can be filled in
@@ -735,6 +737,12 @@ isMetaTyVar tv
     case tcTyVarDetails tv of
         MetaTv {} -> True
         _         -> False
+
+isReturnTyVar tv
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
+      MetaTv { mtv_info = ReturnTv } -> True
+      _                              -> False
 
 -- isAmbiguousTyVar is used only when reporting type errors
 -- It picks out variables that are unbound, namely meta
@@ -1340,20 +1348,31 @@ mkMinimalBySCs ptys = [ ploc |  ploc <- ptys
 transSuperClasses :: Class -> [Type] -> [PredType]
 transSuperClasses cls tys    -- Superclasses of (cls tys),
                              -- excluding (cls tys) itself
-  = concatMap trans_sc (immSuperClasses cls tys)
-  where
-    trans_sc :: PredType -> [PredType]
-    -- (trans_sc p) returns (p : p's superclasses)
-    trans_sc p = case classifyPredType p of
-                   ClassPred cls tys -> p : transSuperClasses cls tys
-                   TuplePred ps      -> concatMap trans_sc ps
-                   _                 -> [p]
+  = concatMap transSuperClassesPred (immSuperClasses cls tys)
+
+transSuperClassesPred :: PredType -> [PredType]
+-- (transSuperClassesPred p) returns (p : p's superclasses)
+transSuperClassesPred p 
+  = case classifyPredType p of
+      ClassPred cls tys -> p : transSuperClasses cls tys
+      TuplePred ps      -> concatMap transSuperClassesPred ps
+      _                 -> [p]
 
 immSuperClasses :: Class -> [Type] -> [PredType]
 immSuperClasses cls tys
   = substTheta (zipTopTvSubst tyvars tys) sc_theta
   where
     (tyvars,sc_theta,_,_) = classBigSig cls
+
+isImprovementPred :: PredType -> Bool
+-- Either it's an equality, or has some functional dependency
+isImprovementPred ty 
+  = case classifyPredType ty of
+      EqPred NomEq t1 t2 -> not (t1 `tcEqType` t2)
+      EqPred ReprEq _ _  -> False
+      ClassPred cls _    -> classHasFds cls
+      TuplePred ts       -> any isImprovementPred ts
+      IrredPred {}       -> True -- Might have equalities after reduction?
 
 {-
 ************************************************************************

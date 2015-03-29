@@ -822,10 +822,7 @@ tcExpr (PArrSeq _ _) _
 ************************************************************************
 -}
 
-tcExpr (HsSpliceE is_ty splice)  res_ty
-  = ASSERT( is_ty )   -- Untyped splices are expanded by the renamer
-   tcSpliceExpr splice res_ty
-
+tcExpr (HsSpliceE splice)        res_ty = tcSpliceExpr splice res_ty
 tcExpr (HsBracket brack)         res_ty = tcTypedBracket   brack res_ty
 tcExpr (HsRnBracketOut brack ps) res_ty = tcUntypedBracket brack ps res_ty
 
@@ -1215,7 +1212,7 @@ tcTagToEnum loc fun_name arg res_ty
         ; let fun' = L loc (HsWrap (WpTyApp rep_ty) (HsVar fun))
               rep_ty = mkTyConApp rep_tc rep_args
 
-        ; return (mkHsWrapCoR (mkTcSymCo coi) $ HsApp fun' arg') }
+        ; return (mkHsWrapCoR (mkTcSymCo $ TcCoercion coi) $ HsApp fun' arg') }
                   -- coi is a Representational coercion
   where
     doc1 = vcat [ ptext (sLit "Specify the type by giving a type signature")
@@ -1293,7 +1290,7 @@ checkCrossStageLifting id (Brack _ (TcPending ps_var lie_var))
 
                    -- Update the pending splices
         ; ps <- readMutVar ps_var
-        ; let pending_splice = PendSplice (idName id) (nlHsApp (noLoc lift) (nlHsVar id))
+        ; let pending_splice = PendingTcSplice (idName id) (nlHsApp (noLoc lift) (nlHsVar id))
         ; writeMutVar ps_var (pending_splice : ps)
 
         ; return () }
@@ -1316,7 +1313,7 @@ for the Lift class in TH.Syntax, because that can lead to overlapping-instance
 errors in a polymorphic situation.
 
 If this check fails (which isn't impossible) we get another chance; see
-Note [Converting strings] in Convert.lhs
+Note [Converting strings] in Convert.hs
 
 Local record selectors
 ~~~~~~~~~~~~~~~~~~~~~~

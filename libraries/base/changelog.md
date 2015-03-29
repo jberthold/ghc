@@ -1,6 +1,36 @@
 # Changelog for [`base` package](http://hackage.haskell.org/package/base)
 
-## 4.8.0.0  *TBA*
+## 4.8.1.0  *TBA*
+
+  * Bundled with GHC 7.12.1
+
+  * `Alt`, `Dual`, `First`, `Last`, `Product`, and `Sum` now have `Data`,
+    `MonadZip`, and `MonadFix` instances
+
+  * `Maybe` now has a `MonadZip` instance
+
+  * `All` and `Any` now have `Data` instances
+
+  * `Dual`, `First`, `Last`, `Product`, and `Sum` now have `Foldable` and
+    `Traversable` instances
+
+  * `Dual`, `Product`, and `Sum` now have `Functor`, `Applicative`, and
+    `Monad` instances
+
+  * `(,) a` now has a `Monad` instance
+
+  * Redundant typeclass constraints have been removed:
+     - `Data.Ratio.{denominator,numerator}` have no `Integral` constraint anymore
+     - **TODO**
+
+  * New module `GHC.SrcLoc`
+
+  * New `GHC.Generics.packageName` operation
+
+  * New `GHC.Stack.CallStack` data type
+
+
+## 4.8.0.0  *Mar 2015*
 
   * Bundled with GHC 7.10.1
 
@@ -60,6 +90,10 @@
     and `Data.Foldable`/`Data.Traversable` no longer lead to conflicting
     definitions. (#9586)
 
+  * New (unofficial) module `GHC.OldList` containing only list-specialised
+    versions of the functions from `Data.List` (in other words, `GHC.OldList`
+    corresponds to `base-4.7.0.2`'s `Data.List`)
+
   * Replace the `Control.Monad`-exported functions
 
     ```
@@ -76,10 +110,6 @@
     `Applicative` and from `MonadPlus` to `Alternative` respectively.
 
   * Generalise `Control.Monad.{foldM,foldM_}` to `Foldable`
-
-  * `foldr2` (together with `zip` and `zipWith`) is made a bit stricter in the
-    second argument, so that the fusion RULES for it do not change the
-    semantics. (#9596)
 
   * `scanr`, `mapAccumL` and `filterM` now take part in list fusion (#9355,
     #9502, #9546)
@@ -139,6 +169,13 @@
   * Add `calloc` and `callocBytes` to `Foreign.Marshal.Alloc`. (#9859)
 
   * Add `callocArray` and `callocArray0` to `Foreign.Marshal.Array`. (#9859)
+
+  * Restore invariant in `Data (Ratio a)` instance (#10011)
+
+  * Add/expose `rnfTypeRep`, `rnfTyCon`, `typeRepFingerprint`, and
+    `tyConFingerprint` helpers to `Data.Typeable`.
+
+  * Define proper `MINIMAL` pragma for `class Ix`. (#10142)
 
 ## 4.7.0.2  *Dec 2014*
 

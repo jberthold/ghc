@@ -129,7 +129,7 @@ test('T3294',
              # 2014-04-24 19882188 (x86/Windows, 64bit machine)
              # 2014-12-22 26525384 (x86/Windows) Increase due to silent superclasses?
 
-           (wordsize(64), 40000000, 15)]),
+           (wordsize(64), 45000000, 20)]),
              # prev:           25753192 (amd64/Linux)
              # 29/08/2012:     37724352 (amd64/Linux)
              #  (increase due to new codegen, see #7198)
@@ -141,6 +141,8 @@ test('T3294',
              #  (reason for increase back to earlier value unknown)
              # 2014-07-14:     36670800  (amd64/Linux)
              #  (reason unknown, setting expected value somewhere in between)
+             # 2015-01-22:     45000000  (amd64/Linux)
+             #  varies between 40959592 and 52914488... increasing to +-20%
 
       compiler_stats_num_field('bytes allocated',
           [(wordsize(32), 1377050640, 5),
@@ -189,7 +191,7 @@ test('T4801',
 #            # 2014-10-13: 48 stricter seqDmdType
 
       compiler_stats_num_field('bytes allocated',
-          [(platform('x86_64-apple-darwin'), 464872776, 5),
+          [(platform('x86_64-apple-darwin'), 434058304, 5),
                            # expected value: 510938976 (amd64/OS X):
 
            (wordsize(32), 203962148, 10),
@@ -242,7 +244,7 @@ test('T3064',
             # 2013-11-13:     18 (x86/Windows, 64bit machine)
             # 2014-01-22:     23 (x86/Linux)
             # 2014-12-22:     23 (x86/Linux) death to silent superclasses
-           (wordsize(64), 27, 20)]),
+           (wordsize(64), 32, 20)]),
             # (amd64/Linux):            18
             # (amd64/Linux) 2012-02-07: 26
             # (amd64/Linux) 2013-02-12: 23; increased range to 10%
@@ -254,6 +256,7 @@ test('T3064',
             # (amd64/Linux) (09/09/2014): 42, AMP changes (larger interfaces, more loading)
             # (amd64/Linux) 2014-10-13: 38: Stricter seqDmdType
             # (amd64/Linux) 2014-12-22: 27: death to silent superclasses
+            # (amd64/Linux) 2015-01-22: 32: Varies from 30 to 34, at least here.
 
       compiler_stats_num_field('bytes allocated',
           [(wordsize(32), 122836340, 10),
@@ -326,7 +329,7 @@ test('T5030',
            # 2014-12-10:  227205560 constraint solver got worse again; more agressive solving
            #                        of family-applications leads to less sharing, I think
 
-           (wordsize(64), 449042120, 10)]),
+           (wordsize(64), 403932600, 10)]),
              # Previously 530000000 (+/- 10%)
              # 17/1/13:   602993184  (x86_64/Linux)
              #            (new demand analyser)
@@ -342,11 +345,12 @@ test('T5030',
              # 2014-12-08 340969128  constraint solver perf improvements (esp kick-out)
              # 2014-12-10 449042120  constraint solver got worse again; more agressive solving
              #                          of family-applications leads to less sharing, I think
+             # 2015-03-17 403932600  tweak to solver algorithm
 
        only_ways(['normal'])
       ],
      compile,
-     ['-fcontext-stack=300'])
+     ['-freduction-depth=300'])
 
 test('T5631',
      [compiler_stats_num_field('bytes allocated',
@@ -487,7 +491,7 @@ test('T5837',
              # 2014-12-01: 135914136 (Windows laptop, regression see below)
              # 2014-12-08  115905208  Constraint solver perf improvements (esp kick-out)
  
-           (wordsize(64), 231155640, 10)])
+           (wordsize(64), 53424304, 10)])
              # sample: 3926235424 (amd64/Linux, 15/2/2012)
              # 2012-10-02 81879216
              # 2012-09-20 87254264 amd64/Linux
@@ -501,8 +505,9 @@ test('T5837',
              # 2014-12-08 234790312 Constraint solver perf improvements (esp kick-out)
              # 2014-12-16 231155640 Mac  Flattener parameterized over roles;
              #                           some optimization
+             # 2015-03-17 53424304  Mac  Better depth checking; fails earlier
       ],
-      compile_fail,['-ftype-function-depth=50'])
+      compile_fail,['-freduction-depth=50'])
 
 test('T6048',
      [ only_ways(['optasm']),
@@ -575,7 +580,7 @@ test('T9872a',
           # 2014-12-10    5521332656    Initally created
           # 2014-12-16    5848657456    Flattener parameterized over roles
           # 2014-12-18    2680733672    Reduce type families even more eagerly
-           (wordsize(32), 1400000000, 5)
+           (wordsize(32), 1325592896, 5)
           ]),
       ],
      compile_fail,
@@ -608,11 +613,12 @@ test('T9872c',
 test('T9872d',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 687562440, 5),
+          [(wordsize(64), 726679784, 5),
           # 2014-12-18    796071864   Initally created
           # 2014-12-18    739189056   Reduce type families even more eagerly
           # 2015-01-07    687562440   TrieMap leaf compression
-           (wordsize(32), 353644844, 5)
+          # 2015-03-17    726679784   tweak to solver; probably flattens more
+           (wordsize(32), 328810212, 5)
           ]),
       ],
      compile,
@@ -621,8 +627,9 @@ test('T9872d',
 test('T9961',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 772510192, 5)
+          [(wordsize(64), 772510192, 5),
           # 2015-01-12    807117816   Initally created
+           (wordsize(32), 375647160, 5)
           ]),
       ],
      compile,

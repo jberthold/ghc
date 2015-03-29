@@ -19,7 +19,7 @@ module TcMType (
   newFlexiTyVar,
   newFlexiTyVarTy,              -- Kind -> TcM TcType
   newFlexiTyVarTys,             -- Int -> Kind -> TcM [TcType]
-  newReturnTyVar,
+  newReturnTyVar, newReturnTyVarTy,
   newMetaKindVar, newMetaKindVars,
   mkTcTyVarName, cloneMetaTyVar,
 
@@ -434,6 +434,9 @@ newFlexiTyVarTys n kind = mapM newFlexiTyVarTy (nOfThem n kind)
 newReturnTyVar :: Kind -> TcM TcTyVar
 newReturnTyVar kind = newMetaTyVar ReturnTv kind
 
+newReturnTyVarTy :: Kind -> TcM TcType
+newReturnTyVarTy kind = TyVarTy <$> newReturnTyVar kind
+
 tcInstTyVars :: [TKVar] -> TcM (TvSubst, [TcTyVar])
 -- Instantiate with META type variables
 -- Note that this works for a sequence of kind and type
@@ -583,7 +586,7 @@ skolemiseUnboundMetaTyVar tv details
         ; writeMetaTyVar tv (mkTyVarTy final_tv)
         ; return final_tv }
   where
-    -- If a wildcard type called _a is generalised, we rename it to tw_a
+    -- If a wildcard type called _a is generalised, we rename it to w_a
     generaliseWildcardVarName :: OccName -> OccName
     generaliseWildcardVarName name | startsWithUnderscore name
       = mkOccNameFS (occNameSpace name) (appendFS (fsLit "w") (occNameFS name))

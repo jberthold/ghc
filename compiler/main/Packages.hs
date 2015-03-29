@@ -13,6 +13,7 @@ module Packages (
         getPackageConfRefs,
         resolvePackageConfig,
         readPackageConfig,
+        listPackageConfigMap,
 
         -- * Querying the package config
         lookupPackage,
@@ -233,9 +234,10 @@ type ModuleToPkgConfAll =
 
 data PackageState = PackageState {
   -- | A mapping of 'PackageKey' to 'PackageConfig'.  This list is adjusted
-  -- so that only valid packages are here.  Currently, we also flip the
-  -- exposed/trusted bits based on package flags; however, the hope is to
-  -- stop doing that.
+  -- so that only valid packages are here.  'PackageConfig' reflects
+  -- what was stored *on disk*, except for the 'trusted' flag, which
+  -- is adjusted at runtime.  (In particular, some packages in this map
+  -- may have the 'exposed' flag be 'False'.)
   pkgIdMap              :: PackageConfigMap,
 
   -- | The packages we're going to link in eagerly.  This list
@@ -287,7 +289,9 @@ getPackageDetails dflags pid =
     expectJust "getPackageDetails" (lookupPackage dflags pid)
 
 -- | Get a list of entries from the package database.  NB: be careful with
--- this function, it may not do what you expect it to.
+-- this function, although all packages in this map are "visible", this
+-- does not imply that the exposed-modules of the package are available
+-- (they may have been thinned or renamed).
 listPackageConfigMap :: DynFlags -> [PackageConfig]
 listPackageConfigMap dflags = eltsUFM (pkgIdMap (pkgState dflags))
 
@@ -367,13 +371,15 @@ readPackageConfig dflags conf_file = do
 
   proto_pkg_configs <-
     if isdir
-       then do let filename = conf_file </> "package.cache"
-               debugTraceMsg dflags 2 (text "Using binary package database:" <+> text filename)
-               readPackageDbForGhc filename
+       then readDirStylePackageConfig conf_file
        else do
             isfile <- doesFileExist conf_file
             if isfile
-               then throwGhcExceptionIO $ InstallationError $
+               then do
+                 mpkgs <- tryReadOldFileStylePackageConfig
+                 case mpkgs of
+                   Just pkgs -> return pkgs
+                   Nothing   -> throwGhcExceptionIO $ InstallationError $
                       "ghc no longer supports single-file style package " ++
                       "databases (" ++ conf_file ++
                       ") use 'ghc-pkg init' to create the database with " ++
@@ -388,6 +394,31 @@ readPackageConfig dflags conf_file = do
       pkg_configs2 = setBatchPackageFlags dflags pkg_configs1
   --
   return pkg_configs2
+  where
+    readDirStylePackageConfig conf_dir = do
+      let filename = conf_dir </> "package.cache"
+      debugTraceMsg dflags 2 (text "Using binary package database:" <+> text filename)
+      readPackageDbForGhc filename
+
+    -- Single-file style package dbs have been deprecated for some time, but
+    -- it turns out that Cabal was using them in one place. So this is a
+    -- workaround to allow older Cabal versions to use this newer ghc.
+    -- We check if the file db contains just "[]" and if so, we look for a new
+    -- dir-style db in conf_file.d/, ie in a dir next to the given file.
+    -- We cannot just replace the file with a new dir style since Cabal still
+    -- assumes it's a file and tries to overwrite with 'writeFile'.
+    -- ghc-pkg also cooperates with this workaround.
+    tryReadOldFileStylePackageConfig = do
+      content <- readFile conf_file `catchIO` \_ -> return ""
+      if take 2 content == "[]"
+        then do
+          let conf_dir = conf_file <.> "d"
+          direxists <- doesDirectoryExist conf_dir
+          if direxists
+             then do debugTraceMsg dflags 2 (text "Ignoring old file-style db and trying:" <+> text conf_dir)
+                     liftM Just (readDirStylePackageConfig conf_dir)
+             else return (Just []) -- ghc-pkg will create it when it's updated
+        else return Nothing
 
 setBatchPackageFlags :: DynFlags -> [PackageConfig] -> [PackageConfig]
 setBatchPackageFlags dflags pkgs = maybeDistrustAll pkgs
@@ -472,10 +503,8 @@ applyPackageFlag dflags unusable (pkgs, vm) flag =
          Right (p:_,_) -> return (pkgs, vm')
           where
            n = fsPackageName p
-           vm' = addToUFM_C edit vm_cleared (packageConfigId p)
-                            (b, map convRn rns, n)
+           vm' = addToUFM_C edit vm_cleared (packageConfigId p) (b, rns, n)
            edit (b, rns, n) (b', rns', _) = (b || b', rns ++ rns', n)
-           convRn (a,b) = (mkModuleName a, mkModuleName b)
            -- ToDo: ATM, -hide-all-packages implicitly triggers change in
            -- behavior, maybe eventually make it toggleable with a separate
            -- flag
@@ -581,8 +610,8 @@ pprFlag flag = case flag of
         ppr_rns (ModRenaming b rns) =
             if b then text "with" else Outputable.empty <+>
             char '(' <> hsep (punctuate comma (map ppr_rn rns)) <> char ')'
-        ppr_rn (orig, new) | orig == new = text orig
-                           | otherwise = text orig <+> text "as" <+> text new
+        ppr_rn (orig, new) | orig == new = ppr orig
+                           | otherwise = ppr orig <+> text "as" <+> ppr new
 
 -- -----------------------------------------------------------------------------
 -- Wired-in packages
