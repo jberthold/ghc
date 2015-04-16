@@ -14,7 +14,7 @@ import TcCanonical
 import TcFlatten
 import VarSet
 import Type
-import Kind (isKind)
+import Kind (isKind, isConstraintKind)
 import Unify
 import InstEnv( DFunInstType, lookupInstEnv, instanceDFunId )
 import CoAxiom(sfInteractTop, sfInteractInert)
@@ -131,7 +131,7 @@ solveSimpleGivens loc givens
   | otherwise
   = go (map mk_given_ct givens)
   where
-    mk_given_ct ev_id = mkNonCanonical (CtGiven { ctev_evtm = EvId ev_id
+    mk_given_ct ev_id = mkNonCanonical (CtGiven { ctev_evar = ev_id
                                                 , ctev_pred = evVarPred ev_id
                                                 , ctev_loc  = loc })
     go givens = do { solveSimples (listToBag givens)
@@ -504,9 +504,7 @@ solveOneFromTheOther ev_i ev_w
      lvl_i = ctLocLevel loc_i
      lvl_w = ctLocLevel loc_w
 
-     has_binding binds ev
-       | EvId v <- ctEvTerm ev = isJust (lookupEvBind binds v)
-       | otherwise             = True
+     has_binding binds ev = isJust (lookupEvBind binds (ctEvId ev))
 
      use_replacement
        | isIPPred pred = lvl_w > lvl_i
@@ -806,8 +804,8 @@ lookupFlattenTyVar inert_eqs ftv
 reactFunEq :: CtEvidence -> TcTyVar    -- From this  :: F tys ~ fsk1
            -> CtEvidence -> TcTyVar    -- Solve this :: F tys ~ fsk2
            -> TcS ()
-reactFunEq from_this fsk1 (CtGiven { ctev_evtm = tm, ctev_loc = loc }) fsk2
-  = do { let fsk_eq_co = mkTcSymCo (evTermCoercion tm)
+reactFunEq from_this fsk1 (CtGiven { ctev_evar = evar, ctev_loc = loc }) fsk2
+  = do { let fsk_eq_co = mkTcSymCo (mkTcCoVarCo evar)
                          `mkTcTransCo` ctEvCoercion from_this
                          -- :: fsk2 ~ fsk1
              fsk_eq_pred = mkTcEqPred (mkTyVarTy fsk2) (mkTyVarTy fsk1)
@@ -1697,10 +1695,8 @@ matchClassInst _ clas [k,t] loc
 
 matchClassInst inerts clas tys loc
    = do { dflags <- getDynFlags
-        ; tclvl <- getTcLevel
         ; traceTcS "matchClassInst" $ vcat [ text "pred =" <+> ppr pred
-                                           , text "inerts=" <+> ppr inerts
-                                           , text "untouchables=" <+> ppr tclvl ]
+                                           , text "inerts=" <+> ppr inerts ]
         ; instEnvs <- getInstEnvs
         ; case lookupInstEnv instEnvs clas tys of
             ([], _, _)               -- Nothing matches
@@ -1710,11 +1706,11 @@ matchClassInst inerts clas tys loc
 
             ([(ispec, inst_tys)], [], _) -- A single match
                 | not (xopt Opt_IncoherentInstances dflags)
-                , given_overlap tclvl
+                , not (isEmptyBag unifiable_givens)
                 -> -- See Note [Instance and Given overlap]
                    do { traceTcS "Delaying instance application" $
-                          vcat [ text "Workitem=" <+> pprType (mkClassPred clas tys)
-                               , text "Relevant given dictionaries=" <+> ppr givens_for_this_clas ]
+                          vcat [ text "Work item=" <+> pprType (mkClassPred clas tys)
+                               , text "Relevant given dictionaries=" <+> ppr unifiable_givens ]
                       ; return NoInstance  }
 
                 | otherwise
@@ -1744,36 +1740,32 @@ matchClassInst inerts clas tys loc
             ; evc_vars <- mapM (newWantedEvVar loc) theta
             ; let new_ev_vars = freshGoals evc_vars
                       -- new_ev_vars are only the real new variables that can be emitted
-                  dfun_app = EvDFunApp dfun_id tys (map (ctEvTerm . fst) evc_vars)
+                  dfun_app = EvDFunApp dfun_id tys (map (ctEvId . fst) evc_vars)
             ; return $ GenInst new_ev_vars dfun_app }
 
-     givens_for_this_clas :: Cts
-     givens_for_this_clas
-         = filterBag isGivenCt (findDictsByClass (inert_dicts $ inert_cans inerts) clas)
+     unifiable_givens :: Cts
+     unifiable_givens = filterBag matchable $
+                        findDictsByClass (inert_dicts $ inert_cans inerts) clas
 
-     given_overlap :: TcLevel -> Bool
-     given_overlap tclvl = anyBag (matchable tclvl) givens_for_this_clas
-
-     matchable tclvl (CDictCan { cc_class = clas_g, cc_tyargs = sys
-                               , cc_ev = fl })
+     matchable (CDictCan { cc_class = clas_g, cc_tyargs = sys, cc_ev = fl })
        | isGiven fl
-       = ASSERT( clas_g == clas )
-         case tcUnifyTys (\tv -> if isTouchableMetaTyVar tclvl tv &&
-                                    tv `elemVarSet` tyVarsOfTypes tys
-                                 then BindMe else Skolem) tys sys of
-       -- We can't learn anything more about any variable at this point, so the only
-       -- cause of overlap can be by an instantiation of a touchable unification
-       -- variable. Hence we only bind touchable unification variables. In addition,
-       -- we use tcUnifyTys instead of tcMatchTys to rule out cyclic substitutions.
-            Nothing -> False
-            Just _  -> True
+       , Just {} <- tcUnifyTys bind_meta_tv tys sys
+       = ASSERT( clas_g == clas ) True
        | otherwise = False -- No overlap with a solved, already been taken care of
                            -- by the overlap check with the instance environment.
-     matchable _tys ct = pprPanic "Expecting dictionary!" (ppr ct)
+     matchable ct = pprPanic "Expecting dictionary!" (ppr ct)
 
-{-
-Note [Instance and Given overlap]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+     bind_meta_tv :: TcTyVar -> BindFlag
+     -- Any meta tyvar may be unified later, so we treat it as
+     -- bindable when unifying with givens. That ensures that we
+     -- conservatively assume that a meta tyvar might get unified with
+     -- something that matches the 'given', until demonstrated
+     -- otherwise.
+     bind_meta_tv tv | isMetaTyVar tv = BindMe
+                     | otherwise      = Skolem
+
+{- Note [Instance and Given overlap]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Example, from the OutsideIn(X) paper:
        instance P x => Q [x]
        instance (x ~ y) => R y [x]
@@ -1796,26 +1788,37 @@ The solution is that:
   instance only when there is no Given in the inerts which is
   unifiable to this particular dictionary.
 
-The end effect is that, much as we do for overlapping instances, we delay choosing a
-class instance if there is a possibility of another instance OR a given to match our
-constraint later on. This fixes bugs #4981 and #5002.
+  We treat any meta-tyvar as "unifiable" for this purpose,
+  *including* untouchable ones
 
-This is arguably not easy to appear in practice due to our aggressive prioritization
-of equality solving over other constraints, but it is possible. I've added a test case
-in typecheck/should-compile/GivenOverlapping.hs
+The end effect is that, much as we do for overlapping instances, we
+delay choosing a class instance if there is a possibility of another
+instance OR a given to match our constraint later on. This fixes
+Trac #4981 and #5002.
 
-We ignore the overlap problem if -XIncoherentInstances is in force: see
-Trac #6002 for a worked-out example where this makes a difference.
+Other notes:
 
-Moreover notice that our goals here are different than the goals of the top-level
-overlapping checks. There we are interested in validating the following principle:
+* This is arguably not easy to appear in practice due to our
+  aggressive prioritization of equality solving over other
+  constraints, but it is possible. I've added a test case in
+  typecheck/should-compile/GivenOverlapping.hs
 
-    If we inline a function f at a site where the same global instance environment
-    is available as the instance environment at the definition site of f then we
-    should get the same behaviour.
+* Another "live" example is Trac #10195
 
-But for the Given Overlap check our goal is just related to completeness of
-constraint solving.
+* We ignore the overlap problem if -XIncoherentInstances is in force:
+  see Trac #6002 for a worked-out example where this makes a
+  difference.
+
+* Moreover notice that our goals here are different than the goals of
+  the top-level overlapping checks. There we are interested in
+  validating the following principle:
+
+      If we inline a function f at a site where the same global
+      instance environment is available as the instance environment at
+      the definition site of f then we should get the same behaviour.
+
+  But for the Given Overlap check our goal is just related to completeness of
+  constraint solving.
 -}
 
 -- | Is the constraint for an implicit CallStack parameter?
@@ -1841,10 +1844,12 @@ isCallStackIP _ _ _
 
 
 -- | Assumes that we've checked that this is the 'Typeable' class,
--- and it was applied to the correc arugment.
+-- and it was applied to the correct argument.
 matchTypeableClass :: Class -> Kind -> Type -> CtLoc -> TcS LookupInstResult
 matchTypeableClass clas k t loc
-  | isForAllTy k                               = return NoInstance
+  | isForAllTy t                               = return NoInstance
+  | isConstraintKind k                         = return NoInstance
+      -- See Note [No Typeable for qualified types]
   | Just (tc, ks) <- splitTyConApp_maybe t
   , all isKind ks                              = doTyCon tc ks
   | Just (f,kt)       <- splitAppTy_maybe t    = doTyApp f kt
@@ -1892,3 +1897,36 @@ matchTypeableClass clas k t loc
 
   mkSimpEv ev = return (GenInst [] (EvTypeable ev))
 
+{- Note [No Typeable for polytype or for constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We do not support impredicative typeable, such as
+   Typeable (forall a. a->a)
+   Typeable (Eq a => a -> a)
+   Typeable (Eq a)
+   Typeable (() :: Constraint)
+   Typeable (() => Int)
+   Typeable (((),()) => Int)
+
+See Trac #9858.  For forall's the case is clear: we simply don't have
+a TypeRep for them.  For qualified but not polymorphic types, like
+(Eq a => a -> a), things are murkier.  But:
+
+ * We don't need a TypeRep for these things.  TypeReps are for
+   monotypes only.
+
+ * The types (Eq a, Show a) => ...blah...
+   and       Eq a => Show a => ...blah...
+   are represented the same way, as a curried function;
+   that is, the tuple before the '=>' is just syntactic
+   sugar.  But since we can abstract over tuples of constraints,
+   we really do have tuples of constraints as well.
+
+   This dichotomy is not well worked out, and Trac #9858 comment:76
+   shows that Typeable treated it one way, while newtype instance
+   matching treated it another.  Or maybe it was the fact that
+   '*' and Constraint are distinct to the type checker, but are
+   the same afterwards.  Anyway, the result was a function of
+   type (forall ab. a -> b), which is pretty dire.
+
+So the simple solution is not to attempt Typable for constraints.
+-}

@@ -357,7 +357,7 @@ test('tc262', normal, compile, [''])
 test('tc263',
     extra_clean(['Tc263_Help.o','Tc263_Help.hi']),
     multimod_compile, ['tc263','-v0'])
-test('tc264', normal, multimod_compile, ['tc264.hsig', '-sig-of base:Data.STRef'])
+test('tc264', normal, multimod_compile, ['tc264.hsig', '-sig-of "ShouldCompile is base:Data.STRef"'])
 
 test('GivenOverlapping', normal, compile, [''])
 test('GivenTypeSynonym', normal, compile, [''])
@@ -447,3 +447,5 @@ test('T10100', normal, compile, [''])
 test('T10156', normal, compile, [''])
 test('T10177', normal, compile, [''])
 test('T10185', expect_broken(10185), compile, [''])
+test('T10195', normal, compile, [''])
+test('T10109', normal, compile, [''])

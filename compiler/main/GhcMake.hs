@@ -97,7 +97,7 @@ label_self thread_name = do
 --
 -- Note that each 'ModSummary' in the module graph caches its 'DynFlags'.
 -- These 'DynFlags' are determined by the /current/ session 'DynFlags' and the
--- @OPTIONS@ and @LANGUAGE@ pragmas of the parsed module.  Thus if you want to
+-- @OPTIONS@ and @LANGUAGE@ pragmas of the parsed module.  Thus if you want
 -- changes to the 'DynFlags' to take effect you need to call this function
 -- again.
 --
@@ -1800,7 +1800,10 @@ findSummaryBySourceFile summaries file
         [] -> Nothing
         (x:_) -> Just x
 
--- Summarise a module, and pick up source and timestamp.
+-- | Summarise a module, and pick up source and timestamp.
+-- Returns @Nothing@ if the module is excluded via @excl_mods@ or is an
+-- external package module (which we don't compile), otherwise returns the
+-- new module summary (or an error saying why we couldn't summarise it).
 summariseModule
           :: HscEnv
           -> NodeMap ModSummary -- Map of old summaries
@@ -1862,13 +1865,25 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
         uncacheModule hsc_env wanted_mod
         found <- findImportedModule hsc_env wanted_mod Nothing
         case found of
-             Found location mod
+             -- TODO: When we add -alias support, we can validly find
+             -- multiple signatures in the home package; need to make this
+             -- logic more flexible in that case.
+             FoundModule (FoundHs { fr_loc = location, fr_mod = mod })
                 | isJust (ml_hs_file location) ->
                         -- Home package
                          just_found location mod
                 | otherwise ->
                         -- Drop external-pkg
                         ASSERT(modulePackageKey mod /= thisPackage dflags)
+                        return Nothing
+
+             FoundSigs hs _backing
+                | Just (FoundHs { fr_loc = location, fr_mod = mod })
+                  <- find (isJust . ml_hs_file . fr_loc) hs ->
+                        just_found location mod
+                | otherwise ->
+                        ASSERT(all (\h -> modulePackageKey (fr_mod h)
+                                            /= thisPackage dflags) hs)
                         return Nothing
 
              err -> return $ Just $ Left $ noModError dflags loc wanted_mod err

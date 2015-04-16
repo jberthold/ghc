@@ -339,9 +339,14 @@ checkOptions mode dflags srcs objs = do
         then throwGhcException (UsageError "no input files")
         else do
 
+   case mode of
+      StopBefore HCc | hscTarget dflags /= HscC
+        -> throwGhcException $ UsageError $
+           "the option -C is only available with an unregisterised GHC"
+      _ -> return ()
+
      -- Verify that output files point somewhere sensible.
    verifyOutputFiles dflags
-
 
 -- Compiler output options
 
@@ -651,7 +656,7 @@ doMake srcs  = do
     let (hs_srcs, non_hs_srcs) = partition haskellish srcs
 
         haskellish (f,Nothing) =
-          looksLikeModuleName f || isHaskellUserSrcFilename f || '.' `notElem` f
+          looksLikeModuleName f || isHaskellSrcFilename f || '.' `notElem` f
         haskellish (_,Just phase) =
           phase `notElem` [ As True, As False, Cc, Cobjc, Cobjcxx, CmmCpp, Cmm
                           , StopLn]
@@ -829,11 +834,12 @@ abiHash strs = do
          let modname = mkModuleName str
          r <- findImportedModule hsc_env modname Nothing
          case r of
-           Found _ m -> return m
+           FoundModule h -> return [fr_mod h]
+           FoundSigs hs _ -> return (map fr_mod hs)
            _error    -> throwGhcException $ CmdLineError $ showSDoc dflags $
                           cannotFindInterface dflags modname r
 
-  mods <- mapM find_it strs
+  mods <- fmap concat (mapM find_it strs)
 
   let get_iface modl = loadUserInterface False (text "abiHash") modl
   ifaces <- initIfaceCheck hsc_env $ mapM get_iface mods

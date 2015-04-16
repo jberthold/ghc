@@ -10,7 +10,7 @@
 module HscTypes (
         -- * compilation state
         HscEnv(..), hscEPS,
-        FinderCache, FindResult(..),
+        FinderCache, FindResult(..), FoundHs(..), FindExactResult(..),
         Target(..), TargetId(..), pprTarget, pprTargetId,
         ModuleGraph, emptyMG,
         HscStatus(..),
@@ -674,15 +674,30 @@ prepareAnnotations hsc_env mb_guts = do
 -- modules along the search path. On @:load@, we flush the entire
 -- contents of this cache.
 --
--- Although the @FinderCache@ range is 'FindResult' for convenience,
--- in fact it will only ever contain 'Found' or 'NotFound' entries.
---
-type FinderCache = ModuleEnv FindResult
+type FinderCache = ModuleEnv FindExactResult
+
+-- | The result of search for an exact 'Module'.
+data FindExactResult
+    = FoundExact ModLocation Module
+        -- ^ The module/signature was found
+    | NoPackageExact PackageKey
+    | NotFoundExact
+        { fer_paths     :: [FilePath]
+        , fer_pkg       :: Maybe PackageKey
+        }
+
+-- | A found module or signature; e.g. anything with an interface file
+data FoundHs = FoundHs { fr_loc :: ModLocation
+                       , fr_mod :: Module
+                       -- , fr_origin :: ModuleOrigin
+                       }
 
 -- | The result of searching for an imported module.
 data FindResult
-  = Found ModLocation Module
+  = FoundModule FoundHs
         -- ^ The module was found
+  | FoundSigs [FoundHs] Module
+        -- ^ Signatures were found, with some backing implementation
   | NoPackage PackageKey
         -- ^ The requested package was not found
   | FoundMultiple [(Module, ModuleOrigin)]
@@ -1524,11 +1539,26 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
                                              (mkQualPackage dflags)
   where
   qual_name mod occ
+        | [] <- unqual_gres
+        , modulePackageKey mod `elem` [primPackageKey, basePackageKey, thPackageKey]
+        , not (isDerivedOccName occ)
+        = NameUnqual   -- For names from ubiquitous packages that come with GHC, if
+                       -- there are no entities called unqualified 'occ', then
+                       -- print unqualified.  Doing so does not cause ambiguity,
+                       -- and it reduces the amount of qualification in error
+                       -- messages.  We can't do this for all packages, because we
+                       -- might get errors like "Can't unify T with T".  But the
+                       -- ubiquitous packages don't contain any such gratuitous
+                       -- name clashes.
+                       --
+                       -- A motivating example is 'Constraint'. It's often not in
+                       -- scope, but printing GHC.Prim.Constraint seems overkill.
+
         | [gre] <- unqual_gres
         , right_name gre
-        = NameUnqual
-                -- If there's a unique entity that's in scope unqualified with 'occ'
-                -- AND that entity is the right one, then we can use the unqualified name
+        = NameUnqual   -- If there's a unique entity that's in scope
+                       -- unqualified with 'occ' AND that entity is
+                       -- the right one, then we can use the unqualified name
 
         | [gre] <- qual_gres
         = NameQual (get_qual_mod (gre_prov gre))
@@ -2029,6 +2059,15 @@ type IsBootInterface = Bool
 -- Invariant: the dependencies of a module @M@ never includes @M@.
 --
 -- Invariant: none of the lists contain duplicates.
+--
+-- NB: While this contains information about all modules and packages below
+-- this one in the the import *hierarchy*, this may not accurately reflect
+-- the full runtime dependencies of the module.  This is because this module may
+-- have imported a boot module, in which case we'll only have recorded the
+-- dependencies from the hs-boot file, not the actual hs file. (This is
+-- unavoidable: usually, the actual hs file will have been compiled *after*
+-- we wrote this interface file.)  See #936, and also @getLinkDeps@ in
+-- @compiler/ghci/Linker.hs@ for code which cares about this distinction.
 data Dependencies
   = Deps { dep_mods   :: [(ModuleName, IsBootInterface)]
                         -- ^ All home-package modules transitively below this one

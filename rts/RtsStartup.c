@@ -69,12 +69,6 @@ static int hs_init_count = 0;
 
 static void flushStdHandles(void);
 
-const RtsConfig defaultRtsConfig  = {
-    .rts_opts_enabled = RtsOptsSafeOnly,
-    .rts_opts = NULL,
-    .rts_hs_main = rtsFalse
-};
-
 #ifdef PARALLEL_RTS
 // remember exit code in hs_exit, avoid loop on multiple failures
 int err=0;
@@ -164,7 +158,7 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     initRtsFlagsDefaults();
 
     /* Call the user hook to reset defaults, if present */
-    defaultsHook();
+    rts_config.defaultsHook();
 
     /* Parse the flags, separating the RTS flags from the programs args */
     if (argc == NULL || argv == NULL) {
@@ -172,12 +166,10 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
         int my_argc = 1;
         char *my_argv[] = { "<unknown>", NULL };
         setFullProgArgv(my_argc,my_argv);
-        setupRtsFlags(&my_argc, my_argv,
-                      rts_config.rts_opts_enabled, rts_config.rts_opts, rts_config.rts_hs_main);
+        setupRtsFlags(&my_argc, my_argv, rts_config);
     } else {
         setFullProgArgv(*argc,*argv);
-        setupRtsFlags(argc, *argv,
-                      rts_config.rts_opts_enabled, rts_config.rts_opts, rts_config.rts_hs_main);
+        setupRtsFlags(argc, *argv, rts_config);
 
 #ifdef DEBUG
         /* load debugging symbols for current binary */
@@ -355,7 +347,7 @@ hs_exit_(rtsBool wait_foreign)
     /* start timing the shutdown */
     stat_startExit();
 
-    OnExitHook();
+    rtsConfig.onExitHook();
 
     flushStdHandles();
 

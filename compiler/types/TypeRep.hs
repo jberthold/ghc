@@ -98,7 +98,7 @@ import qualified Data.Data        as Data hiding ( TyCon )
 data Type
   = TyVarTy Var -- ^ Vanilla type or kind variable (*never* a coercion variable)
 
-  | AppTy         -- See Note [AppTy invariant]
+  | AppTy         -- See Note [AppTy rep]
         Type
         Type            -- ^ Type application to something other than a 'TyCon'. Parameters:
                         --
@@ -107,10 +107,10 @@ data Type
                         --
                         --  2) Argument type
 
-  | TyConApp      -- See Note [AppTy invariant]
+  | TyConApp      -- See Note [AppTy rep]
         TyCon
         [KindOrType]    -- ^ Application of a 'TyCon', including newtypes /and/ synonyms.
-                        -- Invariant: saturated appliations of 'FunTyCon' must
+                        -- Invariant: saturated applications of 'FunTyCon' must
                         -- use 'FunTy' and saturated synonyms must use their own
                         -- constructors. However, /unsaturated/ 'FunTyCon's
                         -- do appear as 'TyConApp's.
@@ -730,8 +730,7 @@ pprTcApp _ pp tc [ty]
 
 pprTcApp p pp tc tys
   | isTupleTyCon tc && tyConArity tc == length tys
-  = pprPromotionQuote tc <>
-    tupleParens (tupleTyConSort tc) (sep (punctuate comma (map (pp TopPrec) tys)))
+  = pprTupleApp p pp tc tys
 
   | Just dc <- isPromotedDataCon_maybe tc
   , let dc_tc = dataConTyCon dc
@@ -745,6 +744,17 @@ pprTcApp p pp tc tys
 
   | otherwise
   = sdocWithDynFlags (pprTcApp_help p pp tc tys)
+
+pprTupleApp :: TyPrec -> (TyPrec -> a -> SDoc) -> TyCon -> [a] -> SDoc
+-- Print a saturated tuple
+pprTupleApp p pp tc tys
+  | null tys
+  , ConstraintTuple <- tupleTyConSort tc
+  = maybeParen p TopPrec $
+    ppr tc <+> dcolon <+> ppr (tyConKind tc)
+  | otherwise
+  = pprPromotionQuote tc <>
+    tupleParens (tupleTyConSort tc) (sep (punctuate comma (map (pp TopPrec) tys)))
 
 pprTcApp_help :: TyPrec -> (TyPrec -> a -> SDoc) -> TyCon -> [a] -> DynFlags -> SDoc
 -- This one has accss to the DynFlags

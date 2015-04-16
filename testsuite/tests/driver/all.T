@@ -422,3 +422,12 @@ test('T9938B',
 
 test('T9963', exit_code(1), run_command,
      ['{compiler} --interactive --print-libdir'])
+
+test('T10219', normal, run_command,
+     # `-x hspp` in make mode should work.
+     # Note: need to specify `-x hspp` before the filename.
+     ['{compiler} --make -x hspp T10219.hspp -fno-code -v0'])
+
+test('T10220', normal, run_command,
+     # Preprocessed T10220.hspp imports T10220B. Should work in --make mode.
+     ['{compiler} --make T10220.hspp -fno-code -v0'])

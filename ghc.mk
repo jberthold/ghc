@@ -49,18 +49,18 @@
 #           o Build utils/ghc-pkg
 #           o Build utils/hsc2hs
 #     * For each package:
-#	    o configure, generate package-data.mk and inplace-pkg-info
+#	    o configure, generate package-data.mk and inplace-pkg-config
 #           o register each package into inplace/lib/package.conf
 #     * build libffi (if not disabled by --with-system-libffi)
 #     * With bootstrapping compiler:
 #	    o Build libraries/{filepath,hpc,Cabal}
 #           o Build compiler (stage 1)
-#     * With stage 1:
+#     * With stage 1 compiler:
 #           o Build libraries/*
 #	    o Build rts
 #           o Build utils/* (except haddock)
 #           o Build compiler (stage 2)
-#     * With stage 2:
+#     * With stage 2 compiler:
 #           o Build utils/haddock
 #           o Build compiler (stage 3) (optional)
 #     * With haddock:
@@ -148,9 +148,12 @@ endif
 endif
 
 include mk/ways.mk
+include mk/warnings.mk
 
 # (Optional) build-specific configuration
 include mk/custom-settings.mk
+SRC_CC_OPTS     += $(WERROR)
+SRC_HC_OPTS     += $(WERROR)
 
 ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
 ifeq "$(DYNAMIC_GHC_PROGRAMS)" "YES"
@@ -587,8 +590,6 @@ libraries/ghc-prim_dist-install_EXTRA_HADDOCK_SRCS = libraries/ghc-prim/dist-ins
 ifneq "$(CLEANING)" "YES"
 ifeq "$(INTEGER_LIBRARY)" "integer-gmp"
 libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-gmp
-else ifeq "$(INTEGER_LIBRARY)" "integer-gmp2"
-libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-gmp2
 else ifeq "$(INTEGER_LIBRARY)" "integer-simple"
 libraries/base_dist-install_CONFIGURE_OPTS += --flags=integer-simple
 else
@@ -649,16 +650,8 @@ endif
 
 ifeq "$(INTEGER_LIBRARY)" "integer-gmp"
 BUILD_DIRS += libraries/integer-gmp/gmp
-BUILD_DIRS += libraries/integer-gmp/mkGmpDerivedConstants
 else ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
 BUILD_DIRS += libraries/integer-gmp/gmp
-BUILD_DIRS += libraries/integer-gmp/mkGmpDerivedConstants
-endif
-
-ifeq "$(INTEGER_LIBRARY)" "integer-gmp2"
-BUILD_DIRS += libraries/integer-gmp2/gmp
-else ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
-BUILD_DIRS += libraries/integer-gmp2/gmp
 endif
 
 ifeq "$(HADDOCK_DOCS)" "YES"
@@ -704,17 +697,15 @@ stage1_libs : $(ALL_STAGE1_LIBS)
 # ----------------------------------------------
 # Per-package compiler flags
 #
-# If you want to add per-package compiler flags, this
-# is the place to do it.  Do it like this for package <pkg>
-#
-#   libraries/<pkg>_dist-boot_HC_OPTS += -Wwarn
-#   libraries/<pkg>_dist-install_HC_OPTS += -Wwarn
+# If you want to add per-package compiler flags, see `mk/warnings.mk`.
 
-# Add $(GhcLibHcOpts) to all package builds
+# Add $(GhcLib(Extra)HcOpts) to all package builds
 $(foreach pkg,$(PACKAGES_STAGE1) $(PACKAGES_STAGE2),$(eval libraries/$(pkg)_dist-install_HC_OPTS += $$(GhcLibHcOpts)))
+$(foreach pkg,$(PACKAGES_STAGE1) $(PACKAGES_STAGE2),$(eval libraries/$(pkg)_dist-install_EXTRA_HC_OPTS += $$(GhcLibExtraHcOpts)))
 
-# Add $(GhcBootLibHcOpts) to all stage0 package builds
+# Add $(GhcBootLib(Extra)HcOpts) to all stage0 package builds
 $(foreach pkg,$(PACKAGES_STAGE0),$(eval libraries/$(pkg)_dist-boot_HC_OPTS += $$(GhcBootLibHcOpts)))
+$(foreach pkg,$(PACKAGES_STAGE0),$(eval libraries/$(pkg)_dist-boot_EXTRA_HC_OPTS += $$(GhcBootLibExtraHcOpts)))
 
 # -----------------------------------------------------------------------------
 # Bootstrapping libraries
@@ -1233,9 +1224,7 @@ sdist_%:
 
 .PHONY: clean
 
-CLEAN_FILES += libraries/integer-gmp/cbits/GmpDerivedConstants.h
 CLEAN_FILES += libraries/integer-gmp/include/HsIntegerGmp.h
-CLEAN_FILES += libraries/integer-gmp2/include/HsIntegerGmp.h
 CLEAN_FILES += libraries/base/include/EventConfig.h
 CLEAN_FILES += mk/config.mk.old
 CLEAN_FILES += mk/project.mk.old

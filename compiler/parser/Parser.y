@@ -10,7 +10,7 @@
 {
 {-# LANGUAGE BangPatterns #-} -- required for versions of Happy before 1.18.6
 {-# OPTIONS -Wwarn -w #-}
--- The above warning supression flag is a temporary kludge.
+-- The above warning suppression flag is a temporary kludge.
 -- While working on this module you are encouraged to remove it and fix
 -- any warnings in the module. See
 --     http://ghc.haskell.org/trac/ghc/wiki/Commentary/CodingStyle#Warnings
@@ -84,12 +84,15 @@ import TysWiredIn       ( unitTyCon, unitDataCon, tupleTyCon, tupleCon, nilDataC
                           unboxedUnitTyCon, unboxedUnitDataCon,
                           listTyCon_RDR, parrTyCon_RDR, consDataCon_RDR, eqTyCon_RDR )
 
+-- compiler/utils
+import Util             ( looksLikePackageName )
+
 }
 
-{- Last updated: 03 Mar 2015
+{- Last updated: 30 Mar 2015
 
-Conflicts: 48 shift/reduce
-           1  reduce/reduce
+Conflicts: 50 shift/reduce
+           2  reduce/reduce
 
 If you modify this parser and add a conflict, please update this comment.
 You can learn more about the conflicts by passing 'happy' the -i flag:
@@ -121,7 +124,7 @@ follows. Shift parses as if the 'module' keyword follows.
 
 -------------------------------------------------------------------------------
 
-state 49 contains 10 shift/reduce conflicts.
+state 49 contains 11 shift/reduce conflicts.
 
         context -> btype . '~' btype                        (rule 279)
         context -> btype .                                  (rule 280)
@@ -134,7 +137,7 @@ state 49 contains 10 shift/reduce conflicts.
         type -> btype . SIMPLEQUOTE varop type              (rule 287)
         btype -> btype . atype                              (rule 299)
 
-    Conflicts: '->' '-' '!' '*' '.' '`' VARSYM CONSYM QVARSYM QCONSYM
+    Conflicts: ':' '->' '-' '!' '*' '.' '`' VARSYM CONSYM QVARSYM QCONSYM
 
 Example of ambiguity: 'e :: a `b` c';  does this mean
     (e::a) `b` c, or
@@ -194,7 +197,7 @@ a rule instructing how to rewrite the expression '[0] f'.
 
 -------------------------------------------------------------------------------
 
-state 285 contains 10 shift/reduce conflicts.
+state 285 contains 11 shift/reduce conflicts.
 
     *** type -> btype .                                     (rule 281)
         type -> btype . qtyconop type                       (rule 282)
@@ -205,7 +208,7 @@ state 285 contains 10 shift/reduce conflicts.
         type -> btype . SIMPLEQUOTE varop type              (rule 287)
         btype -> btype . atype                              (rule 299)
 
-    Conflicts: [elided]
+    Conflicts: ':' '->' '-' '!' '*' '.' '`' VARSYM CONSYM QVARSYM QCONSYM
 
 Same as State 49, but minus the context productions.
 
@@ -215,7 +218,7 @@ state 320 contains 1 shift/reduce conflicts.
 
         tup_exprs -> commas . tup_tail                      (rule 502)
         sysdcon -> '(' commas . ')'                         (rule 610)
-        commas -> commas . ','                              (rule 724)
+        commas -> commas . ','                              (rule 725)
 
     Conflict: ')' (empty tup_tail reduces)
 
@@ -262,7 +265,7 @@ TODO: Why?
 
 -------------------------------------------------------------------------------
 
-state 461 contains 1 shift/reduce conflicts.
+state 462 contains 1 shift/reduce conflicts.
 
     *** strict_mark -> '{-# NOUNPACK' '#-}' .               (rule 268)
         strict_mark -> '{-# NOUNPACK' '#-}' . '!'           (rule 270)
@@ -273,7 +276,7 @@ TODO: Why?
 
 -------------------------------------------------------------------------------
 
-state 462 contains 1 shift/reduce conflicts.
+state 463 contains 1 shift/reduce conflicts.
 
     *** strict_mark -> '{-# UNPACK' '#-}' .                 (rule 267)
         strict_mark -> '{-# UNPACK' '#-}' . '!'             (rule 269)
@@ -284,7 +287,7 @@ Same as State 462
 
 -------------------------------------------------------------------------------
 
-state 493 contains 1 shift/reduce conflicts.
+state 494 contains 1 shift/reduce conflicts.
 
         context -> btype '~' btype .                        (rule 279)
     *** type -> btype '~' btype .                           (rule 285)
@@ -296,7 +299,7 @@ TODO: Why?
 
 -------------------------------------------------------------------------------
 
-state 628 contains 1 shift/reduce conflicts.
+state 629 contains 1 shift/reduce conflicts.
 
     *** aexp2 -> ipvar .                                    (rule 462)
         dbind -> ipvar . '=' exp                            (rule 587)
@@ -311,7 +314,7 @@ sensible meaning, namely the lhs of an implicit binding.
 
 -------------------------------------------------------------------------------
 
-state 695 contains 1 shift/reduce conflicts.
+state 696 contains 1 shift/reduce conflicts.
 
         rule -> STRING rule_activation . rule_forall infixexp '=' exp    (rule 214)
 
@@ -328,7 +331,7 @@ doesn't include 'forall'.
 
 -------------------------------------------------------------------------------
 
-state 768 contains 1 shift/reduce conflicts.
+state 769 contains 1 shift/reduce conflicts.
 
     *** type -> btype '~' btype .                           (rule 285)
         btype -> btype . atype                              (rule 299)
@@ -339,11 +342,11 @@ TODO: Why?
 
 -------------------------------------------------------------------------------
 
-state 951 contains 1 shift/reduce conflicts.
+state 952 contains 1 shift/reduce conflicts.
 
         transformqual -> 'then' 'group' . 'using' exp       (rule 525)
         transformqual -> 'then' 'group' . 'by' exp 'using' exp    (rule 526)
-    *** special_id -> 'group' .                             (rule 700)
+    *** special_id -> 'group' .                             (rule 701)
 
     Conflict: 'by'
 
@@ -351,10 +354,21 @@ TODO: Why?
 
 -------------------------------------------------------------------------------
 
-state 1228 contains 1 reduce/reduce conflicts.
+state 1229 contains 1 reduce/reduce conflicts.
+
+    *** tyconsym -> ':' .                                   (rule 642)
+        consym -> ':' .                                     (rule 712)
+
+    Conflict: ')'
+
+TODO: Same as State 1230
+
+-------------------------------------------------------------------------------
+
+state 1230 contains 1 reduce/reduce conflicts.
 
     *** tyconsym -> CONSYM .                                (rule 640)
-        consym -> CONSYM .                                  (rule 710)
+        consym -> CONSYM .                                  (rule 711)
 
     Conflict: ')'
 
@@ -774,8 +788,13 @@ maybe_safe :: { ([AddAnn],Bool) }
         | {- empty -}                           { ([],False) }
 
 maybe_pkg :: { ([AddAnn],Maybe FastString) }
-        : STRING                                { ([mj AnnPackageName $1]
-                                                  ,Just (getSTRING $1)) }
+        : STRING  {% let pkgFS = getSTRING $1 in
+                     if looksLikePackageName (unpackFS pkgFS)
+                        then return ([mj AnnPackageName $1], Just pkgFS)
+                        else parseErrorSDoc (getLoc $1) $ vcat [
+                             text "parse error" <> colon <+> quotes (ppr pkgFS),
+                             text "Version number or non-alphanumeric" <+>
+                             text "character in package name"] }
         | {- empty -}                           { ([],Nothing) }
 
 optqualified :: { ([AddAnn],Bool) }
@@ -908,8 +927,8 @@ ty_decl :: { LTyClDecl RdrName }
                 -- Note the use of type for the head; this allows
                 -- infix type constructors to be declared
                 {% amms (mkFamDecl (comb4 $1 $3 $4 $5) (snd $ unLoc $5) $3
-                                   (unLoc $4))
-                        (mj AnnType $1:mj AnnFamily $2:(fst $ unLoc $5)) }
+                                   (snd $ unLoc $4))
+                        (mj AnnType $1:mj AnnFamily $2:(fst $ unLoc $4)++(fst $ unLoc $5)) }
 
           -- ordinary data type or newtype declaration
         | data_or_newtype capi_ctype tycl_hdr constrs deriving
@@ -925,15 +944,15 @@ ty_decl :: { LTyClDecl RdrName }
                  gadt_constrlist
                  deriving
             {% amms (mkTyData (comb4 $1 $3 $5 $6) (snd $ unLoc $1) $2 $3
-                            (unLoc $4) (snd $ unLoc $5) (unLoc $6) )
+                            (snd $ unLoc $4) (snd $ unLoc $5) (unLoc $6) )
                                    -- We need the location on tycl_hdr in case
                                    -- constrs and deriving are both empty
-                    ((fst $ unLoc $1):(fst $ unLoc $5)) }
+                    ((fst $ unLoc $1):(fst $ unLoc $4)++(fst $ unLoc $5)) }
 
           -- data/newtype family
         | 'data' 'family' type opt_kind_sig
-                {% amms (mkFamDecl (comb3 $1 $2 $4) DataFamily $3 (unLoc $4))
-                        [mj AnnData $1,mj AnnFamily $2] }
+                {% amms (mkFamDecl (comb3 $1 $2 $4) DataFamily $3 (snd $ unLoc $4))
+                        (mj AnnData $1:mj AnnFamily $2:(fst $ unLoc $4)) }
 
 inst_decl :: { LInstDecl RdrName }
         : 'instance' overlap_pragma inst_type where_inst
@@ -968,9 +987,9 @@ inst_decl :: { LInstDecl RdrName }
                  gadt_constrlist
                  deriving
             {% amms (mkDataFamInst (comb4 $1 $4 $6 $7) (snd $ unLoc $1) $3 $4
-                                   (unLoc $5) (snd $ unLoc $6) (unLoc $7))
+                                   (snd $ unLoc $5) (snd $ unLoc $6) (unLoc $7))
                     ((fst $ unLoc $1):mj AnnInstance $2
-                       :(fst $ unLoc $6)) }
+                       :(fst $ unLoc $5)++(fst $ unLoc $6)) }
 
 overlap_pragma :: { Maybe (Located OverlapMode) }
   : '{-# OVERLAPPABLE'    '#-}' {% ajs (Just (sLL $1 $> (Overlappable (getOVERLAPPABLE_PRAGs $1))))
@@ -1030,19 +1049,19 @@ at_decl_cls :: { LHsDecl RdrName }
         :  -- data family declarations, with optional 'family' keyword
           'data' opt_family type opt_kind_sig
                 {% amms (liftM mkTyClD (mkFamDecl (comb3 $1 $3 $4) DataFamily $3
-                                                  (unLoc $4)))
-                        (mj AnnData $1:$2) }
+                                                  (snd $ unLoc $4)))
+                        (mj AnnData $1:$2++(fst $ unLoc $4)) }
 
            -- type family declarations, with optional 'family' keyword
            -- (can't use opt_instance because you get shift/reduce errors
         | 'type' type opt_kind_sig
                {% amms (liftM mkTyClD (mkFamDecl (comb3 $1 $2 $3)
-                                                  OpenTypeFamily $2 (unLoc $3)))
-                       [mj AnnType $1] }
+                                                  OpenTypeFamily $2 (snd $ unLoc $3)))
+                       (mj AnnType $1:(fst $ unLoc $3)) }
         | 'type' 'family' type opt_kind_sig
                {% amms (liftM mkTyClD (mkFamDecl (comb3 $1 $3 $4)
-                                                  OpenTypeFamily $3 (unLoc $4)))
-                       [mj AnnType $1,mj AnnFamily $2] }
+                                                  OpenTypeFamily $3 (snd $ unLoc $4)))
+                       (mj AnnType $1:mj AnnFamily $2:(fst $ unLoc $4)) }
 
            -- default type instances, with optional 'instance' keyword
         | 'type' ty_fam_inst_eqn
@@ -1078,16 +1097,16 @@ at_decl_inst :: { LInstDecl RdrName }
                  gadt_constrlist
                  deriving
                 {% amms (mkDataFamInst (comb4 $1 $3 $5 $6) (snd $ unLoc $1) $2
-                                $3 (unLoc $4) (snd $ unLoc $5) (unLoc $6))
-                        ((fst $ unLoc $1):(fst $ unLoc $5)) }
+                                $3 (snd $ unLoc $4) (snd $ unLoc $5) (unLoc $6))
+                        ((fst $ unLoc $1):(fst $ unLoc $4)++(fst $ unLoc $5)) }
 
 data_or_newtype :: { Located (AddAnn,NewOrData) }
         : 'data'        { sL1 $1 (mj AnnData    $1,DataType) }
         | 'newtype'     { sL1 $1 (mj AnnNewtype $1,NewType) }
 
-opt_kind_sig :: { Located (Maybe (LHsKind RdrName)) }
-        :                             { noLoc Nothing }
-        | '::' kind                   {% ajl (sLL $1 $> (Just $2)) AnnDcolon (gl $1) }
+opt_kind_sig :: { Located ([AddAnn],Maybe (LHsKind RdrName)) }
+        :                             { noLoc ([],Nothing) }
+        | '::' kind                   { sLL $1 $> ([mj AnnDcolon $1],Just ($2)) }
 
 -- tycl_hdr parses the header of a class or data type decl,
 -- which takes the form
@@ -1980,9 +1999,9 @@ decl_no_th :: { Located (OrdList (LHsDecl RdrName)) }
                                         let { l = comb2 $1 $> };
                                         case r of {
                                           (FunBind n _ _ _ _ _) ->
-                                                ams (L l ()) [mj AnnFunId n] >> return () ;
+                                                ams (L l ()) (mj AnnFunId n:(fst $2)) >> return () ;
                                           _ -> return () } ;
-                                        _ <- ams (L l ()) (fst $ unLoc $3);
+                                        _ <- ams (L l ()) ((fst $2) ++ (fst $ unLoc $3));
                                         return $! (sL l (unitOL $! (sL l $ ValD r))) } }
         | pattern_synonym_decl  { sLL $1 $> $ unitOL $1 }
         | docdecl               { sLL $1 $> $ unitOL $1 }
@@ -2447,18 +2466,20 @@ flattenedpquals :: { Located [LStmt RdrName (LHsExpr RdrName)] }
 pquals :: { Located [[LStmt RdrName (LHsExpr RdrName)]] }
     : squals '|' pquals
                      {% addAnnotation (gl $ last $ unLoc $1) AnnVbar (gl $2) >>
-                        return (L (getLoc $2) (reverse (unLoc $1) : unLoc $3)) }
+                        return (sLL $1 $> (reverse (unLoc $1) : unLoc $3)) }
     | squals         { L (getLoc $1) [reverse (unLoc $1)] }
 
 squals :: { Located [LStmt RdrName (LHsExpr RdrName)] }   -- In reverse order, because the last
                                         -- one can "grab" the earlier ones
     : squals ',' transformqual
              {% addAnnotation (gl $ last $ unLoc $1) AnnComma (gl $2) >>
-                return (sLL $1 $> [L (getLoc $3) ((unLoc $3) (reverse (unLoc $1)))]) }
+                ams (sLL $1 $> ()) (fst $ unLoc $3) >>
+                return (sLL $1 $> [sLL $1 $> ((snd $ unLoc $3) (reverse (unLoc $1)))]) }
     | squals ',' qual
              {% addAnnotation (gl $ head $ unLoc $1) AnnComma (gl $2) >>
                 return (sLL $1 $> ($3 : unLoc $1)) }
-    | transformqual                       { sLL $1 $> [L (getLoc $1) ((unLoc $1) [])] }
+    | transformqual        {% ams $1 (fst $ unLoc $1) >>
+                              return (sLL $1 $> [L (getLoc $1) ((snd $ unLoc $1) [])]) }
     | qual                                { sL1 $1 [$1] }
 --  | transformquals1 ',' '{|' pquals '|}'   { sLL $1 $> ($4 : unLoc $1) }
 --  | '{|' pquals '|}'                       { sL1 $1 [$2] }
@@ -2468,19 +2489,15 @@ squals :: { Located [LStmt RdrName (LHsExpr RdrName)] }   -- In reverse order, b
 -- consensus on the syntax, this feature is not being used until we
 -- get user demand.
 
-transformqual :: { Located ([LStmt RdrName (LHsExpr RdrName)] -> Stmt RdrName (LHsExpr RdrName)) }
+transformqual :: { Located ([AddAnn],[LStmt RdrName (LHsExpr RdrName)] -> Stmt RdrName (LHsExpr RdrName)) }
                         -- Function is applied to a list of stmts *in order*
-    : 'then' exp               {% ams (sLL $1 $> $ \ss -> (mkTransformStmt ss $2))
-                                      [mj AnnThen $1] }
-    | 'then' exp 'by' exp      {% ams (sLL $1 $> $ \ss -> (mkTransformByStmt ss $2 $4))
-                                      [mj AnnThen $1,mj AnnBy  $3] }
+    : 'then' exp               { sLL $1 $> ([mj AnnThen $1], \ss -> (mkTransformStmt ss $2)) }
+    | 'then' exp 'by' exp      { sLL $1 $> ([mj AnnThen $1,mj AnnBy  $3],\ss -> (mkTransformByStmt ss $2 $4)) }
     | 'then' 'group' 'using' exp
-             {% ams (sLL $1 $> $ \ss -> (mkGroupUsingStmt ss $4))
-                    [mj AnnThen $1,mj AnnGroup $2,mj AnnUsing $3] }
+             { sLL $1 $> ([mj AnnThen $1,mj AnnGroup $2,mj AnnUsing $3], \ss -> (mkGroupUsingStmt ss $4)) }
 
     | 'then' 'group' 'by' exp 'using' exp
-             {% ams (sLL $1 $> $ \ss -> (mkGroupByUsingStmt ss $4 $6))
-                     [mj AnnThen $1,mj AnnGroup $2,mj AnnBy $3,mj AnnUsing $5] }
+             { sLL $1 $> ([mj AnnThen $1,mj AnnGroup $2,mj AnnBy $3,mj AnnUsing $5], \ss -> (mkGroupByUsingStmt ss $4 $6)) }
 
 -- Note that 'group' is a special_id, which means that you can enable
 -- TransformListComp while still using Data.List.group. However, this
@@ -2517,7 +2534,7 @@ guardquals :: { Located [LStmt RdrName (LHsExpr RdrName)] }
     : guardquals1           { L (getLoc $1) (reverse (unLoc $1)) }
 
 guardquals1 :: { Located [LStmt RdrName (LHsExpr RdrName)] }
-    : guardquals1 ',' qual  {% addAnnotation (gl $ last $ unLoc $1) AnnComma
+    : guardquals1 ',' qual  {% addAnnotation (gl $ head $ unLoc $1) AnnComma
                                              (gl $2) >>
                                return (sLL $1 $> ($3 : unLoc $1)) }
     | qual                  { sL1 $1 [$1] }
@@ -2556,7 +2573,7 @@ alts1   :: { Located ([AddAnn],[LMatch RdrName (LHsExpr RdrName)]) }
 alt     :: { LMatch RdrName (LHsExpr RdrName) }
         : pat opt_sig alt_rhs      {%ams (sLL $1 $> (Match Nothing [$1] (snd $2)
                                                               (snd $ unLoc $3)))
-                                         (fst $ unLoc $3)}
+                                         ((fst $2) ++ (fst $ unLoc $3))}
 
 alt_rhs :: { Located ([AddAnn],GRHSs RdrName (LHsExpr RdrName)) }
         : ralt wherebinds           { sLL $1 $> (fst $ unLoc $2,
@@ -2849,6 +2866,7 @@ qtyconsym :: { Located RdrName }
 tyconsym :: { Located RdrName }
         : CONSYM                { sL1 $1 $! mkUnqual tcClsName (getCONSYM $1) }
         | VARSYM                { sL1 $1 $! mkUnqual tcClsName (getVARSYM $1) }
+        | ':'                   { sL1 $1 $! consDataCon_RDR }
         | '*'                   { sL1 $1 $! mkUnqual tcClsName (fsLit "*") }
         | '-'                   { sL1 $1 $! mkUnqual tcClsName (fsLit "-") }
 

@@ -1,3 +1,6 @@
+# Tests that call 'compiler_stats_num_field' are skipped when debugging is on.
+# See testsuite/driver/testlib.py.
+
 def no_lint(name, opts):
    opts.compiler_always_flags = \
        [opt for opt in opts.compiler_always_flags if opt != '-dcore-lint' and opt != '-dcmm-lint']
@@ -326,7 +329,7 @@ test('T5030',
            # previous:    196457520
            # 2012-10-08:  259547660 (x86/Linux, new codegen)
            # 2013-11-21:  198573456 (x86 Windows, 64 bit machine)
-           # 2014-12-10:  227205560 constraint solver got worse again; more agressive solving
+           # 2014-12-10:  227205560 constraint solver got worse again; more aggressive solving
            #                        of family-applications leads to less sharing, I think
 
            (wordsize(64), 403932600, 10)]),
@@ -343,7 +346,7 @@ test('T5030',
              # general round of updates
              # 2014-09-10 385152728  post-AMP-cleanup
              # 2014-12-08 340969128  constraint solver perf improvements (esp kick-out)
-             # 2014-12-10 449042120  constraint solver got worse again; more agressive solving
+             # 2014-12-10 449042120  constraint solver got worse again; more aggressive solving
              #                          of family-applications leads to less sharing, I think
              # 2015-03-17 403932600  tweak to solver algorithm
 
@@ -391,7 +394,7 @@ test('T783',
             # 2014-09-03: 223377364 (Windows) better specialisation, raft of core-to-core optimisations
             # 2014-12-22: 235002220 (Windows) not sure why
 
-           (wordsize(64), 441932632, 10)]),
+           (wordsize(64), 719814352, 10)]),
             # prev:       349263216 (amd64/Linux)
             # 07/08/2012: 384479856 (amd64/Linux)
             # 29/08/2012: 436927840 (amd64/Linux)
@@ -406,6 +409,10 @@ test('T783',
             #   (general round of updates)
             # 2014-08-29: 441932632  (amd64/Linux)
             #   (better specialisation, raft of core-to-core optimisations)
+            # 2014-08-29: 719814352  (amd64/Linux)
+	    #   (changed order of cmm block causes analyses to allocate much more,
+	    #    but the changed order is slighly better in terms of runtime, and
+	    #    this test seems to be an extreme outlier.)
       extra_hc_opts('-static')
       ],
       compile,[''])

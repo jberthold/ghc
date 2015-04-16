@@ -18,13 +18,13 @@ import Cmm
 import CPrim
 import PprCmm
 import CmmUtils
+import CmmSwitch
 import Hoopl
 
 import DynFlags
 import FastString
 import ForeignCall
-import Outputable hiding ( panic, pprPanic )
-import qualified Outputable
+import Outputable
 import Platform
 import OrdList
 import UniqSupply
@@ -824,18 +824,16 @@ For a real example of this, see ./rts/StgStdThunks.cmm
 
 
 -- | Switch branch
---
--- N.B. We remove Nothing's from the list of branches, as they are 'undefined'.
--- However, they may be defined one day, so we better document this behaviour.
-genSwitch :: CmmExpr -> [Maybe BlockId] -> LlvmM StmtData
-genSwitch cond maybe_ids = do
+genSwitch :: CmmExpr -> SwitchTargets -> LlvmM StmtData
+genSwitch cond ids = do
     (vc, stmts, top) <- exprToVar cond
     let ty = getVarType vc
 
-    let pairs = [ (ix, id) | (ix,Just id) <- zip [0..] maybe_ids ]
-    let labels = map (\(ix, b) -> (mkIntLit ty ix, blockIdToLlvm b)) pairs
+    let labels = [ (mkIntLit ty ix, blockIdToLlvm b)
+                 | (ix, b) <- switchTargetsCases ids ]
     -- out of range is undefined, so let's just branch to first label
-    let (_, defLbl) = head labels
+    let defLbl | Just l <- switchTargetsDefault ids = blockIdToLlvm l
+               | otherwise                          = snd (head labels)
 
     let s1 = Switch vc defLbl labels
     return $ (stmts `snocOL` s1, top)
@@ -1672,14 +1670,6 @@ toI32 = mkIntLit i32
 
 toIWord :: Integral a => DynFlags -> a -> LlvmVar
 toIWord dflags = mkIntLit (llvmWord dflags)
-
-
--- | Error functions
-panic :: String -> a
-panic s = Outputable.panic $ "LlvmCodeGen.CodeGen." ++ s
-
-pprPanic :: String -> SDoc -> a
-pprPanic s d = Outputable.pprPanic ("LlvmCodeGen.CodeGen." ++ s) d
 
 
 -- | Returns TBAA meta data by unique

@@ -2,4 +2,5 @@ test('annotations', normal, run_command, ['$MAKE -s --no-print-directory annotat
 test('parseTree',   normal, run_command, ['$MAKE -s --no-print-directory parseTree'])
 test('comments',    normal, run_command, ['$MAKE -s --no-print-directory comments'])
 test('exampleTest', normal, run_command, ['$MAKE -s --no-print-directory exampleTest'])
-
+test('listcomps',   normal, run_command, ['$MAKE -s --no-print-directory listcomps'])
+test('T10255',      normal, run_command, ['$MAKE -s --no-print-directory t10255'])

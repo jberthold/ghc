@@ -451,8 +451,8 @@ Note [TcLevel and untouchable type variables]
 Note [Skolem escape prevention]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We only unify touchable unification variables.  Because of
-(MetaTvInv), there can be no occurrences of he variable further out,
-so the unification can't cause the kolems to escape. Example:
+(MetaTvInv), there can be no occurrences of the variable further out,
+so the unification can't cause the skolems to escape. Example:
      data T = forall a. MkT a (a->Int)
      f x (MkT v f) = length [v,x]
 We decide (x::alpha), and generate an implication like
@@ -859,7 +859,7 @@ mkTcEqPredRole Nominal          = mkTcEqPred
 mkTcEqPredRole Representational = mkTcReprEqPred
 mkTcEqPredRole Phantom          = panic "mkTcEqPredRole Phantom"
 
--- @isTauTy@ tests for nested for-alls.  It should not be called on a boxy type.
+-- @isTauTy@ tests for nested for-alls.
 
 isTauTy :: Type -> Bool
 isTauTy ty | Just ty' <- tcView ty = isTauTy ty'
@@ -1234,7 +1234,7 @@ occurCheckExpand dflags tv ty
     -- True => fine
     fast_check (LitTy {})        = True
     fast_check (TyVarTy tv')     = tv /= tv'
-    fast_check (TyConApp _ tys)  = all fast_check tys
+    fast_check (TyConApp tc tys) = all fast_check tys && (isTauTyCon tc || impredicative)
     fast_check (FunTy arg res)   = fast_check arg && fast_check res
     fast_check (AppTy fun arg)   = fast_check fun && fast_check arg
     fast_check (ForAllTy tv' ty) = impredicative
@@ -1268,7 +1268,11 @@ occurCheckExpand dflags tv ty
     -- it and try again.
     go ty@(TyConApp tc tys)
       = case do { tys <- mapM go tys; return (mkTyConApp tc tys) } of
-          OC_OK ty -> return ty  -- First try to eliminate the tyvar from the args
+          OC_OK ty 
+              | impredicative || isTauTyCon tc 
+              -> return ty  -- First try to eliminate the tyvar from the args
+              | otherwise
+              -> OC_Forall  -- A type synonym with a forall on the RHS
           bad | Just ty' <- tcView ty -> go ty'
               | otherwise             -> bad
                       -- Failing that, try to expand a synonym
@@ -1643,8 +1647,8 @@ checkRepTyCon check_tc ty extra
   where
     msg = quotes (ppr ty) <+> ptext (sLit "cannot be marshalled in a foreign call")
     mk_nt_reason tc tys
-      | null tys  = ptext (sLit "because its data construtor is not in scope")
-      | otherwise = ptext (sLit "because the data construtor for")
+      | null tys  = ptext (sLit "because its data constructor is not in scope")
+      | otherwise = ptext (sLit "because the data constructor for")
                     <+> quotes (ppr tc) <+> ptext (sLit "is not in scope")
     nt_fix = ptext (sLit "Possible fix: import the data constructor to bring it into scope")
 

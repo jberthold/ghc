@@ -165,9 +165,22 @@ eqPhase Ccxx        Ccxx       = True
 eqPhase Cobjcxx     Cobjcxx    = True
 eqPhase _           _          = False
 
--- Partial ordering on phases: we want to know which phases will occur before
--- which others.  This is used for sanity checking, to ensure that the
--- pipeline will stop at some point (see DriverPipeline.runPipeline).
+{- Note [Partial ordering on phases]
+
+We want to know which phases will occur before which others. This is used for
+sanity checking, to ensure that the pipeline will stop at some point (see
+DriverPipeline.runPipeline).
+
+A < B iff A occurs before B in a normal compilation pipeline.
+
+There is explicitly not a total ordering on phases, because in registerised
+builds, the phase `HsC` doesn't happen before nor after any other phase.
+
+Although we check that a normal user doesn't set the stop_phase to HsC through
+use of -C with registerised builds (in Main.checkOptions), it is still
+possible for a ghc-api user to do so. So be careful when using the function
+happensBefore, and don't think that `not (a <= b)` implies `b < a`.
+-}
 happensBefore :: DynFlags -> Phase -> Phase -> Bool
 happensBefore dflags p1 p2 = p1 `happensBefore'` p2
     where StopLn `happensBefore'` _ = False
@@ -266,10 +279,14 @@ phaseInputExt StopLn              = "o"
 haskellish_src_suffixes, haskellish_suffixes, cish_suffixes,
     haskellish_user_src_suffixes, haskellish_sig_suffixes
  :: [String]
+-- When a file with an extension in the haskellish_src_suffixes group is
+-- loaded in --make mode, its imports will be loaded too.
 haskellish_src_suffixes      = haskellish_user_src_suffixes ++
-                               [ "hspp", "hscpp", "hcr", "cmm", "cmmcpp" ]
-haskellish_suffixes          = haskellish_src_suffixes ++ ["hc", "raw_s"]
+                               [ "hspp", "hscpp" ]
+haskellish_suffixes          = haskellish_src_suffixes ++
+                               [ "hc", "cmm", "cmmcpp" ]
 cish_suffixes                = [ "c", "cpp", "C", "cc", "cxx", "s", "S", "ll", "bc", "lm_s", "m", "M", "mm" ]
+
 -- Will not be deleted as temp files:
 haskellish_user_src_suffixes =
   haskellish_sig_suffixes ++ [ "hs", "lhs", "hs-boot", "lhs-boot" ]

@@ -51,7 +51,7 @@ module DynFlags (
         fFlags, fWarningFlags, fLangFlags, xFlags,
         dynFlagDependencies,
         tablesNextToCode, mkTablesNextToCode,
-        SigOf(..), getSigOf,
+        SigOf, getSigOf,
 
         Way(..), mkBuildTag, wayRTSOnly, addWay', updateWays,
         wayGeneralFlags, wayUnsetGeneralFlags,
@@ -243,6 +243,7 @@ data DumpFlag
    -- enabled if you run -ddump-cmm
    | Opt_D_dump_cmm_cfg
    | Opt_D_dump_cmm_cbe
+   | Opt_D_dump_cmm_switch
    | Opt_D_dump_cmm_proc
    | Opt_D_dump_cmm_sink
    | Opt_D_dump_cmm_sp
@@ -328,6 +329,7 @@ data GeneralFlag
 
    | Opt_PrintExplicitForalls
    | Opt_PrintExplicitKinds
+   | Opt_PrintUnicodeSyntax
 
    -- optimisation opts
    | Opt_CallArity
@@ -642,16 +644,10 @@ data ExtensionFlag
    | Opt_StaticPointers
    deriving (Eq, Enum, Show)
 
-data SigOf = NotSigOf
-           | SigOf Module
-           | SigOfMap (Map ModuleName Module)
+type SigOf = Map ModuleName Module
 
 getSigOf :: DynFlags -> ModuleName -> Maybe Module
-getSigOf dflags n =
-    case sigOf dflags of
-        NotSigOf -> Nothing
-        SigOf m -> Just m
-        SigOfMap m -> Map.lookup n m
+getSigOf dflags n = Map.lookup n (sigOf dflags)
 
 -- | Contains not only a collection of 'GeneralFlag's but also a plethora of
 -- information relating to the compilation of a single file or GHC session
@@ -1026,7 +1022,7 @@ opt_lc dflags = sOpt_lc (settings dflags)
 versionedAppDir :: DynFlags -> IO FilePath
 versionedAppDir dflags = do
   appdir <- getAppUserDataDirectory (programName dflags)
-  return $ appdir </> (TARGET_ARCH ++ '-':TARGET_OS ++ '-':cProjectVersion)
+  return $ appdir </> (TARGET_ARCH ++ '-':TARGET_OS ++ '-':projectVersion dflags)
 
 -- | The target code type of the compilation (if any).
 --
@@ -1460,7 +1456,7 @@ defaultDynFlags mySettings =
         ghcMode                 = CompManager,
         ghcLink                 = LinkBinary,
         hscTarget               = defaultHscTarget (sTargetPlatform mySettings),
-        sigOf                   = NotSigOf,
+        sigOf                   = Map.empty,
         verbosity               = 0,
         optLevel                = 0,
         simplPhases             = 2,
@@ -1819,8 +1815,9 @@ lang_set dflags lang =
             extensionFlags = flattenExtensionFlags lang (extensions dflags)
           }
 
+-- | Check whether to use unicode syntax for output
 useUnicodeSyntax :: DynFlags -> Bool
-useUnicodeSyntax = xopt Opt_UnicodeSyntax
+useUnicodeSyntax = gopt Opt_PrintUnicodeSyntax
 
 -- | Set the Haskell language standard to use
 setLanguage :: Language -> DynP ()
@@ -1964,9 +1961,7 @@ parseSigOf :: String -> SigOf
 parseSigOf str = case filter ((=="").snd) (readP_to_S parse str) of
     [(r, "")] -> r
     _ -> throwGhcException $ CmdLineError ("Can't parse -sig-of: " ++ str)
-  where parse = parseOne +++ parseMany
-        parseOne = SigOf `fmap` parseModule
-        parseMany = SigOfMap . Map.fromList <$> sepBy parseEntry (R.char ',')
+  where parse = Map.fromList <$> sepBy parseEntry (R.char ',')
         parseEntry = do
             n <- tok $ parseModuleName
             -- ToDo: deprecate this 'is' syntax?
@@ -2493,6 +2488,7 @@ dynamic_flags = [
   , defGhcFlag "ddump-cmm-raw"           (setDumpFlag Opt_D_dump_cmm_raw)
   , defGhcFlag "ddump-cmm-cfg"           (setDumpFlag Opt_D_dump_cmm_cfg)
   , defGhcFlag "ddump-cmm-cbe"           (setDumpFlag Opt_D_dump_cmm_cbe)
+  , defGhcFlag "ddump-cmm-switch"        (setDumpFlag Opt_D_dump_cmm_switch)
   , defGhcFlag "ddump-cmm-proc"          (setDumpFlag Opt_D_dump_cmm_proc)
   , defGhcFlag "ddump-cmm-sink"          (setDumpFlag Opt_D_dump_cmm_sink)
   , defGhcFlag "ddump-cmm-sp"            (setDumpFlag Opt_D_dump_cmm_sp)
@@ -3030,6 +3026,7 @@ fFlags = [
   flagGhciSpec "print-evld-with-show"         Opt_PrintEvldWithShow,
   flagSpec "print-explicit-foralls"           Opt_PrintExplicitForalls,
   flagSpec "print-explicit-kinds"             Opt_PrintExplicitKinds,
+  flagSpec "print-unicode-syntax"             Opt_PrintUnicodeSyntax,
   flagSpec "prof-cafs"                        Opt_AutoSccsOnIndividualCafs,
   flagSpec "prof-count-entries"               Opt_ProfCountEntries,
   flagSpec "regs-graph"                       Opt_RegsGraph,
