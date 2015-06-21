@@ -24,7 +24,8 @@ import Hoopl
 import DynFlags
 import FastString
 import ForeignCall
-import Outputable
+import Outputable hiding (panic, pprPanic)
+import qualified Outputable
 import Platform
 import OrdList
 import UniqSupply
@@ -156,21 +157,6 @@ barrier = do
     let s = Fence False SyncSeqCst
     return (unitOL s, [])
 
--- | Memory barrier instruction for LLVM < 3.0
-oldBarrier :: LlvmM StmtData
-oldBarrier = do
-
-    (fv, _, tops) <- getInstrinct (fsLit "llvm.memory.barrier") LMVoid [i1, i1, i1, i1, i1]
-
-    let args = [lmTrue, lmTrue, lmTrue, lmTrue, lmTrue]
-    let s1 = Expr $ Call StdCall fv args llvmStdFunAttrs
-
-    return (unitOL s1, tops)
-
-    where
-        lmTrue :: LlvmVar
-        lmTrue  = mkIntLit i1 (-1)
-
 -- | Foreign Calls
 genCall :: ForeignTarget -> [CmmFormal] -> [CmmActual]
               -> LlvmM StmtData
@@ -179,12 +165,9 @@ genCall :: ForeignTarget -> [CmmFormal] -> [CmmActual]
 -- intrinsic function.
 genCall (PrimTarget MO_WriteBarrier) _ _ = do
     platform <- getLlvmPlatform
-    ver <- getLlvmVer
-    case () of
-     _ | platformArch platform `elem` [ArchX86, ArchX86_64, ArchSPARC]
-                    -> return (nilOL, [])
-       | ver > 29   -> barrier
-       | otherwise  -> oldBarrier
+    if platformArch platform `elem` [ArchX86, ArchX86_64, ArchSPARC]
+       then return (nilOL, [])
+       else barrier
 
 genCall (PrimTarget MO_Touch) _ _
  = return (nilOL, [])
@@ -206,9 +189,7 @@ genCall (PrimTarget (MO_UF_Conv _)) [_] args =
 -- Handle prefetching data
 genCall t@(PrimTarget (MO_Prefetch_Data localityInt)) [] args
   | 0 <= localityInt && localityInt <= 3 = do
-    ver <- getLlvmVer
-    let argTy | ver <= 29  = [i8Ptr, i32, i32]
-              | otherwise  = [i8Ptr, i32, i32, i32]
+    let argTy = [i8Ptr, i32, i32, i32]
         funTy = \name -> LMFunction $ LlvmFunctionDecl name ExternallyVisible
                              CC_Ccc LMVoid FixedArgs (tysToParams argTy) Nothing
 
@@ -219,8 +200,7 @@ genCall t@(PrimTarget (MO_Prefetch_Data localityInt)) [] args
     (argVars', stmts3)      <- castVars $ zip argVars argTy
 
     trash <- getTrashStmts
-    let argSuffix | ver <= 29  = [mkIntLit i32 0, mkIntLit i32 localityInt]
-                  | otherwise  = [mkIntLit i32 0, mkIntLit i32 localityInt, mkIntLit i32 1]
+    let argSuffix = [mkIntLit i32 0, mkIntLit i32 localityInt, mkIntLit i32 1]
         call = Expr $ Call StdCall fptr (argVars' ++ argSuffix) []
         stmts = stmts1 `appOL` stmts2 `appOL` stmts3
                 `appOL` trash `snocOL` call
@@ -251,18 +231,13 @@ genCall (PrimTarget (MO_AtomicRead _)) [dst] [addr] = do
 
 -- Handle memcpy function specifically since llvm's intrinsic version takes
 -- some extra parameters.
-genCall t@(PrimTarget op) [] args'
- | op == MO_Memcpy ||
-   op == MO_Memset ||
-   op == MO_Memmove = do
-    ver <- getLlvmVer
+genCall t@(PrimTarget op) [] args
+ | Just align <- machOpMemcpyishAlign op = do
     dflags <- getDynFlags
-    let (args, alignVal) = splitAlignVal args'
-        (isVolTy, isVolVal)
-              | ver >= 28       = ([i1], [mkIntLit i1 0])
-              | otherwise       = ([], [])
-        argTy | op == MO_Memset = [i8Ptr, i8,    llvmWord dflags, i32] ++ isVolTy
-              | otherwise       = [i8Ptr, i8Ptr, llvmWord dflags, i32] ++ isVolTy
+    let isVolTy = [i1]
+        isVolVal = [mkIntLit i1 0]
+        argTy | MO_Memset _ <- op = [i8Ptr, i8,    llvmWord dflags, i32] ++ isVolTy
+              | otherwise         = [i8Ptr, i8Ptr, llvmWord dflags, i32] ++ isVolTy
         funTy = \name -> LMFunction $ LlvmFunctionDecl name ExternallyVisible
                              CC_Ccc LMVoid FixedArgs (tysToParams argTy) Nothing
 
@@ -273,21 +248,12 @@ genCall t@(PrimTarget op) [] args'
     (argVars', stmts3)            <- castVars $ zip argVars argTy
 
     stmts4 <- getTrashStmts
-    let arguments = argVars' ++ (alignVal:isVolVal)
+    let alignVal = mkIntLit i32 align
+        arguments = argVars' ++ (alignVal:isVolVal)
         call = Expr $ Call StdCall fptr arguments []
         stmts = stmts1 `appOL` stmts2 `appOL` stmts3
                 `appOL` stmts4 `snocOL` call
     return (stmts, top1 ++ top2)
-  where
-    splitAlignVal xs = (init xs, extractLit $ last xs)
-
-    -- Fix for trac #6158. Since LLVM 3.1, opt fails when given anything other
-    -- than a direct constant (i.e. 'i32 8') as the alignment argument for the
-    -- memcpy & co llvm intrinsic functions. So we handle this directly now.
-    extractLit (CmmLit (CmmInt i _)) = mkIntLit i32 i
-    extractLit _other = trace ("WARNING: Non constant alignment value given" ++
-                               " for memcpy! Please report to GHC developers")
-                        mkIntLit i32 0
 
 -- Handle all other foreign calls and prim ops.
 genCall target res args = do
@@ -516,12 +482,9 @@ castVar v t | getVarType v == t
 cmmPrimOpFunctions :: CallishMachOp -> LlvmM LMString
 cmmPrimOpFunctions mop = do
 
-  ver <- getLlvmVer
   dflags <- getDynFlags
-  let intrinTy1 = (if ver >= 28
-                       then "p0i8.p0i8." else "") ++ showSDoc dflags (ppr $ llvmWord dflags)
-      intrinTy2 = (if ver >= 28
-                       then "p0i8." else "") ++ showSDoc dflags (ppr $ llvmWord dflags)
+  let intrinTy1 = "p0i8.p0i8." ++ showSDoc dflags (ppr $ llvmWord dflags)
+      intrinTy2 = "p0i8." ++ showSDoc dflags (ppr $ llvmWord dflags)
       unsupported = panic ("cmmPrimOpFunctions: " ++ show mop
                         ++ " not supported here")
 
@@ -560,9 +523,9 @@ cmmPrimOpFunctions mop = do
     MO_F64_Cosh   -> fsLit "cosh"
     MO_F64_Tanh   -> fsLit "tanh"
 
-    MO_Memcpy     -> fsLit $ "llvm.memcpy."  ++ intrinTy1
-    MO_Memmove    -> fsLit $ "llvm.memmove." ++ intrinTy1
-    MO_Memset     -> fsLit $ "llvm.memset."  ++ intrinTy2
+    MO_Memcpy _   -> fsLit $ "llvm.memcpy."  ++ intrinTy1
+    MO_Memmove _  -> fsLit $ "llvm.memmove." ++ intrinTy1
+    MO_Memset _   -> fsLit $ "llvm.memset."  ++ intrinTy2
 
     (MO_PopCnt w) -> fsLit $ "llvm.ctpop."  ++ showSDoc dflags (ppr $ widthToLlvmInt w)
     (MO_BSwap w)  -> fsLit $ "llvm.bswap."  ++ showSDoc dflags (ppr $ widthToLlvmInt w)
@@ -1670,6 +1633,14 @@ toI32 = mkIntLit i32
 
 toIWord :: Integral a => DynFlags -> a -> LlvmVar
 toIWord dflags = mkIntLit (llvmWord dflags)
+
+
+-- | Error functions
+panic :: String -> a
+panic s = Outputable.panic $ "LlvmCodeGen.CodeGen." ++ s
+
+pprPanic :: String -> SDoc -> a
+pprPanic s d = Outputable.pprPanic ("LlvmCodeGen.CodeGen." ++ s) d
 
 
 -- | Returns TBAA meta data by unique

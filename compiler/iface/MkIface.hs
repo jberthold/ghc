@@ -69,7 +69,6 @@ import Demand
 import Coercion( tidyCo )
 import Annotations
 import CoreSyn
-import CoreFVs
 import Class
 import Kind
 import TyCon
@@ -271,8 +270,8 @@ mkIface_ hsc_env maybe_old_fingerprint
 
         fixities    = [(occ,fix) | FixItem occ fix <- nameEnvElts fix_env]
         warns       = src_warns
-        iface_rules = map (coreRuleToIfaceRule this_mod) rules
-        iface_insts = map instanceToIfaceInst insts
+        iface_rules = map coreRuleToIfaceRule rules
+        iface_insts = map instanceToIfaceInst $ fixSafeInstances safe_mode insts
         iface_fam_insts = map famInstToIfaceFamInst fam_insts
         iface_vect_info = flattenVectInfo vect_info
         trust_info  = setSafeMode safe_mode
@@ -560,9 +559,20 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
    -- dependency tree.  We only care about orphan modules in the current
    -- package, because changes to orphans outside this package will be
    -- tracked by the usage on the ABI hash of package modules that we import.
-   let orph_mods = filter ((== this_pkg) . modulePackageKey)
-                   $ dep_orphs sorted_deps
+   let orph_mods
+        = filter (/= this_mod) -- Note [Do not update EPS with your own hi-boot]
+        . filter ((== this_pkg) . modulePackageKey)
+        $ dep_orphs sorted_deps
    dep_orphan_hashes <- getOrphanHashes hsc_env orph_mods
+
+   -- Note [Do not update EPS with your own hi-boot]
+   -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   -- (See also Trac #10182).  When your hs-boot file includes an orphan
+   -- instance declaration, you may find that the dep_orphs of a module you
+   -- import contains reference to yourself.  DO NOT actually load this module
+   -- or add it to the orphan hashes: you're going to provide the orphan
+   -- instances yourself, no need to consult hs-boot; if you do load the
+   -- interface into EPS, you will see a duplicate orphan instance.
 
    orphan_hash <- computeFingerprint (mk_put_name local_env)
                       (map ifDFun orph_insts, orph_rules, orph_fis)
@@ -1321,23 +1331,12 @@ checkDependencies hsc_env summary iface
    this_pkg = thisPackage (hsc_dflags hsc_env)
 
    dep_missing (L _ (ImportDecl { ideclName = L _ mod, ideclPkgQual = pkg })) = do
-     find_res <- liftIO $ findImportedModule hsc_env mod pkg
+     find_res <- liftIO $ findImportedModule hsc_env mod (fmap snd pkg)
      let reason = moduleNameString mod ++ " changed"
      case find_res of
-        FoundModule h -> check_mod reason (fr_mod h)
-        FoundSigs hs _backing -> check_mods reason (map fr_mod hs)
-        _otherwise  -> return (RecompBecause reason)
-
-   check_mods _ [] = return UpToDate
-   check_mods reason (m:ms) = do
-        r <- check_mod reason m
-        case r of
-            UpToDate -> check_mods reason ms
-            _otherwise -> return r
-
-   check_mod reason mod
+        Found _ mod
           | pkg == this_pkg
-            = if moduleName mod `notElem` map fst prev_dep_mods
+           -> if moduleName mod `notElem` map fst prev_dep_mods
                  then do traceHiDiffs $
                            text "imported module " <> quotes (ppr mod) <>
                            text " not among previous dependencies"
@@ -1345,7 +1344,7 @@ checkDependencies hsc_env summary iface
                  else
                          return UpToDate
           | otherwise
-            = if pkg `notElem` (map fst prev_dep_pkgs)
+           -> if pkg `notElem` (map fst prev_dep_pkgs)
                  then do traceHiDiffs $
                            text "imported module " <> quotes (ppr mod) <>
                            text " is from package " <> quotes (ppr pkg) <>
@@ -1354,6 +1353,7 @@ checkDependencies hsc_env summary iface
                  else
                          return UpToDate
            where pkg = modulePackageKey mod
+        _otherwise  -> return (RecompBecause reason)
 
 needInterface :: Module -> (ModIface -> IfG RecompileRequired)
               -> IfG RecompileRequired
@@ -1664,10 +1664,13 @@ tyConToIfaceDecl env tycon
                Nothing           -> IfNoParent
 
     to_if_fam_flav OpenSynFamilyTyCon        = IfaceOpenSynFamilyTyCon
-    to_if_fam_flav (ClosedSynFamilyTyCon ax) = IfaceClosedSynFamilyTyCon axn ibr
+    to_if_fam_flav (ClosedSynFamilyTyCon (Just ax))
+      = IfaceClosedSynFamilyTyCon (Just (axn, ibr))
       where defs = fromBranchList $ coAxiomBranches ax
             ibr  = map (coAxBranchToIfaceBranch' tycon) defs
             axn  = coAxiomName ax
+    to_if_fam_flav (ClosedSynFamilyTyCon Nothing)
+      = IfaceClosedSynFamilyTyCon Nothing
     to_if_fam_flav AbstractClosedSynFamilyTyCon
       = IfaceAbstractClosedSynFamilyTyCon
 
@@ -1678,11 +1681,14 @@ tyConToIfaceDecl env tycon
     ifaceConDecls (NewTyCon { data_con = con })     = IfNewTyCon  (ifaceConDecl con)
     ifaceConDecls (DataTyCon { data_cons = cons })  = IfDataTyCon (map ifaceConDecl cons)
     ifaceConDecls (DataFamilyTyCon {})              = IfDataFamTyCon
+    ifaceConDecls (TupleTyCon { data_con = con })   = IfDataTyCon [ifaceConDecl con]
     ifaceConDecls (AbstractTyCon distinct)          = IfAbstractTyCon distinct
-        -- The last case happens when a TyCon has been trimmed during tidying
-        -- Furthermore, tyThingToIfaceDecl is also used
-        -- in TcRnDriver for GHCi, when browsing a module, in which case the
-        -- AbstractTyCon case is perfectly sensible.
+        -- The AbstractTyCon case happens when a TyCon has been trimmed
+        -- during tidying.
+        -- Furthermore, tyThingToIfaceDecl is also used in TcRnDriver
+        -- for GHCi, when browsing a module, in which case the
+        -- AbstractTyCon and TupleTyCon cases are perfectly sensible.
+        -- (Tuple declarations are not serialised into interface files.)
 
     ifaceConDecl data_con
         = IfCon   { ifConOcc     = getOccName (dataConName data_con),
@@ -1922,15 +1928,15 @@ toIfUnfolding _ _
   = Nothing
 
 --------------------------
-coreRuleToIfaceRule :: Module -> CoreRule -> IfaceRule
-coreRuleToIfaceRule _ (BuiltinRule { ru_fn = fn})
+coreRuleToIfaceRule :: CoreRule -> IfaceRule
+coreRuleToIfaceRule (BuiltinRule { ru_fn = fn})
   = pprTrace "toHsRule: builtin" (ppr fn) $
     bogusIfaceRule fn
 
-coreRuleToIfaceRule mod rule@(Rule { ru_name = name, ru_fn = fn,
-                                     ru_act = act, ru_bndrs = bndrs,
-                                     ru_args = args, ru_rhs = rhs,
-                                     ru_auto = auto })
+coreRuleToIfaceRule (Rule { ru_name = name, ru_fn = fn,
+                            ru_act = act, ru_bndrs = bndrs,
+                            ru_args = args, ru_rhs = rhs,
+                            ru_orphan = orph, ru_auto = auto })
   = IfaceRule { ifRuleName  = name, ifActivation = act,
                 ifRuleBndrs = map toIfaceBndr bndrs,
                 ifRuleHead  = fn,
@@ -1946,15 +1952,6 @@ coreRuleToIfaceRule mod rule@(Rule { ru_name = name, ru_fn = fn,
     do_arg (Type ty)     = IfaceType (toIfaceType (deNoteType ty))
     do_arg (Coercion co) = IfaceCo   (toIfaceCoercion co)
     do_arg arg           = toIfaceExpr arg
-
-        -- Compute orphanhood.  See Note [Orphans] in InstEnv
-        -- A rule is an orphan only if none of the variables
-        -- mentioned on its left-hand side are locally defined
-    lhs_names = nameSetElems (ruleLhsOrphNames rule)
-
-    orph = case filter (nameIsLocalOrFrom mod) lhs_names of
-                        (n : _) -> NotOrphan (nameOccName n)
-                        []      -> IsOrphan
 
 bogusIfaceRule :: Name -> IfaceRule
 bogusIfaceRule id_name
@@ -2018,8 +2015,9 @@ toIfaceApp (App f a) as = toIfaceApp f (a:as)
 toIfaceApp (Var v) as
   = case isDataConWorkId_maybe v of
         -- We convert the *worker* for tuples into IfaceTuples
-        Just dc |  isTupleTyCon tc && saturated
-                -> IfaceTuple (tupleTyConSort tc) tup_args
+        Just dc |  saturated
+                ,  Just tup_sort <- tyConTuple_maybe tc
+                -> IfaceTuple tup_sort tup_args
           where
             val_args  = dropWhile isTypeArg as
             saturated = val_args `lengthIs` idArity v

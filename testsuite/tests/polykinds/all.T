@@ -115,4 +115,6 @@ test('T9574', normal, compile_fail, [''])
 test('T9833', normal, compile, [''])
 test('T7908', normal, compile, [''])
 test('T10041', normal, compile, [''])
-
+test('T10451', normal, compile_fail, [''])
+test('T10516', normal, compile_fail, [''])
+test('T10503', normal, compile_fail, [''])

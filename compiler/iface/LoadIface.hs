@@ -234,61 +234,26 @@ needWiredInHomeIface _           = False
 ************************************************************************
 -}
 
--- Note [Un-ambiguous multiple interfaces]
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- When a user writes an import statement, this usually causes a *single*
--- interface file to be loaded.  However, the game is different when
--- signatures are being imported.  Suppose in packages p and q we have
--- signatures:
---
---  module A where
---      foo :: Int
---
---  module A where
---      bar :: Int
---
--- If both packages are exposed and I am importing A, I should see a
--- "unified" signature:
---
---  module A where
---      foo :: Int
---      bar :: Int
---
--- The way we achieve this is having the module lookup for A load and return
--- multiple interface files, which we will then process as if there were
--- "multiple" imports:
---
---  import "p" A
---  import "q" A
---
--- Doing so does not cause any ambiguity, because any overlapping identifiers
--- are guaranteed to have the same name if the backing implementations of the
--- two signatures are the same (a condition which is checked by 'Packages'.)
-
-
 -- | Load the interface corresponding to an @import@ directive in
 -- source code.  On a failure, fail in the monad with an error message.
--- See Note [Un-ambiguous multiple interfaces] for why the return type
--- is @[ModIface]@
 loadSrcInterface :: SDoc
                  -> ModuleName
                  -> IsBootInterface     -- {-# SOURCE #-} ?
                  -> Maybe FastString    -- "package", if any
-                 -> RnM [ModIface]
+                 -> RnM ModIface
 
 loadSrcInterface doc mod want_boot maybe_pkg
   = do { res <- loadSrcInterface_maybe doc mod want_boot maybe_pkg
        ; case res of
-           Failed err       -> failWithTc err
-           Succeeded ifaces -> return ifaces }
+           Failed err      -> failWithTc err
+           Succeeded iface -> return iface }
 
--- | Like 'loadSrcInterface', but returns a 'MaybeErr'.  See also
--- Note [Un-ambiguous multiple interfaces]
+-- | Like 'loadSrcInterface', but returns a 'MaybeErr'.
 loadSrcInterface_maybe :: SDoc
                        -> ModuleName
                        -> IsBootInterface     -- {-# SOURCE #-} ?
                        -> Maybe FastString    -- "package", if any
-                       -> RnM (MaybeErr MsgDoc [ModIface])
+                       -> RnM (MaybeErr MsgDoc ModIface)
 
 loadSrcInterface_maybe doc mod want_boot maybe_pkg
   -- We must first find which Module this import refers to.  This involves
@@ -299,15 +264,7 @@ loadSrcInterface_maybe doc mod want_boot maybe_pkg
   = do { hsc_env <- getTopEnv
        ; res <- liftIO $ findImportedModule hsc_env mod maybe_pkg
        ; case res of
-           FoundModule (FoundHs { fr_mod = mod })
-            -> fmap (fmap (:[]))
-             . initIfaceTcRn
-             $ loadInterface doc mod (ImportByUser want_boot)
-           FoundSigs mods _backing
-            -> initIfaceTcRn $ do
-               ms <- forM mods $ \(FoundHs { fr_mod = mod }) ->
-                          loadInterface doc mod (ImportByUser want_boot)
-               return (sequence ms)
+           Found _ mod -> initIfaceTcRn $ loadInterface doc mod (ImportByUser want_boot)
            err         -> return (Failed (cannotFindInterface (hsc_dflags hsc_env) mod err)) }
 
 -- | Load interface directly for a fully qualified 'Module'.  (This is a fairly
@@ -413,6 +370,7 @@ loadInterface :: SDoc -> Module -> WhereFrom
 loadInterface doc_str mod from
   = do  {       -- Read the state
           (eps,hpt) <- getEpsAndHpt
+        ; gbl_env <- getGblEnv
 
         ; traceIf (text "Considering whether to load" <+> ppr mod <+> ppr from)
 
@@ -429,7 +387,15 @@ loadInterface doc_str mod from
         -- READ THE MODULE IN
         ; read_result <- case (wantHiBootFile dflags eps mod from) of
                            Failed err             -> return (Failed err)
-                           Succeeded hi_boot_file -> findAndReadIface doc_str mod hi_boot_file
+                           Succeeded hi_boot_file ->
+                            -- Stoutly warn against an EPS-updating import
+                            -- of one's own boot file! (one-shot only)
+                            --See Note [Do not update EPS with your own hi-boot]
+                            -- in MkIface.
+                            WARN( hi_boot_file &&
+                                  fmap fst (if_rec_types gbl_env) == Just mod,
+                                  ppr mod )
+                            findAndReadIface doc_str mod hi_boot_file
         ; case read_result of {
             Failed err -> do
                 { let fake_iface = emptyModIface mod
@@ -492,11 +458,7 @@ loadInterface doc_str mod from
 
         ; updateEps_  $ \ eps ->
            if elemModuleEnv mod (eps_PIT eps) then eps else
-              case from of  -- See Note [Care with plugin imports]
-                ImportByPlugin -> eps {
-                  eps_PIT          = extendModuleEnv (eps_PIT eps) mod final_iface,
-                  eps_PTE          = addDeclsToPTE   (eps_PTE eps) new_eps_decls}
-                _              -> eps {
+                eps {
                   eps_PIT          = extendModuleEnv (eps_PIT eps) mod final_iface,
                   eps_PTE          = addDeclsToPTE   (eps_PTE eps) new_eps_decls,
                   eps_rule_base    = extendRuleBaseList (eps_rule_base eps)
@@ -559,27 +521,6 @@ badSourceImport mod
   = hang (ptext (sLit "You cannot {-# SOURCE #-} import a module from another package"))
        2 (ptext (sLit "but") <+> quotes (ppr mod) <+> ptext (sLit "is from package")
           <+> quotes (ppr (modulePackageKey mod)))
-
-{-
-Note [Care with plugin imports]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When dynamically loading a plugin (via loadPluginInterface) we
-populate the same External Package State (EPS), even though plugin
-modules are to link with the compiler itself, and not with the
-compiled program.  That's fine: mostly the EPS is just a cache for
-the interace files on disk.
-
-But it's NOT ok for the RULES or instance environment.  We do not want
-to fire a RULE from the plugin on the code we are compiling, otherwise
-the code we are compiling will have a reference to a RHS of the rule
-that exists only in the compiler!  This actually happened to Daniel,
-via a RULE arising from a specialisation of (^) in the plugin.
-
-Solution: when loading plugins, do not extend the rule and instance
-environments.  We are only interested in the type environment, so that
-we can check that the plugin exports a function with the type that the
-compiler expects.
--}
 
 -----------------------------------------------------
 --      Loading type/class/value decls
@@ -763,7 +704,7 @@ findAndReadIface doc_str mod hi_boot_file
                hsc_env <- getTopEnv
                mb_found <- liftIO (findExactModule hsc_env mod)
                case mb_found of
-                   FoundExact loc mod -> do
+                   Found loc mod -> do
 
                        -- Found file, so read it
                        let file_path = addBootSuffix_maybe hi_boot_file
@@ -780,8 +721,7 @@ findAndReadIface doc_str mod hi_boot_file
                        traceIf (ptext (sLit "...not found"))
                        dflags <- getDynFlags
                        return (Failed (cannotFindInterface dflags
-                                           (moduleName mod)
-                                           (convFindExactResult err)))
+                                           (moduleName mod) err))
     where read_file file_path = do
               traceIf (ptext (sLit "readIFace") <+> text file_path)
               read_result <- readIface mod file_path

@@ -492,7 +492,7 @@ kcTyClDecl (ClassDecl { tcdLName = L _ name, tcdTyVars = hs_tvs
 -- do anything here
 kcTyClDecl (FamDecl (FamilyDecl { fdLName  = L _ fam_tc_name
                                 , fdTyVars = hs_tvs
-                                , fdInfo   = ClosedTypeFamily eqns }))
+                                , fdInfo   = ClosedTypeFamily (Just eqns) }))
   = do { tc_kind <- kcLookupKind fam_tc_name
        ; let fam_tc_shape = ( fam_tc_name, length (hsQTvBndrs hs_tvs), tc_kind)
        ; mapM_ (kcTyFamInstEqn fam_tc_shape) eqns }
@@ -581,13 +581,24 @@ Then:
 This fancy footwork (with two bindings for T) is only necesary for the
 TyCons or Classes of this recursive group.  Earlier, finished groups,
 live in the global env only.
+
+Note [Declarations for wired-in things]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For wired-in things we simply ignore the declaration
+and take the wired-in information.  That avoids complications.
+e.g. the need to make the data constructor worker name for
+     a constraint tuple match the wired-in one
 -}
 
 tcTyClDecl :: RecTyInfo -> LTyClDecl Name -> TcM [TyThing]
 tcTyClDecl rec_info (L loc decl)
+  | Just thing <- wiredInNameTyThing_maybe (tcdName decl)
+  = return [thing]  -- See Note [Declarations for wired-in things]
+
+  | otherwise
   = setSrcSpan loc $ tcAddDeclCtxt decl $
-    traceTc "tcTyAndCl-x" (ppr decl) >>
-    tcTyClDecl1 NoParentTyCon rec_info decl
+    do { traceTc "tcTyAndCl-x" (ppr decl)
+       ; tcTyClDecl1 NoParentTyCon rec_info decl }
 
   -- "type family" declarations
 tcTyClDecl1 :: TyConParent -> RecTyInfo -> TyClDecl Name -> TcM [TyThing]
@@ -673,17 +684,24 @@ tcFamDecl1 parent
   ; return [ATyCon tycon] }
 
 tcFamDecl1 parent
-            (FamilyDecl { fdInfo = ClosedTypeFamily eqns
+            (FamilyDecl { fdInfo = ClosedTypeFamily mb_eqns
                         , fdLName = lname@(L _ tc_name), fdTyVars = tvs })
 -- Closed type families are a little tricky, because they contain the definition
 -- of both the type family and the equations for a CoAxiom.
--- Note: eqns might be empty, in a hs-boot file!
   = do { traceTc "closed type family:" (ppr tc_name)
          -- the variables in the header have no scope:
        ; (tvs', kind) <- tcTyClTyVars tc_name tvs $ \ tvs' kind ->
                          return (tvs', kind)
 
        ; checkFamFlag tc_name -- make sure we have -XTypeFamilies
+
+         -- If Nothing, this is an abstract family in a hs-boot file;
+         -- but eqns might be empty in the Just case as well
+       ; case mb_eqns of
+           Nothing   -> do { tycon <- buildFamilyTyCon tc_name tvs'
+                                        AbstractClosedSynFamilyTyCon kind parent
+                           ; return [ATyCon tycon] }
+           Just eqns -> do {
 
          -- Process the equations, creating CoAxBranches
        ; tc_kind <- kcLookupKind tc_name
@@ -705,20 +723,15 @@ tcFamDecl1 parent
        ; loc <- getSrcSpanM
        ; co_ax_name <- newFamInstAxiomName loc tc_name []
 
-         -- mkBranchedCoAxiom will fail on an empty list of branches, but
-         -- we'll never look at co_ax in this case
-       ; let co_ax = mkBranchedCoAxiom co_ax_name fam_tc branches
+         -- mkBranchedCoAxiom will fail on an empty list of branches
+       ; let mb_co_ax
+              | null eqns = Nothing
+              | otherwise = Just $ mkBranchedCoAxiom co_ax_name fam_tc branches
 
          -- now, finally, build the TyCon
-       ; let syn_rhs = if null eqns
-                       then AbstractClosedSynFamilyTyCon
-                       else ClosedSynFamilyTyCon co_ax
-       ; tycon <- buildFamilyTyCon tc_name tvs' syn_rhs kind parent
-
-       ; let result = if null eqns
-                      then [ATyCon tycon]
-                      else [ATyCon tycon, ACoAxiom co_ax]
-       ; return result }
+       ; tycon <- buildFamilyTyCon tc_name tvs'
+                      (ClosedSynFamilyTyCon mb_co_ax) kind parent
+       ; return $ ATyCon tycon : maybeToList (fmap ACoAxiom mb_co_ax) } }
 -- We check for instance validity later, when doing validity checking for
 -- the tycon
 
@@ -786,7 +799,7 @@ tcDataDefn rec_info tc_name tvs kind
                  else case new_or_data of
                    DataType -> return (mkDataTyConRhs data_cons)
                    NewType  -> ASSERT( not (null data_cons) )
-                                    mkNewTyConRhs tc_name tycon (head data_cons)
+                               mkNewTyConRhs tc_name tycon (head data_cons)
              ; return (buildAlgTyCon tc_name final_tvs roles (fmap unLoc cType)
                                      stupid_theta tc_rhs
                                      (rti_is_rec rec_info tc_name)
@@ -1438,6 +1451,9 @@ checkValidTyCl thing
 
 checkValidTyCon :: TyCon -> TcM ()
 checkValidTyCon tc
+  | isPrimTyCon tc   -- Happens when Haddock'ing GHC.Prim
+  = return ()
+
   | Just cl <- tyConClass_maybe tc
   = checkValidClass cl
 
@@ -1446,11 +1462,12 @@ checkValidTyCon tc
 
   | Just fam_flav <- famTyConFlav_maybe tc
   = case fam_flav of
-    { ClosedSynFamilyTyCon ax      -> checkValidClosedCoAxiom ax
+    { ClosedSynFamilyTyCon (Just ax) -> checkValidClosedCoAxiom ax
+    ; ClosedSynFamilyTyCon Nothing   -> return ()
     ; AbstractClosedSynFamilyTyCon ->
       do { hsBoot <- tcIsHsBootOrSig
          ; checkTc hsBoot $
-           ptext (sLit "You may omit the equations in a closed type family") $$
+           ptext (sLit "You may define an abstract closed type family") $$
            ptext (sLit "only in a .hs-boot file") }
     ; OpenSynFamilyTyCon           -> return ()
     ; BuiltInSynFamTyCon _         -> return () }
@@ -2288,14 +2305,7 @@ addTyThingCtxt thing
   where
     name = getName thing
     flav = case thing of
-             ATyCon tc
-                | isClassTyCon tc       -> ptext (sLit "class")
-                | isTypeFamilyTyCon tc  -> ptext (sLit "type family")
-                | isDataFamilyTyCon tc  -> ptext (sLit "data family")
-                | isTypeSynonymTyCon tc -> ptext (sLit "type")
-                | isNewTyCon tc         -> ptext (sLit "newtype")
-                | isDataTyCon tc        -> ptext (sLit "data")
-
+             ATyCon tc -> text (tyConFlavour tc)
              _ -> pprTrace "addTyThingCtxt strange" (ppr thing)
                   Outputable.empty
 

@@ -46,8 +46,11 @@ endif
 
 ifeq "$(phase)" "final"
 
-ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
-include libraries/integer-gmp/gmp/config.mk
+ifneq "$(CLEANING)" "YES"
+# Hack. The file gmp/config.mk doesn't exist yet after running ./configure in
+# the toplevel (ghc) directory. To let some toplevel make commands such as
+# sdist go through, right after ./configure, don't consider this an error.
+-include libraries/integer-gmp/gmp/config.mk
 endif
 
 gmp_CC_OPTS += $(addprefix -I,$(GMP_INCLUDE_DIRS))
@@ -101,6 +104,8 @@ endif
 
 libraries/integer-gmp_dist-install_EXTRA_CC_OPTS += $(gmp_CC_OPTS)
 
+ifneq "$(CLEANING)" "YES"
+# When running `make clean` before `./configure`, CC_STAGE1 is undefined.
 CLANG = $(findstring clang, $(shell $(CC_STAGE1) --version))
 
 ifeq "$(CLANG)" "clang"
@@ -136,4 +141,5 @@ libraries/integer-gmp/gmp/libgmp.a libraries/integer-gmp/gmp/gmp.h:
 	cd libraries/integer-gmp/gmp/objs && $(AR_STAGE1) x ../libgmp.a
 	$(RANLIB_CMD) libraries/integer-gmp/gmp/libgmp.a
 
-endif
+endif # CLEANING
+endif # phase

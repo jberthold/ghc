@@ -1,8 +1,16 @@
 # Tests that newArray/newArray_ is being optimised correctly
 
+test('T10359',
+     [stats_num_field('bytes allocated',
+          [(wordsize(64), 499512, 5),
+           (wordsize(32), 374056, 5)]),
+      only_ways(['normal'])
+      ],
+     compile_and_run,
+     ['-O'])
+
 # fortunately the values here are mostly independent of the wordsize,
 # because the test allocates an unboxed array of doubles.
-
 test('T3586',
      [stats_num_field('peak_megabytes_allocated', (17, 1)),
                                  # expected value: 17 (amd64/Linux)
@@ -31,7 +39,8 @@ test('T4830',
      compile_and_run,
      ['-O2'])
 
-test('T3245', normal, compile_and_run, ['-O'])
+test('T3245', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
+     compile_and_run, ['-O'])
 
 # Test that bytestring reading/writing isn't over-allocating.  We had
 # a bug in hGetBufNonBlocking in 6.13 that triggered this.

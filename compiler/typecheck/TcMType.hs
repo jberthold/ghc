@@ -143,7 +143,6 @@ predTypeOccName :: PredType -> OccName
 predTypeOccName ty = case classifyPredType ty of
     ClassPred cls _ -> mkDictOcc (getOccName cls)
     EqPred _ _ _    -> mkVarOccFS (fsLit "cobox")
-    TuplePred _     -> mkVarOccFS (fsLit "tup")
     IrredPred _     -> mkVarOccFS (fsLit "irred")
 
 
@@ -329,8 +328,6 @@ cloneMetaTyVar tv
         ; return (mkTcTyVar name' (tyVarKind tv) details') }
 
 mkTcTyVarName :: Unique -> FastString -> Name
--- Make sure that fresh TcTyVar names finish with a digit
--- leaving the un-cluttered names free for user names
 mkTcTyVarName uniq str = mkSysTvName uniq str
 
 -- Works for both type and kind variables
@@ -454,11 +451,16 @@ tcInstTyVarX subst tyvar
   = do  { uniq <- newUnique
         ; details <- newMetaDetails (TauTv False)
         ; let name   = mkSystemName uniq (getOccName tyvar)
+                       -- See Note [Name of an instantiated type variable]
               kind   = substTy subst (tyVarKind tyvar)
               new_tv = mkTcTyVar name kind details
         ; return (extendTvSubst subst tyvar (mkTyVarTy new_tv), new_tv) }
 
-{-
+{- Note [Name of an instantiated type variable]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+At the moment we give a unification variable a System Name, which
+influences the way it is tidied; see TypeRep.tidyTyVarBndr.
+
 ************************************************************************
 *                                                                      *
              Quantification
@@ -909,10 +911,6 @@ zonkTidyOrigin env (KindEqOrigin ty1 ty2 orig)
        ; (env2, ty2') <- zonkTidyTcType env1 ty2
        ; (env3, orig') <- zonkTidyOrigin env2 orig
        ; return (env3, KindEqOrigin ty1' ty2' orig') }
-zonkTidyOrigin env (CoercibleOrigin ty1 ty2)
-  = do { (env1, ty1') <- zonkTidyTcType env  ty1
-       ; (env2, ty2') <- zonkTidyTcType env1 ty2
-       ; return (env2, CoercibleOrigin ty1' ty2') }
 zonkTidyOrigin env (FunDepOrigin1 p1 l1 p2 l2)
   = do { (env1, p1') <- zonkTidyTcType env  p1
        ; (env2, p2') <- zonkTidyTcType env1 p2

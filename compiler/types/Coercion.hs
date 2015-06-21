@@ -190,6 +190,8 @@ data Coercion
 
   | NthCo  Int         Coercion     -- Zero-indexed; decomposes (T t0 ... tn)
     -- :: _ -> e -> ?? (inverse of TyConAppCo, see Note [TyConAppCo roles])
+    -- See Note [NthCo and newtypes]
+
   | LRCo   LeftOrRight Coercion     -- Decomposes (t_left t_right)
     -- :: _ -> N -> N
   | InstCo Coercion Type
@@ -496,6 +498,34 @@ TyConAppCo Phantom Foo (UnivCo Phantom Int Bool) : Foo Int ~P Foo Bool
 The rules here dictate the roles of the parameters to mkTyConAppCo
 (should be checked by Lint).
 
+Note [NthCo and newtypes]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have
+
+  newtype N a = MkN Int
+  type role N representational
+
+This yields axiom
+
+  NTCo:N :: forall a. N a ~R Int
+
+We can then build
+
+  co :: forall a b. N a ~R N b
+  co = NTCo:N a ; sym (NTCo:N b)
+
+for any `a` and `b`. Because of the role annotation on N, if we use
+NthCo, we'll get out a representational coercion. That is:
+
+  NthCo 0 co :: forall a b. a ~R b
+
+Yikes! Clearly, this is terrible. The solution is simple: forbid
+NthCo to be used on newtypes if the internal coercion is representational.
+
+This is not just some corner case discovered by a segfault somewhere;
+it was discovered in the proof of soundness of roles and described
+in the "Safe Coercions" paper (ICFP '14).
+
 ************************************************************************
 *                                                                      *
 \subsection{Coercion variables}
@@ -775,7 +805,7 @@ splitAppCo_maybe :: Coercion -> Maybe (Coercion, Coercion)
 -- ^ Attempt to take a coercion application apart.
 splitAppCo_maybe (AppCo co1 co2) = Just (co1, co2)
 splitAppCo_maybe (TyConAppCo r tc cos)
-  | isDecomposableTyCon tc || cos `lengthExceeds` tyConArity tc
+  | mightBeUnsaturatedTyCon tc || cos `lengthExceeds` tyConArity tc
   , Just (cos', co') <- snocView cos
   , Just co'' <- setNominalRole_maybe co'
   = Just (mkTyConAppCo r tc cos', co'') -- Never create unsaturated type family apps!
@@ -1825,14 +1855,14 @@ seqCo :: Coercion -> ()
 seqCo (Refl eq ty)              = eq `seq` seqType ty
 seqCo (TyConAppCo eq tc cos)    = eq `seq` tc `seq` seqCos cos
 seqCo (AppCo co1 co2)           = seqCo co1 `seq` seqCo co2
-seqCo (ForAllCo tv co)          = tv `seq` seqCo co
+seqCo (ForAllCo tv co)          = seqType (tyVarKind tv) `seq` seqCo co
 seqCo (CoVarCo cv)              = cv `seq` ()
 seqCo (AxiomInstCo con ind cos) = con `seq` ind `seq` seqCos cos
 seqCo (UnivCo s r ty1 ty2)      = s `seq` r `seq` seqType ty1 `seq` seqType ty2
 seqCo (SymCo co)                = seqCo co
 seqCo (TransCo co1 co2)         = seqCo co1 `seq` seqCo co2
-seqCo (NthCo _ co)              = seqCo co
-seqCo (LRCo _ co)               = seqCo co
+seqCo (NthCo n co)              = n `seq` seqCo co
+seqCo (LRCo lr co)              = lr `seq` seqCo co
 seqCo (InstCo co ty)            = seqCo co `seq` seqType ty
 seqCo (SubCo co)                = seqCo co
 seqCo (AxiomRuleCo _ ts cs)     = seqTypes ts `seq` seqCos cs
@@ -1988,4 +2018,3 @@ Kind coercions are only of the form: Refl kind. They are only used to
 instantiate kind polymorphic type constructors in TyConAppCo. Remember
 that kind instantiation only happens with TyConApp, not AppTy.
 -}
-

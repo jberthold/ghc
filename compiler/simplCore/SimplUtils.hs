@@ -20,10 +20,10 @@ module SimplUtils (
         SimplCont(..), DupFlag(..),
         isSimplified,
         contIsDupable, contResultType, contHoleType,
-        contIsTrivial, contArgs, 
+        contIsTrivial, contArgs,
         countValArgs, countArgs,
         mkBoringStop, mkRhsStop, mkLazyArgStop, contIsRhsOrArg,
-        interestingCallContext, interestingArg,
+        interestingCallContext,
 
         -- ArgInfo
         ArgInfo(..), ArgSpec(..), mkArgInfo,
@@ -54,6 +54,7 @@ import SimplMonad
 import Type     hiding( substTy )
 import Coercion hiding( substCo, substTy )
 import DataCon          ( dataConWorkId )
+import VarEnv
 import VarSet
 import BasicTypes
 import Util
@@ -63,7 +64,6 @@ import FastString
 import Pair
 
 import Control.Monad    ( when )
-import Data.List        ( partition )
 
 {-
 ************************************************************************
@@ -122,10 +122,12 @@ data SimplCont
                                    -- See Note [The hole type in ApplyToTy]
         sc_cont    :: SimplCont }
 
-  | Select              -- case <hole> of alts
-        DupFlag                 -- See Note [DupFlag invariants]
-        InId [InAlt] StaticEnv  -- The case binder, alts type, alts, and subst-env
-        SimplCont
+  | Select {           -- case <hole> of alts
+        sc_dup  :: DupFlag,                 -- See Note [DupFlag invariants]
+        sc_bndr :: InId,                    -- case binder
+        sc_alts :: [InAlt],                 -- Alternatives
+        sc_env  ::  StaticEnv,              --   and their static environment
+        sc_cont :: SimplCont }
 
   -- The two strict forms have no DupFlag, because we never duplicate them
   | StrictBind                  -- (\x* \xs. e) <hole>
@@ -174,19 +176,19 @@ instance Outputable DupFlag where
   ppr Simplified = ptext (sLit "simpl")
 
 instance Outputable SimplCont where
-  ppr (Stop ty interesting)           = ptext (sLit "Stop") <> brackets (ppr interesting) <+> ppr ty
-  ppr (ApplyToTy  { sc_arg_ty = ty
-                  , sc_cont = cont }) = (ptext (sLit "ApplyToTy") <+> pprParendType ty) $$ ppr cont
-  ppr (ApplyToVal { sc_arg = arg
-                  , sc_dup = dup
-                  , sc_cont = cont }) = (ptext (sLit "ApplyToVal") <+> ppr dup <+> pprParendExpr arg)
+  ppr (Stop ty interesting) = ptext (sLit "Stop") <> brackets (ppr interesting) <+> ppr ty
+  ppr (CastIt co cont  )    = (ptext (sLit "CastIt") <+> ppr co) $$ ppr cont
+  ppr (TickIt t cont)       = (ptext (sLit "TickIt") <+> ppr t) $$ ppr cont
+  ppr (ApplyToTy  { sc_arg_ty = ty, sc_cont = cont })
+    = (ptext (sLit "ApplyToTy") <+> pprParendType ty) $$ ppr cont
+  ppr (ApplyToVal { sc_arg = arg, sc_dup = dup, sc_cont = cont })
+    = (ptext (sLit "ApplyToVal") <+> ppr dup <+> pprParendExpr arg)
                                         $$ ppr cont
   ppr (StrictBind b _ _ _ cont)       = (ptext (sLit "StrictBind") <+> ppr b) $$ ppr cont
   ppr (StrictArg ai _ cont)           = (ptext (sLit "StrictArg") <+> ppr (ai_fun ai)) $$ ppr cont
-  ppr (Select dup bndr alts se cont)  = (ptext (sLit "Select") <+> ppr dup <+> ppr bndr) $$
-                                        ifPprDebug (nest 2 $ vcat [ppr (seTvSubst se), ppr alts]) $$ ppr cont
-  ppr (CastIt co cont  )              = (ptext (sLit "CastIt") <+> ppr co) $$ ppr cont
-  ppr (TickIt t cont)                 = (ptext (sLit "TickIt") <+> ppr t) $$ ppr cont
+  ppr (Select { sc_dup = dup, sc_bndr = bndr, sc_alts = alts, sc_env = se, sc_cont = cont })
+    = (ptext (sLit "Select") <+> ppr dup <+> ppr bndr) $$
+       ifPprDebug (nest 2 $ vcat [ppr (seTvSubst se), ppr alts]) $$ ppr cont
 
 
 {- Note [The hole type in ApplyToTy]
@@ -322,7 +324,7 @@ contIsDupable :: SimplCont -> Bool
 contIsDupable (Stop {})                         = True
 contIsDupable (ApplyToTy  { sc_cont = k })      = contIsDupable k
 contIsDupable (ApplyToVal { sc_dup = OkToDup }) = True -- See Note [DupFlag invariants]
-contIsDupable (Select   OkToDup _ _ _ _)        = True -- ...ditto...
+contIsDupable (Select { sc_dup = OkToDup })     = True -- ...ditto...
 contIsDupable (CastIt _ k)                      = contIsDupable k
 contIsDupable _                                 = False
 
@@ -340,7 +342,7 @@ contResultType (Stop ty _)                  = ty
 contResultType (CastIt _ k)                 = contResultType k
 contResultType (StrictBind _ _ _ _ k)       = contResultType k
 contResultType (StrictArg _ _ k)            = contResultType k
-contResultType (Select _ _ _ _ k)           = contResultType k
+contResultType (Select { sc_cont = k })     = contResultType k
 contResultType (ApplyToTy  { sc_cont = k }) = contResultType k
 contResultType (ApplyToVal { sc_cont = k }) = contResultType k
 contResultType (TickIt _ k)                 = contResultType k
@@ -349,13 +351,14 @@ contHoleType :: SimplCont -> OutType
 contHoleType (Stop ty _)                      = ty
 contHoleType (TickIt _ k)                     = contHoleType k
 contHoleType (CastIt co _)                    = pFst (coercionKind co)
-contHoleType (Select d b _ se _)              = perhapsSubstTy d se (idType b)
 contHoleType (StrictBind b _ _ se _)          = substTy se (idType b)
 contHoleType (StrictArg ai _ _)               = funArgTy (ai_type ai)
 contHoleType (ApplyToTy  { sc_hole_ty = ty }) = ty  -- See Note [The hole type in ApplyToTy]
 contHoleType (ApplyToVal { sc_arg = e, sc_env = se, sc_dup = dup, sc_cont = k })
   = mkFunTy (perhapsSubstTy dup se (exprType e))
             (contHoleType k)
+contHoleType (Select { sc_dup = d, sc_bndr =  b, sc_env = se })
+  = perhapsSubstTy d se (idType b)
 
 -------------------
 countValArgs :: SimplCont -> Int
@@ -390,76 +393,9 @@ contArgs cont
     go args (CastIt _ k)                = go args k
     go args k                           = (False, reverse args, k)
 
-    is_interesting arg se = interestingArg (substExpr (text "contArgs") se arg)
+    is_interesting arg se = interestingArg se arg
                    -- Do *not* use short-cutting substitution here
                    -- because we want to get as much IdInfo as possible
-
-{-
-Note [Interesting call context]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We want to avoid inlining an expression where there can't possibly be
-any gain, such as in an argument position.  Hence, if the continuation
-is interesting (eg. a case scrutinee, application etc.) then we
-inline, otherwise we don't.
-
-Previously some_benefit used to return True only if the variable was
-applied to some value arguments.  This didn't work:
-
-        let x = _coerce_ (T Int) Int (I# 3) in
-        case _coerce_ Int (T Int) x of
-                I# y -> ....
-
-we want to inline x, but can't see that it's a constructor in a case
-scrutinee position, and some_benefit is False.
-
-Another example:
-
-dMonadST = _/\_ t -> :Monad (g1 _@_ t, g2 _@_ t, g3 _@_ t)
-
-....  case dMonadST _@_ x0 of (a,b,c) -> ....
-
-we'd really like to inline dMonadST here, but we *don't* want to
-inline if the case expression is just
-
-        case x of y { DEFAULT -> ... }
-
-since we can just eliminate this case instead (x is in WHNF).  Similar
-applies when x is bound to a lambda expression.  Hence
-contIsInteresting looks for case expressions with just a single
-default case.
--}
-
-interestingCallContext :: SimplCont -> CallCtxt
--- See Note [Interesting call context]
-interestingCallContext cont
-  = interesting cont
-  where
-    interesting (Select _ _bndr _ _ _) = CaseCtxt
-    interesting (ApplyToVal {})        = ValAppCtxt
-        -- Can happen if we have (f Int |> co) y
-        -- If f has an INLINE prag we need to give it some
-        -- motivation to inline. See Note [Cast then apply]
-        -- in CoreUnfold
-    interesting (StrictArg _ cci _)         = cci
-    interesting (StrictBind {})             = BoringCtxt
-    interesting (Stop _ cci)                = cci
-    interesting (TickIt _ k)                = interesting k
-    interesting (ApplyToTy { sc_cont = k }) = interesting k
-    interesting (CastIt _ k)                = interesting k
-        -- If this call is the arg of a strict function, the context
-        -- is a bit interesting.  If we inline here, we may get useful
-        -- evaluation information to avoid repeated evals: e.g.
-        --      x + (y * z)
-        -- Here the contIsInteresting makes the '*' keener to inline,
-        -- which in turn exposes a constructor which makes the '+' inline.
-        -- Assuming that +,* aren't small enough to inline regardless.
-        --
-        -- It's also very important to inline in a strict context for things
-        -- like
-        --              foldr k z (f x)
-        -- Here, the context of (f x) is strict, and if f's unfolding is
-        -- a build it's *great* to inline it here.  So we must ensure that
-        -- the context for (f x) is not totally uninteresting.
 
 
 -------------------
@@ -541,6 +477,80 @@ it'll just be floated out again.  Even if f has lots of discounts
 on its first argument -- it must be saturated for these to kick in
 -}
 
+
+{-
+************************************************************************
+*                                                                      *
+        Interesting arguments
+*                                                                      *
+************************************************************************
+
+Note [Interesting call context]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We want to avoid inlining an expression where there can't possibly be
+any gain, such as in an argument position.  Hence, if the continuation
+is interesting (eg. a case scrutinee, application etc.) then we
+inline, otherwise we don't.
+
+Previously some_benefit used to return True only if the variable was
+applied to some value arguments.  This didn't work:
+
+        let x = _coerce_ (T Int) Int (I# 3) in
+        case _coerce_ Int (T Int) x of
+                I# y -> ....
+
+we want to inline x, but can't see that it's a constructor in a case
+scrutinee position, and some_benefit is False.
+
+Another example:
+
+dMonadST = _/\_ t -> :Monad (g1 _@_ t, g2 _@_ t, g3 _@_ t)
+
+....  case dMonadST _@_ x0 of (a,b,c) -> ....
+
+we'd really like to inline dMonadST here, but we *don't* want to
+inline if the case expression is just
+
+        case x of y { DEFAULT -> ... }
+
+since we can just eliminate this case instead (x is in WHNF).  Similar
+applies when x is bound to a lambda expression.  Hence
+contIsInteresting looks for case expressions with just a single
+default case.
+-}
+
+interestingCallContext :: SimplCont -> CallCtxt
+-- See Note [Interesting call context]
+interestingCallContext cont
+  = interesting cont
+  where
+    interesting (Select {})     = CaseCtxt
+    interesting (ApplyToVal {}) = ValAppCtxt
+        -- Can happen if we have (f Int |> co) y
+        -- If f has an INLINE prag we need to give it some
+        -- motivation to inline. See Note [Cast then apply]
+        -- in CoreUnfold
+    interesting (StrictArg _ cci _)         = cci
+    interesting (StrictBind {})             = BoringCtxt
+    interesting (Stop _ cci)                = cci
+    interesting (TickIt _ k)                = interesting k
+    interesting (ApplyToTy { sc_cont = k }) = interesting k
+    interesting (CastIt _ k)                = interesting k
+        -- If this call is the arg of a strict function, the context
+        -- is a bit interesting.  If we inline here, we may get useful
+        -- evaluation information to avoid repeated evals: e.g.
+        --      x + (y * z)
+        -- Here the contIsInteresting makes the '*' keener to inline,
+        -- which in turn exposes a constructor which makes the '+' inline.
+        -- Assuming that +,* aren't small enough to inline regardless.
+        --
+        -- It's also very important to inline in a strict context for things
+        -- like
+        --              foldr k z (f x)
+        -- Here, the context of (f x) is strict, and if f's unfolding is
+        -- a build it's *great* to inline it here.  So we must ensure that
+        -- the context for (f x) is not totally uninteresting.
+
 interestingArgContext :: [CoreRule] -> SimplCont -> Bool
 -- If the argument has form (f x y), where x,y are boring,
 -- and f is marked INLINE, then we don't want to inline f.
@@ -578,6 +588,77 @@ interestingArgContext rules call_cont
 
     interesting RuleArgCtxt = True
     interesting _           = False
+
+
+{- Note [Interesting arguments]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+An argument is interesting if it deserves a discount for unfoldings
+with a discount in that argument position.  The idea is to avoid
+unfolding a function that is applied only to variables that have no
+unfolding (i.e. they are probably lambda bound): f x y z There is
+little point in inlining f here.
+
+Generally, *values* (like (C a b) and (\x.e)) deserve discounts.  But
+we must look through lets, eg (let x = e in C a b), because the let will
+float, exposing the value, if we inline.  That makes it different to
+exprIsHNF.
+
+Before 2009 we said it was interesting if the argument had *any* structure
+at all; i.e. (hasSomeUnfolding v).  But does too much inlining; see Trac #3016.
+
+But we don't regard (f x y) as interesting, unless f is unsaturated.
+If it's saturated and f hasn't inlined, then it's probably not going
+to now!
+
+Note [Conlike is interesting]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+        f d = ...((*) d x y)...
+        ... f (df d')...
+where df is con-like. Then we'd really like to inline 'f' so that the
+rule for (*) (df d) can fire.  To do this
+  a) we give a discount for being an argument of a class-op (eg (*) d)
+  b) we say that a con-like argument (eg (df d)) is interesting
+-}
+
+interestingArg :: SimplEnv -> CoreExpr -> ArgSummary
+-- See Note [Interesting arguments]
+interestingArg env e = go env 0 e
+  where
+    -- n is # value args to which the expression is applied
+    go env n (Var v)
+       | SimplEnv { seIdSubst = ids, seInScope = in_scope } <- env
+       = case lookupVarEnv ids v of
+           Nothing                     -> go_var n (refineFromInScope in_scope v)
+           Just (DoneId v')            -> go_var n (refineFromInScope in_scope v')
+           Just (DoneEx e)             -> go (zapSubstEnv env)             n e
+           Just (ContEx tvs cvs ids e) -> go (setSubstEnv env tvs cvs ids) n e
+
+    go _   _ (Lit {})              = ValueArg
+    go _   _ (Type _)              = TrivArg
+    go _   _ (Coercion _)          = TrivArg
+    go env n (App fn (Type _))     = go env n fn
+    go env n (App fn (Coercion _)) = go env n fn
+    go env n (App fn _)            = go env (n+1) fn
+    go env n (Tick _ a)            = go env n a
+    go env n (Cast e _)            = go env n e
+    go env n (Lam v e)
+       | isTyVar v                 = go env n     e
+       | n>0                       = go env (n-1) e
+       | otherwise                 = ValueArg
+    go env n (Let _ e)             = case go env n e of { ValueArg -> ValueArg; _ -> NonTrivArg }
+    go _ _ (Case {})               = NonTrivArg
+
+    go_var n v
+       | isConLikeId v     = ValueArg   -- Experimenting with 'conlike' rather that
+                                        --    data constructors here
+       | idArity v > n     = ValueArg   -- Catches (eg) primops with arity but no unfolding
+       | n > 0             = NonTrivArg -- Saturated or unknown call
+       | conlike_unfolding = ValueArg   -- n==0; look for an interesting unfolding
+                                        -- See Note [Conlike is interesting]
+       | otherwise         = TrivArg    -- n==0, no useful unfolding
+       where
+         conlike_unfolding = isConLikeUnfolding (idUnfolding v)
 
 {-
 ************************************************************************
@@ -1586,81 +1667,27 @@ of the inner case y, which give us nowhere to go!
 prepareAlts :: OutExpr -> OutId -> [InAlt] -> SimplM ([AltCon], [InAlt])
 -- The returned alternatives can be empty, none are possible
 prepareAlts scrut case_bndr' alts
+  | Just (tc, tys) <- splitTyConApp_maybe (varType case_bndr')
            -- Case binder is needed just for its type. Note that as an
            --   OutId, it has maximum information; this is important.
            --   Test simpl013 is an example
   = do { us <- getUniquesM
-       ; let (imposs_deflt_cons, refined_deflt, alts')
-                = filterAlts us (varType case_bndr') imposs_cons alts
-       ; when refined_deflt $ tick (FillInCaseDefault case_bndr')
+       ; let (idcs1, alts1)       = filterAlts tc tys imposs_cons alts
+             (yes2,  alts2)       = refineDefaultAlt us tc tys idcs1 alts1
+             (yes3, idcs3, alts3) = combineIdenticalAlts idcs1 alts2
+             -- "idcs" stands for "impossible default data constructors"
+             -- i.e. the constructors that can't match the default case
+       ; when yes2 $ tick (FillInCaseDefault case_bndr')
+       ; when yes3 $ tick (AltMerge case_bndr')
+       ; return (idcs3, alts3) }
 
-       ; alts'' <- combineIdenticalAlts case_bndr' alts'
-       ; return (imposs_deflt_cons, alts'') }
+  | otherwise  -- Not a data type, so nothing interesting happens
+  = return ([], alts)
   where
     imposs_cons = case scrut of
                     Var v -> otherCons (idUnfolding v)
                     _     -> []
 
-{-
-Note [Combine identical alternatives]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
- If several alternatives are identical, merge them into
- a single DEFAULT alternative.  I've occasionally seen this
- making a big difference:
-
-     case e of               =====>     case e of
-       C _ -> f x                         D v -> ....v....
-       D v -> ....v....                   DEFAULT -> f x
-       DEFAULT -> f x
-
-The point is that we merge common RHSs, at least for the DEFAULT case.
-[One could do something more elaborate but I've never seen it needed.]
-To avoid an expensive test, we just merge branches equal to the *first*
-alternative; this picks up the common cases
-     a) all branches equal
-     b) some branches equal to the DEFAULT (which occurs first)
-
-The case where Combine Identical Alternatives transformation showed up
-was like this (base/Foreign/C/Err/Error.hs):
-
-        x | p `is` 1 -> e1
-          | p `is` 2 -> e2
-        ...etc...
-
-where @is@ was something like
-
-        p `is` n = p /= (-1) && p == n
-
-This gave rise to a horrible sequence of cases
-
-        case p of
-          (-1) -> $j p
-          1    -> e1
-          DEFAULT -> $j p
-
-and similarly in cascade for all the join points!
-
-NB: it's important that all this is done in [InAlt], *before* we work
-on the alternatives themselves, because Simpify.simplAlt may zap the
-occurrence info on the binders in the alternatives, which in turn
-defeats combineIdenticalAlts (see Trac #7360).
--}
-
-combineIdenticalAlts :: OutId -> [InAlt] -> SimplM [InAlt]
--- See Note [Combine identical alternatives]
-combineIdenticalAlts case_bndr ((_con1,bndrs1,rhs1) : con_alts)
-  | all isDeadBinder bndrs1    -- Remember the default
-  , not (null eliminated_alts) -- alternative comes first
-  = do  { tick (AltMerge case_bndr)
-        ; return ((DEFAULT, [], mkTicks (concat tickss) rhs1) : filtered_alts) }
-  where
-    (eliminated_alts, filtered_alts) = partition identical_to_alt1 con_alts
-    cheapEqTicked e1 e2 = cheapEqExpr' tickishFloatable e1 e2
-    identical_to_alt1 (_con,bndrs,rhs)
-      = all isDeadBinder bndrs && rhs `cheapEqTicked` rhs1
-    tickss = map (stripTicksT tickishFloatable . thirdOf3) eliminated_alts
-
-combineIdenticalAlts _ alts = return alts
 
 {-
 ************************************************************************

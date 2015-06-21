@@ -1,10 +1,9 @@
 ---Problems---------------------
 [
-(AK AnnotationTuple.hs:14:39 AnnComma = [AnnotationTuple.hs:14:39])
-
-(AK <no location info> AnnEofPos = [AnnotationTuple.hs:32:1])
 ]
 
+---Problems'--------------------
+[]
 --------------------------------
 [
 (AK AnnotationTuple.hs:1:1 AnnCloseC = [AnnotationTuple.hs:27:1])
@@ -149,7 +148,7 @@
 
 (AK AnnotationTuple.hs:23:9-24 AnnLarrow = [AnnotationTuple.hs:23:16-17])
 
-(AK AnnotationTuple.hs:26:1-14 AnnDcolon = [AnnotationTuple.hs:26:5-6])
+(AK AnnotationTuple.hs:26:1-10 AnnDcolon = [AnnotationTuple.hs:26:5-6])
 
 (AK AnnotationTuple.hs:26:1-14 AnnEqual = [AnnotationTuple.hs:26:12])
 

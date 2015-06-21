@@ -10,7 +10,7 @@
 module HscTypes (
         -- * compilation state
         HscEnv(..), hscEPS,
-        FinderCache, FindResult(..), FoundHs(..), FindExactResult(..),
+        FinderCache, FindResult(..),
         Target(..), TargetId(..), pprTarget, pprTargetId,
         ModuleGraph, emptyMG,
         HscStatus(..),
@@ -674,30 +674,15 @@ prepareAnnotations hsc_env mb_guts = do
 -- modules along the search path. On @:load@, we flush the entire
 -- contents of this cache.
 --
-type FinderCache = ModuleEnv FindExactResult
-
--- | The result of search for an exact 'Module'.
-data FindExactResult
-    = FoundExact ModLocation Module
-        -- ^ The module/signature was found
-    | NoPackageExact PackageKey
-    | NotFoundExact
-        { fer_paths     :: [FilePath]
-        , fer_pkg       :: Maybe PackageKey
-        }
-
--- | A found module or signature; e.g. anything with an interface file
-data FoundHs = FoundHs { fr_loc :: ModLocation
-                       , fr_mod :: Module
-                       -- , fr_origin :: ModuleOrigin
-                       }
+-- Although the @FinderCache@ range is 'FindResult' for convenience,
+-- in fact it will only ever contain 'Found' or 'NotFound' entries.
+--
+type FinderCache = ModuleEnv FindResult
 
 -- | The result of searching for an imported module.
 data FindResult
-  = FoundModule FoundHs
+  = Found ModLocation Module
         -- ^ The module was found
-  | FoundSigs [FoundHs] Module
-        -- ^ Signatures were found, with some backing implementation
   | NoPackage PackageKey
         -- ^ The requested package was not found
   | FoundMultiple [(Module, ModuleOrigin)]
@@ -1159,7 +1144,7 @@ appendStubC (ForeignStubs h c) c_code = ForeignStubs h (c $$ c_code)
 {-
 ************************************************************************
 *                                                                      *
-\subsection{The interactive context}
+                The interactive context
 *                                                                      *
 ************************************************************************
 
@@ -1235,28 +1220,40 @@ The details are a bit tricky though:
 Note [Interactively-bound Ids in GHCi]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The Ids bound by previous Stmts in GHCi are currently
-        a) GlobalIds
-        b) with an Internal Name (not External)
-        c) and a tidied type
+        a) GlobalIds, with
+        b) An External Name, like Ghci4.foo
+           See Note [The interactive package] above
+        c) A tidied type
 
  (a) They must be GlobalIds (not LocalIds) otherwise when we come to
      compile an expression using these ids later, the byte code
      generator will consider the occurrences to be free rather than
      global.
 
- (b) They start with an Internal Name because a Stmt is a local
-     construct, so the renamer naturally builds an Internal name for
-     each of its binders.  It would be possible subsequently to give
-     them an External Name (in a GhciN module) but then we'd have
-     to substitute it out.  So for now they stay Internal.
+ (b) Having an External Name is important because of Note
+     [GlobalRdrEnv shadowing] in RdrName
 
  (c) Their types are tidied. This is important, because :info may ask
      to look at them, and :info expects the things it looks up to have
      tidy types
 
-However note that TyCons, Classes, and even Ids bound by other top-level
-declarations in GHCi (eg foreign import, record selectors) currently get
-External Names, with Ghci9 (or 8, or 7, etc) as the module name.
+Where do interactively-bound Ids come from?
+
+  - GHCi REPL Stmts   e.g.
+         ghci> let foo x = x+1
+    These start with an Internal Name because a Stmt is a local
+    construct, so the renamer naturally builds an Internal name for
+    each of its binders.  Then in tcRnStmt they are externalised via
+    TcRnDriver.externaliseAndTidyId, so they get Names like Ghic4.foo.
+
+  - Ids bound by the debugger etc have Names constructed by
+    IfaceEnv.newInteractiveBinder; at the call sites it is followed by
+    mkVanillaGlobal or mkVanillaGlobalWithInfo.  So again, they are
+    all Global, External.
+
+  - TyCons, Classes, and Ids bound by other top-level declarations in
+    GHCi (eg foreign import, record selectors) also get External
+    Names, with Ghci9 (or 8, or 7, etc) as the module name.
 
 
 Note [ic_tythings]
@@ -1405,12 +1402,11 @@ icPrintUnqual dflags InteractiveContext{ ic_rn_gbl_env = grenv } =
 -- to them (e.g. instances for classes or values of the type for TyCons), it's
 -- not clear whether removing them is even the appropriate behavior.
 extendInteractiveContext :: InteractiveContext
-                         -> [Id] -> [TyCon]
+                         -> [TyThing]
                          -> [ClsInst] -> [FamInst]
                          -> Maybe [Type]
-                         -> [PatSyn]
                          -> InteractiveContext
-extendInteractiveContext ictxt ids tcs new_cls_insts new_fam_insts defaults new_patsyns
+extendInteractiveContext ictxt new_tythings new_cls_insts new_fam_insts defaults
   = ictxt { ic_mod_index  = ic_mod_index ictxt + 1
                             -- Always bump this; even instances should create
                             -- a new mod_index (Trac #9426)
@@ -1420,8 +1416,8 @@ extendInteractiveContext ictxt ids tcs new_cls_insts new_fam_insts defaults new_
                             , new_fam_insts ++ old_fam_insts )
           , ic_default    = defaults }
   where
-    new_tythings = map AnId ids ++ map ATyCon tcs ++ map (AConLike . PatSynCon) new_patsyns
-    old_tythings = filterOut (shadowed_by ids) (ic_tythings ictxt)
+    new_ids = [id | AnId id <- new_tythings]
+    old_tythings = filterOut (shadowed_by new_ids) (ic_tythings ictxt)
 
     -- Discard old instances that have been fully overrridden
     -- See Note [Override identical instances in GHCi]
@@ -1430,14 +1426,15 @@ extendInteractiveContext ictxt ids tcs new_cls_insts new_fam_insts defaults new_
     old_fam_insts = filterOut (\i -> any (identicalFamInstHead i) new_fam_insts) fam_insts
 
 extendInteractiveContextWithIds :: InteractiveContext -> [Id] -> InteractiveContext
-extendInteractiveContextWithIds ictxt ids
-  | null ids  = ictxt
-  | otherwise = ictxt { ic_mod_index  = ic_mod_index ictxt + 1
-                      , ic_tythings   = new_tythings ++ old_tythings
-                      , ic_rn_gbl_env = ic_rn_gbl_env ictxt `icExtendGblRdrEnv` new_tythings }
+-- Just a specialised version
+extendInteractiveContextWithIds ictxt new_ids
+  | null new_ids = ictxt
+  | otherwise    = ictxt { ic_mod_index  = ic_mod_index ictxt + 1
+                         , ic_tythings   = new_tythings ++ old_tythings
+                         , ic_rn_gbl_env = ic_rn_gbl_env ictxt `icExtendGblRdrEnv` new_tythings }
   where
-    new_tythings = map AnId ids
-    old_tythings = filterOut (shadowed_by ids) (ic_tythings ictxt)
+    new_tythings = map AnId new_ids
+    old_tythings = filterOut (shadowed_by new_ids) (ic_tythings ictxt)
 
 shadowed_by :: [Id] -> TyThing -> Bool
 shadowed_by ids = shadowed
@@ -1462,9 +1459,26 @@ icExtendGblRdrEnv env tythings
   = foldr add env tythings  -- Foldr makes things in the front of
                             -- the list shadow things at the back
   where
-    add thing env = extendGlobalRdrEnv True {- Shadowing please -} env
-                                       [tyThingAvailInfo thing]
-       -- One at a time, to ensure each shadows the previous ones
+    -- One at a time, to ensure each shadows the previous ones
+    add thing env
+       | is_sub_bndr thing
+       = env
+       | otherwise
+       = foldl extendGlobalRdrEnv env1 (localGREsFromAvail avail)
+       where
+          env1  = shadowNames env (availNames avail)
+          avail = tyThingAvailInfo thing
+
+    -- Ugh! The new_tythings may include record selectors, since they
+    -- are not implicit-ids, and must appear in the TypeEnv.  But they
+    -- will also be brought into scope by the corresponding (ATyCon
+    -- tc).  And we want the latter, because that has the correct
+    -- parent (Trac #10520)
+    is_sub_bndr (AnId f) = case idDetails f of
+                             RecSelId {}  -> True
+                             ClassOpId {} -> True
+                             _            -> False
+    is_sub_bndr _ = False
 
 substInteractiveContext :: InteractiveContext -> TvSubst -> InteractiveContext
 substInteractiveContext ictxt@InteractiveContext{ ic_tythings = tts } subst
@@ -1561,7 +1575,7 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
                        -- the right one, then we can use the unqualified name
 
         | [gre] <- qual_gres
-        = NameQual (get_qual_mod (gre_prov gre))
+        = NameQual (greQualModName gre)
 
         | null qual_gres
         = if null (lookupGRE_RdrName (mkRdrQual (moduleName mod) occ) env)
@@ -1576,9 +1590,6 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
 
         unqual_gres = lookupGRE_RdrName (mkRdrUnqual occ) env
         qual_gres   = filter right_name (lookupGlobalRdrEnv env occ)
-
-        get_qual_mod LocalDef      = moduleName mod
-        get_qual_mod (Imported is) = ASSERT( not (null is) ) is_as (is_decl (head is))
 
     -- we can mention a module P:M without the P: qualifier iff
     -- "import M" would resolve unambiguously to P:M.  (if P is the
@@ -1722,7 +1733,7 @@ extras_plus thing = thing : implicitTyThings thing
 implicitCoTyCon :: TyCon -> [TyThing]
 implicitCoTyCon tc
   | Just co <- newTyConCo_maybe tc = [ACoAxiom $ toBranchedAxiom co]
-  | Just co <- isClosedSynFamilyTyCon_maybe tc
+  | Just co <- isClosedSynFamilyTyConWithAxiom_maybe tc
                                    = [ACoAxiom co]
   | otherwise                      = []
 
@@ -2059,15 +2070,6 @@ type IsBootInterface = Bool
 -- Invariant: the dependencies of a module @M@ never includes @M@.
 --
 -- Invariant: none of the lists contain duplicates.
---
--- NB: While this contains information about all modules and packages below
--- this one in the the import *hierarchy*, this may not accurately reflect
--- the full runtime dependencies of the module.  This is because this module may
--- have imported a boot module, in which case we'll only have recorded the
--- dependencies from the hs-boot file, not the actual hs file. (This is
--- unavoidable: usually, the actual hs file will have been compiled *after*
--- we wrote this interface file.)  See #936, and also @getLinkDeps@ in
--- @compiler/ghci/Linker.hs@ for code which cares about this distinction.
 data Dependencies
   = Deps { dep_mods   :: [(ModuleName, IsBootInterface)]
                         -- ^ All home-package modules transitively below this one

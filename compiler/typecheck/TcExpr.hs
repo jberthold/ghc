@@ -16,9 +16,7 @@ module TcExpr ( tcPolyExpr, tcPolyExprNC, tcMonoExpr, tcMonoExprNC,
 #include "HsVersions.h"
 
 import {-# SOURCE #-}   TcSplice( tcSpliceExpr, tcTypedBracket, tcUntypedBracket )
-#ifdef GHCI
-import DsMeta( liftStringName, liftName )
-#endif
+import THNames( liftStringName, liftName )
 
 import HsSyn
 import TcHsSyn
@@ -133,7 +131,7 @@ tcHole occ res_ty
  = do { ty <- newFlexiTyVarTy liftedTypeKind
       ; name <- newSysName occ
       ; let ev = mkLocalId name ty
-      ; loc <- getCtLoc HoleOrigin
+      ; loc <- getCtLocM HoleOrigin
       ; let can = CHoleCan { cc_ev = CtWanted ty ev loc, cc_occ = occ
                            , cc_hole = ExprHole }
       ; emitInsoluble can
@@ -375,7 +373,7 @@ tcExpr (SectionL arg1 op) res_ty
 
 tcExpr (ExplicitTuple tup_args boxity) res_ty
   | all tupArgPresent tup_args
-  = do { let tup_tc = tupleTyCon (boxityNormalTupleSort boxity) (length tup_args)
+  = do { let tup_tc = tupleTyCon boxity (length tup_args)
        ; (coi, arg_tys) <- matchExpectedTyConApp tup_tc res_ty
        ; tup_args1 <- tcTupArgs tup_args arg_tys
        ; return $ mkHsWrapCo coi (ExplicitTuple tup_args1 boxity) }
@@ -385,7 +383,7 @@ tcExpr (ExplicitTuple tup_args boxity) res_ty
     do { let kind = case boxity of { Boxed   -> liftedTypeKind
                                    ; Unboxed -> openTypeKind }
              arity = length tup_args
-             tup_tc = tupleTyCon (boxityNormalTupleSort boxity) arity
+             tup_tc = tupleTyCon boxity arity
 
        ; arg_tys <- newFlexiTyVarTys (tyConArity tup_tc) kind
        ; let actual_res_ty
@@ -1109,7 +1107,7 @@ tc_infer_id orig id_name
                  PatSynCon ps    -> tcPatSynBuilderOcc orig ps
 
              _ -> failWithTc $
-                  ppr thing <+> ptext (sLit "used where a value identifer was expected") }
+                  ppr thing <+> ptext (sLit "used where a value identifier was expected") }
   where
     inst_normal_id id
       = do { (wrap, rho) <- deeplyInstantiate orig (idType id)
@@ -1234,13 +1232,6 @@ tcTagToEnum loc fun_name arg res_ty
 -}
 
 checkThLocalId :: Id -> TcM ()
-#ifndef GHCI  /* GHCI and TH is off */
---------------------------------------
--- Check for cross-stage lifting
-checkThLocalId _id
-  = return ()
-
-#else         /* GHCI and TH is on */
 checkThLocalId id
   = do  { mb_local_use <- getStageAndBindLevel (idName id)
         ; case mb_local_use of
@@ -1254,15 +1245,18 @@ checkThLocalId id
 
 --------------------------------------
 checkCrossStageLifting :: Id -> ThStage -> TcM ()
--- If we are inside brackets, and (use_lvl > bind_lvl)
+-- If we are inside typed brackets, and (use_lvl > bind_lvl)
 -- we must check whether there's a cross-stage lift to do
--- Examples   \x -> [| x |]
---            [| map |]
+-- Examples   \x -> [|| x ||]
+--            [|| map ||]
 -- There is no error-checking to do, because the renamer did that
+--
+-- This is similar to checkCrossStageLifting in RnSplice, but
+-- this code is applied to *typed* brackets.
 
 checkCrossStageLifting id (Brack _ (TcPending ps_var lie_var))
   =     -- Nested identifiers, such as 'x' in
-        -- E.g. \x -> [| h x |]
+        -- E.g. \x -> [|| h x ||]
         -- We must behave as if the reference to x was
         --      h $(lift x)
         -- We use 'x' itself as the splice proxy, used by
@@ -1279,14 +1273,14 @@ checkCrossStageLifting id (Brack _ (TcPending ps_var lie_var))
                -- just going to flag an error for now
 
         ; lift <- if isStringTy id_ty then
-                     do { sid <- tcLookupId DsMeta.liftStringName
+                     do { sid <- tcLookupId THNames.liftStringName
                                      -- See Note [Lifting strings]
                         ; return (HsVar sid) }
                   else
                      setConstraintVar lie_var   $
                           -- Put the 'lift' constraint into the right LIE
                      newMethodFromName (OccurrenceOf (idName id))
-                                       DsMeta.liftName id_ty
+                                       THNames.liftName id_ty
 
                    -- Update the pending splices
         ; ps <- readMutVar ps_var
@@ -1300,7 +1294,6 @@ checkCrossStageLifting _ _ = return ()
 polySpliceErr :: Id -> SDoc
 polySpliceErr id
   = ptext (sLit "Can't splice the polymorphic local variable") <+> quotes (ppr id)
-#endif /* GHCI */
 
 {-
 Note [Lifting strings]

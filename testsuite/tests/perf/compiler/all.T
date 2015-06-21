@@ -361,12 +361,13 @@ test('T5631',
         # expected value: 392904228 (x86/Linux)
         # 2014-04-04:     346389856 (x86 Windows, 64 bit machine)
         # 2014-12-01:     390199244 (Windows laptop)
-           (wordsize(64), 776121120, 5)]),
+           (wordsize(64), 812288344, 5)]),
         # expected value: 774595008 (amd64/Linux):
         # expected value: 735486328 (amd64/Linux) 2012/12/12:
         # expected value: 690742040 (amd64/Linux) Call Arity improvements
         # 2014-09-09:     739704712 (amd64/Linux) AMP changes
         # 2014-11-04:     776121120 (amd64/Linux) new-flatten-skolems
+        # 2015-06-01:     812288344 (amd64/Linux) unknown cause
        only_ways(['normal'])
       ],
      compile,
@@ -394,7 +395,7 @@ test('T783',
             # 2014-09-03: 223377364 (Windows) better specialisation, raft of core-to-core optimisations
             # 2014-12-22: 235002220 (Windows) not sure why
 
-           (wordsize(64), 719814352, 10)]),
+           (wordsize(64), 548288760, 10)]),
             # prev:       349263216 (amd64/Linux)
             # 07/08/2012: 384479856 (amd64/Linux)
             # 29/08/2012: 436927840 (amd64/Linux)
@@ -413,6 +414,8 @@ test('T783',
 	    #   (changed order of cmm block causes analyses to allocate much more,
 	    #    but the changed order is slighly better in terms of runtime, and
 	    #    this test seems to be an extreme outlier.)
+            # 2015-05-16: 548288760  (amd64/Linux)
+	    #   (improved sequenceBlocks in nativeCodeGen, #10422)
       extra_hc_opts('-static')
       ],
       compile,[''])
@@ -497,8 +500,8 @@ test('T5837',
              # 2014-09-03:  37096484 (Windows laptop, w/w for INLINABLE things
              # 2014-12-01: 135914136 (Windows laptop, regression see below)
              # 2014-12-08  115905208  Constraint solver perf improvements (esp kick-out)
- 
-           (wordsize(64), 53424304, 10)])
+
+           (wordsize(64), 38834096, 10)])
              # sample: 3926235424 (amd64/Linux, 15/2/2012)
              # 2012-10-02 81879216
              # 2012-09-20 87254264 amd64/Linux
@@ -513,6 +516,7 @@ test('T5837',
              # 2014-12-16 231155640 Mac  Flattener parameterized over roles;
              #                           some optimization
              # 2015-03-17 53424304  Mac  Better depth checking; fails earlier
+             # 2015-06-09 38834096  Better "improvement"; I'm not sure whey it improves things
       ],
       compile_fail,['-freduction-depth=50'])
 
@@ -564,11 +568,12 @@ test('T9675',
            (wordsize(32), 11220552, 25)
           ]),
        compiler_stats_num_field('peak_megabytes_allocated',
-          [(wordsize(64), 53, 15),
+          [(wordsize(64), 44, 15),
           # 2014-10-13    66
           # 2014-10-13    58         seq the DmdEnv in seqDmdType as well
           # 2014-10-13    49         different machines giving different results...
           # 2014-10-13    53         use the mean
+          # 2014-06-15    44         reduced for some reason
             (wordsize(32), 25, 15)
           ]),
        compiler_stats_num_field('bytes allocated',
@@ -634,8 +639,10 @@ test('T9872d',
 test('T9961',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 772510192, 5),
+          [(wordsize(64), 663978160, 5),
           # 2015-01-12    807117816   Initally created
+          # 2015-spring   772510192   Got better
+          # 2015-05-22    663978160   Fix for #10370 improves it more
            (wordsize(32), 375647160, 5)
           ]),
       ],

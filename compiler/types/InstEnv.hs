@@ -29,6 +29,7 @@ module InstEnv (
 
 #include "HsVersions.h"
 
+import CoreSyn (IsOrphan(..), isOrphan, notOrphan)
 import Module
 import Class
 import Var
@@ -44,7 +45,6 @@ import BasicTypes
 import UniqFM
 import Util
 import Id
-import Binary
 import FastString
 import Data.Data        ( Data, Typeable )
 import Data.Maybe       ( isJust, isNothing )
@@ -274,82 +274,6 @@ instanceCantMatch (Just t : ts) (Just a : as) = t/=a || instanceCantMatch ts as
 instanceCantMatch _             _             =  False  -- Safe
 
 {-
-************************************************************************
-*                                                                      *
-                Orphans
-*                                                                      *
-************************************************************************
--}
-
--- | Is this instance an orphan?  If it is not an orphan, contains an 'OccName'
--- witnessing the instance's non-orphanhood.
--- See Note [Orphans]
-data IsOrphan
-  = IsOrphan
-  | NotOrphan OccName  -- The OccName 'n' witnesses the instance's non-orphanhood
-                       -- In that case, the instance is fingerprinted as part
-                       -- of the definition of 'n's definition
-    deriving (Data, Typeable)
-
--- | Returns true if 'IsOrphan' is orphan.
-isOrphan :: IsOrphan -> Bool
-isOrphan IsOrphan = True
-isOrphan _ = False
-
--- | Returns true if 'IsOrphan' is not an orphan.
-notOrphan :: IsOrphan -> Bool
-notOrphan NotOrphan{} = True
-notOrphan _ = False
-
-instance Binary IsOrphan where
-    put_ bh IsOrphan = putByte bh 0
-    put_ bh (NotOrphan n) = do
-        putByte bh 1
-        put_ bh n
-    get bh = do
-        h <- getByte bh
-        case h of
-            0 -> return IsOrphan
-            _ -> do
-                n <- get bh
-                return $ NotOrphan n
-
-{-
-Note [Orphans]
-~~~~~~~~~~~~~~
-Class instances, rules, and family instances are divided into orphans
-and non-orphans.  Roughly speaking, an instance/rule is an orphan if
-its left hand side mentions nothing defined in this module.  Orphan-hood
-has two major consequences
-
- * A module that contains orphans is called an "orphan module".  If
-   the module being compiled depends (transitively) on an oprhan
-   module M, then M.hi is read in regardless of whether M is oherwise
-   needed. This is to ensure that we don't miss any instance decls in
-   M.  But it's painful, because it means we need to keep track of all
-   the orphan modules below us.
-
- * A non-orphan is not finger-printed separately.  Instead, for
-   fingerprinting purposes it is treated as part of the entity it
-   mentions on the LHS.  For example
-      data T = T1 | T2
-      instance Eq T where ....
-   The instance (Eq T) is incorprated as part of T's fingerprint.
-
-   In constrast, orphans are all fingerprinted together in the
-   mi_orph_hash field of the ModIface.
-
-   See MkIface.addFingerprints.
-
-Orphan-hood is computed
-  * For class instances:
-      when we make a ClsInst
-    (because it is needed during instance lookup)
-
-  * For rules and family instances:
-       when we generate an IfaceRule (MkIface.coreRuleToIfaceRule)
-                     or IfaceFamInst (MkIface.instanceToIfaceInst)
-
 Note [When exactly is an instance decl an orphan?]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
   (see MkIface.instanceToIfaceInst, which implements this)
@@ -727,8 +651,9 @@ type InstMatch = (ClsInst, [DFunInstType])
 type ClsInstLookupResult
      = ( [InstMatch]     -- Successful matches
        , [ClsInst]       -- These don't match but do unify
-       , Bool)           -- True if error condition caused by
-                         -- SafeHaskell condition.
+       , [InstMatch] )   -- Unsafe overlapped instances under Safe Haskell
+                         -- (see Note [Safe Haskell Overlapping Instances] in
+                         -- TcSimplify).
 
 {-
 Note [DFunInstType: instantiating types]
@@ -753,7 +678,7 @@ lookupUniqueInstEnv :: InstEnvs
                     -> Class -> [Type]
                     -> Either MsgDoc (ClsInst, [Type])
 lookupUniqueInstEnv instEnv cls tys
-  = case lookupInstEnv instEnv cls tys of
+  = case lookupInstEnv False instEnv cls tys of
       ([(inst, inst_tys)], _, _)
              | noFlexiVar -> Right (inst, inst_tys')
              | otherwise  -> Left $ ptext (sLit "flexible type variable:") <+>
@@ -830,27 +755,35 @@ lookupInstEnv' ie vis_mods cls tys
 
 ---------------
 -- This is the common way to call this function.
-lookupInstEnv :: InstEnvs     -- External and home package inst-env
+lookupInstEnv :: Bool              -- Check Safe Haskell overlap restrictions
+              -> InstEnvs          -- External and home package inst-env
               -> Class -> [Type]   -- What we are looking for
               -> ClsInstLookupResult
 -- ^ See Note [Rules for instance lookup]
-lookupInstEnv (InstEnvs { ie_global = pkg_ie, ie_local = home_ie, ie_visible = vis_mods }) cls tys
-  = (final_matches, final_unifs, safe_fail)
+-- ^ See Note [Safe Haskell Overlapping Instances] in TcSimplify
+-- ^ See Note [Safe Haskell Overlapping Instances Implementation] in TcSimplify
+lookupInstEnv check_overlap_safe
+              (InstEnvs { ie_global = pkg_ie
+                        , ie_local = home_ie
+                        , ie_visible = vis_mods })
+              cls
+              tys
+  = (final_matches, final_unifs, unsafe_overlapped)
   where
     (home_matches, home_unifs) = lookupInstEnv' home_ie vis_mods cls tys
     (pkg_matches,  pkg_unifs)  = lookupInstEnv' pkg_ie  vis_mods cls tys
     all_matches = home_matches ++ pkg_matches
     all_unifs   = home_unifs   ++ pkg_unifs
-    pruned_matches = foldr insert_overlapping [] all_matches
+    final_matches = foldr insert_overlapping [] all_matches
         -- Even if the unifs is non-empty (an error situation)
         -- we still prune the matches, so that the error message isn't
         -- misleading (complaining of multiple matches when some should be
         -- overlapped away)
 
-    (final_matches, safe_fail)
-       = case pruned_matches of
-           [match] -> check_safe match all_matches
-           _       -> (pruned_matches, False)
+    unsafe_overlapped
+       = case final_matches of
+           [match] -> check_safe match
+           _       -> []
 
     -- If the selected match is incoherent, discard all unifiers
     final_unifs = case final_matches of
@@ -867,17 +800,16 @@ lookupInstEnv (InstEnvs { ie_global = pkg_ie, ie_local = home_ie, ie_visible = v
     -- trust. So 'Safe' instances can only overlap instances from the
     -- same module. A same instance origin policy for safe compiled
     -- instances.
-    check_safe match@(inst,_) others
-        = case isSafeOverlap (is_flag inst) of
-                -- most specific isn't from a Safe module so OK
-                False -> ([match], False)
-                -- otherwise we make sure it only overlaps instances from
-                -- the same module
-                True -> (go [] others, True)
+    check_safe (inst,_)
+        = case check_overlap_safe && unsafeTopInstance inst of
+                -- make sure it only overlaps instances from the same module
+                True -> go [] all_matches
+                -- most specific is from a trusted location.
+                False -> []
         where
-            go bad [] = match:bad
+            go bad [] = bad
             go bad (i@(x,_):unchecked) =
-                if inSameMod x
+                if inSameMod x || isOverlappable x
                     then go bad unchecked
                     else go (i:bad) unchecked
 
@@ -887,6 +819,14 @@ lookupInstEnv (InstEnvs { ie_global = pkg_ie, ie_local = home_ie, ie_visible = v
                     nb = getName $ getName b
                     lb = isInternalName nb
                 in (la && lb) || (nameModule na == nameModule nb)
+
+            isOverlappable i = hasOverlappableFlag $ overlapMode $ is_flag i
+
+    -- We consider the most specific instance unsafe when it both:
+    --   (1) Comes from a module compiled as `Safe`
+    --   (2) Is an orphan instance, OR, an instance for a MPTC
+    unsafeTopInstance inst = isSafeOverlap (is_flag inst) &&
+        (isOrphan (is_orphan inst) || classArity (is_cls inst) > 1)
 
 ---------------
 is_incoherent :: InstMatch -> Bool

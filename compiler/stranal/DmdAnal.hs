@@ -27,6 +27,7 @@ import Id
 import CoreUtils        ( exprIsHNF, exprType, exprIsTrivial )
 import TyCon
 import Type
+import Coercion         ( Coercion, coVarsOfCo )
 import FamInstEnv
 import Util
 import Maybes           ( isJust )
@@ -131,13 +132,14 @@ dmdAnal env d e = -- pprTrace "dmdAnal" (ppr d <+> ppr e) $
 
 dmdAnal' _ _ (Lit lit)     = (nopDmdType, Lit lit)
 dmdAnal' _ _ (Type ty)     = (nopDmdType, Type ty)      -- Doesn't happen, in fact
-dmdAnal' _ _ (Coercion co) = (nopDmdType, Coercion co)
+dmdAnal' _ _ (Coercion co)
+  = (unitDmdType (coercionDmdEnv co), Coercion co)
 
 dmdAnal' env dmd (Var var)
   = (dmdTransform env var dmd, Var var)
 
 dmdAnal' env dmd (Cast e co)
-  = (dmd_ty, Cast e' co)
+  = (dmd_ty `bothDmdType` mkBothDmdArg (coercionDmdEnv co), Cast e' co)
   where
     (dmd_ty, e') = dmdAnal env dmd e
 
@@ -164,15 +166,13 @@ dmdAnal' env dmd (App fun (Type ty))
   where
     (fun_ty, fun') = dmdAnal env dmd fun
 
-dmdAnal' sigs dmd (App fun (Coercion co))
-  = (fun_ty, App fun' (Coercion co))
-  where
-    (fun_ty, fun') = dmdAnal sigs dmd fun
-
 -- Lots of the other code is there to make this
 -- beautiful, compositional, application rule :-)
-dmdAnal' env dmd (App fun arg)  -- Non-type arguments
-  = let                         -- [Type arg handled above]
+dmdAnal' env dmd (App fun arg)
+  = -- This case handles value arguments (type args handled above)
+    -- Crucially, coercions /are/ handled here, because they are
+    -- value arguments (Trac #10288)
+    let
         call_dmd          = mkCallDmd dmd
         (fun_ty, fun')    = dmdAnal env call_dmd fun
         (arg_dmd, res_ty) = splitDmdTy fun_ty
@@ -211,7 +211,7 @@ dmdAnal' env dmd (Lam var body)
 dmdAnal' env dmd (Case scrut case_bndr ty [(DataAlt dc, bndrs, rhs)])
   -- Only one alternative with a product constructor
   | let tycon = dataConTyCon dc
-  , isProductTyCon tycon
+  , isJust (isDataProductTyCon_maybe tycon)
   , Just rec_tc' <- checkRecTc (ae_rec_tc env) tycon
   = let
         env_w_tc      = env { ae_rec_tc = rec_tc' }
@@ -257,6 +257,9 @@ dmdAnal' env dmd (Case scrut case_bndr ty alts)
         (alt_tys, alts')     = mapAndUnzip (dmdAnalAlt env dmd case_bndr) alts
         (scrut_ty, scrut')   = dmdAnal env cleanEvalDmd scrut
         (alt_ty, case_bndr') = annotateBndr env (foldr lubDmdType botDmdType alt_tys) case_bndr
+                               -- NB: Base case is botDmdType, for empty case alternatives
+                               --     This is a unit for lubDmdType, and the right result
+                               --     when there really are no alternatives
         res_ty               = alt_ty `bothDmdType` toBothDmdArg scrut_ty
     in
 --    pprTrace "dmdAnal:Case2" (vcat [ text "scrut" <+> ppr scrut
@@ -506,7 +509,7 @@ dmdTransform env var dmd
     else addVarDmd fn_ty var (mkOnceUsedDmd dmd)
 
   | otherwise                                    -- Local non-letrec-bound thing
-  = unitVarDmd var (mkOnceUsedDmd dmd)
+  = unitDmdType (unitVarEnv var (mkOnceUsedDmd dmd))
 
 {-
 ************************************************************************
@@ -702,9 +705,12 @@ a product type.
 ************************************************************************
 -}
 
-unitVarDmd :: Var -> Demand -> DmdType
-unitVarDmd var dmd
-  = DmdType (unitVarEnv var dmd) [] topRes
+unitDmdType :: DmdEnv -> DmdType
+unitDmdType dmd_env = DmdType dmd_env [] topRes
+
+coercionDmdEnv :: Coercion -> DmdEnv
+coercionDmdEnv co = mapVarEnv (const topDmd) (coVarsOfCo co)
+                    -- The VarSet from coVarsOfCo is really a VarEnv Var
 
 addVarDmd :: DmdType -> Var -> Demand -> DmdType
 addVarDmd (DmdType fv ds res) var dmd

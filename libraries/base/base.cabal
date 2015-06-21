@@ -1,5 +1,5 @@
 name:           base
-version:        4.8.1.0
+version:        4.8.2.0
 -- NOTE: Don't forget to update ./changelog.md
 license:        BSD3
 license-file:   LICENSE
@@ -231,7 +231,6 @@ Library
         GHC.IO.IOMode
         GHC.IOArray
         GHC.IORef
-        GHC.IP
         GHC.Int
         GHC.List
         GHC.MVar

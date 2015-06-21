@@ -17,13 +17,7 @@ import copy
 import glob
 from math import ceil, trunc
 import collections
-
-have_subprocess = False
-try:
-    import subprocess
-    have_subprocess = True
-except:
-    print("Warning: subprocess not found, will fall back to spawnv")
+import subprocess
 
 from testglobals import *
 from testutil import *
@@ -90,6 +84,9 @@ def skip( name, opts ):
     opts.skip = 1
 
 def expect_fail( name, opts ):
+    # The compiler, testdriver, OS or platform is missing a certain
+    # feature, and we don't plan to or can't fix it now or in the
+    # future.
     opts.expect = 'fail';
 
 def reqlib( lib ):
@@ -103,24 +100,22 @@ def _reqlib( name, opts, lib ):
     if lib in have_lib:
         got_it = have_lib[lib]
     else:
-        if have_subprocess:
-            # By preference we use subprocess, as the alternative uses
-            # /dev/null which mingw doesn't have.
-            cmd = strip_quotes(config.ghc_pkg)
-            p = subprocess.Popen([cmd, '--no-user-package-db', 'describe', lib],
-                                 stdout=subprocess.PIPE,
-                                 stderr=subprocess.PIPE)
-            # read from stdout and stderr to avoid blocking due to
-            # buffers filling
-            p.communicate()
-            r = p.wait()
-        else:
-            r = os.system(config.ghc_pkg + ' --no-user-package-db describe '
-                                         + lib + ' > /dev/null 2> /dev/null')
+        cmd = strip_quotes(config.ghc_pkg)
+        p = subprocess.Popen([cmd, '--no-user-package-db', 'describe', lib],
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE)
+        # read from stdout and stderr to avoid blocking due to
+        # buffers filling
+        p.communicate()
+        r = p.wait()
         got_it = r == 0
         have_lib[lib] = got_it
 
     if not got_it:
+        opts.expect = 'missing-lib'
+
+def req_haddock( name, opts ):
+    if not config.haddock:
         opts.expect = 'missing-lib'
 
 def req_profiling( name, opts ):
@@ -157,6 +152,8 @@ def _expect_fail_for( name, opts, ways ):
     opts.expect_fail_for = ways
 
 def expect_broken( bug ):
+    # This test is a expected not to work due to the indicated trac bug
+    # number.
     return lambda name, opts, b=bug: _expect_broken (name, opts, b )
 
 def _expect_broken( name, opts, bug ):
@@ -175,6 +172,11 @@ def record_broken(name, opts, bug):
     me = (bug, opts.testdir, name)
     if not me in brokens:
         brokens.append(me)
+
+def _expect_pass(way):
+    # Helper function. Not intended for use in .T files.
+    opts = getTestOpts()
+    return opts.expect == 'pass' and way not in opts.expect_fail_for
 
 # -----
 
@@ -247,11 +249,17 @@ def signal_exit_code( val ):
 
 # -----
 
-def timeout_multiplier( val ):
-    return lambda name, opts, v=val: _timeout_multiplier(name, opts, v)
+def compile_timeout_multiplier( val ):
+    return lambda name, opts, v=val: _compile_timeout_multiplier(name, opts, v)
 
-def _timeout_multiplier( name, opts, v ):
-    opts.timeout_multiplier = v
+def _compile_timeout_multiplier( name, opts, v ):
+    opts.compile_timeout_multiplier = v
+
+def run_timeout_multiplier( val ):
+    return lambda name, opts, v=val: _run_timeout_multiplier(name, opts, v)
+
+def _run_timeout_multiplier( name, opts, v ):
+    opts.run_timeout_multiplier = v
 
 # -----
 
@@ -272,6 +280,7 @@ def _extra_hc_opts( name, opts, v ):
 # -----
 
 def extra_clean( files ):
+    assert not isinstance(files, str), files
     return lambda name, opts, v=files: _extra_clean(name, opts, v);
 
 def _extra_clean( name, opts, v ):
@@ -519,6 +528,10 @@ def normalise_version( *pkgs ):
         _normalise_errmsg_fun(name, opts, normalise_version_(*pkgs))
     return normalise_version__
 
+def normalise_drive_letter(name, opts):
+    # Windows only. Change D:\\ to C:\\.
+    _normalise_fun(name, opts, lambda str: re.sub(r'[A-Z]:\\', r'C:\\', str))
+
 def join_normalisers(*a):
     """
     Compose functions, flattening sequences.
@@ -759,6 +772,11 @@ def test_common_work (name, opts, func, args):
 
 def clean(strs):
     for str in strs:
+        if (str.endswith('.package.conf') or
+            str.startswith('package.conf.') and not str.endswith('/*')):
+            # Package confs are directories now.
+            str += '/*'
+
         for name in glob.glob(in_testdir(str)):
             clean_full_path(name)
 
@@ -819,8 +837,7 @@ def do_test(name, way, func, args):
             passFail = 'No passFail found'
 
         if passFail == 'pass':
-            if getTestOpts().expect == 'pass' \
-               and way not in getTestOpts().expect_fail_for:
+            if _expect_pass(way):
                 t.n_expected_passes = t.n_expected_passes + 1
                 if name in t.expected_passes:
                     t.expected_passes[name].append(way)
@@ -831,8 +848,7 @@ def do_test(name, way, func, args):
                 t.n_unexpected_passes = t.n_unexpected_passes + 1
                 addPassingTestInfo(t.unexpected_passes, getTestOpts().testdir, name, way)
         elif passFail == 'fail':
-            if getTestOpts().expect == 'pass' \
-               and way not in getTestOpts().expect_fail_for:
+            if _expect_pass(way):
                 reason = result['reason']
                 tag = result.get('tag')
                 if tag == 'stat':
@@ -1043,9 +1059,9 @@ def do_compile( name, way, should_fail, top_mod, extra_mods, extra_hc_opts, over
 
     if not compare_outputs(way, 'stderr',
                            join_normalisers(getTestOpts().extra_errmsg_normaliser,
-                                            normalise_errmsg,
-                                            normalise_whitespace),
-                           expected_stderr_file, actual_stderr_file):
+                                            normalise_errmsg),
+                           expected_stderr_file, actual_stderr_file,
+                           whitespace_normaliser=normalise_whitespace):
         return failBecause('stderr mismatch')
 
     # no problems found, this test passed
@@ -1128,7 +1144,10 @@ def checkStats(name, way, stats_file, range_fields):
 
     result = passed()
     if len(range_fields) > 0:
-        f = open(in_testdir(stats_file))
+        try:
+            f = open(in_testdir(stats_file))
+        except IOError as e:
+            return failBecause(str(e))
         contents = f.read()
         f.close()
 
@@ -1243,12 +1262,13 @@ def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, 
            '> {errname} 2>&1'
           ).format(**locals())
 
-    result = runCmdFor(name, cmd)
+    result = runCmdFor(name, cmd, timeout_multiplier=opts.compile_timeout_multiplier)
 
     if result != 0 and not should_fail:
         actual_stderr = qualify(name, 'comp.stderr')
-        if_verbose(1,'Compile failed (status ' + repr(result) + ') errors were:')
-        if_verbose_dump(1,actual_stderr)
+        if config.verbose >= 1 and _expect_pass(way):
+            print('Compile failed (status ' + repr(result) + ') errors were:')
+            if_verbose_dump(1, actual_stderr)
 
     # ToDo: if the sub-shell was killed by ^C, then exit
 
@@ -1324,16 +1344,17 @@ def simple_run( name, way, prog, args ):
     cmd = 'cd ' + opts.testdir + ' && ' + cmd
 
     # run the command
-    result = runCmdFor(name, cmd, timeout_multiplier=opts.timeout_multiplier)
+    result = runCmdFor(name, cmd, timeout_multiplier=opts.run_timeout_multiplier)
 
     exit_code = result >> 8
     signal    = result & 0xff
 
     # check the exit code
     if exit_code != opts.exit_code:
-        print('Wrong exit code (expected', opts.exit_code, ', actual', exit_code, ')')
-        dump_stdout(name)
-        dump_stderr(name)
+        if config.verbose >= 1 and _expect_pass(way):
+            print('Wrong exit code (expected', opts.exit_code, ', actual', exit_code, ')')
+            dump_stdout(name)
+            dump_stderr(name)
         return failBecause('bad exit code')
 
     check_hp = my_rts_flags.find("-h") != -1
@@ -1369,6 +1390,8 @@ def rts_flags(way):
 # Run a program in the interpreter and check its output
 
 def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
+    opts = getTestOpts()
+
     outname = add_suffix(name, 'interp.stdout')
     errname = add_suffix(name, 'interp.stderr')
     rm_no_fail(outname)
@@ -1434,7 +1457,7 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
 
     cmd = 'cd ' + getTestOpts().testdir + " && " + cmd
 
-    result = runCmdFor(name, cmd, timeout_multiplier=getTestOpts().timeout_multiplier)
+    result = runCmdFor(name, cmd, timeout_multiplier=opts.run_timeout_multiplier)
 
     exit_code = result >> 8
     signal    = result & 0xff
@@ -1619,57 +1642,50 @@ def check_prof_ok(name, way):
     if not os.path.exists(expected_prof_file):
         return True
     else:
-        return compare_outputs(way, 'prof',
-                               join_normalisers(normalise_whitespace,normalise_prof), \
-                               expected_prof_file, prof_file)
+        return compare_outputs(way, 'prof', normalise_prof,
+                               expected_prof_file, prof_file,
+                               whitespace_normaliser=normalise_whitespace)
 
 # Compare expected output to actual output, and optionally accept the
 # new output. Returns true if output matched or was accepted, false
-# otherwise.
-def compare_outputs(way, kind, normaliser, expected_file, actual_file):
+# otherwise. See Note [Output comparison] for the meaning of the
+# normaliser and whitespace_normaliser parameters.
+def compare_outputs(way, kind, normaliser, expected_file, actual_file,
+                    whitespace_normaliser=lambda x:x):
+
     if os.path.exists(expected_file):
-        expected_raw = read_no_crs(expected_file)
-        # print "norm:", normaliser(expected_raw)
-        expected_str = normaliser(expected_raw)
-        expected_file_for_diff = expected_file
+        expected_str = normaliser(read_no_crs(expected_file))
+        expected_normalised_file = expected_file + ".normalised"
     else:
         expected_str = ''
-        expected_file_for_diff = '/dev/null'
+        expected_normalised_file = '/dev/null'
 
     actual_raw = read_no_crs(actual_file)
     actual_str = normaliser(actual_raw)
 
-    if expected_str == actual_str:
+    # See Note [Output comparison].
+    if whitespace_normaliser(expected_str) == whitespace_normaliser(actual_str):
         return 1
     else:
-        if_verbose(1, 'Actual ' + kind + ' output differs from expected:')
+        if config.verbose >= 1 and _expect_pass(way):
+            print('Actual ' + kind + ' output differs from expected:')
 
-        if expected_file_for_diff == '/dev/null':
-            expected_normalised_file = '/dev/null'
-        else:
-            expected_normalised_file = expected_file + ".normalised"
+        if expected_normalised_file != '/dev/null':
             write_file(expected_normalised_file, expected_str)
 
         actual_normalised_file = actual_file + ".normalised"
         write_file(actual_normalised_file, actual_str)
 
-        # Ignore whitespace when diffing. We should only get to this
-        # point if there are non-whitespace differences
-        #
-        # Note we are diffing the *actual* output, not the normalised
-        # output.  The normalised output may have whitespace squashed
-        # (including newlines) so the diff would be hard to read.
-        # This does mean that the diff might contain changes that
-        # would be normalised away.
-        if (config.verbose >= 1):
-            r = os.system( 'diff -uw ' + expected_file_for_diff + \
-                                   ' ' + actual_file )
+        if config.verbose >= 1 and _expect_pass(way):
+            # See Note [Output comparison].
+            r = os.system('diff -uw ' + expected_normalised_file +
+                                  ' ' + actual_normalised_file)
 
             # If for some reason there were no non-whitespace differences,
             # then do a full diff
             if r == 0:
-                r = os.system( 'diff -u ' + expected_file_for_diff + \
-                                      ' ' + actual_file )
+                r = os.system( 'diff -u ' + expected_normalised_file + \
+                                      ' ' + actual_normalised_file )
 
         if config.accept and (getTestOpts().expect == 'fail' or
                               way in getTestOpts().expect_fail_for):
@@ -1682,11 +1698,26 @@ def compare_outputs(way, kind, normaliser, expected_file, actual_file):
         else:
             return 0
 
+# Note [Output comparison]
+#
+# We do two types of output comparison:
+#
+# 1. To decide whether a test has failed. We apply a `normaliser` and an
+#    optional `whitespace_normaliser` to the expected and the actual
+#    output, before comparing the two.
+#
+# 2. To show as a diff to the user when the test indeed failed. We apply
+#    the same `normaliser` function to the outputs, to make the diff as
+#    small as possible (only showing the actual problem). But we don't
+#    apply the `whitespace_normaliser` here, because it might completely
+#    squash all whitespace, making the diff unreadable. Instead we rely
+#    on the `diff` program to ignore whitespace changes as much as
+#    possible (#10152).
 
 def normalise_whitespace( str ):
     # Merge contiguous whitespace characters into a single space.
     str = re.sub('[ \t\n]+', ' ', str)
-    return str
+    return str.strip()
 
 def normalise_errmsg( str ):
     # remove " error:" and lower-case " Warning:" to make patch for
@@ -1796,33 +1827,12 @@ def rawSystem(cmd_and_args):
     # with the Windows (non-cygwin) python. An argument "a b c"
     # turns into three arguments ["a", "b", "c"].
 
-    # However, subprocess is new in python 2.4, so fall back to
-    # using spawnv if we don't have it
     cmd = cmd_and_args[0]
-    if have_subprocess:
-        return subprocess.call([strip_quotes(cmd)] + cmd_and_args[1:])
-    else:
-        return os.spawnv(os.P_WAIT, cmd, cmd_and_args)
-
-# When running under native msys Python, any invocations of non-msys binaries,
-# including timeout.exe, will have their arguments munged according to some
-# heuristics, which leads to malformed command lines (#9626).  The easiest way
-# to avoid problems is to invoke through /usr/bin/cmd which sidesteps argument
-# munging because it is a native msys application.
-def passThroughCmd(cmd_and_args):
-    args = []
-    # cmd needs a Windows-style path for its first argument.
-    args.append(cmd_and_args[0].replace('/', '\\'))
-    # Other arguments need to be quoted to deal with spaces.
-    args.extend(['"%s"' % arg for arg in cmd_and_args[1:]])
-    return ["cmd", "/c", " ".join(args)]
+    return subprocess.call([strip_quotes(cmd)] + cmd_and_args[1:])
 
 # Note that this doesn't handle the timeout itself; it is just used for
 # commands that have timeout handling built-in.
 def rawSystemWithTimeout(cmd_and_args):
-    if config.os == 'mingw32' and sys.executable.startswith('/usr'):
-        # This is only needed when running under msys python.
-        cmd_and_args = passThroughCmd(cmd_and_args)
     r = rawSystem(cmd_and_args)
     if r == 98:
         # The python timeout program uses 98 to signal that ^C was pressed
@@ -1873,7 +1883,7 @@ def runCmdFor( name, cmd, timeout_multiplier=1.0 ):
             r = rawSystemWithTimeout(
                     ["strace", "-o", fn, "-fF",
                                "-e", "creat,open,chdir,clone,vfork",
-                     config.timeout_prog, str(timeout), cmd])
+                     strip_quotes(config.timeout_prog), str(timeout), cmd])
             addTestFilesWritten(name, fn)
             rm_no_fail(fn)
         else:
@@ -1890,7 +1900,10 @@ def runCmdExitCode( cmd ):
 # checking for files being written to by multiple tests
 
 re_strace_call_end = '(\) += ([0-9]+|-1 E.*)| <unfinished ...>)$'
-re_strace_unavailable       = re.compile('^\) += \? <unavailable>$')
+re_strace_unavailable_end ='\) += \? <unavailable>$'
+
+re_strace_unavailable_line  = re.compile('^' + re_strace_unavailable_end)
+re_strace_unavailable_cntnt = re.compile('^<\.\.\. .* resumed> ' + re_strace_unavailable_end)
 re_strace_pid               = re.compile('^([0-9]+) +(.*)')
 re_strace_clone             = re.compile('^(clone\(|<... clone resumed> ).*\) = ([0-9]+)$')
 re_strace_clone_unfinished  = re.compile('^clone\( <unfinished \.\.\.>$')
@@ -1901,7 +1914,10 @@ re_strace_chdir_resumed     = re.compile('^<\.\.\. chdir resumed> \) += 0$')
 re_strace_open              = re.compile('^open\("([^"]*)", ([A-Z_|]*)(, [0-9]+)?' + re_strace_call_end)
 re_strace_open_resumed      = re.compile('^<... open resumed> '                    + re_strace_call_end)
 re_strace_ignore_sigchild   = re.compile('^--- SIGCHLD \(Child exited\) @ 0 \(0\) ---$')
+re_strace_ignore_sigchild2  = re.compile('^--- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, .*} ---$')
+re_strace_ignore_exited     = re.compile('^\+\+\+ exited with [0-9]* \+\+\+$')
 re_strace_ignore_sigvtalarm = re.compile('^--- SIGVTALRM \(Virtual timer expired\) @ 0 \(0\) ---$')
+re_strace_ignore_sigvtalarm2= re.compile('^--- SIGVTALRM {si_signo=SIGVTALRM, si_code=SI_TIMER, .*} ---$')
 re_strace_ignore_sigint     = re.compile('^--- SIGINT \(Interrupt\) @ 0 \(0\) ---$')
 re_strace_ignore_sigfpe     = re.compile('^--- SIGFPE \(Floating point exception\) @ 0 \(0\) ---$')
 re_strace_ignore_sigsegv    = re.compile('^--- SIGSEGV \(Segmentation fault\) @ 0 \(0\) ---$')
@@ -1947,7 +1963,7 @@ def addTestFilesWrittenHelper(name, fn):
             if m_pid:
                 pid = m_pid.group(1)
                 content = m_pid.group(2)
-            elif re_strace_unavailable.match(line):
+            elif re_strace_unavailable_line.match(line):
                 next
             else:
                 framework_fail(name, 'strace', "Can't find pid in strace line: " + line)
@@ -1999,7 +2015,13 @@ def addTestFilesWrittenHelper(name, fn):
                 pass
             elif re_strace_ignore_sigchild.match(content):
                 pass
+            elif re_strace_ignore_sigchild2.match(content):
+                pass
+            elif re_strace_ignore_exited.match(content):
+                pass
             elif re_strace_ignore_sigvtalarm.match(content):
+                pass
+            elif re_strace_ignore_sigvtalarm2.match(content):
                 pass
             elif re_strace_ignore_sigint.match(content):
                 pass
@@ -2008,6 +2030,8 @@ def addTestFilesWrittenHelper(name, fn):
             elif re_strace_ignore_sigsegv.match(content):
                 pass
             elif re_strace_ignore_sigpipe.match(content):
+                pass
+            elif re_strace_unavailable_cntnt.match(content):
                 pass
             else:
                 framework_fail(name, 'strace', "Can't understand strace line: " + line)
@@ -2196,10 +2220,15 @@ def findTFiles_(path):
 # -----------------------------------------------------------------------------
 # Output a test summary to the specified file object
 
-def summary(t, file):
+def summary(t, file, short=False):
 
     file.write('\n')
     printUnexpectedTests(file, [t.unexpected_passes, t.unexpected_failures, t.unexpected_stat_failures])
+
+    if short:
+        # Only print the list of unexpected tests above.
+        return
+
     file.write('OVERALL SUMMARY for test run started at '
                + time.strftime("%c %Z", t.start_time) + '\n'
                + str(datetime.timedelta(seconds=
@@ -2285,21 +2314,6 @@ def printFailingTestInfosSummary(file, testInfos):
                           ' [' + reason + ']' + \
                           ' (' + ','.join(testInfos[directory][test][reason]) + ')\n')
     file.write('\n')
-
-def getStdout(cmd_and_args):
-    if have_subprocess:
-        p = subprocess.Popen([strip_quotes(cmd_and_args[0])] + cmd_and_args[1:],
-                             stdout=subprocess.PIPE,
-                             stderr=subprocess.PIPE)
-        (stdout, stderr) = p.communicate()
-        r = p.wait()
-        if r != 0:
-            raise Exception("Command failed: " + str(cmd_and_args))
-        if stderr != '':
-            raise Exception("stderr from command: " + str(cmd_and_args))
-        return stdout
-    else:
-        raise Exception("Need subprocess to get stdout, but don't have it")
 
 def modify_lines(s, f):
     return '\n'.join([f(l) for l in s.splitlines()])

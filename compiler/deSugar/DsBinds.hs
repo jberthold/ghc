@@ -40,20 +40,19 @@ import Digraph
 
 import PrelNames
 import TysPrim ( mkProxyPrimTy )
-import TyCon      ( isTupleTyCon, tyConDataCons_maybe
-                  , tyConName, isPromotedTyCon, isPromotedDataCon )
+import TyCon
 import TcEvidence
 import TcType
 import Type
+import Kind (returnsConstraintKind)
 import Coercion hiding (substCo)
-import TysWiredIn ( eqBoxDataCon, coercibleDataCon, tupleCon, mkListTy
+import TysWiredIn ( eqBoxDataCon, coercibleDataCon, mkListTy
                   , mkBoxedTupleTy, stringTy )
 import Id
 import MkId(proxyHashId)
 import Class
-import DataCon  ( dataConTyCon, dataConWorkId )
+import DataCon  ( dataConTyCon )
 import Name
-import MkId     ( seqId )
 import IdInfo   ( IdDetails(..) )
 import Var
 import VarSet
@@ -69,7 +68,6 @@ import BasicTypes hiding ( TopLevel )
 import DynFlags
 import FastString
 import ErrUtils( MsgDoc )
-import ListSetOps( getNth )
 import Util
 import Control.Monad( when )
 import MonadUtils
@@ -446,6 +444,7 @@ dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
            Right (rule_bndrs, _fn, args) -> do
 
        { dflags <- getDynFlags
+       ; this_mod <- getModule
        ; let fn_unf    = realIdUnfolding poly_id
              unf_fvs   = stableUnfoldingVars fn_unf `orElse` emptyVarSet
              in_scope  = mkInScopeSet (unf_fvs `unionVarSet` exprsFreeVars args)
@@ -453,7 +452,7 @@ dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
              spec_id   = mkLocalId spec_name spec_ty
                             `setInlinePragma` inl_prag
                             `setIdUnfolding`  spec_unf
-             rule =  mkRule False {- Not auto -} is_local_id
+             rule =  mkRule this_mod False {- Not auto -} is_local_id
                         (mkFastString ("SPEC " ++ showPpr dflags poly_name))
                         rule_act poly_name
                         rule_bndrs args
@@ -602,11 +601,6 @@ decomposeRuleLhs orig_bndrs orig_lhs
    decompose (Var fn_id) args
       | not (fn_id `elemVarSet` orig_bndr_set)
       = Just (fn_id, args)
-
-   decompose (Case scrut bndr ty [(DEFAULT, _, body)]) args
-      | isDeadBinder bndr   -- Note [Matching seqId]
-      , let args' = [Type (idType bndr), Type ty, scrut, body]
-      = Just (seqId, args' ++ args)
 
    decompose _ _ = Nothing
 
@@ -852,22 +846,6 @@ dsEvTerm (EvCast tm co)
 dsEvTerm (EvDFunApp df tys tms)     = return (Var df `mkTyApps` tys `mkApps` (map Var tms))
 dsEvTerm (EvCoercion (TcCoVarCo v)) = return (Var v)  -- See Note [Simple coercions]
 dsEvTerm (EvCoercion co)            = dsTcCoercion co mkEqBox
-
-dsEvTerm (EvTupleSel v n)
-   = do { let scrut_ty  = idType v
-              (tc, tys) = splitTyConApp scrut_ty
-              Just [dc] = tyConDataCons_maybe tc
-              xs = mkTemplateLocals tys
-              the_x = getNth xs n
-        ; ASSERT( isTupleTyCon tc )
-          return $
-          Case (Var v) (mkWildValBinder scrut_ty) (idType the_x) [(DataAlt dc, xs, Var the_x)] }
-
-dsEvTerm (EvTupleMk tms)
-  = return (Var (dataConWorkId dc) `mkTyApps` map idType tms `mkApps` map Var tms)
-  where
-    dc = tupleCon ConstraintTuple (length tms)
-
 dsEvTerm (EvSuperClass d n)
   = do { d' <- dsEvTerm d
        ; let (cls, tys) = getClassPredTys (exprType d')
@@ -983,6 +961,9 @@ dsEvTypeable ev =
     hash_name_fs
       | isPromotedTyCon tc    = appendFS (mkFastString "$k") name_fs
       | isPromotedDataCon tc  = appendFS (mkFastString "$c") name_fs
+      | isTupleTyCon tc &&
+        returnsConstraintKind (tyConKind tc)
+                              = appendFS (mkFastString "$p") name_fs
       | otherwise             = name_fs
 
     hashThis = unwords $ map unpackFS [pkg_fs, modl_fs, hash_name_fs]

@@ -100,22 +100,12 @@ else
 $(error Make has restarted itself $(MAKE_RESTARTS) times; is there a makefile bug? See http://ghc.haskell.org/trac/ghc/wiki/Building/Troubleshooting#Makehasrestarteditself3timesisthereamakefilebug for details)
 endif
 
-ifneq "$(CLEANING)" "YES"
-CLEANING = NO
-endif
-
 # -----------------------------------------------------------------------------
 # Misc GNU make utils
 
 nothing=
 space=$(nothing) $(nothing)
 comma=,
-
-# Cancel all suffix rules.  Ideally we'd like to have 'make -r' turned on
-# by default, because that disables all the implicit rules, but there doesn't
-# seem to be a good way to do that.  This turns off all the old-style suffix
-# rules, which does half the job and speeds up make quite a bit:
-.SUFFIXES:
 
 # -----------------------------------------------------------------------------
 # Makefile debugging
@@ -140,7 +130,7 @@ echo:
 
 include mk/tree.mk
 
-ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
+ifneq "$(CLEANING)" "YES"
 include mk/config.mk
 ifeq "$(ProjectVersion)" ""
 $(error Please run ./configure first)
@@ -155,7 +145,7 @@ include mk/custom-settings.mk
 SRC_CC_OPTS     += $(WERROR)
 SRC_HC_OPTS     += $(WERROR)
 
-ifeq "$(findstring clean,$(MAKECMDGOALS))" ""
+ifneq "$(CLEANING)" "YES"
 ifeq "$(DYNAMIC_GHC_PROGRAMS)" "YES"
 ifeq "$(findstring dyn,$(GhcLibWays))" ""
 $(error dyn is not in $$(GhcLibWays), but $$(DYNAMIC_GHC_PROGRAMS) is YES)
@@ -203,7 +193,7 @@ $(eval $(call clean-target,root,inplace,inplace/bin inplace/lib))
 # When we're just doing 'make clean' or 'make show', then we don't need
 # to build dependencies.
 
-ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
+ifeq "$(CLEANING)" "YES"
 NO_INCLUDE_DEPS = YES
 NO_INCLUDE_PKGDATA = YES
 endif
@@ -263,15 +253,13 @@ include rules/cmm-objs.mk
 # Suffix rules cause "make clean" to fail on Windows (trac #3233)
 # so we don't make any when cleaning.
 ifneq "$(CLEANING)" "YES"
-
 include rules/hs-suffix-rules-srcdir.mk
 include rules/hs-suffix-way-rules-srcdir.mk
 include rules/hs-suffix-way-rules.mk
 include rules/hi-rule.mk
 include rules/c-suffix-rules.mk
 include rules/cmm-suffix-rules.mk
-
-endif # CLEANING=YES
+endif
 
 # -----------------------------------------------------------------------------
 # Building package-data.mk files from .cabal files
@@ -321,9 +309,10 @@ include rules/manual-package-config.mk
 include rules/docbook.mk
 
 # -----------------------------------------------------------------------------
-# Making bindists
+# Making bindists and sdists
 
 include rules/bindist.mk
+include rules/sdist-ghc-file.mk
 
 # -----------------------------------------------------------------------------
 # Directories
@@ -386,7 +375,7 @@ else
 # programs such as GHC and ghc-pkg, that we do not assume the stage0
 # compiler already has installed (or up-to-date enough).
 
-PACKAGES_STAGE0 = binary Cabal/Cabal hpc bin-package-db hoopl transformers
+PACKAGES_STAGE0 = binary Cabal/Cabal hpc bin-package-db hoopl transformers template-haskell
 ifeq "$(Windows_Host)" "NO"
 ifneq "$(HostOS_CPP)" "ios"
 PACKAGES_STAGE0 += terminfo
@@ -650,11 +639,14 @@ endif
 
 ifeq "$(INTEGER_LIBRARY)" "integer-gmp"
 BUILD_DIRS += libraries/integer-gmp/gmp
-else ifneq "$(findstring clean,$(MAKECMDGOALS))" ""
+else ifeq "$(CLEANING)" "YES"
 BUILD_DIRS += libraries/integer-gmp/gmp
 endif
 
 ifeq "$(HADDOCK_DOCS)" "YES"
+BUILD_DIRS += utils/haddock
+BUILD_DIRS += utils/haddock/doc
+else ifeq "$(CLEANING)" "YES"
 BUILD_DIRS += utils/haddock
 BUILD_DIRS += utils/haddock/doc
 endif
@@ -670,7 +662,11 @@ BUILD_DIRS += utils/dll-split
 BUILD_DIRS += utils/ghc-pwd
 BUILD_DIRS += utils/ghc-cabal
 BUILD_DIRS += utils/hpc
+ifeq "$(GhcWithInterpreter)" "YES"
 BUILD_DIRS += utils/runghc
+else ifeq "$(CLEANING)" "YES"
+BUILD_DIRS += utils/runghc
+endif
 BUILD_DIRS += ghc
 
 ifneq "$(BINDIST)" "YES"
@@ -912,7 +908,7 @@ install_packages: rts/dist/package.conf.install
 	$(call INSTALL_DIR,"$(DESTDIR)$(topdir)/rts")
 	$(call installLibsTo, $(RTS_INSTALL_LIBS), "$(DESTDIR)$(topdir)/rts")
 	$(foreach p, $(INSTALL_DYNLIBS), \
-	    $(call installLibsTo, $(wildcard $p/dist-install/build/*.so $p/dist-install/build/*.dll $p/dist-install/build/*.dylib), "$(DESTDIR)$(topdir)/$($p_dist-install_PACKAGE_KEY)"))
+	    $(call installLibsTo, $(wildcard $p/dist-install/build/*.so $p/dist-install/build/*.dll $p/dist-install/build/*.dylib), "$(DESTDIR)$(topdir)/$($p_dist-install_LIB_NAME)"))
 	$(foreach p, $(INSTALL_PACKAGES),                             \
 	    $(call make-command,                                      \
 	           "$(ghc-cabal_INPLACE)" copy                        \
@@ -1057,19 +1053,20 @@ publish-docs:
 
 # Do it like this:
 #
-#	$ make
+#	$ ./boot
+#	$ ./configure
 #	$ make sdist
 #
 
-# A source dist is built from a complete build tree, because we
+# A source dist is built from a (partial) build tree, because we
 # require some extra files not contained in a git checkout: the
 # output from Happy and Alex, for example.
 #
-# The steps performed by 'make dist' are as follows:
+# The steps performed by 'make sdist' are as follows:
+#   - build those extra files
 #   - create a complete link-tree of the current build tree in /tmp
 #   - run 'make distclean' on that tree
 #   - remove a bunch of other files that we know shouldn't be in the dist
-#   - tar up first the extralibs package, then the main source package
 
 #
 # Directory in which we're going to build the src dist
@@ -1123,22 +1120,13 @@ GIT_COMMIT_ID:
 	then echo "$@ needs no update"; \
 	else echo "update $@ ($(ProjectGitCommitId))"; echo -n "$(ProjectGitCommitId)" > $@; fi
 
-sdist-ghc-prep : VERSION GIT_COMMIT_ID
-
-# Use:
-#     $(call sdist_ghc_file,compiler,stage2,cmm,Foo/Bar,CmmLex,x)
-# to copy the generated file that replaces compiler/cmm/Foo/Bar/CmmLex.x, where
-# "stage2" is the dist dir.
-define sdist_ghc_file
-	"$(CP)" $1/$2/build/$4/$5.hs $(SRC_DIST_GHC_DIR)/$1/$3/$4
-	mv $(SRC_DIST_GHC_DIR)/$1/$3/$4/$5.$6 $(SRC_DIST_GHC_DIR)/$1/$3/$4/$5.$6.source
-endef
+sdist-ghc-prep-tree : VERSION GIT_COMMIT_ID
 
 # Extra packages which shouldn't be in the source distribution: see #8801
 EXTRA_PACKAGES= random dph
 
-.PHONY: sdist-ghc-prep
-sdist-ghc-prep :
+.PHONY: sdist-ghc-prep-tree
+sdist-ghc-prep-tree :
 	$(call removeTrees,$(SRC_DIST_GHC_ROOT))
 	$(call removeFiles,$(SRC_DIST_GHC_TARBALL))
 	mkdir -p $(SRC_DIST_ROOT)
@@ -1152,14 +1140,20 @@ sdist-ghc-prep :
 	$(call removeTrees,$(SRC_DIST_GHC_DIR)/compiler/stage[123])
 	$(call removeFiles,$(SRC_DIST_GHC_DIR)/mk/build.mk)
 	for i in $(EXTRA_PACKAGES); do $(RM) $(RM_OPTS_REC) $(SRC_DIST_GHC_DIR)/libraries/$$i/; done
-	$(call sdist_ghc_file,compiler,stage2,cmm,,CmmLex,x)
-	$(call sdist_ghc_file,compiler,stage2,cmm,,CmmParse,y)
-	$(call sdist_ghc_file,compiler,stage2,parser,,Lexer,x)
-	$(call sdist_ghc_file,compiler,stage2,parser,,Parser,y)
-	$(call sdist_ghc_file,utils/hpc,dist-install,,,HpcParser,y)
-	$(call sdist_ghc_file,utils/genprimopcode,dist,,,Lexer,x)
-	$(call sdist_ghc_file,utils/genprimopcode,dist,,,Parser,y)
 	cd $(SRC_DIST_GHC_DIR) && "$(FIND)" $(SRC_DIST_GHC_DIRS) \( -name .git -o -name "autom4te*" -o -name "*~" -o -name "\#*" -o -name ".\#*" -o -name "log" -o -name "*-SAVE" -o -name "*.orig" -o -name "*.rej" \) -print | "$(XARGS)" $(XARGS_OPTS) "$(RM)" $(RM_OPTS_REC)
+
+# Add files generated by alex and happy.
+# These rules depend on sdist-ghc-prep-tree.
+$(eval $(call sdist-ghc-file,compiler,stage2,cmm,CmmLex,x))
+$(eval $(call sdist-ghc-file,compiler,stage2,cmm,CmmParse,y))
+$(eval $(call sdist-ghc-file,compiler,stage2,parser,Lexer,x))
+$(eval $(call sdist-ghc-file,compiler,stage2,parser,Parser,y))
+$(eval $(call sdist-ghc-file,utils/hpc,dist-install,,HpcParser,y))
+$(eval $(call sdist-ghc-file,utils/genprimopcode,dist,,Lexer,x))
+$(eval $(call sdist-ghc-file,utils/genprimopcode,dist,,Parser,y))
+
+.PHONY: sdist-ghc-prep
+sdist-ghc-prep : sdist-ghc-prep-tree
 
 .PHONY: sdist-windows-tarballs-prep
 sdist-windows-tarballs-prep :
@@ -1181,6 +1175,7 @@ sdist-testsuite-prep :
 	mkdir -p $(SRC_DIST_TESTSUITE_DIR)
 	mkdir -p $(SRC_DIST_TESTSUITE_DIR)/testsuite
 	cd $(SRC_DIST_TESTSUITE_DIR)/testsuite && lndir $(TOP)/testsuite
+	cd $(SRC_DIST_TESTSUITE_DIR)/testsuite && $(MAKE) distclean
 
 .PHONY: sdist-ghc
 sdist-ghc: sdist-ghc-prep
@@ -1322,7 +1317,7 @@ distclean : clean
 	$(call removeFiles,libraries/directory/include/HsDirectoryConfig.h)
 	$(call removeFiles,libraries/process/include/HsProcessConfig.h)
 	$(call removeFiles,libraries/unix/include/HsUnixConfig.h)
-	$(call removeFiles,libraries/time/include/HsTimeConfig.h)
+	$(call removeFiles,libraries/time/lib/include/HsTimeConfig.h)
 
 # The library configure scripts also like creating autom4te.cache
 # directories, so clean them all up.
@@ -1350,7 +1345,7 @@ maintainer-clean : distclean
 	$(call removeFiles,libraries/directory/include/HsDirectoryConfig.h.in)
 	$(call removeFiles,libraries/process/include/HsProcessConfig.h.in)
 	$(call removeFiles,libraries/unix/include/HsUnixConfig.h.in)
-	$(call removeFiles,libraries/time/include/HsTimeConfig.h.in)
+	$(call removeFiles,libraries/time/lib/include/HsTimeConfig.h.in)
 
 .PHONY: all_libraries
 
@@ -1380,7 +1375,7 @@ validate_build_xhtml:
 	cd libraries/xhtml && ./Setup configure --with-ghc="$(BINDIST_PREFIX)/bin/ghc" $(BINDIST_HADDOCK_FLAG) $(BINDIST_LIBRARY_FLAGS) --global --builddir=dist-bindist --prefix="$(BINDIST_PREFIX)"
 	cd libraries/xhtml && ./Setup build   --builddir=dist-bindist
 ifeq "$(HADDOCK_DOCS)" "YES"
-	cd libraries/xhtml && ./Setup haddock --ghc-options=-optP-P --builddir=dist-bindist
+	cd libraries/xhtml && ./Setup haddock -v0 --ghc-options=-optP-P --builddir=dist-bindist
 endif
 	cd libraries/xhtml && ./Setup install --builddir=dist-bindist
 	cd libraries/xhtml && ./Setup clean   --builddir=dist-bindist

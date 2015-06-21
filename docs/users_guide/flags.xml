@@ -94,7 +94,7 @@
         <tbody>
           <row>
             <entry><option>--help</option>,<option>-?</option></entry>
-            <entry>Disply help</entry>
+            <entry>Display help</entry>
             <entry>mode</entry>
             <entry>-</entry>
           </row>
@@ -712,8 +712,18 @@
         </thead>
         <tbody>
           <row>
+            <entry><option>-fconstraint-solver-iterations=</option><replaceable>n</replaceable></entry>
+	    <entry>Set the iteration limit for the type-constraint solver. 
+                   The default limit is 4. Typically one iteration
+                   suffices; so please yell if you find you need to set
+                   it higher than the default. Zero means infinity. </entry>
+	    <entry>dynamic</entry>
+	    <entry></entry>
+	  </row>
+          <row>
             <entry><option>-freduction-depth=</option><replaceable>n</replaceable></entry>
-	    <entry>set the <link linkend="undecidable-instances">limit for type simplification</link>. Default is 200.</entry>
+	    <entry>Set the <link linkend="undecidable-instances">limit for type simplification</link>. 
+                   Default is 200; zero means infinity.</entry>
 	    <entry>dynamic</entry>
 	    <entry></entry>
 	  </row>
@@ -1974,7 +1984,7 @@
           <row>
             <entry><option>-fliberate-case-threshold</option>=<replaceable>n</replaceable></entry>
             <entry>Set the size threshold for the liberate-case transformation to <replaceable>n</replaceable> (default: 2000)</entry>
-            <entry>dynamis</entry>
+            <entry>dynamic</entry>
             <entry><option>-fno-liberate-case-threshold</option></entry>
           </row>
 
@@ -2003,7 +2013,7 @@
             <entry>
             <option>-fmax-inline-memcpy-insns</option>=<replaceable>n</replaceable>
             </entry>
-            <entry>Inline memcpy calls if they would generate no more
+            <entry>Inline <literal>memcpy</literal> calls if they would generate no more
             than <replaceable>n</replaceable> pseudo instructions
             (default: 32).
             </entry>
@@ -2015,7 +2025,7 @@
             <entry>
             <option>-fmax-inline-memset-insns</option>=<replaceable>n</replaceable>
             </entry>
-            <entry>Inline memset calls if they would generate no more
+            <entry>Inline <literal>memset</literal> calls if they would generate no more
             than <replaceable>n</replaceable> pseudo instructions
             (default: 32).
             </entry>
@@ -2603,6 +2613,14 @@
             <entry><option>-with-rtsopts=<replaceable>opts</replaceable></option></entry>
             <entry>Set the default RTS options to
               <replaceable>opts</replaceable>.</entry>
+            <entry>dynamic</entry>
+            <entry>-</entry>
+          </row>
+          <row>
+            <entry><option>-no-rtsopts-suggestions</option></entry>
+            <entry>Don't print RTS suggestions about linking with
+              <literal>-rtsopts</literal>.
+            </entry>
             <entry>dynamic</entry>
             <entry>-</entry>
           </row>
@@ -3388,5 +3406,6 @@ Misc:
 <!-- Emacs stuff:
      ;;; Local Variables: ***
      ;;; sgml-parent-document: ("users_guide.xml" "book" "chapter") ***
+     ;;; ispell-local-dictionary: "british" ***
      ;;; End: ***
  -->

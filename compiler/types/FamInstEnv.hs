@@ -809,13 +809,13 @@ reduceTyFamApp_maybe envs role tc tys
   , FamInstMatch { fim_instance = fam_inst
                  , fim_tys =      inst_tys } : _ <- lookupFamInstEnv envs tc tys
       -- NB: Allow multiple matches because of compatible overlap
-                                                    
+
   = let ax     = famInstAxiom fam_inst
         co     = mkUnbranchedAxInstCo role ax inst_tys
         ty     = pSnd (coercionKind co)
     in Just (co, ty)
 
-  | Just ax <- isClosedSynFamilyTyCon_maybe tc
+  | Just ax <- isClosedSynFamilyTyConWithAxiom_maybe tc
   , Just (ind, inst_tys) <- chooseBranch ax tys
   = let co     = mkAxInstCo role ax ind inst_tys
         ty     = pSnd (coercionKind co)
@@ -951,7 +951,7 @@ normaliseType :: FamInstEnvs            -- environment with family instances
 -- Normalise the input type, by eliminating *all* type-function redexes
 -- but *not* newtypes (which are visible to the programmer)
 -- Returns with Refl if nothing happens
--- Try to not to disturb type syonyms if possible
+-- Try to not to disturb type synonyms if possible
 
 normaliseType env role (TyConApp tc tys)
   = normaliseTcApp env role tc tys
@@ -1034,6 +1034,8 @@ coreFlattenTys in_scope = go []
 coreFlattenTy :: InScopeSet -> FlattenMap -> Type -> (FlattenMap, Type)
 coreFlattenTy in_scope = go
   where
+    go m ty | Just ty' <- coreView ty = go m ty'
+
     go m ty@(TyVarTy {}) = (m, ty)
     go m (AppTy ty1 ty2) = let (m1, ty1') = go m  ty1
                                (m2, ty2') = go m1 ty2 in

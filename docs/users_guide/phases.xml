@@ -834,7 +834,7 @@ $ cat foo.hspp</screen>
           <para>On Darwin/OS X/iOS only, link in the framework <replaceable>name</replaceable>.
           This option corresponds to the <option>-framework</option> option for Apple's Linker.
           Please note that frameworks and packages are two different things - frameworks don't
-          contain any haskell code. Rather, they are Apple's way of packaging shared libraries.
+          contain any Haskell code. Rather, they are Apple's way of packaging shared libraries.
           To link to Apple's &ldquo;Carbon&rdquo; API, for example, you'd use
           <option>-framework Carbon</option>.
           </para>
@@ -1221,6 +1221,27 @@ $ cat foo.hspp</screen>
 
       <varlistentry>
         <term>
+          <option>-no-rtsopts-suggestions</option>
+          <indexterm><primary><option>-no-rtsopts-suggestions</option></primary></indexterm>
+        </term>
+        <listitem>
+          <para>
+            This option disables RTS suggestions about linking with <option>-rtsopts</option>
+            when they are not available.
+
+            These suggestions would be unhelpful if the users have installed Haskell programs
+            through their package managers.
+            With this option enabled, these suggestions will not appear.
+
+            It is recommended for people distributing binaries
+            to build with either <option>-rtsopts</option> or
+            <option>-no-rtsopts-suggestions</option>.
+          </para>
+        </listitem>
+      </varlistentry>
+
+      <varlistentry>
+        <term>
           <option>-fno-gen-manifest</option>
           <indexterm><primary><option>-fno-gen-manifest</option></primary>
           </indexterm>
@@ -1347,5 +1368,6 @@ $ cat foo.hspp</screen>
 <!-- Emacs stuff:
      ;;; Local Variables: ***
      ;;; sgml-parent-document: ("users_guide.xml" "book" "chapter" "sect1") ***
+     ;;; ispell-local-dictionary: "british" ***
      ;;; End: ***
  -->

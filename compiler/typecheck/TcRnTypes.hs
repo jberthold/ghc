@@ -26,6 +26,7 @@ module TcRnTypes(
         Env(..),
         TcGblEnv(..), TcLclEnv(..),
         IfGblEnv(..), IfLclEnv(..),
+        tcVisibleOrphanMods,
 
         -- Renamer types
         ErrCtxt, RecFieldEnv(..),
@@ -55,14 +56,15 @@ module TcRnTypes(
         isCDictCan_Maybe, isCFunEqCan_maybe,
         isCIrredEvCan, isCNonCanonical, isWantedCt, isDerivedCt,
         isGivenCt, isHoleCt, isExprHoleCt, isTypeHoleCt,
-        ctEvidence, ctLoc, ctPred, ctFlavour, ctEqRel,
+        ctEvidence, ctLoc, setCtLoc, ctPred, ctFlavour, ctEqRel, ctOrigin,
         mkNonCanonical, mkNonCanonicalCt,
-        ctEvPred, ctEvLoc, ctEvEqRel,
+        ctEvPred, ctEvLoc, ctEvOrigin, ctEvEqRel,
         ctEvTerm, ctEvCoercion, ctEvId,
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
         andWC, unionsWC, addSimples, addImplics, mkSimpleWC, addInsols,
-        dropDerivedWC, insolubleImplic, trulyInsoluble,
+        dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
+        isDroppableDerivedLoc, insolubleImplic, trulyInsoluble,
 
         Implication(..), ImplicStatus(..), isInsolubleStatus,
         SubGoalDepth, initialSubGoalDepth,
@@ -70,7 +72,7 @@ module TcRnTypes(
         CtLoc(..), ctLocSpan, ctLocEnv, ctLocLevel, ctLocOrigin,
         ctLocDepth, bumpCtLocDepth,
         setCtLocOrigin, setCtLocEnv, setCtLocSpan,
-        CtOrigin(..), pprCtOrigin,
+        CtOrigin(..), pprCtOrigin, pprCtLoc,
         pushErrCtxt, pushErrCtxtSameOrigin,
 
         SkolemInfo(..),
@@ -83,13 +85,15 @@ module TcRnTypes(
         -- Constraint solver plugins
         TcPlugin(..), TcPluginResult(..), TcPluginSolver,
         TcPluginM, runTcPluginM, unsafeTcPluginTcM,
+        getEvBindsTcPluginM_maybe,
 
         CtFlavour(..), ctEvFlavour,
+        CtFlavourRole, ctEvFlavourRole, ctFlavourRole,
+        eqCanRewrite, eqCanRewriteFR, canDischarge, canDischargeF,
 
         -- Pretty printing
         pprEvVarTheta,
         pprEvVars, pprEvVarWithType,
-        pprArising, pprArisingAt,
 
         -- Misc other types
         TcId, TcIdSet, HoleSort(..)
@@ -370,12 +374,6 @@ data TcGblEnv
         tcg_fam_inst_env :: FamInstEnv, -- ^ Ditto for family instances
         tcg_ann_env      :: AnnEnv,     -- ^ And for annotations
 
-        tcg_visible_orphan_mods :: ModuleSet,
-          -- ^ The set of orphan modules which transitively reachable from
-          -- direct imports.  We use this to figure out if an orphan instance
-          -- in the global InstEnv should be considered visible.
-          -- See Note [Instance lookup and orphan instances] in InstEnv
-
                 -- Now a bunch of things about this module that are simply
                 -- accumulated, but never consulted until the end.
                 -- Nevertheless, it's convenient to accumulate them along
@@ -462,18 +460,18 @@ data TcGblEnv
         -- Things defined in this module, or (in GHCi)
         -- in the declarations for a single GHCi command.
         -- For the latter, see Note [The interactive package] in HscTypes
-        tcg_binds     :: LHsBinds Id,       -- Value bindings in this module
-        tcg_sigs      :: NameSet,           -- ...Top-level names that *lack* a signature
-        tcg_imp_specs :: [LTcSpecPrag],     -- ...SPECIALISE prags for imported Ids
-        tcg_warns     :: Warnings,          -- ...Warnings and deprecations
-        tcg_anns      :: [Annotation],      -- ...Annotations
-        tcg_tcs       :: [TyCon],           -- ...TyCons and Classes
-        tcg_insts     :: [ClsInst],         -- ...Instances
-        tcg_fam_insts :: [FamInst],         -- ...Family instances
-        tcg_rules     :: [LRuleDecl Id],    -- ...Rules
-        tcg_fords     :: [LForeignDecl Id], -- ...Foreign import & exports
-        tcg_vects     :: [LVectDecl Id],    -- ...Vectorisation declarations
-        tcg_patsyns   :: [PatSyn],          -- ...Pattern synonyms
+        tcg_binds     :: LHsBinds Id,        -- Value bindings in this module
+        tcg_sigs      :: NameSet,            -- ...Top-level names that *lack* a signature
+        tcg_imp_specs :: [LTcSpecPrag],      -- ...SPECIALISE prags for imported Ids
+        tcg_warns     :: Warnings,           -- ...Warnings and deprecations
+        tcg_anns      :: [Annotation],       -- ...Annotations
+        tcg_tcs       :: [TyCon],            -- ...TyCons and Classes
+        tcg_insts     :: [ClsInst],          -- ...Instances
+        tcg_fam_insts :: [FamInst],          -- ...Family instances
+        tcg_rules     :: [LRuleDecl Id],     -- ...Rules
+        tcg_fords     :: [LForeignDecl Id],  -- ...Foreign import & exports
+        tcg_vects     :: [LVectDecl Id],     -- ...Vectorisation declarations
+        tcg_patsyns   :: [PatSyn],           -- ...Pattern synonyms
 
         tcg_doc_hdr   :: Maybe LHsDocString, -- ^ Maybe Haddock header docs
         tcg_hpc       :: AnyHpcUsage,        -- ^ @True@ if any part of the
@@ -482,16 +480,22 @@ data TcGblEnv
         tcg_main      :: Maybe Name,         -- ^ The Name of the main
                                              -- function, if this module is
                                              -- the main module.
-        tcg_safeInfer :: TcRef Bool,         -- Has the typechecker
-                                             -- inferred this module
-                                             -- as -XSafe (Safe Haskell)
 
-        -- | A list of user-defined plugins for the constraint solver.
+        tcg_safeInfer :: TcRef (Bool, WarningMessages),
+        -- ^ Has the typechecker inferred this module as -XSafe (Safe Haskell)
+        -- See Note [Safe Haskell Overlapping Instances Implementation],
+        -- although this is used for more than just that failure case.
+
         tcg_tc_plugins :: [TcPluginSolver],
+        -- ^ A list of user-defined plugins for the constraint solver.
 
         tcg_static_wc :: TcRef WantedConstraints
           -- ^ Wanted constraints of static forms.
     }
+
+tcVisibleOrphanMods :: TcGblEnv -> ModuleSet
+tcVisibleOrphanMods tcg_env
+    = mkModuleSet (tcg_mod tcg_env : imp_orphs (tcg_imports tcg_env))
 
 -- Note [Signature parameters in TcGblEnv and DynFlags]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -796,6 +800,9 @@ data ArrowCtxt   -- Note [Escaping the arrow scope]
 -- TcTyThing
 ---------------------------
 
+-- | A typecheckable thing available in a local context.  Could be
+-- 'AGlobal' 'TyThing', but also lexically scoped variables, etc.
+-- See 'TcEnv' for how to retrieve a 'TyThing' given a 'Name'.
 data TcTyThing
   = AGlobal TyThing             -- Used only in the return type of a lookup
 
@@ -1258,6 +1265,12 @@ ctEvidence = cc_ev
 ctLoc :: Ct -> CtLoc
 ctLoc = ctEvLoc . ctEvidence
 
+setCtLoc :: Ct -> CtLoc -> Ct
+setCtLoc ct loc = ct { cc_ev = (cc_ev ct) { ctev_loc = loc } }
+
+ctOrigin :: Ct -> CtOrigin
+ctOrigin = ctLocOrigin . ctLoc
+
 ctPred :: Ct -> PredType
 -- See Note [Ct/evidence invariant]
 ctPred ct = ctEvPred (cc_ev ct)
@@ -1272,34 +1285,68 @@ ctEqRel = ctEvEqRel . ctEvidence
 
 dropDerivedWC :: WantedConstraints -> WantedConstraints
 -- See Note [Dropping derived constraints]
-dropDerivedWC wc@(WC { wc_simple = simples })
-  = wc { wc_simple  = filterBag isWantedCt simples }
+dropDerivedWC wc@(WC { wc_simple = simples, wc_insol = insols })
+  = wc { wc_simple = dropDerivedSimples simples
+       , wc_insol  = dropDerivedInsols insols }
     -- The wc_impl implications are already (recursively) filtered
 
-{-
-Note [Dropping derived constraints]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+dropDerivedSimples :: Cts -> Cts
+dropDerivedSimples simples = filterBag isWantedCt simples
+                             -- simples are all Wanted or Derived
+
+dropDerivedInsols :: Cts -> Cts
+-- See Note [Dropping derived constraints]
+dropDerivedInsols insols = filterBag keep insols
+  where                    -- insols can include Given
+    keep ct
+      | isDerivedCt ct = not (isDroppableDerivedLoc (ctLoc ct))
+      | otherwise      = True
+
+isDroppableDerivedLoc :: CtLoc -> Bool
+-- Note [Dropping derived constraints]
+isDroppableDerivedLoc loc
+  = case ctLocOrigin loc of
+      KindEqOrigin {}  -> False
+      GivenOrigin {}   -> False
+      FunDepOrigin1 {} -> False
+      FunDepOrigin2 {} -> False
+      _                -> True
+
+
+{- Note [Dropping derived constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In general we discard derived constraints at the end of constraint solving;
 see dropDerivedWC.  For example
- * If we have an unsolved (Ord a), we don't want to complain about
-   an unsolved (Eq a) as well.
 
-But we keep Derived *insoluble* constraints because they indicate a solid,
-comprehensible error.  Particularly:
+ * If we have an unsolved [W] (Ord a), we don't want to complain about
+   an unsolved [D] (Eq a) as well.
 
- * Insolubles Givens indicate unreachable code
+ * If we have [W] a ~ Int, [W] a ~ Bool, improvement will generate
+   [D] Int ~ Bool, and we don't want to report that because it's incomprehensible.
+   That is why we don't rewrite wanteds with wanteds!
+
+But (tiresomely) we do keep *some* Derived insolubles:
 
  * Insoluble kind equalities (e.g. [D] * ~ (* -> *)) may arise from
-   a type equality a ~ Int#, say
+   a type equality a ~ Int#, say.  In future they'll be Wanted, not Derived,
+   but at the moment they are Derived.
 
- * Insoluble derived wanted equalities (e.g. [D] Int ~ Bool) may
-   arise from functional dependency interactions.  We are careful
-   to keep a good CtOrigin on such constraints (FunDepOrigin1, FunDepOrigin2)
-   so that we can produce a good error message (Trac #9612)
+ * Insoluble derived equalities (e.g. [D] Int ~ Bool) may arise from
+   functional dependency interactions, either between Givens or
+   Wanteds.  It seems sensible to retain these:
+   - For Givens they reflect unreachable code
+   - For Wanteds it is arguably better to get a fundep error than
+     a no-instance error (Trac #9612)
 
-Since we leave these Derived constraints in the residual WantedConstraints,
-we must filter them out when we re-process the WantedConstraint,
-in TcSimplify.solve_wanteds.
+Moreover, we keep *all* derived insolubles under some circumstances:
+
+  * They are looked at by simplifyInfer, to decide whether to
+    generalise.  Example: [W] a ~ Int, [W] a ~ Bool
+    We get [D] Int ~ Bool, and indeed the constraints are insoluble,
+    and we want simplifyInfer to see that, even though we don't
+    ultimately want to generate an (inexplicable) error message from
+
+To distinguish these cases we use the CtOrigin.
 
 
 ************************************************************************
@@ -1447,6 +1494,7 @@ unionsWC = foldr andWC emptyWC
 addSimples :: WantedConstraints -> Bag Ct -> WantedConstraints
 addSimples wc cts
   = wc { wc_simple = wc_simple wc `unionBags` cts }
+    -- Consider: Put the new constraints at the front, so they get solved first
 
 addImplics :: WantedConstraints -> Bag Implication -> WantedConstraints
 addImplics wc implic = wc { wc_impl = wc_impl wc `unionBags` implic }
@@ -1468,10 +1516,16 @@ insolubleWC (WC { wc_impl = implics, wc_insol = insols })
   || anyBag insolubleImplic implics
 
 trulyInsoluble :: Ct -> Bool
--- The constraint is in the wc_insol set, but we do not
--- treat type-holes, arising from PartialTypeSignatures,
--- as "truly insoluble". Yuk.
-trulyInsoluble insol = not (isTypeHoleCt insol)
+-- The constraint is in the wc_insol set,
+-- but we do not treat as truly isoluble
+--  a) type-holes, arising from PartialTypeSignatures,
+--  b) superclass constraints, arising from the emitInsoluble
+--     in TcInstDcls.tcSuperClasses. In fact only equalities
+--     are truly-insoluble.
+-- Yuk!
+trulyInsoluble insol
+  =  isEqPred (ctPred insol)
+  && not (isTypeHoleCt insol)
 
 instance Outputable WantedConstraints where
   ppr (WC {wc_simple = s, wc_impl = i, wc_insol = n})
@@ -1701,6 +1755,9 @@ ctEvPred = ctev_pred
 ctEvLoc :: CtEvidence -> CtLoc
 ctEvLoc = ctev_loc
 
+ctEvOrigin :: CtEvidence -> CtOrigin
+ctEvOrigin = ctLocOrigin . ctEvLoc
+
 -- | Get the equality relation relevant for a 'CtEvidence'
 ctEvEqRel :: CtEvidence -> EqRel
 ctEvEqRel = predTypeEqRel . ctEvPred
@@ -1763,6 +1820,93 @@ ctEvFlavour :: CtEvidence -> CtFlavour
 ctEvFlavour (CtWanted {})  = Wanted
 ctEvFlavour (CtGiven {})   = Given
 ctEvFlavour (CtDerived {}) = Derived
+
+-- | Whether or not one 'Ct' can rewrite another is determined by its
+-- flavour and its equality relation
+type CtFlavourRole = (CtFlavour, EqRel)
+
+-- | Extract the flavour and role from a 'CtEvidence'
+ctEvFlavourRole :: CtEvidence -> CtFlavourRole
+ctEvFlavourRole ev = (ctEvFlavour ev, ctEvEqRel ev)
+
+-- | Extract the flavour and role from a 'Ct'
+ctFlavourRole :: Ct -> CtFlavourRole
+ctFlavourRole = ctEvFlavourRole . cc_ev
+
+{- Note [eqCanRewrite]
+~~~~~~~~~~~~~~~~~~~
+(eqCanRewrite ct1 ct2) holds if the constraint ct1 (a CTyEqCan of form
+tv ~ ty) can be used to rewrite ct2.  It must satisfy the properties of
+a can-rewrite relation, see Definition [Can-rewrite relation]
+
+With the solver handling Coercible constraints like equality constraints,
+the rewrite conditions must take role into account, never allowing
+a representational equality to rewrite a nominal one.
+
+Note [Wanteds do not rewrite Wanteds]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We don't allow Wanteds to rewrite Wanteds, because that can give rise
+to very confusing type error messages.  A good example is Trac #8450.
+Here's another
+   f :: a -> Bool
+   f x = ( [x,'c'], [x,True] ) `seq` True
+Here we get
+  [W] a ~ Char
+  [W] a ~ Bool
+but we do not want to complain about Bool ~ Char!
+
+Note [Deriveds do rewrite Deriveds]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+However we DO allow Deriveds to rewrite Deriveds, because that's how
+improvement works; see Note [The improvement story] in TcInteract.
+
+However, for now at least I'm only letting (Derived,NomEq) rewrite
+(Derived,NomEq) and not doing anything for ReprEq.  If we have
+    eqCanRewriteFR (Derived, NomEq) (Derived, _)  = True
+then we lose the property of Note [Can-rewrite relation]
+  R2.  If f1 >= f, and f2 >= f,
+       then either f1 >= f2 or f2 >= f1
+Consider f1 = (Given, ReprEq)
+         f2 = (Derived, NomEq)
+          f = (Derived, ReprEq)
+
+I thought maybe we could never get Derived ReprEq constraints, but
+we can; straight from the Wanteds during improvment. And from a Derived
+ReprEq we could conceivably get a Derived NomEq improvment (by decomposing
+a type constructor with Nomninal role), and hence unify.
+
+Note [canRewriteOrSame]
+~~~~~~~~~~~~~~~~~~~~~~~
+canRewriteOrSame is similar but
+ * returns True for Wanted/Wanted.
+ * works for all kinds of constraints, not just CTyEqCans
+See the call sites for explanations.
+-}
+
+eqCanRewrite :: CtEvidence -> CtEvidence -> Bool
+eqCanRewrite ev1 ev2 = ctEvFlavourRole ev1 `eqCanRewriteFR` ctEvFlavourRole ev2
+
+eqCanRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
+-- Very important function!
+-- See Note [eqCanRewrite]
+-- See Note [Wanteds do not rewrite Wanteds]
+-- See Note [Deriveds do rewrite Deriveds]
+eqCanRewriteFR (Given,   NomEq)   (_,       _)      = True
+eqCanRewriteFR (Given,   ReprEq)  (_,       ReprEq) = True
+eqCanRewriteFR (Derived, NomEq)   (Derived, NomEq)  = True
+eqCanRewriteFR _                 _                  = False
+
+canDischarge :: CtEvidence -> CtEvidence -> Bool
+-- See Note [canRewriteOrSame]
+canDischarge ev1 ev2 = ctEvFlavour ev1 `canDischargeF` ctEvFlavour ev2
+
+canDischargeF :: CtFlavour -> CtFlavour -> Bool
+canDischargeF Given  _        = True
+canDischargeF Wanted Wanted   = True
+canDischargeF Wanted Derived  = True
+canDischargeF Derived Derived = True
+canDischargeF _       _       = False
+
 
 {-
 ************************************************************************
@@ -1898,17 +2042,6 @@ pushErrCtxtSameOrigin :: ErrCtxt -> CtLoc -> CtLoc
 pushErrCtxtSameOrigin err loc@(CtLoc { ctl_env = lcl })
   = loc { ctl_env = lcl { tcl_ctxt = err : tcl_ctxt lcl } }
 
-pprArising :: CtOrigin -> SDoc
--- Used for the main, top-level error message
--- We've done special processing for TypeEq and FunDep origins
-pprArising (TypeEqOrigin {}) = empty
-pprArising orig              = pprCtOrigin orig
-
-pprArisingAt :: CtLoc -> SDoc
-pprArisingAt (CtLoc { ctl_origin = o, ctl_env = lcl})
-  = sep [ pprCtOrigin o
-        , text "at" <+> ppr (tcl_loc lcl)]
-
 {-
 ************************************************************************
 *                                                                      *
@@ -1927,7 +2060,13 @@ data SkolemInfo
 
         -- The rest are for non-scoped skolems
   | ClsSkol Class       -- Bound at a class decl
+
   | InstSkol            -- Bound at an instance decl
+  | InstSC TypeSize     -- A "given" constraint obtained by superclass selection
+                        -- from an InstSkol, giving the largest class from
+                        -- which we made a superclass selection in the chain
+                        -- See Note [Solving superclass constraints] in TcInstDcls
+
   | DataSkol            -- Bound at a data type declaration
   | FamInstSkol         -- Bound at a family instance decl
   | PatSkol             -- An existential type variable bound by a pattern for
@@ -1967,6 +2106,7 @@ pprSkolInfo (IPSkol ips)      = ptext (sLit "the implicit-parameter binding") <>
                                 <+> pprWithCommas ppr ips
 pprSkolInfo (ClsSkol cls)     = ptext (sLit "the class declaration for") <+> quotes (ppr cls)
 pprSkolInfo InstSkol          = ptext (sLit "the instance declaration")
+pprSkolInfo (InstSC n)        = ptext (sLit "the instance declaration") <> ifPprDebug (parens (ppr n))
 pprSkolInfo DataSkol          = ptext (sLit "a data type declaration")
 pprSkolInfo FamInstSkol       = ptext (sLit "a family instance declaration")
 pprSkolInfo BracketSkol       = ptext (sLit "a Template Haskell bracket")
@@ -2023,7 +2163,7 @@ data CtOrigin
   | OccurrenceOf Name              -- Occurrence of an overloaded identifier
   | AppOrigin                      -- An application of some kind
 
-  | SpecPragOrigin UserTypeCtxt    -- Specialisation pragma for 
+  | SpecPragOrigin UserTypeCtxt    -- Specialisation pragma for
                                    -- function or instance
 
   | TypeEqOrigin { uo_actual   :: TcType
@@ -2031,7 +2171,6 @@ data CtOrigin
   | KindEqOrigin
       TcType TcType             -- A kind equality arising from unifying these two types
       CtOrigin                  -- originally arising from this
-  | CoercibleOrigin TcType TcType  -- a Coercible constraint
 
   | IPOccOrigin  HsIPName       -- Occurrence of an implicit parameter
 
@@ -2048,7 +2187,10 @@ data CtOrigin
   | RecordUpdOrigin
   | ViewPatOrigin
 
-  | ScOrigin            -- Typechecking superclasses of an instance declaration
+  | ScOrigin TypeSize   -- Typechecking superclasses of an instance declaration
+                        -- whose head has the given size
+                        -- See Note [Solving superclass constraints] in TcInstDcls
+
   | DerivOrigin         -- Typechecking deriving
   | DerivOriginDC DataCon Int
                         -- Checking constraints arising from this data con and field index
@@ -2081,11 +2223,19 @@ data CtOrigin
 ctoHerald :: SDoc
 ctoHerald = ptext (sLit "arising from")
 
-pprCtOrigin :: CtOrigin -> SDoc
+pprCtLoc :: CtLoc -> SDoc
+-- "arising from ... at ..."
+-- Not an instance of Outputable because of the "arising from" prefix
+pprCtLoc (CtLoc { ctl_origin = o, ctl_env = lcl})
+  = sep [ pprCtOrigin o
+        , text "at" <+> ppr (tcl_loc lcl)]
 
+pprCtOrigin :: CtOrigin -> SDoc
+-- "arising from ..."
+-- Not an instance of Outputable because of the "arising from" prefix
 pprCtOrigin (GivenOrigin sk) = ctoHerald <+> ppr sk
 
-pprCtOrigin (SpecPragOrigin ctxt) 
+pprCtOrigin (SpecPragOrigin ctxt)
   = case ctxt of
        FunSigCtxt n _ -> ptext (sLit "a SPECIALISE pragma for") <+> quotes (ppr n)
        SpecInstCtxt   -> ptext (sLit "a SPECIALISE INSTANCE pragma")
@@ -2093,13 +2243,13 @@ pprCtOrigin (SpecPragOrigin ctxt)
 
 pprCtOrigin (FunDepOrigin1 pred1 loc1 pred2 loc2)
   = hang (ctoHerald <+> ptext (sLit "a functional dependency between constraints:"))
-       2 (vcat [ hang (quotes (ppr pred1)) 2 (pprArisingAt loc1)
-               , hang (quotes (ppr pred2)) 2 (pprArisingAt loc2) ])
+       2 (vcat [ hang (quotes (ppr pred1)) 2 (pprCtLoc loc1)
+               , hang (quotes (ppr pred2)) 2 (pprCtLoc loc2) ])
 
 pprCtOrigin (FunDepOrigin2 pred1 orig1 pred2 loc2)
   = hang (ctoHerald <+> ptext (sLit "a functional dependency between:"))
        2 (vcat [ hang (ptext (sLit "constraint") <+> quotes (ppr pred1))
-                    2 (pprArising orig1 )
+                    2 (pprCtOrigin orig1 )
                , hang (ptext (sLit "instance") <+> quotes (ppr pred2))
                     2 (ptext (sLit "at") <+> ppr loc2) ])
 
@@ -2122,11 +2272,6 @@ pprCtOrigin (DerivOriginCoerce meth ty1 ty2)
        2 (sep [ text "from type" <+> quotes (ppr ty1)
               , nest 2 $ text "to type" <+> quotes (ppr ty2) ])
 
-pprCtOrigin (CoercibleOrigin ty1 ty2)
-  = hang (ctoHerald <+> text "trying to show that the representations of")
-       2 (quotes (ppr ty1) <+> text "and" $$
-          quotes (ppr ty2) <+> text "are the same")
-
 pprCtOrigin simple_origin
   = ctoHerald <+> pprCtO simple_origin
 
@@ -2147,7 +2292,8 @@ pprCtO (PArrSeqOrigin seq)   = hsep [ptext (sLit "the parallel array sequence"),
 pprCtO SectionOrigin         = ptext (sLit "an operator section")
 pprCtO TupleOrigin           = ptext (sLit "a tuple")
 pprCtO NegateOrigin          = ptext (sLit "a use of syntactic negation")
-pprCtO ScOrigin              = ptext (sLit "the superclasses of an instance declaration")
+pprCtO (ScOrigin n)          = ptext (sLit "the superclasses of an instance declaration") 
+                               <> ifPprDebug (parens (ppr n))
 pprCtO DerivOrigin           = ptext (sLit "the 'deriving' clause of a data type declaration")
 pprCtO StandAloneDerivOrigin = ptext (sLit "a 'deriving' declaration")
 pprCtO DefaultOrigin         = ptext (sLit "a 'default' declaration")
@@ -2171,7 +2317,7 @@ type TcPluginSolver = [Ct]    -- given
                    -> [Ct]    -- wanted
                    -> TcPluginM TcPluginResult
 
-newtype TcPluginM a = TcPluginM (TcM a)
+newtype TcPluginM a = TcPluginM (Maybe EvBindsVar -> TcM a)
 
 instance Functor     TcPluginM where
   fmap = liftM
@@ -2181,21 +2327,27 @@ instance Applicative TcPluginM where
   (<*>) = ap
 
 instance Monad TcPluginM where
-  return x = TcPluginM (return x)
-  fail x   = TcPluginM (fail x)
+  return x = TcPluginM (const $ return x)
+  fail x   = TcPluginM (const $ fail x)
   TcPluginM m >>= k =
-    TcPluginM (do a <- m
-                  let TcPluginM m1 = k a
-                  m1)
+    TcPluginM (\ ev -> do a <- m ev
+                          runTcPluginM (k a) ev)
 
-runTcPluginM :: TcPluginM a -> TcM a
+runTcPluginM :: TcPluginM a -> Maybe EvBindsVar -> TcM a
 runTcPluginM (TcPluginM m) = m
 
 -- | This function provides an escape for direct access to
 -- the 'TcM` monad.  It should not be used lightly, and
 -- the provided 'TcPluginM' API should be favoured instead.
 unsafeTcPluginTcM :: TcM a -> TcPluginM a
-unsafeTcPluginTcM = TcPluginM
+unsafeTcPluginTcM = TcPluginM . const
+
+-- | Access the 'EvBindsVar' carried by the 'TcPluginM' during
+-- constraint solving.  Returns 'Nothing' if invoked during
+-- 'tcPluginInit' or 'tcPluginStop'.
+getEvBindsTcPluginM_maybe :: TcPluginM (Maybe EvBindsVar)
+getEvBindsTcPluginM_maybe = TcPluginM return
+
 
 data TcPlugin = forall s. TcPlugin
   { tcPluginInit  :: TcPluginM s

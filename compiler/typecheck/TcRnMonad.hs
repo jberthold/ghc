@@ -86,7 +86,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
         used_rdr_var <- newIORef Set.empty ;
         th_var       <- newIORef False ;
         th_splice_var<- newIORef False ;
-        infer_var    <- newIORef True ;
+        infer_var    <- newIORef (True, emptyBag) ;
         lie_var      <- newIORef emptyWC ;
         dfun_n_var   <- newIORef emptyOccSet ;
         type_env_var <- case hsc_type_env_var hsc_env of {
@@ -125,13 +125,14 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 tcg_rdr_env        = emptyGlobalRdrEnv,
                 tcg_fix_env        = emptyNameEnv,
                 tcg_field_env      = RecFields emptyNameEnv emptyNameSet,
-                tcg_default        = Nothing,
+                tcg_default        = if modulePackageKey mod == primPackageKey
+                                     then Just []  -- See Note [Default types]
+                                     else Nothing,
                 tcg_type_env       = emptyNameEnv,
                 tcg_type_env_var   = type_env_var,
                 tcg_inst_env       = emptyInstEnv,
                 tcg_fam_inst_env   = emptyFamInstEnv,
                 tcg_ann_env        = emptyAnnEnv,
-                tcg_visible_orphan_mods = mkModuleSet [mod],
                 tcg_th_used        = th_var,
                 tcg_th_splice_used = th_splice_var,
                 tcg_exports        = [],
@@ -225,7 +226,17 @@ initTcForLookup hsc_env thing_inside
              Nothing -> throwIO $ mkSrcErr $ snd msgs
              Just x -> return x }
 
-{-
+{- Note [Default types]
+~~~~~~~~~~~~~~~~~~~~~~~
+The Integer type is simply not available in package ghc-prim (it is
+declared in integer-gmp).  So we set the defaulting types to (Just
+[]), meaning there are no default types, rather then Nothing, which
+means "use the default default types of Integer, Double".
+
+If you don't do this, attempted defaulting in package ghc-prim causes
+an actual crash (attempting to look up the Integer type).
+
+
 ************************************************************************
 *                                                                      *
                 Initialisation
@@ -679,6 +690,9 @@ addErr msg = do { loc <- getSrcSpanM; addErrAt loc msg }
 failWith :: MsgDoc -> TcRn a
 failWith msg = addErr msg >> failM
 
+failAt :: SrcSpan -> MsgDoc -> TcRn a
+failAt loc msg = addErrAt loc msg >> failM
+
 addErrAt :: SrcSpan -> MsgDoc -> TcRn ()
 -- addErrAt is mainly (exclusively?) used by the renamer, where
 -- tidying is not an issue, but it's all lazy so the extra
@@ -942,16 +956,16 @@ updCtxt upd = updLclEnv (\ env@(TcLclEnv { tcl_ctxt = ctxt }) ->
 popErrCtxt :: TcM a -> TcM a
 popErrCtxt = updCtxt (\ msgs -> case msgs of { [] -> []; (_ : ms) -> ms })
 
-getCtLoc :: CtOrigin -> TcM CtLoc
-getCtLoc origin
+getCtLocM :: CtOrigin -> TcM CtLoc
+getCtLocM origin
   = do { env <- getLclEnv
        ; return (CtLoc { ctl_origin = origin
                        , ctl_env = env
                        , ctl_depth = initialSubGoalDepth }) }
 
-setCtLoc :: CtLoc -> TcM a -> TcM a
+setCtLocM :: CtLoc -> TcM a -> TcM a
 -- Set the SrcSpan and error context from the CtLoc
-setCtLoc (CtLoc { ctl_env = lcl }) thing_inside
+setCtLocM (CtLoc { ctl_env = lcl }) thing_inside
   = updLclEnv (\env -> env { tcl_loc   = tcl_loc lcl
                            , tcl_bndrs = tcl_bndrs lcl
                            , tcl_ctxt  = tcl_ctxt lcl })
@@ -1003,6 +1017,10 @@ failWithTcM local_and_msg
 checkTc :: Bool -> MsgDoc -> TcM ()         -- Check that the boolean is true
 checkTc True  _   = return ()
 checkTc False err = failWithTc err
+
+failIfTc :: Bool -> MsgDoc -> TcM ()         -- Check that the boolean is false
+failIfTc False _   = return ()
+failIfTc True  err = failWithTc err
 
 --         Warnings have no 'M' variant, nor failure
 
@@ -1223,7 +1241,7 @@ traceTcConstraints msg
 
 emitWildcardHoleConstraints :: [(Name, TcTyVar)] -> TcM ()
 emitWildcardHoleConstraints wcs
-  = do { ctLoc <- getCtLoc HoleOrigin
+  = do { ctLoc <- getCtLocM HoleOrigin
        ; forM_ wcs $ \(name, tv) -> do {
        ; let real_span = case nameSrcSpan name of
                            RealSrcSpan span  -> span
@@ -1280,17 +1298,27 @@ setStage s = updLclEnv (\ env -> env { tcl_th_ctxt = s })
 -}
 
 -- | Mark that safe inference has failed
-recordUnsafeInfer :: TcM ()
-recordUnsafeInfer = getGblEnv >>= \env -> writeTcRef (tcg_safeInfer env) False
+-- See Note [Safe Haskell Overlapping Instances Implementation]
+-- although this is used for more than just that failure case.
+recordUnsafeInfer :: WarningMessages -> TcM ()
+recordUnsafeInfer warns =
+    getGblEnv >>= \env -> writeTcRef (tcg_safeInfer env) (False, warns)
 
 -- | Figure out the final correct safe haskell mode
 finalSafeMode :: DynFlags -> TcGblEnv -> IO SafeHaskellMode
 finalSafeMode dflags tcg_env = do
-    safeInf <- readIORef (tcg_safeInfer tcg_env)
+    safeInf <- fst <$> readIORef (tcg_safeInfer tcg_env)
     return $ case safeHaskell dflags of
         Sf_None | safeInferOn dflags && safeInf -> Sf_Safe
                 | otherwise                     -> Sf_None
         s -> s
+
+-- | Switch instances to safe instances if we're in Safe mode.
+fixSafeInstances :: SafeHaskellMode -> [ClsInst] -> [ClsInst]
+fixSafeInstances sfMode | sfMode /= Sf_Safe = id
+fixSafeInstances _ = map fixSafe
+  where fixSafe inst = let new_flag = (is_flag inst) { isSafeOverlap = True }
+                       in inst { is_flag = new_flag }
 
 {-
 ************************************************************************

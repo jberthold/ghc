@@ -40,7 +40,8 @@ test('tcrun020', normal, compile_and_run, [''])
 test('tcrun021', normal, compile_and_run, ['-package containers'])
 test('tcrun022', [omit_ways(['ghci']),only_compiler_types(['ghc'])],
      compile_and_run, ['-O'])
-test('tcrun023', normal, compile_and_run, ['-O'])
+test('tcrun023', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
+     compile_and_run, ['-O'])
 test('tcrun024', normal, compile_and_run, ['-O'])
 test('tcrun025', extra_clean(['TcRun025_B.hi', 'TcRun025_B.o']),
      multimod_compile_and_run, ['tcrun025',''])
@@ -116,4 +117,5 @@ test('T8739', normal, compile_and_run, [''])
 test('T9497a-run', [exit_code(1)], compile_and_run, ['-fdefer-typed-holes'])
 test('T9497b-run', [exit_code(1)], compile_and_run, ['-fdefer-typed-holes -fno-warn-typed-holes'])
 test('T9497c-run', [exit_code(1)], compile_and_run, ['-fdefer-type-errors -fno-warn-typed-holes'])
-test('T9858b', normal, compile_and_run, [''])
+test('T9858c', normal, compile_and_run, [''])
+test('T9858d', normal, compile_and_run, [''])

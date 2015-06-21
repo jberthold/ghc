@@ -87,47 +87,69 @@ module GHC (
         PrintUnqualified, alwaysQualify,
 
         -- * Interactive evaluation
+
+#ifdef GHCI
+        -- ** Executing statements
+        execStmt, ExecOptions(..), execOptions, ExecResult(..),
+        resumeExec,
+
+        -- ** Adding new declarations
+        runDecls, runDeclsWithLocation,
+
+        -- ** Get/set the current context
+        parseImportDecl,
+        setContext, getContext,
+        setGHCiMonad, getGHCiMonad,
+#endif
+        -- ** Inspecting the current context
         getBindings, getInsts, getPrintUnqual,
         findModule, lookupModule,
 #ifdef GHCI
-        isModuleTrusted,
-        moduleTrustReqs,
-        setContext, getContext, 
+        isModuleTrusted, moduleTrustReqs,
         getNamesInScope,
         getRdrNamesInScope,
         getGRE,
         moduleIsInterpreted,
         getInfo,
+        showModule,
+        isModuleInterpreted,
+
+        -- ** Inspecting types and kinds
         exprType,
         typeKind,
+
+        -- ** Looking up a Name
         parseName,
-        RunResult(..),  
-        runStmt, runStmtWithLocation, runDecls, runDeclsWithLocation,
+#endif
+        lookupName,
+#ifdef GHCI
+        -- ** Compiling expressions
+        HValue, parseExpr, compileParsedExpr,
+        InteractiveEval.compileExpr, dynCompileExpr,
+
+        -- ** Other
         runTcInteractive,   -- Desired by some clients (Trac #8878)
-        parseImportDecl, SingleStep(..),
-        resume,
+
+        -- ** The debugger
+        SingleStep(..),
         Resume(resumeStmt, resumeThreadId, resumeBreakInfo, resumeSpan,
                resumeHistory, resumeHistoryIx),
         History(historyBreakInfo, historyEnclosingDecls), 
         GHC.getHistorySpan, getHistoryModule,
-        getResumeContext,
         abandon, abandonAll,
-        InteractiveEval.back,
-        InteractiveEval.forward,
-        showModule,
-        isModuleInterpreted,
-        InteractiveEval.compileExpr, HValue, dynCompileExpr,
+        getResumeContext,
         GHC.obtainTermFromId, GHC.obtainTermFromVal, reconstructType,
         modInfoModBreaks,
         ModBreaks(..), BreakIndex,
         BreakInfo(breakInfo_number, breakInfo_module),
         BreakArray, setBreakOn, setBreakOff, getBreak,
-#endif
-        lookupName,
+        InteractiveEval.back,
+        InteractiveEval.forward,
 
-#ifdef GHCI
-        -- ** EXPERIMENTAL
-        setGHCiMonad,
+        -- ** Deprecated API
+        RunResult(..),
+        runStmt, runStmtWithLocation,
+        resume,
 #endif
 
         -- * Abstract syntax elements
@@ -274,7 +296,7 @@ import HscMain
 import GhcMake
 import DriverPipeline   ( compileOne' )
 import GhcMonad
-import TcRnMonad        ( finalSafeMode )
+import TcRnMonad        ( finalSafeMode, fixSafeInstances )
 import TcRnTypes
 import Packages
 import NameSet
@@ -549,17 +571,19 @@ checkBrokenTablesNextToCode' dflags
 --
 setSessionDynFlags :: GhcMonad m => DynFlags -> m [PackageKey]
 setSessionDynFlags dflags = do
-  (dflags', preload) <- liftIO $ initPackages dflags
-  modifySession $ \h -> h{ hsc_dflags = dflags'
-                         , hsc_IC = (hsc_IC h){ ic_dflags = dflags' } }
+  dflags' <- checkNewDynFlags dflags
+  (dflags'', preload) <- liftIO $ initPackages dflags'
+  modifySession $ \h -> h{ hsc_dflags = dflags''
+                         , hsc_IC = (hsc_IC h){ ic_dflags = dflags'' } }
   invalidateModSummaryCache
   return preload
 
 -- | Sets the program 'DynFlags'.
 setProgramDynFlags :: GhcMonad m => DynFlags -> m [PackageKey]
 setProgramDynFlags dflags = do
-  (dflags', preload) <- liftIO $ initPackages dflags
-  modifySession $ \h -> h{ hsc_dflags = dflags' }
+  dflags' <- checkNewDynFlags dflags
+  (dflags'', preload) <- liftIO $ initPackages dflags'
+  modifySession $ \h -> h{ hsc_dflags = dflags'' }
   invalidateModSummaryCache
   return preload
 
@@ -598,7 +622,8 @@ getProgramDynFlags = getSessionDynFlags
 -- 'pkgState' into the interactive @DynFlags@.
 setInteractiveDynFlags :: GhcMonad m => DynFlags -> m ()
 setInteractiveDynFlags dflags = do
-  modifySession $ \h -> h{ hsc_IC = (hsc_IC h) { ic_dflags = dflags }}
+  dflags' <- checkNewDynFlags dflags
+  modifySession $ \h -> h{ hsc_IC = (hsc_IC h) { ic_dflags = dflags' }}
 
 -- | Get the 'DynFlags' used to evaluate interactive expressions.
 getInteractiveDynFlags :: GhcMonad m => m DynFlags
@@ -610,6 +635,32 @@ parseDynamicFlags :: MonadIO m =>
                   -> m (DynFlags, [Located String], [Located String])
 parseDynamicFlags = parseDynamicFlagsCmdLine
 
+{- Note [GHCi and -O]
+~~~~~~~~~~~~~~~~~~~~~
+When using optimization, the compiler can introduce several things
+(such as unboxed tuples) into the intermediate code, which GHCi later
+chokes on since the bytecode interpreter can't handle this (and while
+this is arguably a bug these aren't handled, there are no plans to fix
+it.)
+
+While the driver pipeline always checks for this particular erroneous
+combination when parsing flags, we also need to check when we update
+the flags; this is because API clients may parse flags but update the
+DynFlags afterwords, before finally running code inside a session (see
+T10052 and #10052).
+-}
+
+-- | Checks the set of new DynFlags for possibly erroneous option
+-- combinations when invoking 'setSessionDynFlags' and friends, and if
+-- found, returns a fixed copy (if possible).
+checkNewDynFlags :: MonadIO m => DynFlags -> m DynFlags
+checkNewDynFlags dflags
+  -- See Note [GHCi and -O]
+  | Left e <- checkOptLevel (optLevel dflags) dflags
+    = do liftIO $ warningMsg dflags (text e)
+         return (dflags { optLevel = 0 })
+  | otherwise
+    = return dflags
 
 -- %************************************************************************
 -- %*                                                                      *
@@ -837,6 +888,7 @@ typecheckModule pmod = do
                                        hpm_annotations = pm_annotations pmod }
  details <- liftIO $ makeSimpleDetails hsc_env_tmp tc_gbl_env
  safe    <- liftIO $ finalSafeMode (ms_hspp_opts ms) tc_gbl_env
+
  return $
      TypecheckedModule {
        tm_internals_          = (tc_gbl_env, details),
@@ -848,7 +900,7 @@ typecheckModule pmod = do
            minf_type_env  = md_types details,
            minf_exports   = availsToNameSet $ md_exports details,
            minf_rdr_env   = Just (tcg_rdr_env tc_gbl_env),
-           minf_instances = md_insts details,
+           minf_instances = fixSafeInstances safe $ md_insts details,
            minf_iface     = Nothing,
            minf_safe      = safe
 #ifdef GHCI
@@ -1326,20 +1378,6 @@ showRichTokenStream ts = go startLoc ts ""
 -- | Takes a 'ModuleName' and possibly a 'PackageKey', and consults the
 -- filesystem and package database to find the corresponding 'Module', 
 -- using the algorithm that is used for an @import@ declaration.
---
--- However, there is a twist for local modules, see #2682.
---
--- The full algorithm:
--- IF it's a package qualified import for a REMOTE package (not @this_pkg@ or
--- this), do a normal lookup.
--- OTHERWISE see if it is ALREADY loaded, and use it if it is.
--- OTHERWISE do a normal lookup, but reject the result if the found result
--- is from the LOCAL package (@this_pkg@).
---
--- For signatures, we return the BACKING implementation to keep the API
--- consistent with what we had before. (ToDo: create a new GHC API which
--- can deal with signatures.)
---
 findModule :: GhcMonad m => ModuleName -> Maybe FastString -> m Module
 findModule mod_name maybe_pkg = withSession $ \hsc_env -> do
   let 
@@ -1350,23 +1388,17 @@ findModule mod_name maybe_pkg = withSession $ \hsc_env -> do
     Just pkg | fsToPackageKey pkg /= this_pkg && pkg /= fsLit "this" -> liftIO $ do
       res <- findImportedModule hsc_env mod_name maybe_pkg
       case res of
-        FoundModule h -> return (fr_mod h)
-        FoundSigs _ backing -> return backing
+        Found _ m -> return m
         err       -> throwOneError $ noModError dflags noSrcSpan mod_name err
     _otherwise -> do
       home <- lookupLoadedHomeModule mod_name
       case home of
-        -- TODO: This COULD be a signature
         Just m  -> return m
         Nothing -> liftIO $ do
            res <- findImportedModule hsc_env mod_name maybe_pkg
            case res of
-             FoundModule (FoundHs { fr_mod = m, fr_loc = loc })
-                | modulePackageKey m /= this_pkg -> return m
-                | otherwise -> modNotLoadedError dflags m loc
-             FoundSigs (FoundHs { fr_loc = loc, fr_mod = m }:_) backing
-                | modulePackageKey m /= this_pkg -> return backing
-                | otherwise -> modNotLoadedError dflags m loc
+             Found loc m | modulePackageKey m /= this_pkg -> return m
+                         | otherwise -> modNotLoadedError dflags m loc
              err -> throwOneError $ noModError dflags noSrcSpan mod_name err
 
 modNotLoadedError :: DynFlags -> Module -> ModLocation -> IO a
@@ -1387,13 +1419,11 @@ lookupModule mod_name (Just pkg) = findModule mod_name (Just pkg)
 lookupModule mod_name Nothing = withSession $ \hsc_env -> do
   home <- lookupLoadedHomeModule mod_name
   case home of
-    -- TODO: This COULD be a signature
     Just m  -> return m
     Nothing -> liftIO $ do
       res <- findExposedPackageModule hsc_env mod_name Nothing
       case res of
-        FoundModule (FoundHs { fr_mod = m }) -> return m
-        FoundSigs _ backing -> return backing
+        Found _ m -> return m
         err       -> throwOneError $ noModError (hsc_dflags hsc_env) noSrcSpan mod_name err
 
 lookupLoadedHomeModule :: GhcMonad m => ModuleName -> m (Maybe Module)
@@ -1416,20 +1446,21 @@ moduleTrustReqs :: GhcMonad m => Module -> m (Bool, [PackageKey])
 moduleTrustReqs m = withSession $ \hsc_env ->
     liftIO $ hscGetSafe hsc_env m noSrcSpan
 
--- | EXPERIMENTAL: DO NOT USE.
--- 
--- Set the monad GHCi lifts user statements into.
+-- | Set the monad GHCi lifts user statements into.
 --
 -- Checks that a type (in string form) is an instance of the
 -- @GHC.GHCi.GHCiSandboxIO@ type class. Sets it to be the GHCi monad if it is,
 -- throws an error otherwise.
-{-# WARNING setGHCiMonad "This is experimental! Don't use." #-}
 setGHCiMonad :: GhcMonad m => String -> m ()
 setGHCiMonad name = withSession $ \hsc_env -> do
     ty <- liftIO $ hscIsGHCiMonad hsc_env name
     modifySession $ \s ->
         let ic = (hsc_IC s) { ic_monad = ty }
         in s { hsc_IC = ic }
+
+-- | Get the monad GHCi lifts user statements into.
+getGHCiMonad :: GhcMonad m => m Name
+getGHCiMonad = fmap (ic_monad . hsc_IC) getSession
 
 getHistorySpan :: GhcMonad m => History -> m SrcSpan
 getHistorySpan h = withSession $ \hsc_env ->

@@ -27,7 +27,7 @@ import SrcLoc           ( noSrcSpan )
 import Finder           ( findImportedModule, cannotFindModule )
 import TcRnMonad        ( initTcInteractive, initIfaceTcRn )
 import LoadIface        ( loadPluginInterface )
-import RdrName          ( RdrName, Provenance(..), ImportSpec(..), ImpDeclSpec(..)
+import RdrName          ( RdrName, ImportSpec(..), ImpDeclSpec(..)
                         , ImpItemSpec(..), mkGlobalRdrEnv, lookupGRE_RdrName
                         , gre_name, mkRdrQual )
 import OccName          ( mkVarOcc )
@@ -203,15 +203,7 @@ lookupRdrNameInModuleForPlugins hsc_env mod_name rdr_name = do
     -- First find the package the module resides in by searching exposed packages and home modules
     found_module <- findImportedModule hsc_env mod_name Nothing
     case found_module of
-        FoundModule h -> check_mod (fr_mod h)
-        FoundSigs hs _backing  -> check_mods (map fr_mod hs) -- (not tested)
-        err -> throwCmdLineErrorS dflags $ cannotFindModule dflags mod_name err
-  where
-    dflags = hsc_dflags hsc_env
-    meth = "lookupRdrNameInModule"
-    doc = ptext (sLit $ "contains a name used in an invocation of " ++ meth)
-
-    check_mod mod = do
+        Found _ mod -> do
             -- Find the exports of the module
             (_, mb_iface) <- initTcInteractive hsc_env $
                              initIfaceTcRn $
@@ -221,21 +213,18 @@ lookupRdrNameInModuleForPlugins hsc_env mod_name rdr_name = do
                     -- Try and find the required name in the exports
                     let decl_spec = ImpDeclSpec { is_mod = mod_name, is_as = mod_name
                                                 , is_qual = False, is_dloc = noSrcSpan }
-                        provenance = Imported [ImpSpec decl_spec ImpAll]
-                        env = mkGlobalRdrEnv (gresFromAvails provenance (mi_exports iface))
+                        imp_spec = ImpSpec decl_spec ImpAll
+                        env = mkGlobalRdrEnv (gresFromAvails (Just imp_spec) (mi_exports iface))
                     case lookupGRE_RdrName rdr_name env of
                         [gre] -> return (Just (gre_name gre))
                         []    -> return Nothing
                         _     -> panic "lookupRdrNameInModule"
 
                 Nothing -> throwCmdLineErrorS dflags $ hsep [ptext (sLit "Could not determine the exports of the module"), ppr mod_name]
-
-    check_mods [] = return Nothing
-    check_mods (m:ms) = do
-        r <- check_mod m
-        case r of
-            Nothing -> check_mods ms
-            Just _ -> return r
+        err -> throwCmdLineErrorS dflags $ cannotFindModule dflags mod_name err
+  where
+    dflags = hsc_dflags hsc_env
+    doc = ptext (sLit "contains a name used in an invocation of lookupRdrNameInModule")
 
 wrongTyThingError :: Name -> TyThing -> SDoc
 wrongTyThingError name got_thing = hsep [ptext (sLit "The name"), ppr name, ptext (sLit "is not that of a value but rather a"), pprTyThingCategory got_thing]

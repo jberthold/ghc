@@ -29,9 +29,11 @@ module Rules (
 #include "HsVersions.h"
 
 import CoreSyn          -- All of it
+import Module           ( Module, ModuleSet, elemModuleSet )
 import CoreSubst
 import OccurAnal        ( occurAnalyseExpr )
-import CoreFVs          ( exprFreeVars, exprsFreeVars, bindFreeVars, rulesFreeVars )
+import CoreFVs          ( exprFreeVars, exprsFreeVars, bindFreeVars
+                        , rulesFreeVars, exprsOrphNames )
 import CoreUtils        ( exprType, eqExpr, mkTick, mkTicks,
                           stripTicksTopT, stripTicksTopE )
 import PprCore          ( pprRules )
@@ -43,7 +45,8 @@ import Id
 import IdInfo           ( SpecInfo( SpecInfo ) )
 import VarEnv
 import VarSet
-import Name             ( Name, NamedThing(..) )
+import Name             ( Name, NamedThing(..), nameIsLocalOrFrom, nameOccName )
+import NameSet
 import NameEnv
 import Unify            ( ruleMatchTyX, MatchEnv(..) )
 import BasicTypes       ( Activation, CompilerPhase, isActive )
@@ -158,16 +161,28 @@ might have a specialisation
 where pi' :: Lift Int# is the specialised version of pi.
 -}
 
-mkRule :: Bool -> Bool -> RuleName -> Activation
+mkRule :: Module -> Bool -> Bool -> RuleName -> Activation
        -> Name -> [CoreBndr] -> [CoreExpr] -> CoreExpr -> CoreRule
 -- ^ Used to make 'CoreRule' for an 'Id' defined in the module being
 -- compiled. See also 'CoreSyn.CoreRule'
-mkRule is_auto is_local name act fn bndrs args rhs
+mkRule this_mod is_auto is_local name act fn bndrs args rhs
   = Rule { ru_name = name, ru_fn = fn, ru_act = act,
            ru_bndrs = bndrs, ru_args = args,
            ru_rhs = occurAnalyseExpr rhs,
            ru_rough = roughTopNames args,
+           ru_origin = this_mod,
+           ru_orphan = orph,
            ru_auto = is_auto, ru_local = is_local }
+  where
+        -- Compute orphanhood.  See Note [Orphans] in InstEnv
+        -- A rule is an orphan only if none of the variables
+        -- mentioned on its left-hand side are locally defined
+    lhs_names = nameSetElems (extendNameSet (exprsOrphNames args) fn)
+        -- TODO: copied from ruleLhsOrphNames
+
+    orph = case filter (nameIsLocalOrFrom this_mod) lhs_names of
+                        (n : _) -> NotOrphan (nameOccName n)
+                        []      -> IsOrphan
 
 --------------
 roughTopNames :: [CoreExpr] -> [Maybe Name]
@@ -277,12 +292,17 @@ addIdSpecialisations id rules
 rulesOfBinds :: [CoreBind] -> [CoreRule]
 rulesOfBinds binds = concatMap (concatMap idCoreRules . bindersOf) binds
 
-getRules :: RuleBase -> Id -> [CoreRule]
+getRules :: RuleEnv -> Id -> [CoreRule]
 -- See Note [Where rules are found]
-getRules rule_base fn
-  = idCoreRules fn ++ imp_rules
+getRules (RuleEnv { re_base = rule_base, re_visible_orphs = orphs }) fn
+  = idCoreRules fn ++ filter (ruleIsVisible orphs) imp_rules
   where
     imp_rules = lookupNameEnv rule_base (idName fn) `orElse` []
+
+ruleIsVisible :: ModuleSet -> CoreRule -> Bool
+ruleIsVisible _ BuiltinRule{} = True
+ruleIsVisible vis_orphs Rule { ru_orphan = orph, ru_origin = origin }
+    = notOrphan orph || origin `elemModuleSet` vis_orphs
 
 {-
 Note [Where rules are found]
@@ -733,9 +753,13 @@ match_co renv subst (TyConAppCo r1 tc1 cos1) co2
          | r1 == r2 && tc1 == tc2
          -> match_cos renv subst cos1 cos2
        _ -> Nothing
-match_co _ _ co1 co2
-  = pprTrace "match_co: needs more cases" (ppr co1 $$ ppr co2) Nothing
+match_co _ _ _co1 _co2
     -- Currently just deals with CoVarCo, TyConAppCo and Refl
+#ifdef DEBUG
+  = pprTrace "match_co: needs more cases" (ppr _co1 $$ ppr _co2) Nothing
+#else
+  = Nothing
+#endif
 
 match_cos :: RuleMatchEnv
          -> RuleSubst
@@ -1037,7 +1061,7 @@ is so important.
 -- string for the purposes of error reporting
 ruleCheckProgram :: CompilerPhase               -- ^ Rule activation test
                  -> String                      -- ^ Rule pattern
-                 -> RuleBase                    -- ^ Database of rules
+                 -> RuleEnv                     -- ^ Database of rules
                  -> CoreProgram                 -- ^ Bindings to check in
                  -> SDoc                        -- ^ Resulting check message
 ruleCheckProgram phase rule_pat rule_base binds
@@ -1061,7 +1085,7 @@ data RuleCheckEnv = RuleCheckEnv {
     rc_is_active :: Activation -> Bool,
     rc_id_unf  :: IdUnfoldingFun,
     rc_pattern :: String,
-    rc_rule_base :: RuleBase
+    rc_rule_base :: RuleEnv
 }
 
 ruleCheckBind :: RuleCheckEnv -> CoreBind -> Bag SDoc

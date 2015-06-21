@@ -49,7 +49,7 @@ import DataCon
 import PrelNames
 import TysWiredIn
 import TysPrim          ( superKindTyConName )
-import BasicTypes       ( strongLoopBreaker )
+import BasicTypes       ( strongLoopBreaker, Arity, TupleSort(..), Boxity(..) )
 import Literal
 import qualified Var
 import VarEnv
@@ -358,8 +358,8 @@ tc_iface_decl parent _ (IfaceFamily {ifName = occ_name, ifTyVars = tv_bndrs,
    where
      mk_doc n = ptext (sLit "Type synonym") <+> ppr n
      tc_fam_flav IfaceOpenSynFamilyTyCon   = return OpenSynFamilyTyCon
-     tc_fam_flav (IfaceClosedSynFamilyTyCon ax_name _)
-       = do { ax <- tcIfaceCoAxiom ax_name
+     tc_fam_flav (IfaceClosedSynFamilyTyCon mb_ax_name_branches)
+       = do { ax <- traverse (tcIfaceCoAxiom . fst) mb_ax_name_branches
             ; return (ClosedSynFamilyTyCon ax) }
      tc_fam_flav IfaceAbstractClosedSynFamilyTyCon
          = return AbstractClosedSynFamilyTyCon
@@ -625,7 +625,7 @@ tcIfaceRules ignore_prags if_rules
 tcIfaceRule :: IfaceRule -> IfL CoreRule
 tcIfaceRule (IfaceRule {ifRuleName = name, ifActivation = act, ifRuleBndrs = bndrs,
                         ifRuleHead = fn, ifRuleArgs = args, ifRuleRhs = rhs,
-                        ifRuleAuto = auto })
+                        ifRuleAuto = auto, ifRuleOrph = orph })
   = do  { ~(bndrs', args', rhs') <-
                 -- Typecheck the payload lazily, in the hope it'll never be looked at
                 forkM (ptext (sLit "Rule") <+> ftext name) $
@@ -634,24 +634,28 @@ tcIfaceRule (IfaceRule {ifRuleName = name, ifActivation = act, ifRuleBndrs = bnd
                    ; rhs'  <- tcIfaceExpr rhs
                    ; return (bndrs', args', rhs') }
         ; let mb_tcs = map ifTopFreeName args
+        ; this_mod <- getIfModule
         ; return (Rule { ru_name = name, ru_fn = fn, ru_act = act,
                           ru_bndrs = bndrs', ru_args = args',
                           ru_rhs = occurAnalyseExpr rhs',
                           ru_rough = mb_tcs,
+                          ru_origin = this_mod,
+                          ru_orphan = orph,
                           ru_auto = auto,
                           ru_local = False }) } -- An imported RULE is never for a local Id
                                                 -- or, even if it is (module loop, perhaps)
                                                 -- we'll just leave it in the non-local set
   where
-        -- This function *must* mirror exactly what Rules.topFreeName does
+        -- This function *must* mirror exactly what Rules.roughTopNames does
         -- We could have stored the ru_rough field in the iface file
         -- but that would be redundant, I think.
         -- The only wrinkle is that we must not be deceived by
-        -- type syononyms at the top of a type arg.  Since
+        -- type synonyms at the top of a type arg.  Since
         -- we can't tell at this point, we are careful not
         -- to write them out in coreRuleToIfaceRule
     ifTopFreeName :: IfaceExpr -> Maybe Name
     ifTopFreeName (IfaceType (IfaceTyConApp tc _ )) = Just (ifaceTyConName tc)
+    ifTopFreeName (IfaceType (IfaceTupleTy s _ ts)) = Just (tupleTyConName s (length (tcArgsIfaceTypes ts)))
     ifTopFreeName (IfaceApp f _)                    = ifTopFreeName f
     ifTopFreeName (IfaceExt n)                      = Just n
     ifTopFreeName _                                 = Nothing
@@ -805,7 +809,7 @@ tcIfaceVectInfo mod typeEnv (IfaceVectInfo
                      -- name is not a tycon => internal inconsistency
                    Just _              -> notATyConErr
                      -- tycon is external
-                   Nothing             -> tcIfaceTyCon (IfaceTc name)
+                   Nothing             -> tcIfaceTyConByName name
                }
 
         notATyConErr = pprPanic "TcIface.tcIfaceVectInfo: not a tycon" (ppr name)
@@ -824,6 +828,7 @@ tcIfaceType (IfaceAppTy t1 t2)     = do { t1' <- tcIfaceType t1; t2' <- tcIfaceT
 tcIfaceType (IfaceLitTy l)         = do { l1 <- tcIfaceTyLit l; return (LitTy l1) }
 tcIfaceType (IfaceFunTy t1 t2)     = tcIfaceTypeFun t1 t2
 tcIfaceType (IfaceDFunTy t1 t2)    = tcIfaceTypeFun t1 t2
+tcIfaceType (IfaceTupleTy s i tks) = tcIfaceTupleTy s i tks
 tcIfaceType (IfaceTyConApp tc tks) = do { tc' <- tcIfaceTyCon tc
                                         ; tks' <- tcIfaceTcArgs tks
                                         ; return (mkTyConApp tc' tks') }
@@ -841,6 +846,34 @@ tcIfaceKind k                   = tcIfaceType k
 
 tcIfaceKindFun :: IfaceKind -> IfaceKind -> IfL Type
 tcIfaceKindFun t1 t2 = do { t1' <- tcIfaceKind t1; t2' <- tcIfaceKind t2; return (FunTy t1' t2') }
+
+tcIfaceTupleTy :: TupleSort -> IfaceTyConInfo -> IfaceTcArgs -> IfL Type
+tcIfaceTupleTy sort info args
+ = do { args' <- tcIfaceTcArgs args
+      ; let arity = length args'
+      ; base_tc <- tcTupleTyCon sort arity
+      ; case info of
+          NoIfaceTyConInfo
+            -> return (mkTyConApp base_tc args')
+
+          IfacePromotedTyCon
+            | Just tc <- promotableTyCon_maybe base_tc
+            -> return (mkTyConApp tc args')
+            | otherwise
+            -> panic "tcIfaceTupleTy" (ppr base_tc)
+
+          IfacePromotedDataCon
+            -> do { let tc        = promoteDataCon (tyConSingleDataCon base_tc)
+                        kind_args = map typeKind args'
+                  ; return (mkTyConApp tc (kind_args ++ args')) } }
+
+tcTupleTyCon :: TupleSort -> Arity -> IfL TyCon
+tcTupleTyCon sort arity
+  = case sort of
+      ConstraintTuple -> do { thing <- tcIfaceGlobal (cTupleTyConName arity)
+                            ; return (tyThingTyCon thing) }
+      BoxedTuple   -> return (tupleTyCon Boxed   arity)
+      UnboxedTuple -> return (tupleTyCon Unboxed arity)
 
 tcIfaceTcArgs :: IfaceTcArgs -> IfL [Type]
 tcIfaceTcArgs args
@@ -942,15 +975,15 @@ tcIfaceExpr (IfaceFCall cc ty) = do
     dflags <- getDynFlags
     return (Var (mkFCallId dflags u cc ty'))
 
-tcIfaceExpr (IfaceTuple boxity args)  = do
-    args' <- mapM tcIfaceExpr args
-    -- Put the missing type arguments back in
-    let con_args = map (Type . exprType) args' ++ args'
-    return (mkApps (Var con_id) con_args)
+tcIfaceExpr (IfaceTuple sort args)
+  = do { args' <- mapM tcIfaceExpr args
+       ; tc <- tcTupleTyCon sort arity
+       ; let con_args = map (Type . exprType) args' ++ args'
+                        -- Put the missing type arguments back in
+             con_id   = dataConWorkId (tyConSingleDataCon tc)
+       ; return (mkApps (Var con_id) con_args) }
   where
     arity = length args
-    con_id = dataConWorkId (tupleCon boxity arity)
-
 
 tcIfaceExpr (IfaceLam (bndr, os) body)
   = bindIfaceBndr bndr $ \bndr' ->
@@ -1059,7 +1092,7 @@ tcIfaceLit :: Literal -> IfL Literal
 -- so tcIfaceLit just fills in the type.
 -- See Note [Integer literals] in Literal
 tcIfaceLit (LitInteger i _)
-  = do t <- tcIfaceTyCon (IfaceTc integerTyConName)
+  = do t <- tcIfaceTyConByName integerTyConName
        return (mkLitInteger i (mkTyConTy t))
 tcIfaceLit lit = return lit
 
@@ -1237,6 +1270,7 @@ tcIfaceGlobal name
         -- sure the instances and RULES of this thing (particularly TyCon) are loaded
         -- Imagine: f :: Double -> Double
   = do { ifCheckWiredInThing thing; return thing }
+
   | otherwise
   = do  { env <- getGblEnv
         ; case if_rec_types env of {    -- Note [Tying the knot]
@@ -1279,20 +1313,25 @@ tcIfaceGlobal name
 -- Because if M.hs also has M.hs-boot, M.T will *already be* in the HPT, but in its
 -- emasculated form (e.g. lacking data constructors).
 
+tcIfaceTyConByName :: IfExtName -> IfL TyCon
+tcIfaceTyConByName name
+  = do { thing <- tcIfaceGlobal name
+       ; return (tyThingTyCon thing) }
+
 tcIfaceTyCon :: IfaceTyCon -> IfL TyCon
-tcIfaceTyCon itc
-  = do {
-    ; thing <- tcIfaceGlobal (ifaceTyConName itc)
-    ; case itc of
-        IfaceTc _ -> return $ tyThingTyCon thing
-        IfacePromotedDataCon _ -> return $ promoteDataCon $ tyThingDataCon thing
-        IfacePromotedTyCon name ->
-          let ktycon tc
-                | isSuperKind (tyConKind tc) = return tc
-                | Just prom_tc <- promotableTyCon_maybe tc = return prom_tc
-                | otherwise = pprPanic "tcIfaceTyCon" (ppr name $$ ppr thing)
-          in ktycon (tyThingTyCon thing)
-    }
+tcIfaceTyCon (IfaceTyCon name info)
+  = do { thing <- tcIfaceGlobal name
+       ; case info of
+           NoIfaceTyConInfo     -> return (tyThingTyCon thing)
+           IfacePromotedDataCon -> return (promoteDataCon (tyThingDataCon thing))
+                                   -- Same Name as its underlying DataCon
+           IfacePromotedTyCon   -> return (promote_tc (tyThingTyCon thing)) }
+                                   -- Same Name as its underlying TyCon
+  where
+    promote_tc tc
+      | Just prom_tc <- promotableTyCon_maybe tc = prom_tc
+      | isSuperKind (tyConKind tc)               = tc
+      | otherwise = pprPanic "tcIfaceTyCon" (ppr name $$ ppr tc)
 
 tcIfaceCoAxiom :: Name -> IfL (CoAxiom Branched)
 tcIfaceCoAxiom name = do { thing <- tcIfaceGlobal name

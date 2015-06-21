@@ -3,6 +3,8 @@
 (AK <no location info> AnnEofPos = [Test10255.hs:8:1])
 ]
 
+---Problems'--------------------
+[(AnnEofPos, Test10255.hs:8:1)]
 --------------------------------
 [
 (AK Test10255.hs:1:1 AnnModule = [Test10255.hs:2:1-6])
@@ -28,6 +30,8 @@
 (AK Test10255.hs:6:11-26 AnnCloseP = [Test10255.hs:6:26])
 
 (AK Test10255.hs:6:11-26 AnnOpenP = [Test10255.hs:6:11])
+
+(AK Test10255.hs:6:12-18 AnnRarrow = [Test10255.hs:6:20-21])
 
 (AK Test10255.hs:6:12-25 AnnRarrow = [Test10255.hs:6:20-21])
 

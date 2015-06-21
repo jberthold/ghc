@@ -557,9 +557,9 @@ deriving instance (DataId id) => Data (FamilyDecl id)
 data FamilyInfo name
   = DataFamily
   | OpenTypeFamily
-     -- this list might be empty, if we're in an hs-boot file and the user
+     -- | 'Nothing' if we're in an hs-boot file and the user
      -- said "type family Foo x where .."
-  | ClosedTypeFamily [LTyFamInstEqn name]
+  | ClosedTypeFamily (Maybe [LTyFamInstEqn name])
   deriving( Typeable )
 deriving instance (DataId name) => Data (FamilyInfo name)
 
@@ -739,11 +739,12 @@ instance (OutputableBndr name) => Outputable (FamilyDecl name) where
                       Nothing   -> empty
                       Just kind -> dcolon <+> ppr kind
           (pp_where, pp_eqns) = case info of
-            ClosedTypeFamily eqns -> ( ptext (sLit "where")
-                                     , if null eqns
-                                       then ptext (sLit "..")
-                                       else vcat $ map ppr_fam_inst_eqn eqns )
-            _                     -> (empty, empty)
+            ClosedTypeFamily mb_eqns ->
+              ( ptext (sLit "where")
+              , case mb_eqns of
+                  Nothing   -> ptext (sLit "..")
+                  Just eqns -> vcat $ map ppr_fam_inst_eqn eqns )
+            _ -> (empty, empty)
 
 pprFlavour :: FamilyInfo name -> SDoc
 pprFlavour DataFamily            = ptext (sLit "data family")
@@ -1413,11 +1414,11 @@ instance Outputable ForeignImport where
     where
       pp_hdr = case mHeader of
                Nothing -> empty
-               Just (Header header) -> ftext header
+               Just (Header _ header) -> ftext header
 
       pprCEntity (CLabel lbl) =
         ptext (sLit "static") <+> pp_hdr <+> char '&' <> ppr lbl
-      pprCEntity (CFunction (StaticTarget lbl _ isFun)) =
+      pprCEntity (CFunction (StaticTarget _ lbl _ isFun)) =
             ptext (sLit "static")
         <+> pp_hdr
         <+> (if isFun then empty else ptext (sLit "value"))
@@ -1427,7 +1428,7 @@ instance Outputable ForeignImport where
       pprCEntity (CWrapper) = ptext (sLit "wrapper")
 
 instance Outputable ForeignExport where
-  ppr (CExport  (L _ (CExportStatic lbl cconv)) _) =
+  ppr (CExport  (L _ (CExportStatic _ lbl cconv)) _) =
     ppr cconv <+> char '"' <> ppr lbl <> char '"'
 
 {-
@@ -1449,8 +1450,9 @@ deriving instance (DataId name) => Data (RuleDecls name)
 type LRuleDecl name = Located (RuleDecl name)
 
 data RuleDecl name
-  = HsRule                      -- Source rule
-        (Located RuleName)      -- Rule name
+  = HsRule                             -- Source rule
+        (Located (SourceText,RuleName)) -- Rule name
+               -- Note [Pragma source text] in BasicTypes
         Activation
         [LRuleBndr name]        -- Forall'd vars; after typechecking this
                                 --   includes tyvars
@@ -1493,7 +1495,7 @@ instance OutputableBndr name => Outputable (RuleDecls name) where
 
 instance OutputableBndr name => Outputable (RuleDecl name) where
   ppr (HsRule name act ns lhs _fv_lhs rhs _fv_rhs)
-        = sep [text "{-# RULES" <+> doubleQuotes (ftext $ unLoc name)
+        = sep [text "{-# RULES" <+> doubleQuotes (ftext $ snd $ unLoc name)
                                 <+> ppr act,
                nest 4 (pp_forall <+> pprExpr (unLoc lhs)),
                nest 4 (equals <+> pprExpr (unLoc rhs) <+> text "#-}") ]

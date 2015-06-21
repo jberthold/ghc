@@ -1,6 +1,6 @@
 # Changelog for [`base` package](http://hackage.haskell.org/package/base)
 
-## 4.8.1.0  *TBA*
+## 4.8.2.0  *TBA*
 
   * Bundled with GHC 7.12.1
 
@@ -34,6 +34,14 @@
   * `System.Exit.ExitCode` now has a `Generic` instance
 
   * `Data.Version.Version` now has a `Generic` instance
+
+  * `IO` now has a `Monoid` instance
+
+## 4.8.1.0  *TBA*
+
+  * Bundled with GHC 7.10.2
+
+  * `Lifetime` is now exported from `GHC.Event`
 
 ## 4.8.0.0  *Mar 2015*
 
