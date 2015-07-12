@@ -33,8 +33,9 @@ module TcSMonad (
     checkReductionDepth,
 
     getInstEnvs, getFamInstEnvs,                -- Getting the environments
-    getTopEnv, getGblEnv, getTcEvBinds, getTcLevel,
+    getTopEnv, getGblEnv, getLclEnv, getTcEvBinds, getTcLevel,
     getTcEvBindsMap,
+    tcLookupClass,
 
     -- Inerts
     InertSet(..), InertCans(..),
@@ -111,7 +112,7 @@ import FamInstEnv
 import qualified TcRnMonad as TcM
 import qualified TcMType as TcM
 import qualified TcEnv as TcM
-       ( checkWellStaged, topIdLvl, tcGetDefaultTys )
+       ( checkWellStaged, topIdLvl, tcGetDefaultTys, tcLookupClass )
 import Kind
 import TcType
 import DynFlags
@@ -762,7 +763,7 @@ The idea is that
   have (a -fs-> a) in S, which contradicts (WF2).
 
 * The extended substitution satisfies (WF1) and (WF2)
-  - (K1) plus (L1) guarantee that the extended substiution satisfies (WF1).
+  - (K1) plus (L1) guarantee that the extended substitution satisfies (WF1).
   - (T3) guarantees (WF2).
 
 * (K2) is about inertness.  Intuitively, any infinite chain T^0(f,t),
@@ -2457,6 +2458,12 @@ getTopEnv = wrapTcS $ TcM.getTopEnv
 getGblEnv :: TcS TcGblEnv
 getGblEnv = wrapTcS $ TcM.getGblEnv
 
+getLclEnv :: TcS TcLclEnv
+getLclEnv = wrapTcS $ TcM.getLclEnv
+
+tcLookupClass :: Name -> TcS Class
+tcLookupClass c = wrapTcS $ TcM.tcLookupClass c
+
 -- Setting names as used (used in the deriving of Coercible evidence)
 -- Too hackish to expose it to TcS? In that case somehow extract the used
 -- constructors from the result of solveInteract
@@ -2847,7 +2854,7 @@ deferTcSForAllEq role loc (tvs1,body1) (tvs2,body2)
         ; coe_inside <- case freshness of
             Cached -> return (ctEvCoercion ctev)
             Fresh  -> do { ev_binds_var <- newTcEvBinds
-                         ; env <- wrapTcS $ TcM.getLclEnv
+                         ; env <- getLclEnv
                          ; let ev_binds = TcEvBinds ev_binds_var
                                new_ct = mkNonCanonical ctev
                                new_co = ctEvCoercion ctev

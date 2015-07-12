@@ -705,6 +705,7 @@ static void procRtsOpts (int rts_argc0,
 {
     rtsBool error = rtsFalse;
     int arg;
+    int unchecked_arg_start;
 
     if (!(rts_argc0 < rts_argc)) return;
 
@@ -733,7 +734,9 @@ static void procRtsOpts (int rts_argc0,
             error = rtsTrue;
 
         } else {
-
+            /* 0 is dash, 1 is first letter */
+            /* see Trac #9839 */
+            unchecked_arg_start = 1;
             switch(rts_argv[arg][1]) {
 
               /* process: general args, then PROFILING-only ones, then
@@ -892,6 +895,7 @@ error = rtsTrue;
               case 'B':
                 OPTION_UNSAFE;
                 RtsFlags.GcFlags.ringBell = rtsTrue;
+                unchecked_arg_start++;
                 goto check_rest;
 
               case 'c':
@@ -907,6 +911,7 @@ error = rtsTrue;
               case 'w':
                 OPTION_UNSAFE;
                 RtsFlags.GcFlags.sweep = rtsTrue;
+                unchecked_arg_start++;
                 goto check_rest;
 
               case 'F':
@@ -1073,6 +1078,7 @@ error = rtsTrue;
               case 'T':
                   OPTION_SAFE;
                   RtsFlags.GcFlags.giveStats = COLLECT_GC_STATS;
+                  unchecked_arg_start++;
                   goto check_rest; /* Don't initialize statistics file. */
 
               case 'S':
@@ -1105,6 +1111,7 @@ error = rtsTrue;
               case 'Z':
                 OPTION_UNSAFE;
                 RtsFlags.GcFlags.squeezeUpdFrames = rtsFalse;
+                unchecked_arg_start++;
                 goto check_rest;
 
               /* =========== PROFILING ========================== */
@@ -1133,6 +1140,7 @@ error = rtsTrue;
                       }
                       break;
                   default:
+                    unchecked_arg_start++;
                     goto check_rest;
                 }
                 ) break;
@@ -1485,6 +1493,7 @@ error = rtsTrue;
               /* =========== EXTENDED OPTIONS =================== */
 
               case 'x': /* Extend the argument space */
+                unchecked_arg_start++;
                 switch(rts_argv[arg][2]) {
                   case '\0':
                     OPTION_SAFE;
@@ -1525,6 +1534,7 @@ error = rtsTrue;
                     PROFILING_BUILD_ONLY(
                         RtsFlags.ProfFlags.showCCSOnException = rtsTrue;
                         );
+                    unchecked_arg_start++;
                     goto check_rest;
 
                 case 't':  /* Include memory used by TSOs in a heap profile */
@@ -1532,6 +1542,7 @@ error = rtsTrue;
                     PROFILING_BUILD_ONLY(
                         RtsFlags.ProfFlags.includeTSOs = rtsTrue;
                         );
+                    unchecked_arg_start++;
                     goto check_rest;
 
                   /*
@@ -1558,7 +1569,10 @@ error = rtsTrue;
             /* see Trac #9839 */
             check_rest:
                 {
-                    if (rts_argv[arg][2] != '\0') {
+                    /* start checking from the first unchecked position,
+                     * not from index 2*/
+                    /* see Trac #9839 */
+                    if (rts_argv[arg][unchecked_arg_start] != '\0') {
                       errorBelch("flag -%c given an argument"
                                  " when none was expected: %s",
                                  rts_argv[arg][1],rts_argv[arg]);

@@ -29,7 +29,7 @@ module DriverPipeline (
    hscPostBackendPhase, getLocation, setModLocation, setDynFlags,
    runPhase, exeFileName,
    mkExtraObjToLinkIntoBinary, mkNoteObjsToLinkIntoBinary,
-   maybeCreateManifest, runPhase_MoveBinary,
+   maybeCreateManifest,
    linkingNeeded, checkLinkInfo, writeInterfaceOnlyMode
   ) where
 
@@ -1586,6 +1586,7 @@ getLocation src_flavour mod_name = do
 
     return location4
 
+-- Parallel Haskell Support, Eden group Marburg
 -----------------------------------------------------------------------------
 -- MoveBinary sort-of-phase
 -- After having produced a binary, move it somewhere else and generate a
@@ -1601,7 +1602,6 @@ getLocation src_flavour mod_name = do
 
 runPhase_MoveBinary :: DynFlags -> FilePath -> IO ()
 runPhase_MoveBinary dflags input_fn
--- Parallel Haskell Support, Eden group Marburg
 --  PVM: move to $PVM_ROOT, generate start script
 --  MPI: rename program, generate start script (using mpirun)
     | needsScript = do
@@ -1647,12 +1647,14 @@ mkExtraObj dflags extn xs
       oFile <- newTempName dflags "o"
       writeFile cFile xs
       let rtsDetails = getPackageDetails dflags rtsPackageKey
+          pic_c_flags = picCCOpts dflags
       SysTools.runCc dflags
                      ([Option        "-c",
                        FileOption "" cFile,
                        Option        "-o",
                        FileOption "" oFile]
-                      ++ map (FileOption "-I") (includeDirs rtsDetails))
+                      ++ map (FileOption "-I") (includeDirs rtsDetails)
+                      ++ map Option pic_c_flags)
       return oFile
 
 -- When linking a binary, we need to create a C main() function that
@@ -2085,7 +2087,7 @@ linkBinary' staticLink dflags o_files dep_packages = do
                     let os = platformOS (targetPlatform dflags)
                     in if os == OSOsf3 then ["-lpthread", "-lexc"]
                        else if os `elem` [OSMinGW32, OSFreeBSD, OSOpenBSD,
-                                          OSNetBSD, OSHaiku, OSQNXNTO, OSiOS]
+                                          OSNetBSD, OSHaiku, OSQNXNTO, OSiOS, OSDarwin]
                        then []
                        else ["-lpthread"]
                 | WayParMSlot `elem` ways dflags =

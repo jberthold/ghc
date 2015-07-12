@@ -396,25 +396,23 @@ generate directory distdir dll0Modules config_args
 
           dep_ids  = map snd (externalPackageDeps lbi)
           deps     = map display dep_ids
-          dep_keys
+          dep_direct = map (fromMaybe (error "ghc-cabal: dep_keys failed")
+                           . PackageIndex.lookupInstalledPackageId
+                                            (installedPkgs lbi)
+                           . fst)
+                       . externalPackageDeps
+                       $ lbi
+          dep_ipids = map (display . Installed.installedPackageId) dep_direct
+          depLibNames
             | packageKeySupported comp
-                   = map (display
-                        . Installed.packageKey
-                        . fromMaybe (error "ghc-cabal: dep_keys failed")
-                        . PackageIndex.lookupInstalledPackageId
-                                                           (installedPkgs lbi)
-                        . fst)
-                   . externalPackageDeps
-                   $ lbi
+                = map (\p -> packageKeyLibraryName
+                                (Installed.sourcePackageId p)
+                                (Installed.packageKey p)) dep_direct
             | otherwise = deps
           depNames = map (display . packageName) dep_ids
 
           transitive_dep_ids = map Installed.sourcePackageId dep_pkgs
           transitiveDeps = map display transitive_dep_ids
-          transitiveDepKeys
-            | packageKeySupported comp
-                   = map (display . Installed.packageKey) dep_pkgs
-            | otherwise = transitiveDeps
           transitiveDepLibNames
             | packageKeySupported comp
                 = map (\p -> packageKeyLibraryName
@@ -447,10 +445,10 @@ generate directory distdir dll0Modules config_args
                 variablePrefix ++ "_SYNOPSIS =" ++ synopsis pd,
                 variablePrefix ++ "_HS_SRC_DIRS = " ++ unwords (hsSourceDirs bi),
                 variablePrefix ++ "_DEPS = " ++ unwords deps,
-                variablePrefix ++ "_DEP_KEYS = " ++ unwords dep_keys,
+                variablePrefix ++ "_DEP_IPIDS = " ++ unwords dep_ipids,
                 variablePrefix ++ "_DEP_NAMES = " ++ unwords depNames,
+                variablePrefix ++ "_DEP_LIB_NAMES = " ++ unwords depLibNames,
                 variablePrefix ++ "_TRANSITIVE_DEPS = " ++ unwords transitiveDeps,
-                variablePrefix ++ "_TRANSITIVE_DEP_KEYS = " ++ unwords transitiveDepKeys,
                 variablePrefix ++ "_TRANSITIVE_DEP_LIB_NAMES = " ++ unwords transitiveDepLibNames,
                 variablePrefix ++ "_TRANSITIVE_DEP_NAMES = " ++ unwords transitiveDepNames,
                 variablePrefix ++ "_INCLUDE_DIRS = " ++ unwords (includeDirs bi),
