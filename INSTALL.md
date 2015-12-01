@@ -13,8 +13,8 @@ because the compiler is itself written in Haskell.  For instructions
 on how to port GHC to a new platform, see the Building Guide [1].
 
 For building library documentation, you'll need Haddock [3].  To build
-the compiler documentation, you need a good DocBook XML toolchain and
-dblatex.
+the compiler documentation, you need [Sphinx](http://www.sphinx-doc.org/) and
+Xelatex (only for PDF output).
 
 Quick start:  the following gives you a default build:
 
@@ -22,6 +22,11 @@ Quick start:  the following gives you a default build:
     $ ./configure
     $ make
     $ make install
+
+  On Windows, you need an extra repository containing some build tools.
+  These can be downloaded for you by configure. This only needs to be done once by running:
+
+    $ ./configure --enable-tarballs-autodownload
 
 The "perl boot" step is only necessary if this is a tree checked out
 from git.  For source distributions downloaded from GHC's web site,

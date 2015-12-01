@@ -27,7 +27,6 @@ import Outputable
 import Module
 import SrcLoc
 import DynFlags
-import FastString
 import RnTypes          ( rnLHsType )
 
 import Control.Monad    ( unless, when )
@@ -39,13 +38,14 @@ import TcEnv            ( checkWellStaged )
 import THNames          ( liftName )
 
 #ifdef GHCI
+import FastString
 import ErrUtils         ( dumpIfSet_dyn_printer )
 import TcEnv            ( tcMetaTy )
 import Hooks
 import Var              ( Id )
 import THNames          ( quoteExpName, quotePatName, quoteDecName, quoteTypeName
                         , decsQTyConName, expQTyConName, patQTyConName, typeQTyConName, )
-import Util
+import RnTypes          ( collectWildCards )
 
 import {-# SOURCE #-} TcExpr   ( tcMonoExpr )
 import {-# SOURCE #-} TcSplice ( runMetaD, runMetaE, runMetaP, runMetaT, tcTopSpliceExpr )
@@ -62,32 +62,40 @@ import {-# SOURCE #-} TcSplice ( runMetaD, runMetaE, runMetaP, runMetaT, tcTopSp
 rnBracket :: HsExpr RdrName -> HsBracket RdrName -> RnM (HsExpr Name, FreeVars)
 rnBracket e br_body
   = addErrCtxt (quotationCtxtDoc br_body) $
-    do { -- Check that Template Haskell is enabled and available
-         thEnabled <- xoptM Opt_TemplateHaskell
-       ; unless thEnabled $
-           failWith ( vcat [ ptext (sLit "Syntax error on") <+> ppr e
-                           , ptext (sLit "Perhaps you intended to use TemplateHaskell") ] )
+    do { -- Check that -XTemplateHaskellQuotes is enabled and available
+         thQuotesEnabled <- xoptM Opt_TemplateHaskellQuotes
+       ; unless thQuotesEnabled $
+           failWith ( vcat
+                      [ text "Syntax error on" <+> ppr e
+                      , text ("Perhaps you intended to use TemplateHaskell"
+                              ++ " or TemplateHaskellQuotes") ] )
 
          -- Check for nested brackets
        ; cur_stage <- getStage
        ; case cur_stage of
-           { Splice True  -> checkTc (isTypedBracket br_body) illegalUntypedBracket
-           ; Splice False -> checkTc (not (isTypedBracket br_body)) illegalTypedBracket
-           ; Comp         -> return ()
-           ; Brack {}     -> failWithTc illegalBracket
+           { Splice Typed   -> checkTc (isTypedBracket br_body)
+                                       illegalUntypedBracket
+           ; Splice Untyped -> checkTc (not (isTypedBracket br_body))
+                                       illegalTypedBracket
+           ; Comp           -> return ()
+           ; Brack {}       -> failWithTc illegalBracket
            }
 
          -- Brackets are desugared to code that mentions the TH package
        ; recordThUse
 
        ; case isTypedBracket br_body of
-            True  -> do { (body', fvs_e) <- setStage (Brack cur_stage RnPendingTyped) $
-                                            rn_bracket cur_stage br_body
+            True  -> do { traceRn (text "Renaming typed TH bracket")
+                        ; (body', fvs_e) <-
+                          setStage (Brack cur_stage RnPendingTyped) $
+                                   rn_bracket cur_stage br_body
                         ; return (HsBracket body', fvs_e) }
 
-            False -> do { ps_var <- newMutVar []
-                        ; (body', fvs_e) <- setStage (Brack cur_stage (RnPendingUntyped ps_var)) $
-                                            rn_bracket cur_stage br_body
+            False -> do { traceRn (text "Renaming untyped TH bracket")
+                        ; ps_var <- newMutVar []
+                        ; (body', fvs_e) <-
+                          setStage (Brack cur_stage (RnPendingUntyped ps_var)) $
+                                   rn_bracket cur_stage br_body
                         ; pendings <- readMutVar ps_var
                         ; return (HsRnBracketOut body' pendings, fvs_e) }
        }
@@ -130,7 +138,7 @@ rn_bracket _ (DecBrL decls)
                           -- The emptyDUs is so that we just collect uses for this
                           -- group alone in the call to rnSrcDecls below
        ; (tcg_env, group') <- setGblEnv new_gbl_env $
-                              rnSrcDecls Nothing group
+                              rnSrcDecls group
 
               -- Discard the tcg_env; it contains only extra info about fixity
         ; traceRn (text "rn_bracket dec" <+> (ppr (tcg_dus tcg_env) $$
@@ -156,22 +164,26 @@ rn_bracket _ (TExpBr e) = do { (e', fvs) <- rnLExpr e
 
 quotationCtxtDoc :: HsBracket RdrName -> SDoc
 quotationCtxtDoc br_body
-  = hang (ptext (sLit "In the Template Haskell quotation"))
+  = hang (text "In the Template Haskell quotation")
          2 (ppr br_body)
 
 illegalBracket :: SDoc
-illegalBracket = ptext (sLit "Template Haskell brackets cannot be nested (without intervening splices)")
+illegalBracket =
+    text "Template Haskell brackets cannot be nested" <+>
+    text "(without intervening splices)"
 
 illegalTypedBracket :: SDoc
-illegalTypedBracket = ptext (sLit "Typed brackets may only appear in typed slices.")
+illegalTypedBracket =
+    text "Typed brackets may only appear in typed splices."
 
 illegalUntypedBracket :: SDoc
-illegalUntypedBracket = ptext (sLit "Untyped brackets may only appear in untyped slices.")
+illegalUntypedBracket =
+    text "Untyped brackets may only appear in untyped splices."
 
 quotedNameStageErr :: HsBracket RdrName -> SDoc
 quotedNameStageErr br
-  = sep [ ptext (sLit "Stage error: the non-top-level quoted name") <+> ppr br
-        , ptext (sLit "must be used at the same stage at which is is bound")]
+  = sep [ text "Stage error: the non-top-level quoted name" <+> ppr br
+        , text "must be used at the same stage at which is is bound" ]
 
 #ifndef GHCI
 rnTopSpliceDecls :: HsSplice RdrName -> RnM ([LHsDecl RdrName], FreeVars)
@@ -252,7 +264,7 @@ rnSpliceGen run_splice pend_splice splice
                 ; return (result, fvs) }
 
         _ ->  do { (splice', fvs1) <- checkNoErrs $
-                                      setStage (Splice is_typed_splice) $
+                                      setStage (Splice splice_type) $
                                       rnSplice splice
                    -- checkNoErrs: don't attempt to run the splice if
                    -- renaming it failed; otherwise we get a cascade of
@@ -261,6 +273,9 @@ rnSpliceGen run_splice pend_splice splice
                  ; return (result, fvs1 `plusFV` fvs2) } }
    where
      is_typed_splice = isTypedSplice splice
+     splice_type = if is_typed_splice
+                   then Typed
+                   else Untyped
 
 ------------------
 runRnSplice :: UntypedSpliceFlavour
@@ -279,7 +294,7 @@ runRnSplice flavour run_meta ppr_res splice
 
              -- Typecheck the expression
        ; meta_exp_ty   <- tcMetaTy meta_ty_name
-       ; zonked_q_expr <- tcTopSpliceExpr False $
+       ; zonked_q_expr <- tcTopSpliceExpr Untyped $
                           tcMonoExpr the_expr meta_exp_ty
 
              -- Run the expression
@@ -323,10 +338,11 @@ mkQuasiQuoteExpr :: UntypedSpliceFlavour -> Name -> SrcSpan -> FastString -> LHs
 -- which is what we must run in a quasi-quote
 mkQuasiQuoteExpr flavour quoter q_span quote
   = L q_span $ HsApp (L q_span $
-                      HsApp (L q_span (HsVar quote_selector)) quoterExpr)
+                      HsApp (L q_span (HsVar (L q_span quote_selector)))
+                            quoterExpr)
                      quoteExpr
   where
-    quoterExpr = L q_span $! HsVar $! quoter
+    quoterExpr = L q_span $! HsVar $! (L q_span quoter)
     quoteExpr  = L q_span $! HsLit $! HsString "" quote
     quote_selector = case flavour of
                        UntypedExpSplice  -> quoteExpName
@@ -356,17 +372,6 @@ rnSplice (HsQuasiQuote splice_name quoter q_loc quote)
         ; loc  <- getSrcSpanM
         ; splice_name' <- newLocalBndrRn (L loc splice_name)
 
-          -- Drop the leading "$" from the quoter name, if present
-          -- This is old-style syntax, now deprecated
-          -- NB: when removing this backward-compat, remove
-          --     the matching code in Lexer.x (around line 310)
-        ; let occ_str = occNameString (rdrNameOcc quoter)
-        ; quoter <- if ASSERT( not (null occ_str) )  -- Lexer ensures this
-                       head occ_str /= '$'
-                    then return quoter
-                    else do { addWarn (deprecatedDollar quoter)
-                            ; return (mkRdrUnqual (mkVarOcc (tail occ_str))) }
-
           -- Rename the quoter; akin to the HsVar case of rnExpr
         ; quoter' <- lookupOccRn quoter
         ; this_mod <- getModule
@@ -374,13 +379,6 @@ rnSplice (HsQuasiQuote splice_name quoter q_loc quote)
           checkThLocalName quoter'
 
         ; return (HsQuasiQuote splice_name' quoter' q_loc quote, unitFV quoter') }
-
-deprecatedDollar :: RdrName -> SDoc
-deprecatedDollar quoter
-  = hang (ptext (sLit "Deprecated syntax:"))
-       2 (ptext (sLit "quasiquotes no longer need a dollar sign:")
-          <+> ppr quoter)
-
 
 ---------------------
 rnSpliceExpr :: HsSplice RdrName -> RnM (HsExpr Name, FreeVars)
@@ -395,7 +393,8 @@ rnSpliceExpr splice
     run_expr_splice rn_splice
       | isTypedSplice rn_splice   -- Run it later, in the type checker
       = do {  -- Ugh!  See Note [Splices] above
-             lcl_rdr <- getLocalRdrEnv
+             traceRn (text "rnSpliceExpr: typed expression splice")
+           ; lcl_rdr <- getLocalRdrEnv
            ; gbl_rdr <- getGlobalRdrEnv
            ; let gbl_names = mkNameSet [gre_name gre | gre <- globalRdrEnvElts gbl_rdr
                                                      , isLocalGRE gre]
@@ -404,7 +403,8 @@ rnSpliceExpr splice
            ; return (HsSpliceE rn_splice, lcl_names `plusFV` gbl_names) }
 
       | otherwise  -- Run it here
-      = do { rn_expr <- runRnSplice UntypedExpSplice runMetaE ppr rn_splice
+      = do { traceRn (text "rnSpliceExpr: untyped expression splice")
+           ; rn_expr <- runRnSplice UntypedExpSplice runMetaE ppr rn_splice
            ; (lexpr3, fvs) <- checkNoErrs (rnLExpr rn_expr)
            ; return (HsPar lexpr3, fvs)  }
 
@@ -418,13 +418,73 @@ rnSpliceType splice k
        = (makePending UntypedTypeSplice rn_splice, HsSpliceTy rn_splice k)
 
     run_type_splice rn_splice
-      = do { hs_ty2 <- runRnSplice UntypedTypeSplice runMetaT ppr rn_splice
+      = do { traceRn (text "rnSpliceType: untyped type splice")
+           ; hs_ty2 <- runRnSplice UntypedTypeSplice runMetaT ppr rn_splice
            ; (hs_ty3, fvs) <- do { let doc = SpliceTypeCtx hs_ty2
+                                 ; checkValidPartialTypeSplice doc hs_ty2
+                                    -- See Note [Partial Type Splices]
                                  ; checkNoErrs $ rnLHsType doc hs_ty2 }
                                     -- checkNoErrs: see Note [Renamer errors]
            ; return (HsParTy hs_ty3, fvs) }
               -- Wrap the result of the splice in parens so that we don't
               -- lose the outermost location set by runQuasiQuote (#7918)
+{-
+Note [Partial Type Splices]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Partial Type Signatures are partially supported in TH type splices: only
+anonymous wild cards are allowed.
+
+Normally, named wild cards are collected before renaming a (partial) type
+signature. However, TH type splices are run during renaming, i.e. after the
+initial traversal, leading to out of scope errors for named wild cards. We
+can't just extend the initial traversal to collect the named wild cards in TH
+type splices, as we'd need to expand them, which is supposed to happen only
+once, during renaming.
+
+Similarly, the extra-constraints wild card is handled right before renaming
+too, and is therefore also not supported in a TH type splice. Another reason
+to forbid extra-constraints wild cards in TH type splices is that a single
+signature can contain many TH type splices, whereas it mustn't contain more
+than one extra-constraints wild card. Enforcing would this be hard the way
+things are currently organised.
+
+Anonymous wild cards pose no problem, because they start out without names and
+are given names during renaming. These names are collected right after
+renaming. The names generated for anonymous wild cards in TH type splices will
+thus be collected as well.
+
+For more details about renaming wild cards, see rnLHsTypeWithWildCards.
+
+Note that partial type signatures are fully supported in TH declaration
+splices, e.g.:
+
+     [d| foo :: _ => _
+         foo x y = x == y |]
+
+This is because in this case, the partial type signature can be treated as a
+whole signature, instead of as an arbitray type.
+
+-}
+
+-- | Check that the type splice doesn't contain an extra-constraint wild card.
+-- See Note [Partial Type Splices]. Named wild cards aren't supported in type
+-- splices either, but they will be caught during renaming, as they won't be
+-- in scope.
+--
+-- Note that without this check, an error would still be reported, but it
+-- would tell the user an unexpected wild card was encountered. This message
+-- is confusing, as it doesn't mention the wild card was unexpected because it
+-- was an extra-constraints wild card. To avoid confusing, this function
+-- provides a specific error message for this case.
+checkValidPartialTypeSplice :: HsDocContext -> LHsType RdrName -> RnM ()
+checkValidPartialTypeSplice doc ty
+  | (L loc _extraWc : _, _) <- collectWildCards ty
+  = failAt loc $ hang (text "Invalid partial type:") 2 (ppr ty) $$
+    text "An extra-constraints wild card is not allowed in a type splice" $$
+    docOfHsDocContext doc
+  | otherwise
+  = return ()
 
 ----------------------
 -- | Rename a splice pattern. See Note [rnSplicePat]
@@ -437,7 +497,8 @@ rnSplicePat splice
       = (makePending UntypedPatSplice rn_splice, Right (SplicePat rn_splice))
 
     run_pat_splice rn_splice
-      = do { pat <- runRnSplice UntypedPatSplice runMetaP ppr rn_splice
+      = do { traceRn (text "rnSplicePat: untyped pattern splice")
+           ; pat <- runRnSplice UntypedPatSplice runMetaP ppr rn_splice
            ; return (Left (ParPat pat), emptyFVs) }
               -- Wrap the result of the quasi-quoter in parens so that we don't
               -- lose the outermost location set by runQuasiQuote (#7918)
@@ -455,8 +516,9 @@ rnSpliceDecl (SpliceDecl (L loc splice) flg)
 rnTopSpliceDecls :: HsSplice RdrName -> RnM ([LHsDecl RdrName], FreeVars)
 -- Declaration splice at the very top level of the module
 rnTopSpliceDecls splice
-   = do  { (rn_splice, fvs) <- setStage (Splice False) $
+   = do  { (rn_splice, fvs) <- setStage (Splice Untyped) $
                                rnSplice splice
+         ; traceRn (text "rnTopSpliceDecls: untyped declaration splice")
          ; decls <- runRnSplice UntypedDeclSplice runMetaD ppr_decls rn_splice
          ; return (decls,fvs) }
    where
@@ -478,8 +540,10 @@ the CpsRn monad.
 The problem is that if we're renaming a splice within a bracket, we
 *don't* want to run the splice now. We really do just want to rename
 it to an HsSplice Name. Of course, then we can't know what variables
-are bound within the splice, so pattern splices within brackets aren't
-all that useful.
+are bound within the splice. So we accept any unbound variables and
+rename them again when the bracket is spliced in.  If a variable is brought
+into scope by a pattern splice all is fine.  If it is not then an error is
+reported.
 
 In any case, when we're done in rnSplicePat, we'll either have a
 Pat RdrName (the result of running a top-level splice) or a Pat Name

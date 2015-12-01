@@ -68,6 +68,7 @@ import Util
 import FastString
 import Fingerprint
 import Hooks
+import FieldLabel
 
 import Control.Monad
 import Data.IORef
@@ -191,6 +192,7 @@ checkWiredInTyCon tc
   = return ()
   | otherwise
   = do  { mod <- getModule
+        ; traceIf (text "checkWiredInTyCon" <+> ppr tc_name $$ ppr mod)
         ; ASSERT( isExternalName tc_name )
           when (mod /= nameModule tc_name)
                (initIfaceTcRn (loadWiredInHomeIface tc_name))
@@ -317,7 +319,7 @@ loadInterfaceForModule doc m
 
 -- | An 'IfM' function to load the home interface for a wired-in thing,
 -- so that we're sure that we see its instance declarations and rules
--- See Note [Loading instances for wired-in things] in TcIface
+-- See Note [Loading instances for wired-in things]
 loadWiredInHomeIface :: Name -> IfM lcl ()
 loadWiredInHomeIface name
   = ASSERT( isWiredInName name )
@@ -514,13 +516,13 @@ wantHiBootFile dflags eps mod from
                      -- The boot-ness of the requested interface,
                      -- based on the dependencies in directly-imported modules
   where
-    this_package = thisPackage dflags == modulePackageKey mod
+    this_package = thisPackage dflags == moduleUnitId mod
 
 badSourceImport :: Module -> SDoc
 badSourceImport mod
   = hang (ptext (sLit "You cannot {-# SOURCE #-} import a module from another package"))
        2 (ptext (sLit "but") <+> quotes (ppr mod) <+> ptext (sLit "is from package")
-          <+> quotes (ppr (modulePackageKey mod)))
+          <+> quotes (ppr (moduleUnitId mod)))
 
 -----------------------------------------------------
 --      Loading type/class/value decls
@@ -542,20 +544,18 @@ loadDecls :: Bool
           -> [(Fingerprint, IfaceDecl)]
           -> IfL [(Name,TyThing)]
 loadDecls ignore_prags ver_decls
-   = do { mod <- getIfModule
-        ; thingss <- mapM (loadDecl ignore_prags mod) ver_decls
+   = do { thingss <- mapM (loadDecl ignore_prags) ver_decls
         ; return (concat thingss)
         }
 
 loadDecl :: Bool                    -- Don't load pragmas into the decl pool
-         -> Module
           -> (Fingerprint, IfaceDecl)
           -> IfL [(Name,TyThing)]   -- The list can be poked eagerly, but the
                                     -- TyThings are forkM'd thunks
-loadDecl ignore_prags mod (_version, decl)
+loadDecl ignore_prags (_version, decl)
   = do  {       -- Populate the name cache with final versions of all
                 -- the names associated with the decl
-          main_name      <- lookupOrig mod (ifName decl)
+          main_name      <- lookupIfaceTop (ifName decl)
 
         -- Typecheck the thing, lazily
         -- NB. Firstly, the laziness is there in case we never need the
@@ -628,7 +628,7 @@ loadDecl ignore_prags mod (_version, decl)
                            Nothing    ->
                              pprPanic "loadDecl" (ppr main_name <+> ppr n $$ ppr (decl))
 
-        ; implicit_names <- mapM (lookupOrig mod) (ifaceDeclImplicitBndrs decl)
+        ; implicit_names <- mapM lookupIfaceTop (ifaceDeclImplicitBndrs decl)
 
 --         ; traceIf (text "Loading decl for " <> ppr main_name $$ ppr implicit_names)
         ; return $ (main_name, thing) :
@@ -711,7 +711,7 @@ findAndReadIface doc_str mod hi_boot_file
                                                            (ml_hi_file loc)
 
                        -- See Note [Home module load error]
-                       if thisPackage dflags == modulePackageKey mod &&
+                       if thisPackage dflags == moduleUnitId mod &&
                           not (isOneShot (ghcMode dflags))
                            then return (Failed (homeModError mod loc))
                            else do r <- read_file file_path
@@ -867,7 +867,7 @@ pprModIface :: ModIface -> SDoc
 -- Show a ModIface
 pprModIface iface
  = vcat [ ptext (sLit "interface")
-                <+> ppr (mi_module iface) <+> pp_boot
+                <+> ppr (mi_module iface) <+> pp_hsc_src (mi_hsc_src iface)
                 <+> (if mi_orphan iface then ptext (sLit "[orphan module]") else Outputable.empty)
                 <+> (if mi_finsts iface then ptext (sLit "[family instance module]") else Outputable.empty)
                 <+> (if mi_hpc    iface then ptext (sLit "[hpc]") else Outputable.empty)
@@ -896,8 +896,9 @@ pprModIface iface
         , pprTrustPkg (mi_trust_pkg iface)
         ]
   where
-    pp_boot | mi_boot iface = ptext (sLit "[boot]")
-            | otherwise     = Outputable.empty
+    pp_hsc_src HsBootFile = ptext (sLit "[boot]")
+    pp_hsc_src HsigFile = ptext (sLit "[hsig]")
+    pp_hsc_src HsSrcFile = Outputable.empty
 
 {-
 When printing export lists, we print like this:
@@ -907,14 +908,15 @@ When printing export lists, we print like this:
 -}
 
 pprExport :: IfaceExport -> SDoc
-pprExport (Avail n)      = ppr n
-pprExport (AvailTC _ []) = Outputable.empty
-pprExport (AvailTC n (n':ns))
-  | n==n'     = ppr n <> pp_export ns
-  | otherwise = ppr n <> char '|' <> pp_export (n':ns)
+pprExport (Avail _ n)         = ppr n
+pprExport (AvailTC _ [] []) = Outputable.empty
+pprExport (AvailTC n ns0 fs)
+  = case ns0 of
+      (n':ns) | n==n' -> ppr n <> pp_export ns fs
+      _               -> ppr n <> vbar <> pp_export ns0 fs
   where
-    pp_export []    = Outputable.empty
-    pp_export names = braces (hsep (map ppr names))
+    pp_export []    [] = Outputable.empty
+    pp_export names fs = braces (hsep (map ppr names ++ map (ppr . flLabel) fs))
 
 pprUsage :: Usage -> SDoc
 pprUsage usage@UsagePackageModule{}

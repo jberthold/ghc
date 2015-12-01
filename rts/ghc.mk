@@ -19,6 +19,14 @@ rts_dist_HC = $(GHC_STAGE1)
 rts_INSTALL_INFO = rts
 rts_VERSION = 1.0
 
+# Minimum supported Windows version.
+# These numbers can be found at:
+#  https://msdn.microsoft.com/en-us/library/windows/desktop/aa383745(v=vs.85).aspx
+# If we're compiling on windows, enforce that we only support Vista SP1+
+# Adding this here means it doesn't have to be done in individual .c files
+# and also centralizes the versioning.
+rts_WINVER = 0x06000100
+
 # merge GhcLibWays and GhcRTSWays but strip out duplicates
 rts_WAYS = $(GhcLibWays) $(filter-out $(GhcLibWays),$(GhcRTSWays))
 rts_dist_WAYS = $(rts_WAYS)
@@ -184,7 +192,7 @@ rts_dist_$1_CC_OPTS += -DRtsWay=\"rts_$1\"
 # Adding this here means it doesn't have to be done in individual .c files
 # and also centralizes the versioning.
 ifeq "$$(TargetOS_CPP)" "mingw32"
-rts_dist_$1_CC_OPTS += -DWINVER=0x0501
+rts_dist_$1_CC_OPTS += -DWINVER=$(rts_WINVER)
 endif
 
 ifneq "$$(UseSystemLibFFI)" "YES"
@@ -319,6 +327,15 @@ rts_CC_OPTS += -fno-common
 
 ifeq "$(BeConservative)" "YES"
 rts_CC_OPTS += -DBE_CONSERVATIVE
+endif
+
+# Set Windows version
+ifeq "$$(TargetOS_CPP)" "mingw32"
+rts_CC_OPTS += -DWINVER=$(rts_WINVER)
+endif
+
+ifeq "$(SplitSections)" "YES"
+rts_CC_OPTS += -ffunction-sections -fdata-sections
 endif
 
 #-----------------------------------------------------------------------------
@@ -470,33 +487,6 @@ rts/parallel/MPIComm_CC_OPTS += $(MPIOpts)
 endif
 
 #-----------------------------------------------------------------------------
-# Add PAPI library if needed
-
-ifeq "$(GhcRtsWithPapi)" "YES"
-
-rts_CC_OPTS		+= -DUSE_PAPI
-
-rts_PACKAGE_CPP_OPTS	+= -DUSE_PAPI
-rts_PACKAGE_CPP_OPTS    += -DPAPI_INCLUDE_DIR=$(PapiIncludeDir)
-rts_PACKAGE_CPP_OPTS    += -DPAPI_LIB_DIR=$(PapiLibDir)
-
-ifneq "$(PapiIncludeDir)" ""
-rts_HC_OPTS     += -I$(PapiIncludeDir)
-rts_CC_OPTS     += -I$(PapiIncludeDir)
-rts_HSC2HS_OPTS += -I$(PapiIncludeDir)
-endif
-ifneq "$(PapiLibDirs)" ""
-rts_LD_OPTS     += -L$(PapiLibDirs)
-endif
-
-else # GhcRtsWithPapi==YES
-
-rts_PACKAGE_CPP_OPTS += -DPAPI_INCLUDE_DIR=""
-rts_PACKAGE_CPP_OPTS += -DPAPI_LIB_DIR=""
-
-endif
-
-#-----------------------------------------------------------------------------
 # Use system provided libffi
 
 ifeq "$(UseSystemLibFFI)" "YES"
@@ -511,6 +501,14 @@ rts_PACKAGE_CPP_OPTS += -DFFI_INCLUDE_DIR=
 rts_PACKAGE_CPP_OPTS += -DFFI_LIB_DIR=
 rts_PACKAGE_CPP_OPTS += '-DFFI_LIB="C$(LIBFFI_NAME)"'
 
+endif
+
+#-----------------------------------------------------------------------------
+# Add support for reading DWARF debugging information, if available
+
+ifeq "$(GhcRtsWithLibdw)" "YES"
+rts_CC_OPTS          += -DUSE_LIBDW
+rts_PACKAGE_CPP_OPTS += -DUSE_LIBDW
 endif
 
 # -----------------------------------------------------------------------------
@@ -602,8 +600,8 @@ endif
 
 .PHONY: install_libffi_headers
 install_libffi_headers :
-	$(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)")
-	$(call INSTALL_HEADER,$(INSTALL_OPTS),$(libffi_HEADERS),"$(DESTDIR)$(ghcheaderdir)/")
+	$(INSTALL_DIR) "$(DESTDIR)$(ghcheaderdir)"
+	$(INSTALL_HEADER) $(INSTALL_OPTS) $(libffi_HEADERS) "$(DESTDIR)$(ghcheaderdir)/"
 
 # -----------------------------------------------------------------------------
 # cleaning

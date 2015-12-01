@@ -43,6 +43,9 @@ import Data.Typeable
 import System.IO.Unsafe ( unsafeInterleaveIO )
 import System.IO        ( fixIO )
 import Control.Monad
+#if __GLASGOW_HASKELL__ > 710
+import qualified Control.Monad.Fail as MonadFail
+#endif
 import MonadUtils
 import Control.Applicative (Alternative(..))
 
@@ -58,13 +61,20 @@ unIOEnv (IOEnv m) = m
 
 instance Monad (IOEnv m) where
     (>>=)  = thenM
-    (>>)   = thenM_
-    return = returnM
+    (>>)   = (*>)
+    return = pure
     fail _ = failM -- Ignore the string
+
+#if __GLASGOW_HASKELL__ > 710
+instance MonadFail.MonadFail (IOEnv m) where
+    fail _ = failM -- Ignore the string
+#endif
+
 
 instance Applicative (IOEnv m) where
     pure = returnM
     IOEnv f <*> IOEnv x = IOEnv (\ env -> f env <*> x env )
+    (*>) = thenM_
 
 instance Functor (IOEnv m) where
     fmap f (IOEnv m) = IOEnv (\ env -> fmap f (m env))
@@ -92,6 +102,16 @@ instance Show IOEnvFailure where
     show IOEnvFailure = "IOEnv failure"
 
 instance Exception IOEnvFailure
+
+instance ExceptionMonad (IOEnv a) where
+  gcatch act handle =
+      IOEnv $ \s -> unIOEnv act s `gcatch` \e -> unIOEnv (handle e) s
+  gmask f =
+      IOEnv $ \s -> gmask $ \io_restore ->
+                             let
+                                g_restore (IOEnv m) = IOEnv $ \s -> io_restore (m s)
+                             in
+                                unIOEnv (f g_restore) s
 
 instance ContainsDynFlags env => HasDynFlags (IOEnv env) where
     getDynFlags = do env <- getEnv

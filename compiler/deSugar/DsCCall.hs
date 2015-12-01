@@ -21,7 +21,7 @@ module DsCCall
 import CoreSyn
 
 import DsMonad
-
+import DsUtils( mkCastDs )
 import CoreUtils
 import MkCore
 import Var
@@ -40,7 +40,6 @@ import BasicTypes
 import FastString ( unpackFS )
 import Literal
 import PrelNames
-import VarSet
 import DynFlags
 import Outputable
 import Util
@@ -119,7 +118,7 @@ mkFCall dflags uniq the_fcall val_args res_ty
   where
     arg_tys = map exprType val_args
     body_ty = (mkFunTys arg_tys res_ty)
-    tyvars  = varSetElems (tyVarsOfType body_ty)
+    tyvars  = tyVarsOfTypeList body_ty
     ty      = mkForAllTys tyvars body_ty
     the_fcall_id = mkFCallId dflags uniq the_fcall ty
 
@@ -138,7 +137,7 @@ unboxArg arg
 
   -- Recursive newtypes
   | Just(co, _rep_ty) <- topNormaliseNewType_maybe arg_ty
-  = unboxArg (mkCast arg co)
+  = unboxArg (mkCastDs arg co)
 
   -- Booleans
   | Just tc <- tyConAppTyCon_maybe arg_ty,
@@ -338,7 +337,7 @@ resultWrapper result_ty
   -- Newtypes
   | Just (co, rep_ty) <- topNormaliseNewType_maybe result_ty
   = do (maybe_ty, wrapper) <- resultWrapper rep_ty
-       return (maybe_ty, \e -> mkCast (wrapper e) (mkSymCo co))
+       return (maybe_ty, \e -> mkCastDs (wrapper e) (mkSymCo co))
 
   -- The type might contain foralls (eg. for dummy type arguments,
   -- referring to 'Ptr a' is legal).

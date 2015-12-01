@@ -37,7 +37,7 @@ import Type             hiding ( substTy )
 import TyCon            ( isRecursiveTyCon, tyConName )
 import Id
 import PprCore          ( pprParendExpr )
-import MkCore           ( mkImpossibleExpr )
+import MkCore           ( mkImpossibleExpr, sortQuantVars )
 import Var
 import VarEnv
 import VarSet
@@ -1178,7 +1178,9 @@ scExpr' _   e@(Lit {})   = return (nullUsage, e)
 scExpr' env (Tick t e)   = do (usg, e') <- scExpr env e
                               return (usg, Tick t e')
 scExpr' env (Cast e co)  = do (usg, e') <- scExpr env e
-                              return (usg, Cast e' (scSubstCo env co))
+                              return (usg, mkCast e' (scSubstCo env co))
+                              -- Important to use mkCast here
+                              -- See Note [SpecConstr call patterns]
 scExpr' env e@(App _ _)  = scApp env (collectArgs e)
 scExpr' env (Lam b e)    = do let (env', b') = extendBndr env b
                               (usg, e') <- scExpr env' e
@@ -1244,7 +1246,7 @@ scExpr' env (Let (NonRec bndr rhs) body)
 
         ; return (body_usg { scu_calls = scu_calls body_usg `delVarEnv` bndr' }
                     `combineUsage` spec_usg,  -- Note [spec_usg includes rhs_usg]
-                  mkLets [NonRec b r | (b,r) <- specInfoBinds rhs_info specs] body')
+                  mkLets [NonRec b r | (b,r) <- ruleInfoBinds rhs_info specs] body')
         }
 
 
@@ -1267,7 +1269,7 @@ scExpr' env (Let (Rec prs) body)
                 -- See Note [Local recursive groups]
 
         ; let all_usg = spec_usg `combineUsage` body_usg  -- Note [spec_usg includes rhs_usg]
-              bind'   = Rec (concat (zipWith specInfoBinds rhs_infos specs))
+              bind'   = Rec (concat (zipWith ruleInfoBinds rhs_infos specs))
 
         ; return (all_usg { scu_calls = scu_calls all_usg `delVarEnvList` bndrs' },
                   Let bind' body') }
@@ -1377,7 +1379,7 @@ scTopBind env body_usage (Rec prs)
                                          body_usage rhs_infos
 
         ; return (body_usage `combineUsage` spec_usage,
-                  Rec (concat (zipWith specInfoBinds rhs_infos specs))) }
+                  Rec (concat (zipWith ruleInfoBinds rhs_infos specs))) }
   where
     (bndrs,rhss) = unzip prs
     force_spec   = any (forceSpecBndr env) bndrs
@@ -1404,8 +1406,8 @@ scRecRhs env (bndr,rhs)
                 -- Two pats are the same if they match both ways
 
 ----------------------
-specInfoBinds :: RhsInfo -> [OneSpec] -> [(Id,CoreExpr)]
-specInfoBinds (RI { ri_fn = fn, ri_new_rhs = new_rhs }) specs
+ruleInfoBinds :: RhsInfo -> [OneSpec] -> [(Id,CoreExpr)]
+ruleInfoBinds (RI { ri_fn = fn, ri_new_rhs = new_rhs }) specs
   = [(id,rhs) | OS _ _ id rhs <- specs] ++
               -- First the specialised bindings
 
@@ -1432,7 +1434,7 @@ data RhsInfo
        , ri_arg_occs  :: [ArgOcc]      -- Info on how the xs occur in body
     }
 
-data SpecInfo = SI [OneSpec]            -- The specialisations we have generated
+data RuleInfo = SI [OneSpec]            -- The specialisations we have generated
 
                    Int                  -- Length of specs; used for numbering them
 
@@ -1503,13 +1505,13 @@ specialise
    :: ScEnv
    -> CallEnv                     -- Info on newly-discovered calls to this function
    -> RhsInfo
-   -> SpecInfo                    -- Original RHS plus patterns dealt with
-   -> UniqSM (ScUsage, SpecInfo)  -- New specialised versions and their usage
+   -> RuleInfo                    -- Original RHS plus patterns dealt with
+   -> UniqSM (ScUsage, RuleInfo)  -- New specialised versions and their usage
 
 -- See Note [spec_usg includes rhs_usg]
 
 -- Note: this only generates *specialised* bindings
--- The original binding is added by specInfoBinds
+-- The original binding is added by ruleInfoBinds
 --
 -- Note: the rhs here is the optimised version of the original rhs
 -- So when we make a specialised copy of the RHS, we're starting
@@ -1690,7 +1692,7 @@ calcSpecStrictness fn qvars pats
 Note [spec_usg includes rhs_usg]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In calls to 'specialise', the returned ScUsage must include the rhs_usg in
-the passed-in SpecInfo, unless there are no calls at all to the function.
+the passed-in RuleInfo, unless there are no calls at all to the function.
 
 The caller can, indeed must, assume this.  He should not combine in rhs_usg
 himself, or he'll get rhs_usg twice -- and that can lead to an exponential
@@ -1764,9 +1766,27 @@ BUT phantom type synonyms can mess this reasoning up,
   eg   x::T b   with  type T b = Int
 So we apply expandTypeSynonyms to the bound Ids.
 See Trac # 5458.  Yuk.
+
+Note [SpecConstr call patterns]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A "call patterns" that we collect is going to become the LHS of a RULE.
+It's important that it doesn't have
+     e |> Refl
+or
+    e |> g1 |> g2
+because both of these will be optimised by Simplify.simplRule. In the
+former case such optimisation benign, because the rule will match more
+terms; but in the latter we may lose a binding of 'g1' or 'g2', and
+end up with a rule LHS that doesn't bind the template variables
+(Trac #10602).
+
+The simplifier eliminates such things, but SpecConstr itself constructs
+new terms by substituting.  So the 'mkCast' in the Cast case of scExpr
+is very important!
 -}
 
 type CallPat = ([Var], [CoreExpr])      -- Quantified variables and arguments
+                                        -- See Note [SpecConstr call patterns]
 
 callsToPats :: ScEnv -> [OneSpec] -> [ArgOcc] -> [Call] -> UniqSM (Bool, [CallPat])
         -- Result has no duplicate patterns,
@@ -1823,10 +1843,11 @@ callToPats env bndr_occs (Call _ args con_env)
                 -- See Note [Free type variables of the qvar types]
                 -- See Note [Shadowing] at the top
 
-              (tvs, ids)    = partition isTyVar qvars
-              qvars'        = tvs ++ map sanitise ids
-                -- Put the type variables first; the type of a term
-                -- variable may mention a type variable
+              (ktvs, ids)   = partition isTyVar qvars
+              qvars'        = sortQuantVars ktvs ++ map sanitise ids
+                -- Order into kind variables, type variables, term variables
+                -- The kind of a type variable may mention a kind variable
+                -- and the type of a term variable may mention a type variable
 
               sanitise id   = id `setIdType` expandTypeSynonyms (idType id)
                 -- See Note [Free type variables of the qvar types]
@@ -1886,9 +1907,6 @@ argToPat env in_scope val_env (Case scrut _ _ [(_, _, rhs)]) arg_occ
 -}
 
 argToPat env in_scope val_env (Cast arg co) arg_occ
-  | isReflCo co     -- Substitution in the SpecConstr itself
-                    -- can lead to identity coercions
-  = argToPat env in_scope val_env arg arg_occ
   | not (ignoreType env ty2)
   = do  { (interesting, arg') <- argToPat env in_scope val_env arg arg_occ
         ; if not interesting then

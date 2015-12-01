@@ -15,7 +15,8 @@ Note [The Type-related module hierarchy]
   Coercion imports Type
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable, DeriveFunctor, DeriveFoldable, DeriveTraversable #-}
+{-# LANGUAGE CPP, DeriveDataTypeable, DeriveFunctor, DeriveFoldable,
+             DeriveTraversable #-}
 {-# OPTIONS_HADDOCK hide #-}
 -- We expose the relevant stuff from this module via the Type module
 
@@ -32,15 +33,17 @@ module TypeRep (
 
         -- Pretty-printing
         pprType, pprParendType, pprTypeApp, pprTvBndr, pprTvBndrs,
-        pprTyThing, pprTyThingCategory, pprSigmaType, pprSigmaTypeExtraCts,
+        pprTyThing, pprTyThingCategory, pprSigmaType,
         pprTheta, pprForAll, pprUserForAll,
         pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind, pprTyLit, suppressKinds,
         TyPrec(..), maybeParen, pprTcApp,
         pprPrefixApp, pprArrowChain, ppr_type,
+        pprDataCons,
 
         -- Free variables
         tyVarsOfType, tyVarsOfTypes, closeOverKinds, varSetElemsKvsFirst,
+        tyVarsOfTypeAcc, tyVarsOfTypeList, tyVarsOfTypesAcc, tyVarsOfTypesList,
 
         -- * Tidying type related things up for printing
         tidyType,      tidyTypes,
@@ -58,8 +61,8 @@ module TypeRep (
 
 #include "HsVersions.h"
 
-import {-# SOURCE #-} DataCon( dataConTyCon )
-import ConLike ( ConLike(..) )
+import {-# SOURCE #-} DataCon( DataCon, dataConTyCon, dataConFullSig )
+import {-# SOURCE #-} ConLike ( ConLike(..) )
 import {-# SOURCE #-} Type( isPredTy ) -- Transitively pulls in a LOT of stuff, better to break the loop
 
 -- friends:
@@ -71,18 +74,20 @@ import BasicTypes
 import TyCon
 import Class
 import CoAxiom
+import FV
 
 -- others
 import PrelNames
 import Outputable
 import FastString
+import ListSetOps
 import Util
 import DynFlags
 import StaticFlags( opt_PprStyle_Debug )
 
 -- libraries
 import Data.List( mapAccumL, partition )
-import qualified Data.Data        as Data hiding ( TyCon )
+import qualified Data.Data as Data hiding ( TyCon )
 
 {-
 ************************************************************************
@@ -305,19 +310,44 @@ isKindVar v = isTKVar v && isSuperKind (varType v)
 
 tyVarsOfType :: Type -> VarSet
 -- ^ NB: for type synonyms tyVarsOfType does /not/ expand the synonym
--- tyVarsOfType returns only the free variables of a type
--- For example, tyVarsOfType (a::k) returns {a}, not including the
--- kind variable {k}
-tyVarsOfType (TyVarTy v)         = unitVarSet v
-tyVarsOfType (TyConApp _ tys)    = tyVarsOfTypes tys
-tyVarsOfType (LitTy {})          = emptyVarSet
-tyVarsOfType (FunTy arg res)     = tyVarsOfType arg `unionVarSet` tyVarsOfType res
-tyVarsOfType (AppTy fun arg)     = tyVarsOfType fun `unionVarSet` tyVarsOfType arg
-tyVarsOfType (ForAllTy tyvar ty) = delVarSet (tyVarsOfType ty) tyvar
-                                   `unionVarSet` tyVarsOfType (tyVarKind tyvar)
+-- tyVarsOfType returns free variables of a type, including kind variables.
+tyVarsOfType ty = runFVSet $ tyVarsOfTypeAcc ty
+
+-- | `tyVarsOfType` that returns free variables of a type in deterministic
+-- order. For explanation of why using `VarSet` is not deterministic see
+-- Note [Deterministic UniqFM] in UniqDFM.
+tyVarsOfTypeList :: Type -> [Var]
+tyVarsOfTypeList ty = runFVList $ tyVarsOfTypeAcc ty
 
 tyVarsOfTypes :: [Type] -> TyVarSet
-tyVarsOfTypes = mapUnionVarSet tyVarsOfType
+tyVarsOfTypes tys = runFVSet $ tyVarsOfTypesAcc tys
+
+tyVarsOfTypesList :: [Type] -> [Var]
+tyVarsOfTypesList tys = runFVList $ tyVarsOfTypesAcc tys
+
+
+-- | The worker for `tyVarsOfType` and `tyVarsOfTypeList`.
+-- The previous implementation used `unionVarSet` which is O(n+m) and can
+-- make the function quadratic.
+-- It's exported, so that it can be composed with other functions that compute
+-- free variables.
+tyVarsOfTypeAcc :: Type -> FV
+tyVarsOfTypeAcc (TyVarTy v) fv_cand in_scope acc = oneVar v fv_cand in_scope acc
+tyVarsOfTypeAcc (TyConApp _ tys) fv_cand in_scope acc =
+  tyVarsOfTypesAcc tys fv_cand in_scope acc
+tyVarsOfTypeAcc (LitTy {}) fv_cand in_scope acc = noVars fv_cand in_scope acc
+tyVarsOfTypeAcc (FunTy arg res) fv_cand in_scope acc =
+  (tyVarsOfTypeAcc arg `unionFV` tyVarsOfTypeAcc res) fv_cand in_scope acc
+tyVarsOfTypeAcc (AppTy fun arg) fv_cand in_scope acc =
+  (tyVarsOfTypeAcc fun `unionFV` tyVarsOfTypeAcc arg) fv_cand in_scope acc
+tyVarsOfTypeAcc (ForAllTy tyvar ty) fv_cand in_scope acc =
+  (delFV tyvar (tyVarsOfTypeAcc ty) `unionFV`
+    tyVarsOfTypeAcc (tyVarKind tyvar)) fv_cand in_scope acc
+
+tyVarsOfTypesAcc :: [Type] -> FV
+tyVarsOfTypesAcc (ty:tys) fv_cand in_scope acc =
+  (tyVarsOfTypeAcc ty `unionFV` tyVarsOfTypesAcc tys) fv_cand in_scope acc
+tyVarsOfTypesAcc [] fv_cand in_scope acc = noVars fv_cand in_scope acc
 
 closeOverKinds :: TyVarSet -> TyVarSet
 -- Add the kind variables free in the kinds
@@ -407,7 +437,7 @@ instance NamedThing TyThing where       -- Can't put this with the type
 -- the in-scope set is not relevant
 --
 -- 3. The substitution is only applied ONCE! This is because
--- in general such application will not reached a fixed point.
+-- in general such application will not reach a fixed point.
 data TvSubst
   = TvSubst InScopeSet  -- The in-scope type and kind variables
             TvSubstEnv  -- Substitutes both type and kind variables
@@ -562,10 +592,6 @@ pprThetaArrowTy preds  = parens (fsep (punctuate comma (map (ppr_type TopPrec) p
     --            Eq j, Eq k, Eq l) =>
     --           Eq (a, b, c, d, e, f, g, h, i, j, k, l)
 
-pprThetaArrowTyExtra :: ThetaType -> SDoc
-pprThetaArrowTyExtra []    = text "_" <+> darrow
-pprThetaArrowTyExtra preds = parens (fsep (punctuate comma xs)) <+> darrow
-  where xs = (map (ppr_type TopPrec) preds) ++ [text "_"]
 ------------------
 instance Outputable Type where
     ppr ty = pprType ty
@@ -599,7 +625,7 @@ ppr_type p fun_ty@(FunTy ty1 ty2)
 
 ppr_forall_type :: TyPrec -> Type -> SDoc
 ppr_forall_type p ty
-  = maybeParen p FunPrec $ ppr_sigma_type True False ty
+  = maybeParen p FunPrec $ ppr_sigma_type True ty
     -- True <=> we always print the foralls on *nested* quantifiers
     -- Opt_PrintExplicitForalls only affects top-level quantifiers
     -- False <=> we don't print an extra-constraints wildcard
@@ -615,16 +641,14 @@ ppr_tylit _ tl =
     StrTyLit s -> text (show s)
 
 -------------------
-ppr_sigma_type :: Bool -> Bool -> Type -> SDoc
+ppr_sigma_type :: Bool -> Type -> SDoc
 -- First Bool <=> Show the foralls unconditionally
 -- Second Bool <=> Show an extra-constraints wildcard
-ppr_sigma_type show_foralls_unconditionally extra_cts ty
+ppr_sigma_type show_foralls_unconditionally ty
   = sep [ if   show_foralls_unconditionally
           then pprForAll tvs
           else pprUserForAll tvs
-        , if extra_cts
-          then pprThetaArrowTyExtra ctxt
-          else pprThetaArrowTy ctxt
+        , pprThetaArrowTy ctxt
         , pprType tau ]
   where
     (tvs,  rho) = split1 [] ty
@@ -637,10 +661,7 @@ ppr_sigma_type show_foralls_unconditionally extra_cts ty
     split2 ps ty                               = (reverse ps, ty)
 
 pprSigmaType :: Type -> SDoc
-pprSigmaType ty = ppr_sigma_type False False ty
-
-pprSigmaTypeExtraCts :: Bool -> Type -> SDoc
-pprSigmaTypeExtraCts = ppr_sigma_type False
+pprSigmaType ty = ppr_sigma_type False ty
 
 pprUserForAll :: [TyVar] -> SDoc
 -- Print a user-level forall; see Note [When to print foralls]
@@ -703,6 +724,20 @@ remember to parenthesise the operator, thus
 See Trac #2766.
 -}
 
+pprDataCons :: TyCon -> SDoc
+pprDataCons = sepWithVBars . fmap pprDataConWithArgs . tyConDataCons
+  where
+    sepWithVBars [] = empty
+    sepWithVBars docs = sep (punctuate (space <> vbar) docs)
+
+pprDataConWithArgs :: DataCon -> SDoc
+pprDataConWithArgs dc = sep [forAllDoc, thetaDoc, ppr dc <+> argsDoc]
+  where
+    (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _res_ty) = dataConFullSig dc
+    forAllDoc = pprUserForAll ((univ_tvs `minusList` map fst eq_spec) ++ ex_tvs)
+    thetaDoc  = pprThetaArrowTy theta
+    argsDoc   = hsep (fmap pprParendType arg_tys)
+
 pprTypeApp :: TyCon -> [Type] -> SDoc
 pprTypeApp tc tys = pprTyTcApp TopPrec tc tys
         -- We have to use ppr on the TyCon (not its name)
@@ -712,7 +747,7 @@ pprTyTcApp :: TyPrec -> TyCon -> [Type] -> SDoc
 -- Used for types only; so that we can make a
 -- special case for type-level lists
 pprTyTcApp p tc tys
-  | tc `hasKey` ipClassNameKey
+  | tc `hasKey` ipTyConKey
   , [LitTy (StrTyLit n),ty] <- tys
   = maybeParen p FunPrec $
     char '?' <> ftext n <> ptext (sLit "::") <> ppr_type TopPrec ty
@@ -723,6 +758,8 @@ pprTyTcApp p tc tys
     if gopt Opt_PrintExplicitKinds dflags then pprTcApp  p ppr_type tc tys
                                    else pprTyList p ty1 ty2
 
+  | tc `hasKey` errorMessageTypeErrorFamKey = text "(TypeError ...)"
+
   | otherwise
   = pprTcApp p ppr_type tc tys
 
@@ -731,6 +768,7 @@ pprTcApp :: TyPrec -> (TyPrec -> a -> SDoc) -> TyCon -> [a] -> SDoc
 pprTcApp _ pp tc [ty]
   | tc `hasKey` listTyConKey = pprPromotionQuote tc <> brackets   (pp TopPrec ty)
   | tc `hasKey` parrTyConKey = pprPromotionQuote tc <> paBrackets (pp TopPrec ty)
+
 
 pprTcApp p pp tc tys
   | Just sort <- tyConTuple_maybe tc
@@ -925,7 +963,7 @@ tidyOpenType :: TidyEnv -> Type -> (TidyEnv, Type)
 tidyOpenType env ty
   = (env', tidyType (trimmed_occ_env, var_env) ty)
   where
-    (env'@(_, var_env), tvs') = tidyOpenTyVars env (varSetElems (tyVarsOfType ty))
+    (env'@(_, var_env), tvs') = tidyOpenTyVars env (tyVarsOfTypeList ty)
     trimmed_occ_env = initTidyOccEnv (map getOccName tvs')
       -- The idea here was that we restrict the new TidyEnv to the
       -- _free_ vars of the type, so that we don't gratuitously rename

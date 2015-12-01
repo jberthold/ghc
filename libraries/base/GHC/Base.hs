@@ -111,7 +111,7 @@ import GHC.CString
 import GHC.Magic
 import GHC.Prim
 import GHC.Err
-import {-# SOURCE #-} GHC.IO (failIO)
+import {-# SOURCE #-} GHC.IO (failIO,mplusIO)
 
 import GHC.Tuple ()     -- Note [Depend on GHC.Tuple]
 import GHC.Integer ()   -- Note [Depend on GHC.Integer]
@@ -309,7 +309,6 @@ instance Monoid a => Applicative ((,) a) where
     (u, f) <*> (v, x) = (u `mappend` v, f x)
 
 instance Monoid a => Monad ((,) a) where
-    return x = (mempty, x)
     (u, a) >>= k = case k a of (v, b) -> (u `mappend` v, b)
 
 instance Monoid a => Monoid (IO a) where
@@ -480,6 +479,11 @@ class Applicative m => Monad m where
     -- | Fail with a message.  This operation is not part of the
     -- mathematical definition of a monad, but is invoked on pattern-match
     -- failure in a @do@ expression.
+    --
+    -- As part of the MonadFail proposal (MFP), this function is moved
+    -- to its own class 'MonadFail' (see "Control.Monad.Fail" for more
+    -- details). The definition here will be removed in a future
+    -- release.
     fail        :: String -> m a
     fail s      = error s
 
@@ -626,7 +630,6 @@ instance Applicative ((->) a) where
     (<*>) f g x = f x (g x)
 
 instance Monad ((->) r) where
-    return = const
     f >>= k = \ r -> k (f r) r
 
 instance Functor ((,) a) where
@@ -652,7 +655,6 @@ instance  Monad Maybe  where
 
     (>>) = (*>)
 
-    return              = Just
     fail _              = Nothing
 
 -- -----------------------------------------------------------------------------
@@ -735,8 +737,6 @@ instance Monad []  where
     xs >>= f             = [y | x <- xs, y <- f x]
     {-# INLINE (>>) #-}
     (>>) = (*>)
-    {-# INLINE return #-}
-    return x            = [x]
     {-# INLINE fail #-}
     fail _              = []
 
@@ -853,9 +853,10 @@ augment g xs = g (:) xs
 -- > map f [x1, x2, ...] == [f x1, f x2, ...]
 
 map :: (a -> b) -> [a] -> [b]
-{-# NOINLINE [1] map #-}    -- We want the RULE to fire first.
-                            -- It's recursive, so won't inline anyway,
-                            -- but saying so is more explicit
+{-# NOINLINE [0] map #-}
+  -- We want the RULEs "map" and "map/coerce" to fire first.
+  -- map is recursive, so won't inline anyway,
+  -- but saying so is more explicit, and silences warnings
 map _ []     = []
 map f (x:xs) = f x : map f xs
 
@@ -1062,20 +1063,27 @@ asTypeOf                =  const
 ----------------------------------------------
 
 instance  Functor IO where
-   fmap f x = x >>= (return . f)
+   fmap f x = x >>= (pure . f)
 
 instance Applicative IO where
-    pure = return
-    (<*>) = ap
+    {-# INLINE pure #-}
+    {-# INLINE (*>) #-}
+    pure   = returnIO
+    m *> k = m >>= \ _ -> k
+    (<*>)  = ap
 
 instance  Monad IO  where
-    {-# INLINE return #-}
     {-# INLINE (>>)   #-}
     {-# INLINE (>>=)  #-}
-    m >> k    = m >>= \ _ -> k
-    return    = returnIO
+    (>>)      = (*>)
     (>>=)     = bindIO
     fail s    = failIO s
+
+instance Alternative IO where
+    empty = failIO "mzero"
+    (<|>) = mplusIO
+
+instance MonadPlus IO
 
 returnIO :: a -> IO a
 returnIO x = IO $ \ s -> (# s, x #)
@@ -1196,11 +1204,3 @@ a `iShiftRL#` b | isTrue# (b >=# WORD_SIZE_IN_BITS#) = 0#
 --      unpackFoldr "foo" c (unpackFoldr "baz" c n)  =  unpackFoldr "foobaz" c n
 
   #-}
-
-
-#ifdef __HADDOCK__
--- | A special argument for the 'Control.Monad.ST.ST' type constructor,
--- indexing a state embedded in the 'Prelude.IO' monad by
--- 'Control.Monad.ST.stToIO'.
-data RealWorld
-#endif

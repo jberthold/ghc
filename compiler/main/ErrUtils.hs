@@ -10,14 +10,15 @@ module ErrUtils (
         MsgDoc,
         Validity(..), andValid, allValid, isValid, getInvalids,
 
-        ErrMsg, WarnMsg, Severity(..),
+        ErrMsg, ErrDoc, errDoc, WarnMsg, Severity(..),
         Messages, ErrorMessages, WarningMessages,
-        errMsgSpan, errMsgContext, errMsgShortDoc, errMsgExtraInfo,
+        errMsgSpan, errMsgContext,
         mkLocMessage, pprMessageBag, pprErrMsgBagWithLoc,
         pprLocErrMsg, makeIntoWarning,
 
         errorsFound, emptyMessages, isEmptyMessages,
-        mkErrMsg, mkPlainErrMsg, mkLongErrMsg, mkWarnMsg, mkPlainWarnMsg,
+        mkErrMsg, mkPlainErrMsg, mkErrDoc, mkLongErrMsg, mkWarnMsg,
+        mkPlainWarnMsg,
         printBagOfErrors,
         warnIsErrorMsg, mkLongWarnMsg,
 
@@ -54,6 +55,7 @@ import System.FilePath  ( takeDirectory, (</>) )
 import Data.List
 import qualified Data.Set as Set
 import Data.IORef
+import Data.Maybe       ( fromMaybe )
 import Data.Ord
 import Data.Time
 import Control.Monad
@@ -93,23 +95,51 @@ type ErrorMessages   = Bag ErrMsg
 data ErrMsg = ErrMsg {
         errMsgSpan        :: SrcSpan,
         errMsgContext     :: PrintUnqualified,
-        errMsgShortDoc    :: MsgDoc,   -- errMsgShort* should always
-        errMsgShortString :: String,   -- contain the same text
-        errMsgExtraInfo   :: MsgDoc,
+        errMsgDoc         :: ErrDoc,
+        -- | This has the same text as errDocImportant . errMsgDoc.
+        errMsgShortString :: String,
         errMsgSeverity    :: Severity
         }
         -- The SrcSpan is used for sorting errors into line-number order
+
+-- | Categorise error msgs by their importance.  This is so each section can
+-- be rendered visually distinct.  See Note [Error report] for where these come
+-- from.
+data ErrDoc = ErrDoc {
+        -- | Primary error msg.
+        errDocImportant :: [MsgDoc],
+        -- | Context e.g. \"In the second argument of ...\".
+        _errDocContext :: [MsgDoc],
+        -- | Supplementary information, e.g. \"Relevant bindings include ...\".
+        _errDocSupplementary :: [MsgDoc]
+        }
+
+errDoc :: [MsgDoc] -> [MsgDoc] -> [MsgDoc] -> ErrDoc
+errDoc = ErrDoc
 
 type WarnMsg = ErrMsg
 
 data Severity
   = SevOutput
-  | SevDump
+  | SevFatal
   | SevInteractive
+
+  | SevDump
+    -- Log messagse intended for compiler developers
+    -- No file/line/column stuff
+
   | SevInfo
+    -- Log messages intended for end users.
+    -- No file/line/column stuff.
+
   | SevWarning
   | SevError
-  | SevFatal
+    -- SevWarning and SevError are used for warnings and errors
+    --   o The message has a file/line/column heading,
+    --     plus "warning:" or "error:",
+    --     added by mkLocMessags
+    --   o Output is intended for end users
+
 
 instance Show ErrMsg where
     show em = errMsgShortString em
@@ -142,12 +172,16 @@ makeIntoWarning err = err { errMsgSeverity = SevWarning }
 -- -----------------------------------------------------------------------------
 -- Collecting up messages for later ordering and printing.
 
-mk_err_msg :: DynFlags -> Severity -> SrcSpan -> PrintUnqualified -> MsgDoc -> SDoc -> ErrMsg
-mk_err_msg  dflags sev locn print_unqual msg extra
- = ErrMsg { errMsgSpan = locn, errMsgContext = print_unqual
-          , errMsgShortDoc = msg , errMsgShortString = showSDoc dflags msg
-          , errMsgExtraInfo = extra
+mk_err_msg :: DynFlags -> Severity -> SrcSpan -> PrintUnqualified -> ErrDoc -> ErrMsg
+mk_err_msg dflags sev locn print_unqual doc
+ = ErrMsg { errMsgSpan = locn
+          , errMsgContext = print_unqual
+          , errMsgDoc = doc
+          , errMsgShortString = showSDoc dflags (vcat (errDocImportant doc))
           , errMsgSeverity = sev }
+
+mkErrDoc :: DynFlags -> SrcSpan -> PrintUnqualified -> ErrDoc -> ErrMsg
+mkErrDoc dflags = mk_err_msg dflags SevError
 
 mkLongErrMsg, mkLongWarnMsg   :: DynFlags -> SrcSpan -> PrintUnqualified -> MsgDoc -> MsgDoc -> ErrMsg
 -- A long (multi-line) error message
@@ -156,12 +190,12 @@ mkErrMsg, mkWarnMsg           :: DynFlags -> SrcSpan -> PrintUnqualified -> MsgD
 mkPlainErrMsg, mkPlainWarnMsg :: DynFlags -> SrcSpan ->                     MsgDoc            -> ErrMsg
 -- Variant that doesn't care about qualified/unqualified names
 
-mkLongErrMsg   dflags locn unqual msg extra = mk_err_msg dflags SevError   locn unqual        msg extra
-mkErrMsg       dflags locn unqual msg       = mk_err_msg dflags SevError   locn unqual        msg empty
-mkPlainErrMsg  dflags locn        msg       = mk_err_msg dflags SevError   locn alwaysQualify msg empty
-mkLongWarnMsg  dflags locn unqual msg extra = mk_err_msg dflags SevWarning locn unqual        msg extra
-mkWarnMsg      dflags locn unqual msg       = mk_err_msg dflags SevWarning locn unqual        msg empty
-mkPlainWarnMsg dflags locn        msg       = mk_err_msg dflags SevWarning locn alwaysQualify msg empty
+mkLongErrMsg   dflags locn unqual msg extra = mk_err_msg dflags SevError   locn unqual        (ErrDoc [msg] [] [extra])
+mkErrMsg       dflags locn unqual msg       = mk_err_msg dflags SevError   locn unqual        (ErrDoc [msg] [] [])
+mkPlainErrMsg  dflags locn        msg       = mk_err_msg dflags SevError   locn alwaysQualify (ErrDoc [msg] [] [])
+mkLongWarnMsg  dflags locn unqual msg extra = mk_err_msg dflags SevWarning locn unqual        (ErrDoc [msg] [] [extra])
+mkWarnMsg      dflags locn unqual msg       = mk_err_msg dflags SevWarning locn unqual        (ErrDoc [msg] [] [])
+mkPlainWarnMsg dflags locn        msg       = mk_err_msg dflags SevWarning locn alwaysQualify (ErrDoc [msg] [] [])
 
 ----------------
 emptyMessages :: Messages
@@ -180,28 +214,42 @@ errorsFound _dflags (_warns, errs) = not (isEmptyBag errs)
 printBagOfErrors :: DynFlags -> Bag ErrMsg -> IO ()
 printBagOfErrors dflags bag_of_errors
   = sequence_ [ let style = mkErrStyle dflags unqual
-                in log_action dflags dflags sev s style (d $$ e)
+                in log_action dflags dflags sev s style (formatErrDoc dflags doc)
               | ErrMsg { errMsgSpan      = s,
-                         errMsgShortDoc  = d,
+                         errMsgDoc       = doc,
                          errMsgSeverity  = sev,
-                         errMsgExtraInfo = e,
-                         errMsgContext   = unqual } <- sortMsgBag bag_of_errors ]
+                         errMsgContext   = unqual } <- sortMsgBag (Just dflags)
+                                                                  bag_of_errors ]
+
+formatErrDoc :: DynFlags -> ErrDoc -> SDoc
+formatErrDoc dflags (ErrDoc important context supplementary)
+  = case msgs of
+        [msg] -> vcat msg
+        _ -> vcat $ map starred msgs
+    where
+    msgs = filter (not . null) $ map (filter (not . Outputable.isEmpty dflags))
+        [important, context, supplementary]
+    starred = (bullet<+>) . vcat
+    bullet = text $ if DynFlags.useUnicode dflags then "•" else "*"
 
 pprErrMsgBagWithLoc :: Bag ErrMsg -> [SDoc]
-pprErrMsgBagWithLoc bag = [ pprLocErrMsg item | item <- sortMsgBag bag ]
+pprErrMsgBagWithLoc bag = [ pprLocErrMsg item | item <- sortMsgBag Nothing bag ]
 
 pprLocErrMsg :: ErrMsg -> SDoc
 pprLocErrMsg (ErrMsg { errMsgSpan      = s
-                     , errMsgShortDoc  = d
-                     , errMsgExtraInfo = e
+                     , errMsgDoc       = doc
                      , errMsgSeverity  = sev
                      , errMsgContext   = unqual })
   = sdocWithDynFlags $ \dflags ->
     withPprStyle (mkErrStyle dflags unqual) $
-    mkLocMessage sev s (d $$ e)
+    mkLocMessage sev s (formatErrDoc dflags doc)
 
-sortMsgBag :: Bag ErrMsg -> [ErrMsg]
-sortMsgBag bag = sortBy (comparing errMsgSpan) $ bagToList bag
+sortMsgBag :: Maybe DynFlags -> Bag ErrMsg -> [ErrMsg]
+sortMsgBag dflags = sortBy (maybeFlip $ comparing errMsgSpan) . bagToList
+  where maybeFlip :: (a -> a -> b) -> (a -> a -> b)
+        maybeFlip
+          | fromMaybe False (fmap reverseErrors dflags) = flip
+          | otherwise                                   = id
 
 ghcExit :: DynFlags -> Int -> IO ()
 ghcExit dflags val
@@ -277,6 +325,13 @@ dumpSDoc dflags print_unqual flag hdr doc
                             writeIORef gdref (Set.insert fileName gd)
                         createDirectoryIfMissing True (takeDirectory fileName)
                         handle <- openFile fileName mode
+
+                        -- We do not want the dump file to be affected by
+                        -- environment variables, but instead to always use
+                        -- UTF8. See:
+                        -- https://ghc.haskell.org/trac/ghc/ticket/10762
+                        hSetEncoding handle utf8
+
                         doc' <- if null hdr
                                 then return doc
                                 else do t <- getCurrentTime

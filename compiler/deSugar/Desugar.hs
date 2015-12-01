@@ -8,14 +8,20 @@ The Desugarer: turning HsSyn into Core.
 
 {-# LANGUAGE CPP #-}
 
-module Desugar ( deSugar, deSugarExpr ) where
+module Desugar (
+    -- * Desugaring operations
+    deSugar, deSugarExpr,
+    -- * Dependency/fingerprinting code (used by MkIface)
+    mkUsageInfo, mkUsedNames, mkDependencies
+    ) where
+
+#include "HsVersions.h"
 
 import DynFlags
 import HscTypes
 import HsSyn
 import TcRnTypes
 import TcRnMonad ( finalSafeMode, fixSafeInstances )
-import MkIface
 import Id
 import Name
 import Type
@@ -25,6 +31,7 @@ import InstEnv
 import Class
 import Avail
 import CoreSyn
+import CoreFVs( exprsSomeFreeVars )
 import CoreSubst
 import PprCore
 import DsMonad
@@ -37,10 +44,11 @@ import NameEnv
 import Rules
 import TysPrim (eqReprPrimTyCon)
 import TysWiredIn (coercibleTyCon )
-import BasicTypes       ( Activation(.. ) )
+import BasicTypes       ( Activation(.. ), competesWith, pprRuleName )
 import CoreMonad        ( CoreToDo(..) )
 import CoreLint         ( endPassIO )
 import MkCore
+import VarSet
 import FastString
 import ErrUtils
 import Outputable
@@ -50,9 +58,193 @@ import Util
 import MonadUtils
 import OrdList
 import StaticPtrTable
+import UniqFM
+import ListSetOps
+import Fingerprint
+import Maybes
+
+import Data.Function
 import Data.List
 import Data.IORef
 import Control.Monad( when )
+import Data.Map (Map)
+import qualified Data.Map as Map
+
+-- | Extract information from the rename and typecheck phases to produce
+-- a dependencies information for the module being compiled.
+mkDependencies :: TcGblEnv -> IO Dependencies
+mkDependencies
+          TcGblEnv{ tcg_mod = mod,
+                    tcg_imports = imports,
+                    tcg_th_used = th_var
+                  }
+ = do
+      -- Template Haskell used?
+      th_used <- readIORef th_var
+      let dep_mods = eltsUFM (delFromUFM (imp_dep_mods imports) (moduleName mod))
+                -- M.hi-boot can be in the imp_dep_mods, but we must remove
+                -- it before recording the modules on which this one depends!
+                -- (We want to retain M.hi-boot in imp_dep_mods so that
+                --  loadHiBootInterface can see if M's direct imports depend
+                --  on M.hi-boot, and hence that we should do the hi-boot consistency
+                --  check.)
+
+          pkgs | th_used   = insertList thUnitId (imp_dep_pkgs imports)
+               | otherwise = imp_dep_pkgs imports
+
+          -- Set the packages required to be Safe according to Safe Haskell.
+          -- See Note [RnNames . Tracking Trust Transitively]
+          sorted_pkgs = sortBy stableUnitIdCmp pkgs
+          trust_pkgs  = imp_trust_pkgs imports
+          dep_pkgs'   = map (\x -> (x, x `elem` trust_pkgs)) sorted_pkgs
+
+      return Deps { dep_mods   = sortBy (stableModuleNameCmp `on` fst) dep_mods,
+                    dep_pkgs   = dep_pkgs',
+                    dep_orphs  = sortBy stableModuleCmp (imp_orphs  imports),
+                    dep_finsts = sortBy stableModuleCmp (imp_finsts imports) }
+                    -- sort to get into canonical order
+                    -- NB. remember to use lexicographic ordering
+
+mkUsedNames :: TcGblEnv -> NameSet
+mkUsedNames TcGblEnv{ tcg_dus = dus } = allUses dus
+
+mkUsageInfo :: HscEnv -> Module -> ImportedMods -> NameSet -> [FilePath] -> IO [Usage]
+mkUsageInfo hsc_env this_mod dir_imp_mods used_names dependent_files
+  = do
+    eps <- hscEPS hsc_env
+    hashes <- mapM getFileHash dependent_files
+    let mod_usages = mk_mod_usage_info (eps_PIT eps) hsc_env this_mod
+                                       dir_imp_mods used_names
+    let usages = mod_usages ++ [ UsageFile { usg_file_path = f
+                                           , usg_file_hash = hash }
+                               | (f, hash) <- zip dependent_files hashes ]
+    usages `seqList` return usages
+    -- seq the list of Usages returned: occasionally these
+    -- don't get evaluated for a while and we can end up hanging on to
+    -- the entire collection of Ifaces.
+
+mk_mod_usage_info :: PackageIfaceTable
+              -> HscEnv
+              -> Module
+              -> ImportedMods
+              -> NameSet
+              -> [Usage]
+mk_mod_usage_info pit hsc_env this_mod direct_imports used_names
+  = mapMaybe mkUsage usage_mods
+  where
+    hpt = hsc_HPT hsc_env
+    dflags = hsc_dflags hsc_env
+    this_pkg = thisPackage dflags
+
+    used_mods    = moduleEnvKeys ent_map
+    dir_imp_mods = moduleEnvKeys direct_imports
+    all_mods     = used_mods ++ filter (`notElem` used_mods) dir_imp_mods
+    usage_mods   = sortBy stableModuleCmp all_mods
+                        -- canonical order is imported, to avoid interface-file
+                        -- wobblage.
+
+    -- ent_map groups together all the things imported and used
+    -- from a particular module
+    ent_map :: ModuleEnv [OccName]
+    ent_map  = foldNameSet add_mv emptyModuleEnv used_names
+     where
+      add_mv name mv_map
+        | isWiredInName name = mv_map  -- ignore wired-in names
+        | otherwise
+        = case nameModule_maybe name of
+             Nothing  -> ASSERT2( isSystemName name, ppr name ) mv_map
+                -- See Note [Internal used_names]
+
+             Just mod -> -- This lambda function is really just a
+                         -- specialised (++); originally came about to
+                         -- avoid quadratic behaviour (trac #2680)
+                         extendModuleEnvWith (\_ xs -> occ:xs) mv_map mod [occ]
+                where occ = nameOccName name
+
+    -- We want to create a Usage for a home module if
+    --  a) we used something from it; has something in used_names
+    --  b) we imported it, even if we used nothing from it
+    --     (need to recompile if its export list changes: export_fprint)
+    mkUsage :: Module -> Maybe Usage
+    mkUsage mod
+      | isNothing maybe_iface           -- We can't depend on it if we didn't
+                                        -- load its interface.
+      || mod == this_mod                -- We don't care about usages of
+                                        -- things in *this* module
+      = Nothing
+
+      | moduleUnitId mod /= this_pkg
+      = Just UsagePackageModule{ usg_mod      = mod,
+                                 usg_mod_hash = mod_hash,
+                                 usg_safe     = imp_safe }
+        -- for package modules, we record the module hash only
+
+      | (null used_occs
+          && isNothing export_hash
+          && not is_direct_import
+          && not finsts_mod)
+      = Nothing                 -- Record no usage info
+        -- for directly-imported modules, we always want to record a usage
+        -- on the orphan hash.  This is what triggers a recompilation if
+        -- an orphan is added or removed somewhere below us in the future.
+
+      | otherwise
+      = Just UsageHomeModule {
+                      usg_mod_name = moduleName mod,
+                      usg_mod_hash = mod_hash,
+                      usg_exports  = export_hash,
+                      usg_entities = Map.toList ent_hashs,
+                      usg_safe     = imp_safe }
+      where
+        maybe_iface  = lookupIfaceByModule dflags hpt pit mod
+                -- In one-shot mode, the interfaces for home-package
+                -- modules accumulate in the PIT not HPT.  Sigh.
+
+        Just iface   = maybe_iface
+        finsts_mod   = mi_finsts    iface
+        hash_env     = mi_hash_fn   iface
+        mod_hash     = mi_mod_hash  iface
+        export_hash | depend_on_exports = Just (mi_exp_hash iface)
+                    | otherwise         = Nothing
+
+        (is_direct_import, imp_safe)
+            = case lookupModuleEnv direct_imports mod of
+                Just (imv : _xs) -> (True, imv_is_safe imv)
+                Just _           -> pprPanic "mkUsage: empty direct import" Outputable.empty
+                Nothing          -> (False, safeImplicitImpsReq dflags)
+                -- Nothing case is for implicit imports like 'System.IO' when 'putStrLn'
+                -- is used in the source code. We require them to be safe in Safe Haskell
+
+        used_occs = lookupModuleEnv ent_map mod `orElse` []
+
+        -- Making a Map here ensures that (a) we remove duplicates
+        -- when we have usages on several subordinates of a single parent,
+        -- and (b) that the usages emerge in a canonical order, which
+        -- is why we use Map rather than OccEnv: Map works
+        -- using Ord on the OccNames, which is a lexicographic ordering.
+        ent_hashs :: Map OccName Fingerprint
+        ent_hashs = Map.fromList (map lookup_occ used_occs)
+
+        lookup_occ occ =
+            case hash_env occ of
+                Nothing -> pprPanic "mkUsage" (ppr mod <+> ppr occ <+> ppr used_names)
+                Just r  -> r
+
+        depend_on_exports = is_direct_import
+        {- True
+              Even if we used 'import M ()', we have to register a
+              usage on the export list because we are sensitive to
+              changes in orphan instances/rules.
+           False
+              In GHC 6.8.x we always returned true, and in
+              fact it recorded a dependency on *all* the
+              modules underneath in the dependency tree.  This
+              happens to make orphans work right, but is too
+              expensive: it'll read too many interface files.
+              The 'isNothing maybe_iface' check above saved us
+              from generating many of these usages (at least in
+              one-shot mode), but that's even more bogus!
+        -}
 
 {-
 ************************************************************************
@@ -165,15 +357,16 @@ deSugar hsc_env
         ; used_th <- readIORef tc_splice_used
         ; dep_files <- readIORef dependent_files
         ; safe_mode <- finalSafeMode dflags tcg_env
+        ; usages <- mkUsageInfo hsc_env mod (imp_mods imports) used_names dep_files
 
         ; let mod_guts = ModGuts {
                 mg_module       = mod,
-                mg_boot         = hsc_src == HsBootFile,
+                mg_hsc_src      = hsc_src,
+                mg_loc          = mkFileSrcSpan mod_loc,
                 mg_exports      = exports,
+                mg_usages       = usages,
                 mg_deps         = deps,
-                mg_used_names   = used_names,
                 mg_used_th      = used_th,
-                mg_dir_imps     = imp_mods imports,
                 mg_rdr_env      = rdr_env,
                 mg_fix_env      = fix_env,
                 mg_warns        = warns,
@@ -192,11 +385,16 @@ deSugar hsc_env
                 mg_vect_decls   = ds_vects,
                 mg_vect_info    = noVectInfo,
                 mg_safe_haskell = safe_mode,
-                mg_trust_pkg    = imp_trust_own_pkg imports,
-                mg_dependent_files = dep_files
+                mg_trust_pkg    = imp_trust_own_pkg imports
               }
         ; return (msgs, Just mod_guts)
         }}}
+
+mkFileSrcSpan :: ModLocation -> SrcSpan
+mkFileSrcSpan mod_loc
+  = case ml_hs_file mod_loc of
+      Just file_path -> mkGeneralSrcSpan (mkFastString file_path)
+      Nothing        -> interactiveSrcSpan   -- Presumably
 
 dsImpSpecs :: [LTcSpecPrag] -> DsM (OrdList (Id,CoreExpr), [CoreRule])
 dsImpSpecs imp_specs
@@ -346,7 +544,7 @@ Reason
 -}
 
 dsRule :: LRuleDecl Id -> DsM (Maybe CoreRule)
-dsRule (L loc (HsRule name act vars lhs _tv_lhs rhs _fv_rhs))
+dsRule (L loc (HsRule name rule_act vars lhs _tv_lhs rhs _fv_rhs))
   = putSrcSpanDs loc $
     do  { let bndrs' = [var | L _ (RuleBndr (L _ var)) <- vars]
 
@@ -355,7 +553,6 @@ dsRule (L loc (HsRule name act vars lhs _tv_lhs rhs _fv_rhs))
                   dsLExpr lhs   -- Note [Desugaring RULE left hand sides]
 
         ; rhs' <- dsLExpr rhs
-        ; dflags <- getDynFlags
         ; this_mod <- getModule
 
         ; (bndrs'', lhs'', rhs'') <- unfold_coerce bndrs' lhs' rhs'
@@ -372,35 +569,56 @@ dsRule (L loc (HsRule name act vars lhs _tv_lhs rhs _fv_rhs))
                 -- because they don't show up in the bindings until just before code gen
               fn_name   = idName fn_id
               final_rhs = simpleOptExpr rhs''    -- De-crap it
-              rule      = mkRule this_mod False {- Not auto -} is_local
-                                 (snd $ unLoc name) act fn_name final_bndrs args
-                                 final_rhs
+              rule_name = snd (unLoc name)
+              arg_ids = varSetElems (exprsSomeFreeVars isId args `delVarSetList` final_bndrs)
 
-              inline_shadows_rule   -- Function can be inlined before rule fires
-                | wopt Opt_WarnInlineRuleShadowing dflags
-                , isLocalId fn_id || hasSomeUnfolding (idUnfolding fn_id)
-                       -- If imported with no unfolding, no worries
-                = case (idInlineActivation fn_id, act) of
-                    (NeverActive, _)    -> False
-                    (AlwaysActive, _)   -> True
-                    (ActiveBefore {}, _) -> True
-                    (ActiveAfter {}, NeverActive)     -> True
-                    (ActiveAfter n, ActiveAfter r)    -> r < n  -- Rule active strictly first
-                    (ActiveAfter {}, AlwaysActive)    -> False
-                    (ActiveAfter {}, ActiveBefore {}) -> False
-                | otherwise = False
-
-        ; when inline_shadows_rule $
-          warnDs (vcat [ hang (ptext (sLit "Rule")
-                               <+> doubleQuotes (ftext $ snd $ unLoc name)
-                               <+> ptext (sLit "may never fire"))
-                            2 (ptext (sLit "because") <+> quotes (ppr fn_id)
-                               <+> ptext (sLit "might inline first"))
-                       , ptext (sLit "Probable fix: add an INLINE[n] or NOINLINE[n] pragma on")
-                         <+> quotes (ppr fn_id) ])
+        ; dflags <- getDynFlags
+        ; rule <- dsMkUserRule this_mod is_local
+                         rule_name rule_act fn_name final_bndrs args
+                         final_rhs
+        ; when (wopt Opt_WarnInlineRuleShadowing dflags) $
+          warnRuleShadowing rule_name rule_act fn_id arg_ids
 
         ; return (Just rule)
         } } }
+
+
+warnRuleShadowing :: RuleName -> Activation -> Id -> [Id] -> DsM ()
+-- See Note [Rules and inlining/other rules]
+warnRuleShadowing rule_name rule_act fn_id arg_ids
+  = do { check False fn_id    -- We often have multiple rules for the same Id in a
+                              -- module. Maybe we should check that they don't overlap
+                              -- but currently we don't
+       ; mapM_ (check True) arg_ids }
+  where
+    check check_rules_too lhs_id
+      | isLocalId lhs_id || canUnfold (idUnfolding lhs_id)
+                       -- If imported with no unfolding, no worries
+      , idInlineActivation lhs_id `competesWith` rule_act
+      = warnDs (vcat [ hang (ptext (sLit "Rule") <+> pprRuleName rule_name
+                               <+> ptext (sLit "may never fire"))
+                            2 (ptext (sLit "because") <+> quotes (ppr lhs_id)
+                               <+> ptext (sLit "might inline first"))
+                     , ptext (sLit "Probable fix: add an INLINE[n] or NOINLINE[n] pragma for")
+                       <+> quotes (ppr lhs_id)
+                     , ifPprDebug (ppr (idInlineActivation lhs_id) $$ ppr rule_act) ])
+
+      | check_rules_too
+      , bad_rule : _ <- get_bad_rules lhs_id
+      = warnDs (vcat [ hang (ptext (sLit "Rule") <+> pprRuleName rule_name
+                               <+> ptext (sLit "may never fire"))
+                            2 (ptext (sLit "because rule") <+> pprRuleName (ruleName bad_rule)
+                               <+> ptext (sLit "for")<+> quotes (ppr lhs_id)
+                               <+> ptext (sLit "might fire first"))
+                      , ptext (sLit "Probable fix: add phase [n] or [~n] to the competing rule")
+                      , ifPprDebug (ppr bad_rule) ])
+
+      | otherwise
+      = return ()
+
+    get_bad_rules lhs_id
+      = [ rule | rule <- idCoreRules lhs_id
+               , ruleActivation rule `competesWith` rule_act ]
 
 -- See Note [Desugaring coerce as cast]
 unfold_coerce :: [Id] -> CoreExpr -> CoreExpr -> DsM ([Var], CoreExpr, CoreExpr)
@@ -422,9 +640,8 @@ unfold_coerce bndrs lhs rhs = do
             (bndrs,wrap) <- go vs
             return (v:bndrs, wrap)
 
-{-
-Note [Desugaring RULE left hand sides]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{- Note [Desugaring RULE left hand sides]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For the LHS of a RULE we do *not* want to desugar
     [x]   to    build (\cn. x `c` n)
 We want to leave explicit lists simply as chains
@@ -439,7 +656,6 @@ Nor do we want to warn of conversion identities on the LHS;
 the rule is precisly to optimise them:
   {-# RULES "fromRational/id" fromRational = id :: Rational -> Rational #-}
 
-
 Note [Desugaring coerce as cast]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We want the user to express a rule saying roughly “mapping a coercion over a
@@ -453,6 +669,42 @@ For that we replace any forall'ed `c :: Coercible a b` value in a RULE by
 corresponding `co :: a ~#R b` and wrap the LHS and the RHS in
 `let c = MkCoercible co in ...`. This is later simplified to the desired form
 by simpleOptExpr (for the LHS) resp. the simplifiers (for the RHS).
+
+Note [Rules and inlining/other rules]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If you have
+  f x = ...
+  g x = ...
+  {-# RULES "rule-for-f" forall x. f (g x) = ... #-}
+then there's a good chance that in a potential rule redex
+    ...f (g e)...
+then 'f' or 'g' will inline befor the rule can fire.  Solution: add an
+INLINE [n] or NOINLINE [n] pragma to 'f' and 'g'.
+
+Note that this applies to all the free variables on the LHS, both the
+main function and things in its arguments.
+
+We also check if there are Ids on the LHS that have competing RULES.
+In the above example, suppose we had
+  {-# RULES "rule-for-g" forally. g [y] = ... #-}
+Then "rule-for-f" and "rule-for-g" would compete.  Better to add phase
+control, so "rule-for-f" has a chance to fire before "rule-for-g" becomes
+active; or perhpas after "rule-for-g" has become inactive. This is checked
+by 'competesWith'
+
+Class methods have a built-in RULE to select the method from the dictionary,
+so you can't change the phase on this.  That makes id very dubious to
+match on class methods in RULE lhs's.   See Trac #10595.   I'm not happy
+about this. For exmaple in Control.Arrow we have
+
+{-# RULES "compose/arr"   forall f g .
+                          (arr f) . (arr g) = arr (f . g) #-}
+
+and similar, which will elicit exactly these warnings, and risk never
+firing.  But it's not clear what to do instead.  We could make the
+class methocd rules inactive in phase 2, but that would delay when
+subsequent transformations could fire.
+
 
 ************************************************************************
 *                                                                      *

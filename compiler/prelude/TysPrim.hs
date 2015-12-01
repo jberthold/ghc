@@ -10,7 +10,10 @@
 -- | This module defines TyCons that can't be expressed in Haskell.
 --   They are all, therefore, wired-in TyCons.  C.f module TysWiredIn
 module TysPrim(
-        tyVarList, alphaTyVars, betaTyVars, alphaTyVar, betaTyVar, gammaTyVar, deltaTyVar,
+        mkPrimTyConName, -- For implicit parameters in TysWiredIn only
+
+        mkTemplateTyVars,
+        alphaTyVars, betaTyVars, alphaTyVar, betaTyVar, gammaTyVar, deltaTyVar,
         alphaTy, betaTy, gammaTy, deltaTy,
         openAlphaTy, openBetaTy, openAlphaTyVar, openBetaTyVar, openAlphaTyVars,
         kKiVar,
@@ -80,12 +83,11 @@ module TysPrim(
 #include "HsVersions.h"
 
 import Var              ( TyVar, KindVar, mkTyVar )
-import Name             ( Name, BuiltInSyntax(..), mkInternalName, mkWiredInName )
-import OccName          ( mkTyVarOccFS, mkTcOccFS )
+import Name
 import TyCon
 import TypeRep
 import SrcLoc
-import Unique           ( mkAlphaTyVarUnique )
+import Unique
 import PrelNames
 import FastString
 
@@ -205,18 +207,19 @@ alphaTyVars is a list of type variables for use in templates:
         ["a", "b", ..., "z", "t1", "t2", ... ]
 -}
 
-tyVarList :: Kind -> [TyVar]
-tyVarList kind = [ mkTyVar (mkInternalName (mkAlphaTyVarUnique u)
-                                (mkTyVarOccFS (mkFastString name))
-                                noSrcSpan) kind
-                 | u <- [2..],
-                   let name | c <= 'z'  = [c]
-                            | otherwise = 't':show u
-                            where c = chr (u-2 + ord 'a')
-                 ]
+mkTemplateTyVars :: [Kind] -> [TyVar]
+mkTemplateTyVars kinds =
+  [ mkTyVar (mkInternalName (mkAlphaTyVarUnique u)
+                            (mkTyVarOccFS (mkFastString name))
+                            noSrcSpan) k
+  | (k,u) <- zip kinds [2..],
+    let name | c <= 'z'  = [c]
+             | otherwise = 't':show u
+          where c = chr (u-2 + ord 'a')
+  ]
 
 alphaTyVars :: [TyVar]
-alphaTyVars = tyVarList liftedTypeKind
+alphaTyVars = mkTemplateTyVars $ repeat liftedTypeKind
 
 betaTyVars :: [TyVar]
 betaTyVars = tail alphaTyVars
@@ -234,14 +237,15 @@ alphaTy, betaTy, gammaTy, deltaTy :: Type
         -- result type for "error", so that we can have (error Int# "Help")
 openAlphaTyVars :: [TyVar]
 openAlphaTyVar, openBetaTyVar :: TyVar
-openAlphaTyVars@(openAlphaTyVar:openBetaTyVar:_) = tyVarList openTypeKind
+openAlphaTyVars@(openAlphaTyVar:openBetaTyVar:_)
+  = mkTemplateTyVars $ repeat openTypeKind
 
 openAlphaTy, openBetaTy :: Type
 openAlphaTy = mkTyVarTy openAlphaTyVar
 openBetaTy  = mkTyVarTy openBetaTyVar
 
 kKiVar :: KindVar
-kKiVar = (tyVarList superKind) !! 10
+kKiVar = (mkTemplateTyVars $ repeat superKind) !! 10
 
 {-
 ************************************************************************
@@ -255,8 +259,9 @@ funTyConName :: Name
 funTyConName = mkPrimTyConName (fsLit "(->)") funTyConKey funTyCon
 
 funTyCon :: TyCon
-funTyCon = mkFunTyCon funTyConName $
-           mkArrowKinds [liftedTypeKind, liftedTypeKind] liftedTypeKind
+funTyCon = mkFunTyCon funTyConName kind tc_rep_nm
+  where
+    kind = mkArrowKinds [liftedTypeKind, liftedTypeKind] liftedTypeKind
         -- You might think that (->) should have type (?? -> ? -> *), and you'd be right
         -- But if we do that we get kind errors when saying
         --      instance Control.Arrow (->)
@@ -265,6 +270,8 @@ funTyCon = mkFunTyCon funTyConName $
         -- the kind sub-typing does.  Sigh.  It really only matters if you use (->) in
         -- a prefix way, thus:  (->) Int# Int#.  And this is unusual.
         -- because they are never in scope in the source
+
+    tc_rep_nm = mkSpecialTyConRepName (fsLit "tcFun") funTyConName
 
 -- One step to remove subkinding.
 -- (->) :: * -> * -> *
@@ -315,14 +322,21 @@ superKindTyConName, anyKindTyConName, liftedTypeKindTyConName,
       constraintKindTyConName
    :: Name
 
-superKindTyCon        = mkKindTyCon superKindTyConName        superKind
-   -- See Note [SuperKind (BOX)]
+mk_kind_tycon :: Name        -- ^ Name of the kind constructor, e.g. @*@
+              -> FastString  -- ^ Name of the 'TyConRepName' function,
+                             -- e.g. @tcLiftedKind :: TyCon@
+              -> TyCon       -- ^ The kind constructor
+mk_kind_tycon tc_name rep_fs
+  = mkKindTyCon tc_name superKind (mkSpecialTyConRepName rep_fs tc_name)
 
-anyKindTyCon          = mkKindTyCon anyKindTyConName          superKind
-liftedTypeKindTyCon   = mkKindTyCon liftedTypeKindTyConName   superKind
-openTypeKindTyCon     = mkKindTyCon openTypeKindTyConName     superKind
-unliftedTypeKindTyCon = mkKindTyCon unliftedTypeKindTyConName superKind
-constraintKindTyCon   = mkKindTyCon constraintKindTyConName   superKind
+superKindTyCon = mk_kind_tycon superKindTyConName (fsLit "tcBOX")
+    -- See Note [SuperKind (BOX)]
+
+anyKindTyCon          = mk_kind_tycon anyKindTyConName          (fsLit "tcAnyK")
+constraintKindTyCon   = mk_kind_tycon constraintKindTyConName   (fsLit "tcConstraint")
+liftedTypeKindTyCon   = mk_kind_tycon liftedTypeKindTyConName   (fsLit "tcLiftedKind")
+openTypeKindTyCon     = mk_kind_tycon openTypeKindTyConName     (fsLit "tcOpenKind")
+unliftedTypeKindTyCon = mk_kind_tycon unliftedTypeKindTyConName (fsLit "tcUnliftedKind")
 
 --------------------------
 -- ... and now their names
@@ -733,6 +747,7 @@ variables with no constraints on them. It appears in similar circumstances to
 Any, but at the kind level. For example:
 
   type family Length (l :: [k]) :: Nat
+  type instance Length [] = Zero
 
   f :: Proxy (Length []) -> Int
   f = ....
@@ -771,9 +786,10 @@ anyTy :: Type
 anyTy = mkTyConTy anyTyCon
 
 anyTyCon :: TyCon
-anyTyCon = mkFamilyTyCon anyTyConName kind [kKiVar]
+anyTyCon = mkFamilyTyCon anyTyConName kind [kKiVar] Nothing
                          (ClosedSynFamilyTyCon Nothing)
-                         NoParentTyCon
+                         Nothing
+                         NotInjective
   where
     kind = ForAllTy kKiVar (mkTyVarTy kKiVar)
 

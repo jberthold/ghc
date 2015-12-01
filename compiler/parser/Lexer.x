@@ -50,7 +50,6 @@
 {-# OPTIONS_GHC -fno-warn-tabs #-}
 {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
 
-{-# OPTIONS_GHC -fno-warn-overlapping-patterns #-}
 {-# OPTIONS_GHC -funbox-strict-fields #-}
 
 module Lexer (
@@ -79,6 +78,9 @@ module Lexer (
 import Control.Applicative
 #endif
 import Control.Monad
+#if __GLASGOW_HASKELL__ > 710
+import Control.Monad.Fail
+#endif
 import Data.Bits
 import Data.Char
 import Data.List
@@ -261,7 +263,8 @@ $tab          { warnTab }
 -- with {-#, then we'll assume it's a pragma we know about and go for do_bol.
 <bol> {
   \n                                    ;
-  ^\# (line)?                           { begin line_prag1 }
+  ^\# line                              { begin line_prag1 }
+  ^\# / { followedByDigit }             { begin line_prag1 }
   ^\# pragma .* \n                      ; -- GCC 3.3 CPP generated, apparently
   ^\# \! .* \n                          ; -- #!, for scripts
   ()                                    { do_bol }
@@ -366,23 +369,19 @@ $tab          { warnTab }
 }
 
 <0> {
-  "[|"        / { ifExtension thEnabled } { token ITopenExpQuote }
-  "[||"       / { ifExtension thEnabled } { token ITopenTExpQuote }
-  "[e|"       / { ifExtension thEnabled } { token ITopenExpQuote }
-  "[e||"      / { ifExtension thEnabled } { token ITopenTExpQuote }
-  "[p|"       / { ifExtension thEnabled } { token ITopenPatQuote }
-  "[d|"       / { ifExtension thEnabled } { layout_token ITopenDecQuote }
-  "[t|"       / { ifExtension thEnabled } { token ITopenTypQuote }
-  "|]"        / { ifExtension thEnabled } { token ITcloseQuote }
-  "||]"       / { ifExtension thEnabled } { token ITcloseTExpQuote }
+  "[|"        / { ifExtension thQuotesEnabled } { token (ITopenExpQuote NoE) }
+  "[||"       / { ifExtension thQuotesEnabled } { token (ITopenTExpQuote NoE) }
+  "[e|"       / { ifExtension thQuotesEnabled } { token (ITopenExpQuote HasE) }
+  "[e||"      / { ifExtension thQuotesEnabled } { token (ITopenTExpQuote HasE) }
+  "[p|"       / { ifExtension thQuotesEnabled } { token ITopenPatQuote }
+  "[d|"       / { ifExtension thQuotesEnabled } { layout_token ITopenDecQuote }
+  "[t|"       / { ifExtension thQuotesEnabled } { token ITopenTypQuote }
+  "|]"        / { ifExtension thQuotesEnabled } { token ITcloseQuote }
+  "||]"       / { ifExtension thQuotesEnabled } { token ITcloseTExpQuote }
   \$ @varid   / { ifExtension thEnabled } { skip_one_varid ITidEscape }
   "$$" @varid / { ifExtension thEnabled } { skip_two_varid ITidTyEscape }
   "$("        / { ifExtension thEnabled } { token ITparenEscape }
   "$$("       / { ifExtension thEnabled } { token ITparenTyEscape }
-
--- For backward compatibility, accept the old dollar syntax
-  "[$" @varid "|"  / { ifExtension qqEnabled }
-                     { lex_quasiquote_tok }
 
   "[" @varid "|"  / { ifExtension qqEnabled }
                      { lex_quasiquote_tok }
@@ -400,6 +399,11 @@ $tab          { warnTab }
 
 <0> {
   \? @varid / { ifExtension ipEnabled } { skip_one_varid ITdupipvarid }
+}
+
+<0> {
+  "#" @varid / { ifExtension overloadedLabelsEnabled }
+               { skip_one_varid ITlabelvarid }
 }
 
 <0> {
@@ -536,7 +540,7 @@ data Token
   | ITtype
   | ITwhere
 
-  | ITforall                    -- GHC extension keywords
+  | ITforall            IsUnicodeSyntax -- GHC extension keywords
   | ITexport
   | ITlabel
   | ITdynamic
@@ -588,20 +592,20 @@ data Token
 
   | ITdotdot                    -- reserved symbols
   | ITcolon
-  | ITdcolon
+  | ITdcolon            IsUnicodeSyntax
   | ITequal
   | ITlam
   | ITlcase
   | ITvbar
-  | ITlarrow
-  | ITrarrow
+  | ITlarrow            IsUnicodeSyntax
+  | ITrarrow            IsUnicodeSyntax
   | ITat
   | ITtilde
   | ITtildehsh
-  | ITdarrow
+  | ITdarrow            IsUnicodeSyntax
   | ITminus
   | ITbang
-  | ITstar
+  | ITstar              IsUnicodeSyntax
   | ITdot
 
   | ITbiglam                    -- GHC-extension symbols
@@ -634,6 +638,7 @@ data Token
   | ITqconsym (FastString,FastString)
 
   | ITdupipvarid   FastString   -- GHC extension: implicit param: ?x
+  | ITlabelvarid   FastString   -- Overloaded label: #x
 
   | ITchar     SourceText Char       -- Note [Literal source text] in BasicTypes
   | ITstring   SourceText FastString -- Note [Literal source text] in BasicTypes
@@ -648,12 +653,12 @@ data Token
   | ITprimdouble FractionalLit
 
   -- Template Haskell extension tokens
-  | ITopenExpQuote              --  [| or [e|
+  | ITopenExpQuote HasE         --  [| or [e|
   | ITopenPatQuote              --  [p|
   | ITopenDecQuote              --  [d|
   | ITopenTypQuote              --  [t|
   | ITcloseQuote                --  |]
-  | ITopenTExpQuote             --  [||
+  | ITopenTExpQuote HasE        --  [|| or [e||
   | ITcloseTExpQuote            --  ||]
   | ITidEscape   FastString     --  $x
   | ITparenEscape               --  $(
@@ -672,15 +677,15 @@ data Token
   -- Arrow notation extension
   | ITproc
   | ITrec
-  | IToparenbar                 --  (|
-  | ITcparenbar                 --  |)
-  | ITlarrowtail                --  -<
-  | ITrarrowtail                --  >-
-  | ITLarrowtail                --  -<<
-  | ITRarrowtail                --  >>-
+  | IToparenbar                  --  (|
+  | ITcparenbar                  --  |)
+  | ITlarrowtail IsUnicodeSyntax --  -<
+  | ITrarrowtail IsUnicodeSyntax --  >-
+  | ITLarrowtail IsUnicodeSyntax --  -<<
+  | ITRarrowtail IsUnicodeSyntax --  >>-
 
-  | ITunknown String            -- Used when the lexer can't make sense of it
-  | ITeof                       -- end of file token
+  | ITunknown String             -- Used when the lexer can't make sense of it
+  | ITeof                        -- end of file token
 
   -- Documentation annotations
   | ITdocCommentNext  String     -- something beginning '-- |'
@@ -734,7 +739,8 @@ reservedWordsFM = listToUFM $
          ( "type",           ITtype,          0 ),
          ( "where",          ITwhere,         0 ),
 
-         ( "forall",         ITforall,        xbit ExplicitForallBit .|.
+         ( "forall",         ITforall NormalSyntax,
+                                              xbit ExplicitForallBit .|.
                                               xbit InRulePragBit),
          ( "mdo",            ITmdo,           xbit RecursiveDoBit),
              -- See Note [Lexing type pseudo-keywords]
@@ -785,44 +791,49 @@ a key detail to make all this work.
 reservedSymsFM :: UniqFM (Token, ExtsBitmap -> Bool)
 reservedSymsFM = listToUFM $
     map (\ (x,y,z) -> (mkFastString x,(y,z)))
-      [ ("..",  ITdotdot,   always)
+      [ ("..",  ITdotdot,              always)
         -- (:) is a reserved op, meaning only list cons
-       ,(":",   ITcolon,    always)
-       ,("::",  ITdcolon,   always)
-       ,("=",   ITequal,    always)
-       ,("\\",  ITlam,      always)
-       ,("|",   ITvbar,     always)
-       ,("<-",  ITlarrow,   always)
-       ,("->",  ITrarrow,   always)
-       ,("@",   ITat,       always)
-       ,("~",   ITtilde,    always)
-       ,("~#",  ITtildehsh, magicHashEnabled)
-       ,("=>",  ITdarrow,   always)
-       ,("-",   ITminus,    always)
-       ,("!",   ITbang,     always)
+       ,(":",   ITcolon,               always)
+       ,("::",  ITdcolon NormalSyntax, always)
+       ,("=",   ITequal,               always)
+       ,("\\",  ITlam,                 always)
+       ,("|",   ITvbar,                always)
+       ,("<-",  ITlarrow NormalSyntax, always)
+       ,("->",  ITrarrow NormalSyntax, always)
+       ,("@",   ITat,                  always)
+       ,("~",   ITtilde,               always)
+       ,("~#",  ITtildehsh,            magicHashEnabled)
+       ,("=>",  ITdarrow NormalSyntax, always)
+       ,("-",   ITminus,               always)
+       ,("!",   ITbang,                always)
 
         -- For data T (a::*) = MkT
-       ,("*", ITstar, always) -- \i -> kindSigsEnabled i || tyFamEnabled i)
+       ,("*", ITstar NormalSyntax, always)
+                                  -- \i -> kindSigsEnabled i || tyFamEnabled i)
         -- For 'forall a . t'
        ,(".", ITdot,  always) -- \i -> explicitForallEnabled i || inRulePrag i)
 
-       ,("-<",  ITlarrowtail, arrowsEnabled)
-       ,(">-",  ITrarrowtail, arrowsEnabled)
-       ,("-<<", ITLarrowtail, arrowsEnabled)
-       ,(">>-", ITRarrowtail, arrowsEnabled)
+       ,("-<",  ITlarrowtail NormalSyntax, arrowsEnabled)
+       ,(">-",  ITrarrowtail NormalSyntax, arrowsEnabled)
+       ,("-<<", ITLarrowtail NormalSyntax, arrowsEnabled)
+       ,(">>-", ITRarrowtail NormalSyntax, arrowsEnabled)
 
-       ,("∷",   ITdcolon, unicodeSyntaxEnabled)
-       ,("⇒",   ITdarrow, unicodeSyntaxEnabled)
-       ,("∀",   ITforall, unicodeSyntaxEnabled)
-       ,("→",   ITrarrow, unicodeSyntaxEnabled)
-       ,("←",   ITlarrow, unicodeSyntaxEnabled)
+       ,("∷",   ITdcolon UnicodeSyntax, unicodeSyntaxEnabled)
+       ,("⇒",   ITdarrow UnicodeSyntax, unicodeSyntaxEnabled)
+       ,("∀",   ITforall UnicodeSyntax, unicodeSyntaxEnabled)
+       ,("→",   ITrarrow UnicodeSyntax, unicodeSyntaxEnabled)
+       ,("←",   ITlarrow UnicodeSyntax, unicodeSyntaxEnabled)
 
-       ,("⤙",   ITlarrowtail, \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
-       ,("⤚",   ITrarrowtail, \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
-       ,("⤛",   ITLarrowtail, \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
-       ,("⤜",   ITRarrowtail, \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+       ,("⤙",   ITlarrowtail UnicodeSyntax,
+                                \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+       ,("⤚",   ITrarrowtail UnicodeSyntax,
+                                \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+       ,("⤛",   ITLarrowtail UnicodeSyntax,
+                                \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+       ,("⤜",   ITRarrowtail UnicodeSyntax,
+                                \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
 
-       ,("★", ITstar, unicodeSyntaxEnabled)
+       ,("★", ITstar UnicodeSyntax, unicodeSyntaxEnabled)
 
         -- ToDo: ideally, → and ∷ should be "specials", so that they cannot
         -- form part of a large operator.  This would let us have a better
@@ -900,6 +911,10 @@ notFollowedBy char _ _ _ (AI _ buf)
 notFollowedBySymbol :: AlexAccPred ExtsBitmap
 notFollowedBySymbol _ _ _ (AI _ buf)
   = nextCharIsNot buf (`elem` "!#$%&*+./<=>?@\\^|-~")
+
+followedByDigit :: AlexAccPred ExtsBitmap
+followedByDigit _ _ _ (AI _ buf)
+  = afterOptionalSpace buf (\b -> nextCharIs b (`elem` ['0'..'9']))
 
 -- We must reject doc comments as being ordinary comments everywhere.
 -- In some cases the doc comment will be selected as the lexeme due to
@@ -1012,7 +1027,7 @@ withLexedDocType lexDocComment = do
   case prevChar buf ' ' of
     '|' -> lexDocComment input ITdocCommentNext False
     '^' -> lexDocComment input ITdocCommentPrev False
-    '$' -> lexDocComment input ITdocCommentNamed False
+    '$' -> lexDocComment input ITdocCommentNamed True
     '*' -> lexDocSection 1 input
     '#' -> lexDocComment input ITdocOptionsOld False
     _ -> panic "withLexedDocType: Bad doc type"
@@ -1495,7 +1510,6 @@ lex_escape = do
 
         'x'   -> readNum is_hexdigit 16 hexDigit
         'o'   -> readNum is_octdigit  8 octDecDigit
-        'b'   -> readNum is_bindigit  2 octDecDigit
         x | is_decdigit x -> readNum2 is_decdigit 10 octDecDigit (octDecDigit x)
 
         c1 ->  do
@@ -1732,13 +1746,18 @@ instance Functor P where
   fmap = liftM
 
 instance Applicative P where
-  pure  = return
+  pure = returnP
   (<*>) = ap
 
 instance Monad P where
-  return = returnP
+  return = pure
   (>>=) = thenP
   fail = failP
+
+#if __GLASGOW_HASKELL__ > 710
+instance MonadFail P where
+  fail = failP
+#endif
 
 returnP :: a -> P a
 returnP a = a `seq` (P $ \s -> POk s a)
@@ -1767,7 +1786,7 @@ getPState = P $ \s -> POk s s
 instance HasDynFlags P where
     getDynFlags = P $ \s -> POk s (dflags s)
 
-withThisPackage :: (PackageKey -> a) -> P a
+withThisPackage :: (UnitId -> a) -> P a
 withThisPackage f
  = do pkg <- liftM thisPackage getDynFlags
       return $ f pkg
@@ -1979,7 +1998,9 @@ data ExtBits
   | ParrBit
   | ArrowsBit
   | ThBit
+  | ThQuotesBit
   | IpBit
+  | OverloadedLabelsBit -- #x overloaded labels
   | ExplicitForallBit -- the 'forall' keyword and '.' symbol
   | BangPatBit -- Tells the parser to understand bang-patterns
                -- (doesn't affect the lexer)
@@ -2017,8 +2038,12 @@ arrowsEnabled :: ExtsBitmap -> Bool
 arrowsEnabled = xtest ArrowsBit
 thEnabled :: ExtsBitmap -> Bool
 thEnabled = xtest ThBit
+thQuotesEnabled :: ExtsBitmap -> Bool
+thQuotesEnabled = xtest ThQuotesBit
 ipEnabled :: ExtsBitmap -> Bool
 ipEnabled = xtest IpBit
+overloadedLabelsEnabled :: ExtsBitmap -> Bool
+overloadedLabelsEnabled = xtest OverloadedLabelsBit
 explicitForallEnabled :: ExtsBitmap -> Bool
 explicitForallEnabled = xtest ExplicitForallBit
 bangPatEnabled :: ExtsBitmap -> Bool
@@ -2107,8 +2132,10 @@ mkPState flags buf loc =
                .|. ParrBit                     `setBitIf` xopt Opt_ParallelArrays           flags
                .|. ArrowsBit                   `setBitIf` xopt Opt_Arrows                   flags
                .|. ThBit                       `setBitIf` xopt Opt_TemplateHaskell          flags
+               .|. ThQuotesBit                 `setBitIf` xopt Opt_TemplateHaskellQuotes    flags
                .|. QqBit                       `setBitIf` xopt Opt_QuasiQuotes              flags
                .|. IpBit                       `setBitIf` xopt Opt_ImplicitParams           flags
+               .|. OverloadedLabelsBit         `setBitIf` xopt Opt_OverloadedLabels         flags
                .|. ExplicitForallBit           `setBitIf` xopt Opt_ExplicitForAll           flags
                .|. BangPatBit                  `setBitIf` xopt Opt_BangPatterns             flags
                .|. HaddockBit                  `setBitIf` gopt Opt_Haddock                  flags

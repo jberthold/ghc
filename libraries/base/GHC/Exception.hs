@@ -2,6 +2,8 @@
 {-# LANGUAGE NoImplicitPrelude
            , ExistentialQuantification
            , MagicHash
+           , RecordWildCards
+           , PatternSynonyms
   #-}
 {-# OPTIONS_HADDOCK hide #-}
 
@@ -22,9 +24,12 @@
 module GHC.Exception
        ( Exception(..)    -- Class
        , throw
-       , SomeException(..), ErrorCall(..), ArithException(..)
+       , SomeException(..), ErrorCall(..), pattern ErrorCall, ArithException(..)
        , divZeroException, overflowException, ratioZeroDenomException
-       , errorCallException
+       , errorCallException, errorCallWithCallStackException
+       , showCallStack, popCallStack, showSrcLoc
+         -- re-export CallStack and SrcLoc from GHC.Types
+       , CallStack(..), SrcLoc(..)
        ) where
 
 import Data.Maybe
@@ -32,6 +37,10 @@ import Data.Typeable (Typeable, cast)
    -- loop: Data.Typeable -> GHC.Err -> GHC.Exception
 import GHC.Base
 import GHC.Show
+import GHC.Stack.Types
+import GHC.OldList
+import GHC.IO.Unsafe
+import {-# SOURCE #-} GHC.Stack.CCS
 
 {- |
 The @SomeException@ type is the root of the exception type hierarchy.
@@ -158,16 +167,64 @@ throw e = raise# (toException e)
 
 -- |This is thrown when the user calls 'error'. The @String@ is the
 -- argument given to 'error'.
-newtype ErrorCall = ErrorCall String
+data ErrorCall = ErrorCallWithLocation String String
     deriving (Eq, Ord)
+
+pattern ErrorCall err <- ErrorCallWithLocation err _ where
+  ErrorCall err = ErrorCallWithLocation err ""
 
 instance Exception ErrorCall
 
 instance Show ErrorCall where
-    showsPrec _ (ErrorCall err) = showString err
+  showsPrec _ (ErrorCallWithLocation err "") = showString err
+  showsPrec _ (ErrorCallWithLocation err loc) = showString (err ++ '\n' : loc)
 
 errorCallException :: String -> SomeException
 errorCallException s = toException (ErrorCall s)
+
+errorCallWithCallStackException :: String -> CallStack -> SomeException
+errorCallWithCallStackException s stk = unsafeDupablePerformIO $ do
+  ccsStack <- currentCallStack
+  let
+    implicitParamCallStack = showCallStackLines (popCallStack stk)
+    ccsCallStack = showCCSStack ccsStack
+    stack = intercalate "\n" $ implicitParamCallStack ++ ccsCallStack
+  return $ toException (ErrorCallWithLocation s stack)
+
+showCCSStack :: [String] -> [String]
+showCCSStack [] = []
+showCCSStack stk = "CallStack (from -prof):" : map ("  " ++) (reverse stk)
+
+-- | Pretty print 'SrcLoc'
+--
+-- @since 4.9.0.0
+showSrcLoc :: SrcLoc -> String
+showSrcLoc SrcLoc {..}
+  = foldr (++) ""
+      [ srcLocFile, ":"
+      , show srcLocStartLine, ":"
+      , show srcLocStartCol, " in "
+      , srcLocPackage, ":", srcLocModule
+      ]
+
+-- | Pretty print 'CallStack'
+--
+-- @since 4.9.0.0
+showCallStack :: CallStack -> String
+showCallStack = intercalate "\n" . showCallStackLines
+
+showCallStackLines :: CallStack -> [String]
+showCallStackLines (CallStack stk) =
+    "CallStack (from ImplicitParams):" : map (("  " ++) . showCallSite) stk
+  where
+    showCallSite (f, loc) = f ++ ", called at " ++ showSrcLoc loc
+
+-- | Remove the most recent callsite from the 'CallStack'
+--
+-- @since 4.9.0.0
+popCallStack :: CallStack -> CallStack
+popCallStack (CallStack (_:rest)) = CallStack rest
+popCallStack _ = error "CallStack cannot be empty!"
 
 -- |Arithmetic exceptions.
 data ArithException

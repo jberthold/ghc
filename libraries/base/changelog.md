@@ -1,8 +1,11 @@
 # Changelog for [`base` package](http://hackage.haskell.org/package/base)
 
-## 4.8.2.0  *TBA*
+## 4.9.0.0  *TBA*
 
-  * Bundled with GHC 7.12.1
+  * Bundled with GHC 8.0
+
+  * The restore operation provided by `mask` and `uninterruptibleMask` now
+    restores the previous masking state whatever the current masking state is.
 
   * `Alt`, `Dual`, `First`, `Last`, `Product`, and `Sum` now have `Data`,
     `MonadZip`, and `MonadFix` instances
@@ -19,17 +22,22 @@
 
   * `(,) a` now has a `Monad` instance
 
+  * `ZipList` now has `Foldable` and `Traversable` instances
+
+  * `Identity` now has a `Monoid` instance
+
+  * `()` now has a `Storable` instance
+
   * Redundant typeclass constraints have been removed:
      - `Data.Ratio.{denominator,numerator}` have no `Integral` constraint anymore
      - **TODO**
-
-  * New module `GHC.SrcLoc`
 
   * New `GHC.Generics.packageName` operation
 
   * New `GHC.Stack.CallStack` data type
 
-  * `Complex` now has a `Generic` instance
+  * `Complex` now has `Generic`, `Generic1`, `Functor`, `Foldable`, `Traversable`,
+    `Applicative`, and `Monad` instances
 
   * `System.Exit.ExitCode` now has a `Generic` instance
 
@@ -42,14 +50,68 @@
 
   * Generalise `forever` from `Monad` to `Applicative`
 
+  * Generalize `filterM`, `mapAndUnzipM`, `zipWithM`, `zipWithM_`, `replicateM`,
+    `replicateM` from `Monad` to `Applicative` (#10168)
+
   * Exported `GiveGCStats`, `DoCostCentres`, `DoHeapProfile`, `DoTrace`,
     `RtsTime`, and `RtsNat` from `GHC.RTS.Flags`
 
-## 4.8.1.0  *TBA*
+  * New function `GHC.IO.interruptible` used to correctly implement
+    `Control.Exception.allowInterrupt` (#9516)
+
+  * Made `PatternMatchFail`, `RecSelError`, `RecConError`, `RecUpdError`,
+    `NoMethodError`, and `AssertionFailed` newtypes (#10738)
+
+  * New module `Control.Monad.IO.Class` (previously provided by `transformers`
+    package). (#10773)
+
+  * New module `Control.Monad.Fail` providing new `MonadFail(fail)`
+    class (#10751)
+
+  * The `Generic` instance for `Proxy` is now poly-kinded (#10775)
+
+  * add `Data.List.NonEmpty` and `Data.Semigroup` (to become
+    super-class of `Monoid` in the future). These modules were
+    provided by the `semigroups` package previously. (#10365)
+
+  * Add `URec`, `UAddr`, `UChar`, `UDouble`, `UFloat`, `UInt`, and `UWord` to
+    `GHC.Generics` as part of making GHC generics capable of handling
+    unlifted types (#10868)
+
+  * Keep `shift{L,R}` on `Integer` with negative shift-arguments from
+    segfaulting (#10571)
+
+  * Add `forkOSWithUnmask` to `Control.Concurrent`, which is like
+    `forkIOWithUnmask`, but the child is run in a bound thread.
+
+  * The `MINIMAL` definition of `Arrow` is now `arr AND (first OR (***))`.
+
+  * The `MINIMAL` definition of `ArrowChoice` is now `left OR (+++)`.
+
+  * Add `MonadPlus IO` and `Alternative IO` instances
+    (previously orphans in `transformers`) (#10755)
+
+  * Add `GHC.TypeLits.TypeError` and `ErrorMessage` to allow users
+    to define custom compile-time error messages.
+
+## 4.8.2.0  *Oct 2015*
+
+  * Bundled with GHC 7.10.3
+
+  * The restore operation provided by `mask` and `uninterruptibleMask` now
+    restores the previous masking state whatever the current masking state is.
+
+  * Exported `GiveGCStats`, `DoCostCentres`, `DoHeapProfile`, `DoTrace`,
+    `RtsTime`, and `RtsNat` from `GHC.RTS.Flags`
+
+## 4.8.1.0  *Jul 2015*
 
   * Bundled with GHC 7.10.2
 
   * `Lifetime` is now exported from `GHC.Event`
+
+  * Implicit-parameter based source location support exposed in `GHC.SrcLoc`.
+    See GHC User's Manual for more information.
 
 ## 4.8.0.0  *Mar 2015*
 

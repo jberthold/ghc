@@ -46,8 +46,9 @@ Library
 
     Build-Depends: base       >= 4   && < 5,
                    directory  >= 1   && < 1.3,
-                   process    >= 1   && < 1.3,
+                   process    >= 1   && < 1.5,
                    bytestring >= 0.9 && < 0.11,
+                   binary     >= 0.7 && < 0.8,
                    time                 < 1.6,
                    containers >= 0.5 && < 0.6,
                    array      >= 0.1 && < 0.6,
@@ -55,7 +56,7 @@ Library
                    template-haskell,
                    hpc,
                    transformers,
-                   bin-package-db,
+                   ghc-boot,
                    hoopl
 
     if os(windows)
@@ -101,7 +102,7 @@ Library
     Include-Dirs: . parser utils
 
     if impl( ghc >= 7.9 )
-        -- We need to set the package key to ghc (without a version number)
+        -- We need to set the unit id to ghc (without a version number)
         -- as it's magic.  But we can't set it for old versions of GHC (e.g.
         -- when bootstrapping) because those versions of GHC don't understand
         -- that GHC is wired-in.
@@ -124,6 +125,7 @@ Library
         cbits/genSym.c
 
     hs-source-dirs:
+        backpack
         basicTypes
         cmm
         codeGen
@@ -158,6 +160,7 @@ Library
         Demand
         Debug
         Exception
+        FieldLabel
         GhcMonad
         Hooks
         Id
@@ -259,6 +262,8 @@ Library
         CoreTidy
         CoreUnfold
         CoreUtils
+        CoreSeq
+        CoreStats
         MkCore
         PprCore
         Check
@@ -328,6 +333,7 @@ Library
         StaticFlags
         StaticPtrTable
         SysTools
+        Elf
         TidyPgm
         Ctype
         HaddockUtils
@@ -410,6 +416,7 @@ Library
         TcErrors
         TcTyClsDecls
         TcTyDecls
+        TcTypeable
         TcType
         TcEvidence
         TcUnify
@@ -438,13 +445,13 @@ Library
         BufWrite
         Digraph
         Encoding
-        FastBool
         FastFunctions
         FastMutInt
         FastString
-        FastTypes
+        FastStringEnv
         Fingerprint
         FiniteMap
+        FV
         GraphBase
         GraphColor
         GraphOps
@@ -462,11 +469,11 @@ Library
         State
         Stream
         StringBuffer
+        UniqDFM
+        UniqDSet
         UniqFM
         UniqSet
         Util
-        ExtsCompat46
---      ^^^  a temporary module necessary to bootstrap with GHC <= 7.6
         Vectorise.Builtins.Base
         Vectorise.Builtins.Initialise
         Vectorise.Builtins

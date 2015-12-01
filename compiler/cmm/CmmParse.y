@@ -190,7 +190,10 @@ jump f (info_ptr, field1,..,fieldN) (arg1,..,argN)
 
 where info_ptr and field1..fieldN describe the stack frame, and
 arg1..argN are the arguments passed to f using the NativeNodeCall
-convention.
+convention. Note if a field is longer than a word (e.g. a D_ on
+a 32-bit machine) then the call will push as many words as
+necessary to the stack to accomodate it (e.g. 2).
+
 
 ----------------------------------------------------------------------------- -}
 
@@ -382,7 +385,7 @@ cmmdata :: { CmmParse () }
         : 'section' STRING '{' data_label statics '}' 
                 { do lbl <- $4;
                      ss <- sequence $5;
-                     code (emitDecl (CmmData (section $2) (Statics lbl $ concat ss))) }
+                     code (emitDecl (CmmData (Section (section $2) lbl) (Statics lbl $ concat ss))) }
 
 data_label :: { CmmParse CLabel }
     : NAME ':'  
@@ -574,7 +577,7 @@ importName
 
         -- A label imported with an explicit packageId.
         | STRING NAME
-        { ($2, mkCmmCodeLabel (fsToPackageKey (mkFastString $1)) $2) }
+        { ($2, mkCmmCodeLabel (fsToUnitId (mkFastString $1)) $2) }
         
         
 names   :: { [FastString] }
@@ -831,7 +834,7 @@ typenot8 :: { CmmType }
         | 'gcptr'               {% do dflags <- getDynFlags; return $ gcWord dflags }
 
 {
-section :: String -> Section
+section :: String -> SectionType
 section "text"      = Text
 section "data"      = Data
 section "rodata"    = ReadOnlyData
@@ -978,7 +981,12 @@ callishMachOps = listToUFM $
         ("prefetch0", (,) $ MO_Prefetch_Data 0),
         ("prefetch1", (,) $ MO_Prefetch_Data 1),
         ("prefetch2", (,) $ MO_Prefetch_Data 2),
-        ("prefetch3", (,) $ MO_Prefetch_Data 3)
+        ("prefetch3", (,) $ MO_Prefetch_Data 3),
+
+        ( "popcnt8",  (,) $ MO_PopCnt W8  ),
+        ( "popcnt16", (,) $ MO_PopCnt W16 ),
+        ( "popcnt32", (,) $ MO_PopCnt W32 ),
+        ( "popcnt64", (,) $ MO_PopCnt W64 )
 
         -- ToDo: the rest, maybe
         -- edit: which rest?
@@ -988,8 +996,7 @@ callishMachOps = listToUFM $
     memcpyLikeTweakArgs :: (Int -> CallishMachOp) -> [CmmExpr] -> (CallishMachOp, [CmmExpr])
     memcpyLikeTweakArgs op [] = pgmError "memcpy-like function requires at least one argument"
     memcpyLikeTweakArgs op args@(_:_) =
-        -- Force alignment with result to ensure pprPgmError fires
-        align `seq` (op align, args')
+        (op align, args')
       where
         args' = init args
         align = case last args of
@@ -1120,7 +1127,7 @@ profilingInfo dflags desc_str ty_str
     else ProfilingInfo (stringToWord8s desc_str)
                        (stringToWord8s ty_str)
 
-staticClosure :: PackageKey -> FastString -> FastString -> [CmmLit] -> CmmParse ()
+staticClosure :: UnitId -> FastString -> FastString -> [CmmLit] -> CmmParse ()
 staticClosure pkg cl_label info payload
   = do dflags <- getDynFlags
        let lits = mkStaticClosure dflags (mkCmmInfoLabel pkg info) dontCareCCS payload [] [] []
@@ -1269,7 +1276,7 @@ cmmRawIf cond then_id = do
 -- branching to true_id if so, and falling through otherwise.
 emitCond (BoolTest e) then_id = do
   else_id <- newBlockId
-  emit (mkCbranch e then_id else_id)
+  emit (mkCbranch e then_id else_id Nothing)
   emitLabel else_id
 emitCond (BoolNot (BoolTest (CmmMachOp op args))) then_id
   | Just op' <- maybeInvertComparison op

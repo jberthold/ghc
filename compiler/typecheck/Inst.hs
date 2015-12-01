@@ -18,7 +18,8 @@ module Inst (
 
        newClsInst,
        tcGetInsts, tcGetInstEnvs, getOverlapFlag,
-       tcExtendLocalInstEnv, instCallConstraints, newMethodFromName,
+       tcExtendLocalInstEnv,
+       instCallConstraints, newMethodFromName,
        tcSyntaxName,
 
        -- Simple functions over evidence variables
@@ -110,7 +111,7 @@ newMethodFromName origin name inst_ty
 
        ; wrap <- ASSERT( null rest && isSingleton theta )
                  instCall origin [inst_ty] (substTheta subst theta)
-       ; return (mkHsWrap wrap (HsVar id)) }
+       ; return (mkHsWrap wrap (HsVar (noLoc id))) }
 
 {-
 ************************************************************************
@@ -364,7 +365,7 @@ tcSyntaxName :: CtOrigin
 -- USED ONLY FOR CmdTop (sigh) ***
 -- See Note [CmdSyntaxTable] in HsExpr
 
-tcSyntaxName orig ty (std_nm, HsVar user_nm)
+tcSyntaxName orig ty (std_nm, HsVar (L _ user_nm))
   | std_nm == user_nm
   = do rhs <- newMethodFromName orig std_nm ty
        return (std_nm, rhs)
@@ -407,6 +408,9 @@ syntaxNameCtxt name orig ty tidy_env
 -}
 
 getOverlapFlag :: Maybe OverlapMode -> TcM OverlapFlag
+-- Construct the OverlapFlag from the global module flags,
+-- but if the overlap_mode argument is (Just m),
+--     set the OverlapMode to 'm'
 getOverlapFlag overlap_mode
   = do  { dflags <- getDynFlags
         ; let overlap_ok    = xopt Opt_OverlappingInstances dflags
@@ -438,7 +442,21 @@ newClsInst overlap_mode dfun_name tvs theta clas tys
              -- Not sure if this is really the right place to do so,
              -- but it'll do fine
        ; oflag <- getOverlapFlag overlap_mode
-       ; return (mkLocalInstance dfun oflag tvs' clas tys') }
+       ; let inst = mkLocalInstance dfun oflag tvs' clas tys'
+       ; dflags <- getDynFlags
+       ; warnIf (isOrphan (is_orphan inst) && wopt Opt_WarnOrphans dflags) (instOrphWarn inst)
+       ; return inst }
+
+instOrphWarn :: ClsInst -> SDoc
+instOrphWarn inst
+  = hang (ptext (sLit "Orphan instance:")) 2 (pprInstanceHdr inst)
+    $$ text "To avoid this"
+    $$ nest 4 (vcat possibilities)
+  where
+    possibilities =
+      text "move the instance declaration to the module of the class or of the type, or" :
+      text "wrap the type with a newtype and declare the instance on the new type." :
+      []
 
 tcExtendLocalInstEnv :: [ClsInst] -> TcM a -> TcM a
   -- Add new locally-defined instances
@@ -490,27 +508,26 @@ addLocalInst (home_ie, my_insts) ispec
                  | isGHCi    = deleteFromInstEnv home_ie ispec
                  | otherwise = home_ie
 
-               (_tvs, cls, tys) = instanceHead ispec
                -- If we're compiling sig-of and there's an external duplicate
                -- instance, silently ignore it (that's the instance we're
                -- implementing!)  NB: we still count local duplicate instances
                -- as errors.
                -- See Note [Signature files and type class instances]
-               global_ie
-                    | isJust (tcg_sig_of tcg_env) = emptyInstEnv
-                    | otherwise = eps_inst_env eps
-               inst_envs       = InstEnvs { ie_global  = global_ie
-                                          , ie_local   = home_ie'
-                                          , ie_visible = tcVisibleOrphanMods tcg_env }
-               (matches, _, _) = lookupInstEnv False inst_envs cls tys
-               dups            = filter (identicalClsInstHead ispec) (map fst matches)
+               global_ie | isJust (tcg_sig_of tcg_env) = emptyInstEnv
+                         | otherwise = eps_inst_env eps
+               inst_envs = InstEnvs { ie_global  = global_ie
+                                    , ie_local   = home_ie'
+                                    , ie_visible = tcVisibleOrphanMods tcg_env }
 
-             -- Check functional dependencies
-         ; case checkFunDeps inst_envs ispec of
-             Just specs -> funDepErr ispec specs
-             Nothing    -> return ()
+             -- Check for inconsistent functional dependencies
+         ; let inconsistent_ispecs = checkFunDeps inst_envs ispec
+         ; unless (null inconsistent_ispecs) $
+           funDepErr ispec inconsistent_ispecs
 
              -- Check for duplicate instance decls.
+         ; let (_tvs, cls, tys) = instanceHead ispec
+               (matches, _, _)  = lookupInstEnv False inst_envs cls tys
+               dups             = filter (identicalClsInstHead ispec) (map fst matches)
          ; unless (null dups) $
            dupInstErr ispec (head dups)
 

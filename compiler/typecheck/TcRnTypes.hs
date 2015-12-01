@@ -28,14 +28,18 @@ module TcRnTypes(
         IfGblEnv(..), IfLclEnv(..),
         tcVisibleOrphanMods,
 
+        -- Frontend types (shouldn't really be here)
+        FrontendResult(..),
+
         -- Renamer types
-        ErrCtxt, RecFieldEnv(..),
+        ErrCtxt, RecFieldEnv,
         ImportAvails(..), emptyImportAvails, plusImportAvails,
         WhereFrom(..), mkModDeps,
 
         -- Typechecker types
         TcTypeEnv, TcIdBinderStack, TcIdBinder(..),
         TcTyThing(..), PromotionErr(..),
+        SelfBootInfo(..),
         pprTcTyThingCategory, pprPECategory,
 
         -- Desugaring types
@@ -43,7 +47,8 @@ module TcRnTypes(
         DsMetaEnv, DsMetaVal(..),
 
         -- Template Haskell
-        ThStage(..), PendingStuff(..), topStage, topAnnStage, topSpliceStage,
+        ThStage(..), SpliceType(..), PendingStuff(..),
+        topStage, topAnnStage, topSpliceStage,
         ThLevel, impLevel, outerLevel, thLevel,
 
         -- Arrows
@@ -56,6 +61,7 @@ module TcRnTypes(
         isCDictCan_Maybe, isCFunEqCan_maybe,
         isCIrredEvCan, isCNonCanonical, isWantedCt, isDerivedCt,
         isGivenCt, isHoleCt, isOutOfScopeCt, isExprHoleCt, isTypeHoleCt,
+        isUserTypeErrorCt, getUserTypeErrorMsg,
         ctEvidence, ctLoc, setCtLoc, ctPred, ctFlavour, ctEqRel, ctOrigin,
         mkNonCanonical, mkNonCanonicalCt,
         ctEvPred, ctEvLoc, ctEvOrigin, ctEvEqRel,
@@ -89,7 +95,7 @@ module TcRnTypes(
 
         CtFlavour(..), ctEvFlavour,
         CtFlavourRole, ctEvFlavourRole, ctFlavourRole,
-        eqCanRewrite, eqCanRewriteFR, canDischarge, canDischargeF,
+        eqCanRewrite, eqCanRewriteFR, canDischarge, canDischargeFR,
 
         -- Pretty printing
         pprEvVarTheta,
@@ -113,6 +119,7 @@ import TyCon    ( TyCon )
 import ConLike  ( ConLike(..) )
 import DataCon  ( DataCon, dataConUserType, dataConOrigArgTys )
 import PatSyn   ( PatSyn, patSynType )
+import FieldLabel ( FieldLabel )
 import TcType
 import Annotations
 import InstEnv
@@ -139,8 +146,10 @@ import ListSetOps
 import FastString
 import GHC.Fingerprint
 
-import Data.Set (Set)
-import Control.Monad (ap, liftM)
+import Control.Monad (ap, liftM, msum)
+#if __GLASGOW_HASKELL__ > 710
+import qualified Control.Monad.Fail as MonadFail
+#endif
 
 #ifdef GHCI
 import Data.Map      ( Map )
@@ -325,6 +334,17 @@ data DsMetaVal
 ************************************************************************
 -}
 
+-- | 'FrontendResult' describes the result of running the
+-- frontend of a Haskell module.  Usually, you'll get
+-- a 'FrontendTypecheck', since running the frontend involves
+-- typechecking a program, but for an hs-boot merge you'll
+-- just get a ModIface, since no actual typechecking occurred.
+--
+-- This data type really should be in HscTypes, but it needs
+-- to have a TcGblEnv which is only defined here.
+data FrontendResult
+        = FrontendTypecheck TcGblEnv
+
 -- | 'TcGblEnv' describes the top-level of the module at the
 -- point at which the typechecker is finished work.
 -- It is this structure that is handed on to the desugarer
@@ -337,8 +357,6 @@ data TcGblEnv
           -- ^ What kind of module (regular Haskell, hs-boot, hsig)
         tcg_sig_of  :: Maybe Module,
           -- ^ Are we being compiled as a signature of an implementation?
-        tcg_mod_name :: Maybe (Located ModuleName),
-          -- ^ @Nothing@: \"module X where\" is omitted
         tcg_impl_rdr_env :: Maybe GlobalRdrEnv,
           -- ^ Environment used only during -sig-of for resolving top level
           -- bindings.  See Note [Signature parameters in TcGblEnv and DynFlags]
@@ -384,8 +402,8 @@ data TcGblEnv
           -- things bound in this module. Also store Safe Haskell info
           -- here about transative trusted packaage requirements.
 
-        tcg_dus :: DefUses,   -- ^ What is defined in this module and what is used.
-        tcg_used_rdrnames :: TcRef (Set RdrName),
+        tcg_dus       :: DefUses,   -- ^ What is defined in this module and what is used.
+        tcg_used_gres :: TcRef [GlobalRdrElt],  -- ^ Records occurrences of imported entities
           -- See Note [Tracking unused binding and imports]
 
         tcg_keep :: TcRef NameSet,
@@ -430,6 +448,8 @@ data TcGblEnv
 
         tcg_rn_exports :: Maybe [Located (IE Name)],
                 -- Nothing <=> no explicit export list
+                -- Is always Nothing if we don't want to retain renamed
+                -- exports
 
         tcg_rn_imports :: [LImportDecl Name],
                 -- Keep the renamed imports regardless.  They are not
@@ -460,6 +480,9 @@ data TcGblEnv
         -- Things defined in this module, or (in GHCi)
         -- in the declarations for a single GHCi command.
         -- For the latter, see Note [The interactive package] in HscTypes
+        tcg_tr_module :: Maybe Id,           -- Id for $trModule :: GHC.Types.Module
+                                             -- for which every module has a top-level defn
+                                             -- except in GHCi in which case we have Nothing
         tcg_binds     :: LHsBinds Id,        -- Value bindings in this module
         tcg_sigs      :: NameSet,            -- ...Top-level names that *lack* a signature
         tcg_imp_specs :: [LTcSpecPrag],      -- ...SPECIALISE prags for imported Ids
@@ -476,6 +499,9 @@ data TcGblEnv
         tcg_doc_hdr   :: Maybe LHsDocString, -- ^ Maybe Haddock header docs
         tcg_hpc       :: AnyHpcUsage,        -- ^ @True@ if any part of the
                                              --  prog uses hpc instrumentation.
+
+        tcg_self_boot :: SelfBootInfo,       -- ^ Whether this module has a
+                                             -- corresponding hi-boot file
 
         tcg_main      :: Maybe Name,         -- ^ The Name of the main
                                              -- function, if this module is
@@ -547,23 +573,28 @@ tcVisibleOrphanMods tcg_env
 instance ContainsModule TcGblEnv where
     extractModule env = tcg_mod env
 
-data RecFieldEnv
-  = RecFields (NameEnv [Name])  -- Maps a constructor name *in this module*
-                                -- to the fields for that constructor
-              NameSet           -- Set of all fields declared *in this module*;
-                                -- used to suppress name-shadowing complaints
-                                -- when using record wild cards
-                                -- E.g.  let fld = e in C {..}
+type RecFieldEnv = NameEnv [FieldLabel]
+        -- Maps a constructor name *in this module*
+        -- to the fields for that constructor.
         -- This is used when dealing with ".." notation in record
         -- construction and pattern matching.
         -- The FieldEnv deals *only* with constructors defined in *this*
         -- module.  For imported modules, we get the same info from the
         -- TypeEnv
 
-{-
-Note [Tracking unused binding and imports]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+data SelfBootInfo
+  = NoSelfBoot    -- No corresponding hi-boot file
+  | SelfBoot
+       { sb_mds :: ModDetails   -- There was a hi-boot file,
+       , sb_tcs :: NameSet      -- defining these TyCons,
+       , sb_ids :: NameSet }    -- and these Ids
+  -- We need this info to compute a safe approximation to
+  -- recursive loops, to avoid infinite inlinings
+
+{- Note [Tracking unused binding and imports]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We gather two sorts of usage information
+
  * tcg_dus (defs/uses)
       Records *defined* Names (local, top-level)
           and *used*    Names (local or imported)
@@ -575,13 +606,15 @@ We gather two sorts of usage information
    This usage info is mainly gathered by the renamer's
    gathering of free-variables
 
- * tcg_used_rdrnames
-      Records used *imported* (not locally-defined) RdrNames
+ * tcg_used_gres
       Used only to report unused import declarations
-      Notice that they are RdrNames, not Names, so we can
-      tell whether the reference was qualified or unqualified, which
-      is esssential in deciding whether a particular import decl
-      is unnecessary.  This info isn't present in Names.
+
+      Records each *occurrence* an *imported* (not locally-defined) entity.
+      The occurrence is recorded by keeping a GlobalRdrElt for it.
+      These is not the GRE that is in the GlobalRdrEnv; rather it
+      is recorded *after* the filtering done by pickGREs.  So it reflect
+      /how that occurrence is in scope/.   See Note [GRE filtering] in
+      RdrName.
 
 
 ************************************************************************
@@ -704,12 +737,13 @@ instance Outputable TcIdBinder where
 -- Template Haskell stages and levels
 ---------------------------
 
+data SpliceType = Typed | Untyped
+
 data ThStage    -- See Note [Template Haskell state diagram] in TcSplice
-  = Splice      -- Inside a top-level splice splice
-                -- This code will be run *at compile time*;
-                --   the result replaces the splice
-                -- Binding level = 0
-      Bool      -- True if in a typed splice, False otherwise
+  = Splice SpliceType -- Inside a top-level splice
+                      -- This code will be run *at compile time*;
+                      --   the result replaces the splice
+                      -- Binding level = 0
 
   | Comp        -- Ordinary Haskell code
                 -- Binding level = 1
@@ -730,8 +764,8 @@ data PendingStuff
 
 topStage, topAnnStage, topSpliceStage :: ThStage
 topStage       = Comp
-topAnnStage    = Splice False
-topSpliceStage = Splice False
+topAnnStage    = Splice Untyped
+topSpliceStage = Splice Untyped
 
 instance Outputable ThStage where
    ppr (Splice _)  = text "Splice"
@@ -866,7 +900,7 @@ pprPECategory RecDataConPE = ptext (sLit "Data constructor")
 pprPECategory NoDataKinds  = ptext (sLit "Data constructor")
 
 {- Note [Bindings with closed types]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider
 
   f x = let g ys = map not ys
@@ -882,6 +916,8 @@ Definition:
 iff
    a) all its free variables are imported, or are let-bound with closed types
    b) generalisation is not restricted by the monomorphism restriction
+
+Invariant: a closed variable has no free type variables in its type.
 
 Under OutsideIn we are free to generalise a closed let-binding.
 This is an extension compared to the JFP paper on OutsideIn, which
@@ -933,27 +969,11 @@ type ErrCtxt = (Bool, TidyEnv -> TcM (TidyEnv, MsgDoc))
 data ImportAvails
    = ImportAvails {
         imp_mods :: ImportedMods,
-          --      = ModuleEnv [(ModuleName, Bool, SrcSpan, Bool)],
+          --      = ModuleEnv [ImportedModsVal],
           -- ^ Domain is all directly-imported modules
-          -- The 'ModuleName' is what the module was imported as, e.g. in
-          -- @
-          --     import Foo as Bar
-          -- @
-          -- it is @Bar@.
           --
-          -- The 'Bool' means:
-          --
-          --  - @True@ => import was @import Foo ()@
-          --
-          --  - @False@ => import was some other form
-          --
-          -- Used
-          --
-          --   (a) to help construct the usage information in the interface
-          --       file; if we import something we need to recompile if the
-          --       export version changes
-          --
-          --   (b) to specify what child modules to initialise
+          -- See the documentaion on ImportedModsVal in HscTypes for the
+          -- meaning of the fields.
           --
           -- We need a full ModuleEnv rather than a ModuleNameEnv here,
           -- because we might be importing modules of the same name from
@@ -970,17 +990,17 @@ data ImportAvails
           -- compiling M might not need to consult X.hi, but X
           -- is still listed in M's dependencies.
 
-        imp_dep_pkgs :: [PackageKey],
+        imp_dep_pkgs :: [UnitId],
           -- ^ Packages needed by the module being compiled, whether directly,
           -- or via other modules in this package, or via modules imported
           -- from other packages.
 
-        imp_trust_pkgs :: [PackageKey],
+        imp_trust_pkgs :: [UnitId],
           -- ^ This is strictly a subset of imp_dep_pkgs and records the
           -- packages the current module needs to trust for Safe Haskell
           -- compilation to succeed. A package is required to be trusted if
           -- we are dependent on a trustworthy module in that package.
-          -- While perhaps making imp_dep_pkgs a tuple of (PackageKey, Bool)
+          -- While perhaps making imp_dep_pkgs a tuple of (UnitId, Bool)
           -- where True for the bool indicates the package is required to be
           -- trusted is the more logical  design, doing so complicates a lot
           -- of code not concerned with Safe Haskell.
@@ -1135,7 +1155,6 @@ data Ct
        --   * isTypeFamilyTyCon cc_fun
        --   * typeKind (F xis) = tyVarKind fsk
        --   * always Nominal role
-       --   * always Given or Wanted, never Derived
       cc_ev     :: CtEvidence,  -- See Note [Ct/evidence invariant]
       cc_fun    :: TyCon,       -- A type function
 
@@ -1409,6 +1428,24 @@ isExprHoleCt _ = False
 isTypeHoleCt :: Ct -> Bool
 isTypeHoleCt (CHoleCan { cc_hole = TypeHole }) = True
 isTypeHoleCt _ = False
+
+-- | The following constraints are considered to be a custom type error:
+--    1. TypeError msg
+--    2. TypeError msg ~ Something  (and the other way around)
+--    3. C (TypeError msg)          (for any parameter of class constraint)
+getUserTypeErrorMsg :: Ct -> Maybe (Kind, Type)
+getUserTypeErrorMsg ct
+  | Just (_,t1,t2) <- getEqPredTys_maybe ctT    = oneOf [t1,t2]
+  | Just (_,ts)    <- getClassPredTys_maybe ctT = oneOf ts
+  | otherwise                                   = isUserErrorTy ctT
+  where
+  ctT       = ctPred ct
+  oneOf xs  = msum (map isUserErrorTy xs)
+
+isUserTypeErrorCt :: Ct -> Bool
+isUserTypeErrorCt ct = case getUserTypeErrorMsg ct of
+                         Just _ -> True
+                         _      -> False
 
 instance Outputable Ct where
   ppr ct = ppr (cc_ev ct) <+> parens (text ct_sort)
@@ -1842,7 +1879,8 @@ ctFlavourRole = ctEvFlavourRole . cc_ev
 ~~~~~~~~~~~~~~~~~~~
 (eqCanRewrite ct1 ct2) holds if the constraint ct1 (a CTyEqCan of form
 tv ~ ty) can be used to rewrite ct2.  It must satisfy the properties of
-a can-rewrite relation, see Definition [Can-rewrite relation]
+a can-rewrite relation, see Definition [Can-rewrite relation] in
+TcSMonad.
 
 With the solver handling Coercible constraints like equality constraints,
 the rewrite conditions must take role into account, never allowing
@@ -1868,7 +1906,8 @@ improvement works; see Note [The improvement story] in TcInteract.
 However, for now at least I'm only letting (Derived,NomEq) rewrite
 (Derived,NomEq) and not doing anything for ReprEq.  If we have
     eqCanRewriteFR (Derived, NomEq) (Derived, _)  = True
-then we lose the property of Note [Can-rewrite relation]
+then we lose property R2 of Definition [Can-rewrite relation]
+in TcSMonad
   R2.  If f1 >= f, and f2 >= f,
        then either f1 >= f2 or f2 >= f1
 Consider f1 = (Given, ReprEq)
@@ -1880,12 +1919,27 @@ we can; straight from the Wanteds during improvment. And from a Derived
 ReprEq we could conceivably get a Derived NomEq improvment (by decomposing
 a type constructor with Nomninal role), and hence unify.
 
-Note [canRewriteOrSame]
-~~~~~~~~~~~~~~~~~~~~~~~
-canRewriteOrSame is similar but
- * returns True for Wanted/Wanted.
- * works for all kinds of constraints, not just CTyEqCans
-See the call sites for explanations.
+Note [canDischarge]
+~~~~~~~~~~~~~~~~~~~
+(x1:c1 `canDischarge` x2:c2) returns True if we can use c1 to
+/discharge/ c2; that is, if we can simply drop (x2:c2) altogether,
+perhaps adding a binding for x2 in terms of x1.  We only ask this
+question in two cases:
+
+* Identical equality constraints:
+      (x1:s~t) `canDischarge` (xs:s~t)
+  In this case we can just drop x2 in favour of x1.
+
+* Function calls with the same LHS:
+    (x1:F ts ~ f1) `canDischarge` (x2:F ts ~ f2)
+  Here we can drop x2 in favour of x1, either unifying
+  f2 (if it's a flatten meta-var) or adding a new Given
+  (f1 ~ f2), if x2 is a Given.
+
+This is different from eqCanRewrite; for exammple, a Wanted
+can certainly discharge an identical Wanted.  So canDicharge
+does /not/ define a can-rewrite relation in the sense of
+Definition [Can-rewrite relation] in TcSMonad.
 -}
 
 eqCanRewrite :: CtEvidence -> CtEvidence -> Bool
@@ -1902,15 +1956,16 @@ eqCanRewriteFR (Derived, NomEq)   (Derived, NomEq)  = True
 eqCanRewriteFR _                 _                  = False
 
 canDischarge :: CtEvidence -> CtEvidence -> Bool
--- See Note [canRewriteOrSame]
-canDischarge ev1 ev2 = ctEvFlavour ev1 `canDischargeF` ctEvFlavour ev2
+-- See Note [canDischarge]
+canDischarge ev1 ev2 = ctEvFlavourRole ev1 `canDischargeFR` ctEvFlavourRole ev2
 
-canDischargeF :: CtFlavour -> CtFlavour -> Bool
-canDischargeF Given  _        = True
-canDischargeF Wanted Wanted   = True
-canDischargeF Wanted Derived  = True
-canDischargeF Derived Derived = True
-canDischargeF _       _       = False
+canDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
+canDischargeFR (_, ReprEq)  (_, NomEq)   = False
+canDischargeFR (Given, _)   _            = True
+canDischargeFR (Wanted, _)  (Wanted, _)  = True
+canDischargeFR (Wanted, _)  (Derived, _) = True
+canDischargeFR (Derived, _) (Derived, _) = True
+canDischargeFR _             _           = False
 
 
 {-
@@ -2116,7 +2171,7 @@ pprSkolInfo (InstSC n)        = ptext (sLit "the instance declaration") <> ifPpr
 pprSkolInfo DataSkol          = ptext (sLit "a data type declaration")
 pprSkolInfo FamInstSkol       = ptext (sLit "a family instance declaration")
 pprSkolInfo BracketSkol       = ptext (sLit "a Template Haskell bracket")
-pprSkolInfo (RuleSkol name)   = ptext (sLit "the RULE") <+> doubleQuotes (ftext name)
+pprSkolInfo (RuleSkol name)   = ptext (sLit "the RULE") <+> pprRuleName name
 pprSkolInfo ArrowSkol         = ptext (sLit "an arrow form")
 pprSkolInfo (PatSkol cl mc)   = sep [ pprPatSkolInfo cl
                                     , ptext (sLit "in") <+> pprMatchContext mc ]
@@ -2137,8 +2192,8 @@ pprSigSkolInfo ctxt ty
        _              -> hang (pprUserTypeCtxt ctxt <> colon)
                             2 (ppr ty)
   where
-    pp_sig f = sep [ ptext (sLit "the type signature for:")
-                   , pprPrefixOcc f <+> dcolon <+> ppr ty ]
+    pp_sig f = vcat [ ptext (sLit "the type signature for:")
+                    , nest 2 (pprPrefixOcc f <+> dcolon <+> ppr ty) ]
 
 pprPatSkolInfo :: ConLike -> SDoc
 pprPatSkolInfo (RealDataCon dc)
@@ -2167,6 +2222,7 @@ data CtOrigin
 
   -- All the others are for *wanted* constraints
   | OccurrenceOf Name              -- Occurrence of an overloaded identifier
+  | OccurrenceOfRecSel RdrName     -- Occurrence of a record selector
   | AppOrigin                      -- An application of some kind
 
   | SpecPragOrigin UserTypeCtxt    -- Specialisation pragma for
@@ -2179,6 +2235,7 @@ data CtOrigin
       CtOrigin                  -- originally arising from this
 
   | IPOccOrigin  HsIPName       -- Occurrence of an implicit parameter
+  | OverLabelOrigin FastString  -- Occurrence of an overloaded label
 
   | LiteralOrigin (HsOverLit Name)      -- Occurrence of a literal
   | NegateOrigin                        -- Occurrence of syntactic negation
@@ -2207,7 +2264,11 @@ data CtOrigin
   | StandAloneDerivOrigin -- Typechecking stand-alone deriving
   | DefaultOrigin       -- Typechecking a default decl
   | DoOrigin            -- Arising from a do expression
+  | DoPatOrigin (LPat Name) -- Arising from a failable pattern in
+                            -- a do expression
   | MCompOrigin         -- Arising from a monad comprehension
+  | MCompPatOrigin (LPat Name) -- Arising from a failable pattern in a
+                               -- monad comprehension
   | IfOrigin            -- Arising from an if statement
   | ProcOrigin          -- Arising from a proc expression
   | AnnOrigin           -- An annotation
@@ -2226,6 +2287,9 @@ data CtOrigin
   | UnboundOccurrenceOf RdrName
   | ListOrigin          -- An overloaded list
   | StaticOrigin        -- A static form
+  | FailablePattern (LPat TcId) -- A failable pattern in do-notation for the
+                                -- MonadFail Proposal (MFP). Obsolete when
+                                -- actual desugaring to MonadFail.fail is live.
 
 ctoHerald :: SDoc
 ctoHerald = ptext (sLit "arising from")
@@ -2279,14 +2343,31 @@ pprCtOrigin (DerivOriginCoerce meth ty1 ty2)
        2 (sep [ text "from type" <+> quotes (ppr ty1)
               , nest 2 $ text "to type" <+> quotes (ppr ty2) ])
 
+pprCtOrigin (DoPatOrigin pat)
+    = ctoHerald <+> text "a do statement"
+      $$
+      text "with the failable pattern" <+> quotes (ppr pat)
+
+pprCtOrigin (MCompPatOrigin pat)
+    = ctoHerald <+> hsep [ text "the failable pattern"
+           , quotes (ppr pat)
+           , text "in a statement in a monad comprehension" ]
+pprCtOrigin (FailablePattern pat)
+    = ctoHerald <+> text "the failable pattern" <+> quotes (ppr pat)
+      $$
+      text "(this will become an error a future GHC release)"
+
 pprCtOrigin simple_origin
   = ctoHerald <+> pprCtO simple_origin
 
-----------------
-pprCtO :: CtOrigin -> SDoc  -- Ones that are short one-liners
+-- | Short one-liners
+pprCtO :: CtOrigin -> SDoc
 pprCtO (OccurrenceOf name)   = hsep [ptext (sLit "a use of"), quotes (ppr name)]
+pprCtO (OccurrenceOfRecSel name) = hsep [ptext (sLit "a use of"), quotes (ppr name)]
 pprCtO AppOrigin             = ptext (sLit "an application")
 pprCtO (IPOccOrigin name)    = hsep [ptext (sLit "a use of implicit parameter"), quotes (ppr name)]
+pprCtO (OverLabelOrigin l)   = hsep [ptext (sLit "the overloaded label")
+                                    ,quotes (char '#' <> ppr l)]
 pprCtO RecordUpdOrigin       = ptext (sLit "a record update")
 pprCtO ExprSigOrigin         = ptext (sLit "an expression type signature")
 pprCtO PatSigOrigin          = ptext (sLit "a pattern type signature")
@@ -2299,13 +2380,13 @@ pprCtO (PArrSeqOrigin seq)   = hsep [ptext (sLit "the parallel array sequence"),
 pprCtO SectionOrigin         = ptext (sLit "an operator section")
 pprCtO TupleOrigin           = ptext (sLit "a tuple")
 pprCtO NegateOrigin          = ptext (sLit "a use of syntactic negation")
-pprCtO (ScOrigin n)          = ptext (sLit "the superclasses of an instance declaration") 
+pprCtO (ScOrigin n)          = ptext (sLit "the superclasses of an instance declaration")
                                <> ifPprDebug (parens (ppr n))
 pprCtO DerivOrigin           = ptext (sLit "the 'deriving' clause of a data type declaration")
 pprCtO StandAloneDerivOrigin = ptext (sLit "a 'deriving' declaration")
 pprCtO DefaultOrigin         = ptext (sLit "a 'default' declaration")
 pprCtO DoOrigin              = ptext (sLit "a do statement")
-pprCtO MCompOrigin           = ptext (sLit "a statement in a monad comprehension")
+pprCtO MCompOrigin           = text "a statement in a monad comprehension"
 pprCtO ProcOrigin            = ptext (sLit "a proc expression")
 pprCtO (TypeEqOrigin t1 t2)  = ptext (sLit "a type equality") <+> sep [ppr t1, char '~', ppr t2]
 pprCtO AnnOrigin             = ptext (sLit "an annotation")
@@ -2330,15 +2411,20 @@ instance Functor     TcPluginM where
   fmap = liftM
 
 instance Applicative TcPluginM where
-  pure  = return
+  pure x = TcPluginM (const $ pure x)
   (<*>) = ap
 
 instance Monad TcPluginM where
-  return x = TcPluginM (const $ return x)
+  return = pure
   fail x   = TcPluginM (const $ fail x)
   TcPluginM m >>= k =
     TcPluginM (\ ev -> do a <- m ev
                           runTcPluginM (k a) ev)
+
+#if __GLASGOW_HASKELL__ > 710
+instance MonadFail.MonadFail TcPluginM where
+  fail x   = TcPluginM (const $ fail x)
+#endif
 
 runTcPluginM :: TcPluginM a -> Maybe EvBindsVar -> TcM a
 runTcPluginM (TcPluginM m) = m

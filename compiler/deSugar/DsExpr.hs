@@ -33,6 +33,7 @@ import TcType
 import Coercion ( Role(..) )
 import TcEvidence
 import TcRnMonad
+import TcHsSyn
 import Type
 import CoreSyn
 import CoreUtils
@@ -56,7 +57,9 @@ import Util
 import Bag
 import Outputable
 import FastString
+import PatSyn
 
+import IfaceEnv
 import IdInfo
 import Data.IORef       ( atomicModifyIORef', modifyIORef )
 
@@ -106,16 +109,17 @@ ds_val_bind (NonRecursive, hsbinds) body
         -- ToDo: in some bizarre case it's conceivable that there
         --       could be dict binds in the 'binds'.  (See the notes
         --       below.  Then pattern-match would fail.  Urk.)
-    strictMatchOnly bind
-  = putSrcSpanDs loc (dsStrictBind bind body)
+    unliftedMatchOnly bind
+  = putSrcSpanDs loc (dsUnliftedBind bind body)
 
 -- Ordinary case for bindings; none should be unlifted
 ds_val_bind (_is_rec, binds) body
-  = do  { prs <- dsLHsBinds binds
+  = do  { (force_vars,prs) <- dsLHsBinds binds
+        ; let body' = foldr seqVar body force_vars
         ; ASSERT2( not (any (isUnLiftedType . idType . fst) prs), ppr _is_rec $$ ppr binds )
           case prs of
             [] -> return body
-            _  -> return (Let (Rec prs) body) }
+            _  -> return (Let (Rec prs) body') }
         -- Use a Rec regardless of is_rec.
         -- Why? Because it allows the binds to be all
         -- mixed up, which is what happens in one rare case
@@ -128,29 +132,31 @@ ds_val_bind (_is_rec, binds) body
         --    only have to deal with lifted ones now; so Rec is ok
 
 ------------------
-dsStrictBind :: HsBind Id -> CoreExpr -> DsM CoreExpr
-dsStrictBind (AbsBinds { abs_tvs = [], abs_ev_vars = []
+dsUnliftedBind :: HsBind Id -> CoreExpr -> DsM CoreExpr
+dsUnliftedBind (AbsBinds { abs_tvs = [], abs_ev_vars = []
                , abs_exports = exports
                , abs_ev_binds = ev_binds
                , abs_binds = lbinds }) body
   = do { let body1 = foldr bind_export body exports
              bind_export export b = bindNonRec (abe_poly export) (Var (abe_mono export)) b
-       ; body2 <- foldlBagM (\body lbind -> dsStrictBind (unLoc lbind) body)
+       ; body2 <- foldlBagM (\body lbind -> dsUnliftedBind (unLoc lbind) body)
                             body1 lbinds
        ; ds_binds <- dsTcEvBinds_s ev_binds
        ; return (mkCoreLets ds_binds body2) }
 
-dsStrictBind (FunBind { fun_id = L _ fun, fun_matches = matches, fun_co_fn = co_fn
-                      , fun_tick = tick, fun_infix = inf }) body
-                -- Can't be a bang pattern (that looks like a PatBind)
-                -- so must be simply unboxed
-  = do { (args, rhs) <- matchWrapper (FunRhs (idName fun ) inf) matches
+dsUnliftedBind (FunBind { fun_id = L _ fun
+                        , fun_matches = matches
+                        , fun_co_fn = co_fn
+                        , fun_tick = tick }) body
+               -- Can't be a bang pattern (that looks like a PatBind)
+               -- so must be simply unboxed
+  = do { (args, rhs) <- matchWrapper (FunRhs (idName fun)) matches
        ; MASSERT( null args ) -- Functions aren't lifted
        ; MASSERT( isIdHsWrapper co_fn )
        ; let rhs' = mkOptTickBox tick rhs
        ; return (bindNonRec fun rhs' body) }
 
-dsStrictBind (PatBind {pat_lhs = pat, pat_rhs = grhss, pat_rhs_ty = ty }) body
+dsUnliftedBind (PatBind {pat_lhs = pat, pat_rhs = grhss, pat_rhs_ty = ty }) body
   =     -- let C x# y# = rhs in body
         -- ==> case rhs of C x# y# -> body
     do { rhs <- dsGuarded grhss ty
@@ -161,19 +167,19 @@ dsStrictBind (PatBind {pat_lhs = pat, pat_rhs = grhss, pat_rhs_ty = ty }) body
        ; result <- matchEquations PatBindRhs [var] [eqn] (exprType body)
        ; return (bindNonRec var rhs result) }
 
-dsStrictBind bind body = pprPanic "dsLet: unlifted" (ppr bind $$ ppr body)
+dsUnliftedBind bind body = pprPanic "dsLet: unlifted" (ppr bind $$ ppr body)
 
 ----------------------
-strictMatchOnly :: HsBind Id -> Bool
-strictMatchOnly (AbsBinds { abs_binds = lbinds })
-  = anyBag (strictMatchOnly . unLoc) lbinds
-strictMatchOnly (PatBind { pat_lhs = lpat, pat_rhs_ty = rhs_ty })
+unliftedMatchOnly :: HsBind Id -> Bool
+unliftedMatchOnly (AbsBinds { abs_binds = lbinds })
+  = anyBag (unliftedMatchOnly . unLoc) lbinds
+unliftedMatchOnly (PatBind { pat_lhs = lpat, pat_rhs_ty = rhs_ty })
   =  isUnLiftedType rhs_ty
-  || isStrictLPat lpat
+  || isUnliftedLPat lpat
   || any (isUnLiftedType . idType) (collectPatBinders lpat)
-strictMatchOnly (FunBind { fun_id = L _ id })
+unliftedMatchOnly (FunBind { fun_id = L _ id })
   = isUnLiftedType (idType id)
-strictMatchOnly _ = False -- I hope!  Checked immediately by caller in fact
+unliftedMatchOnly _ = False -- I hope!  Checked immediately by caller in fact
 
 {-
 ************************************************************************
@@ -190,9 +196,11 @@ dsLExpr (L loc e) = putSrcSpanDs loc $ dsExpr e
 dsExpr :: HsExpr Id -> DsM CoreExpr
 dsExpr (HsPar e)              = dsLExpr e
 dsExpr (ExprWithTySigOut e _) = dsLExpr e
-dsExpr (HsVar var)            = return (varToCoreExpr var)   -- See Note [Desugaring vars]
+dsExpr (HsVar (L _ var))      = return (varToCoreExpr var)
+                                -- See Note [Desugaring vars]
 dsExpr (HsUnboundVar {})      = panic "dsExpr: HsUnboundVar" -- Typechecker eliminates them
 dsExpr (HsIPVar _)            = panic "dsExpr: HsIPVar"
+dsExpr (HsOverLabel _)        = panic "dsExpr: HsOverLabel"
 dsExpr (HsLit lit)            = dsLit lit
 dsExpr (HsOverLit lit)        = dsOverLit lit
 
@@ -214,8 +222,8 @@ dsExpr (HsLamCase arg matches)
        ; ([discrim_var], matching_code) <- matchWrapper CaseAlt matches
        ; return $ Lam arg_var $ bindNonRec discrim_var (Var arg_var) matching_code }
 
-dsExpr (HsApp fun arg)
-  = mkCoreAppDs <$> dsLExpr fun <*>  dsLExpr arg
+dsExpr e@(HsApp fun arg)
+  = mkCoreAppDs (text "HsApp" <+> ppr e) <$> dsLExpr fun <*>  dsLExpr arg
 
 
 {-
@@ -257,15 +265,15 @@ If \tr{expr} is actually just a variable, say, then the simplifier
 will sort it out.
 -}
 
-dsExpr (OpApp e1 op _ e2)
+dsExpr e@(OpApp e1 op _ e2)
   = -- for the type of y, we need the type of op's 2nd argument
-    mkCoreAppsDs <$> dsLExpr op <*> mapM dsLExpr [e1, e2]
+    mkCoreAppsDs (text "opapp" <+> ppr e) <$> dsLExpr op <*> mapM dsLExpr [e1, e2]
 
 dsExpr (SectionL expr op)       -- Desugar (e !) to ((!) e)
-  = mkCoreAppDs <$> dsLExpr op <*> dsLExpr expr
+  = mkCoreAppDs (text "sectionl" <+> ppr expr) <$> dsLExpr op <*> dsLExpr expr
 
 -- dsLExpr (SectionR op expr)   -- \ x -> op x expr
-dsExpr (SectionR op expr) = do
+dsExpr e@(SectionR op expr) = do
     core_op <- dsLExpr op
     -- for the type of x, we need the type of op's 2nd argument
     let (x_ty:y_ty:_, _) = splitFunTys (exprType core_op)
@@ -274,7 +282,7 @@ dsExpr (SectionR op expr) = do
     x_id <- newSysLocalDs x_ty
     y_id <- newSysLocalDs y_ty
     return (bindNonRec y_id y_core $
-            Lam x_id (mkCoreAppsDs core_op [Var x_id, Var y_id]))
+            Lam x_id (mkCoreAppsDs (text "sectionr" <+> ppr e) core_op [Var x_id, Var y_id]))
 
 dsExpr (ExplicitTuple tup_args boxity)
   = do { let go (lam_vars, args) (L _ (Missing ty))
@@ -302,7 +310,7 @@ dsExpr (HsSCC _ cc expr@(L loc _)) = do
         mod_name <- getModule
         count <- goptM Opt_ProfCountEntries
         uniq <- newUnique
-        Tick (ProfNote (mkUserCC (snd cc) mod_name loc uniq) count True)
+        Tick (ProfNote (mkUserCC (sl_fs cc) mod_name loc uniq) count True)
                <$> dsLExpr expr
       else dsLExpr expr
 
@@ -316,19 +324,19 @@ dsExpr (HsCase discrim matches)
 
 -- Pepe: The binds are in scope in the body but NOT in the binding group
 --       This is to avoid silliness in breakpoints
-dsExpr (HsLet binds body) = do
+dsExpr (HsLet (L _ binds) body) = do
     body' <- dsLExpr body
     dsLocalBinds binds body'
 
 -- We need the `ListComp' form to use `deListComp' (rather than the "do" form)
 -- because the interpretation of `stmts' depends on what sort of thing it is.
 --
-dsExpr (HsDo ListComp     stmts res_ty) = dsListComp stmts res_ty
-dsExpr (HsDo PArrComp     stmts _)      = dsPArrComp (map unLoc stmts)
-dsExpr (HsDo DoExpr       stmts _)      = dsDo stmts
-dsExpr (HsDo GhciStmtCtxt stmts _)      = dsDo stmts
-dsExpr (HsDo MDoExpr      stmts _)      = dsDo stmts
-dsExpr (HsDo MonadComp    stmts _)      = dsMonadComp stmts
+dsExpr (HsDo ListComp     (L _ stmts) res_ty) = dsListComp stmts res_ty
+dsExpr (HsDo PArrComp     (L _ stmts) _)      = dsPArrComp (map unLoc stmts)
+dsExpr (HsDo DoExpr       (L _ stmts) _)      = dsDo stmts
+dsExpr (HsDo GhciStmtCtxt (L _ stmts) _)      = dsDo stmts
+dsExpr (HsDo MDoExpr      (L _ stmts) _)      = dsDo stmts
+dsExpr (HsDo MonadComp    (L _ stmts) _)      = dsMonadComp stmts
 
 dsExpr (HsIf mb_fun guard_expr then_expr else_expr)
   = do { pred <- dsLExpr guard_expr
@@ -434,11 +442,11 @@ dsExpr (HsStatic expr@(L loc _)) = do
     info <- mkConApp staticPtrInfoDataCon <$>
             (++[srcLoc]) <$>
             mapM mkStringExprFS
-                 [ packageKeyFS $ modulePackageKey $ nameModule n'
+                 [ unitIdFS $ moduleUnitId $ nameModule n'
                  , moduleNameFS $ moduleName $ nameModule n'
                  , occNameFS    $ nameOccName n'
                  ]
-    let tvars = varSetElems $ tyVarsOfType ty
+    let tvars = tyVarsOfTypeList ty
         speTy = mkForAllTys tvars $ mkTyConApp staticPtrTyCon [ty]
         speId = mkExportedLocalId VanillaId n' speTy
         fp@(Fingerprint w0 w1) = fingerprintName $ idName speId
@@ -460,7 +468,7 @@ dsExpr (HsStatic expr@(L loc _)) = do
 
     fingerprintName :: Name -> Fingerprint
     fingerprintName n = fingerprintString $ unpackFS $ concatFS
-        [ packageKeyFS $ modulePackageKey $ nameModule n
+        [ unitIdFS $ moduleUnitId $ nameModule n
         , fsLit ":"
         , moduleNameFS (moduleName $ nameModule n)
         , fsLit "."
@@ -490,28 +498,28 @@ We also handle @C{}@ as valid construction syntax for an unlabelled
 constructor @C@, setting all of @C@'s fields to bottom.
 -}
 
-dsExpr (RecordCon (L _ data_con_id) con_expr rbinds) = do
-    con_expr' <- dsExpr con_expr
-    let
-        (arg_tys, _) = tcSplitFunTys (exprType con_expr')
-        -- A newtype in the corner should be opaque;
-        -- hence TcType.tcSplitFunTys
+dsExpr (RecordCon { rcon_con_expr = con_expr, rcon_flds = rbinds
+                  , rcon_con_like = con_like })
+  = do { con_expr' <- dsExpr con_expr
+       ; let
+             (arg_tys, _) = tcSplitFunTys (exprType con_expr')
+             -- A newtype in the corner should be opaque;
+             -- hence TcType.tcSplitFunTys
 
-        mk_arg (arg_ty, lbl)    -- Selector id has the field label as its name
-          = case findField (rec_flds rbinds) lbl of
-              (rhs:rhss) -> ASSERT( null rhss )
-                            dsLExpr rhs
-              []         -> mkErrorAppDs rEC_CON_ERROR_ID arg_ty (ppr lbl)
-        unlabelled_bottom arg_ty = mkErrorAppDs rEC_CON_ERROR_ID arg_ty Outputable.empty
+             mk_arg (arg_ty, fl)
+               = case findField (rec_flds rbinds) (flSelector fl) of
+                   (rhs:rhss) -> ASSERT( null rhss )
+                                 dsLExpr rhs
+                   []         -> mkErrorAppDs rEC_CON_ERROR_ID arg_ty (ppr (flLabel fl))
+             unlabelled_bottom arg_ty = mkErrorAppDs rEC_CON_ERROR_ID arg_ty Outputable.empty
 
-        labels = dataConFieldLabels (idDataCon data_con_id)
-        -- The data_con_id is guaranteed to be the wrapper id of the constructor
+             labels = conLikeFieldLabels con_like
 
-    con_args <- if null labels
-                then mapM unlabelled_bottom arg_tys
-                else mapM mk_arg (zipEqual "dsExpr:RecordCon" arg_tys labels)
+       ; con_args <- if null labels
+                     then mapM unlabelled_bottom arg_tys
+                     else mapM mk_arg (zipEqual "dsExpr:RecordCon" arg_tys labels)
 
-    return (mkCoreApps con_expr' con_args)
+       ; return (mkCoreApps con_expr' con_args) }
 
 {-
 Record update is a little harder. Suppose we have the decl:
@@ -548,8 +556,10 @@ But if x::T a b, then
 So we need to cast (T a Int) to (T a b).  Sigh.
 -}
 
-dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
-                       cons_to_upd in_inst_tys out_inst_tys)
+dsExpr expr@(RecordUpd { rupd_expr = record_expr, rupd_flds = fields
+                       , rupd_cons = cons_to_upd
+                       , rupd_in_tys = in_inst_tys, rupd_out_tys = out_inst_tys
+                       , rupd_wrap = dict_req_wrap } )
   | null fields
   = dsLExpr record_expr
   | otherwise
@@ -566,7 +576,8 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
         -- constructor aguments.
         ; alts <- mapM (mk_alt upd_fld_env) cons_to_upd
         ; ([discrim_var], matching_code)
-                <- matchWrapper RecUpd (MG { mg_alts = alts, mg_arg_tys = [in_ty]
+                <- matchWrapper RecUpd (MG { mg_alts = noLoc alts
+                                           , mg_arg_tys = [in_ty]
                                            , mg_res_ty = out_ty, mg_origin = FromSource })
                                            -- FromSource is not strictly right, but we
                                            -- want incomplete pattern-match warnings
@@ -574,13 +585,13 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
         ; return (add_field_binds field_binds' $
                   bindNonRec discrim_var record_expr' matching_code) }
   where
-    ds_field :: LHsRecField Id (LHsExpr Id) -> DsM (Name, Id, CoreExpr)
+    ds_field :: LHsRecUpdField Id -> DsM (Name, Id, CoreExpr)
       -- Clone the Id in the HsRecField, because its Name is that
-      -- of the record selector, and we must not make that a lcoal binder
+      -- of the record selector, and we must not make that a local binder
       -- else we shadow other uses of the record selector
       -- Hence 'lcl_id'.  Cf Trac #2735
     ds_field (L _ rec_field) = do { rhs <- dsLExpr (hsRecFieldArg rec_field)
-                                  ; let fld_id = unLoc (hsRecFieldId rec_field)
+                                  ; let fld_id = unLoc (hsRecUpdFieldId rec_field)
                                   ; lcl_id <- newSysLocalDs (idType fld_id)
                                   ; return (idName fld_id, lcl_id, rhs) }
 
@@ -589,26 +600,37 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
 
         -- Awkwardly, for families, the match goes
         -- from instance type to family type
-    tycon     = dataConTyCon (head cons_to_upd)
-    in_ty     = mkTyConApp tycon in_inst_tys
-    out_ty    = mkFamilyTyConApp tycon out_inst_tys
-
+    (in_ty, out_ty) =
+      case (head cons_to_upd) of
+        RealDataCon data_con ->
+          let tycon = dataConTyCon data_con in
+          (mkTyConApp tycon in_inst_tys, mkFamilyTyConApp tycon out_inst_tys)
+        PatSynCon pat_syn ->
+          (patSynInstResTy pat_syn in_inst_tys
+          , patSynInstResTy pat_syn out_inst_tys)
     mk_alt upd_fld_env con
       = do { let (univ_tvs, ex_tvs, eq_spec,
-                  theta, arg_tys, _) = dataConFullSig con
+                  prov_theta, _req_theta, arg_tys, _) = conLikeFullSig con
                  subst = mkTopTvSubst (univ_tvs `zip` in_inst_tys)
 
                 -- I'm not bothering to clone the ex_tvs
            ; eqs_vars   <- mapM newPredVarDs (substTheta subst (eqSpecPreds eq_spec))
-           ; theta_vars <- mapM newPredVarDs (substTheta subst theta)
+           ; theta_vars <- mapM newPredVarDs (substTheta subst prov_theta)
            ; arg_ids    <- newSysLocalsDs (substTys subst arg_tys)
-           ; let val_args = zipWithEqual "dsExpr:RecordUpd" mk_val_arg
-                                         (dataConFieldLabels con) arg_ids
-                 mk_val_arg field_name pat_arg_id
-                     = nlHsVar (lookupNameEnv upd_fld_env field_name `orElse` pat_arg_id)
-                 inst_con = noLoc $ HsWrap wrap (HsVar (dataConWrapId con))
+           ; let field_labels = conLikeFieldLabels con
+                 val_args = zipWithEqual "dsExpr:RecordUpd" mk_val_arg
+                                         field_labels arg_ids
+                 mk_val_arg fl pat_arg_id
+                     = nlHsVar (lookupNameEnv upd_fld_env (flSelector fl) `orElse` pat_arg_id)
+                 -- SAFE: the typechecker will complain if the synonym is
+                 -- not bidirectional
+                 wrap_id = expectJust "dsExpr:mk_alt" (conLikeWrapId_maybe con)
+                 inst_con = noLoc $ HsWrap wrap (HsVar (noLoc wrap_id))
                         -- Reconstruct with the WrapId so that unpacking happens
-                 wrap = mkWpEvVarApps theta_vars          <.>
+                 -- The order here is because of the order in `TcPatSyn`.
+                 wrap =
+                        dict_req_wrap <.>
+                        mkWpEvVarApps theta_vars          <.>
                         mkWpTyApps    (mkTyVarTys ex_tvs) <.>
                         mkWpTyApps [ty | (tv, ty) <- univ_tvs `zip` out_inst_tys
                                        , not (tv `elemVarEnv` wrap_subst) ]
@@ -616,24 +638,39 @@ dsExpr expr@(RecordUpd record_expr (HsRecFields { rec_flds = fields })
 
                         -- Tediously wrap the application in a cast
                         -- Note [Update for GADTs]
-                 wrap_co = mkTcTyConAppCo Nominal tycon
-                                [ lookup tv ty | (tv,ty) <- univ_tvs `zip` out_inst_tys ]
-                 lookup univ_tv ty = case lookupVarEnv wrap_subst univ_tv of
-                                        Just co' -> co'
-                                        Nothing  -> mkTcReflCo Nominal ty
-                 wrap_subst = mkVarEnv [ (tv, mkTcSymCo (mkTcCoVarCo eq_var))
-                                       | ((tv,_),eq_var) <- eq_spec `zip` eqs_vars ]
+                 wrapped_rhs =
+                  case con of
+                    RealDataCon data_con ->
+                      let
+                        wrap_co =
+                          mkTcTyConAppCo Nominal
+                            (dataConTyCon data_con)
+                            [ lookup tv ty
+                              | (tv,ty) <- univ_tvs `zip` out_inst_tys ]
+                        lookup univ_tv ty =
+                          case lookupVarEnv wrap_subst univ_tv of
+                            Just co' -> co'
+                            Nothing  -> mkTcReflCo Nominal ty
+                        in if null eq_spec
+                             then rhs
+                             else mkLHsWrap (mkWpCast (mkTcSubCo wrap_co)) rhs
+                    -- eq_spec is always null for a PatSynCon
+                    PatSynCon _ -> rhs
 
-                 pat = noLoc $ ConPatOut { pat_con = noLoc (RealDataCon con)
+                 wrap_subst =
+                  mkVarEnv [ (tv, mkTcSymCo (mkTcCoVarCo eq_var))
+                           | ((tv,_),eq_var) <- eq_spec `zip` eqs_vars ]
+
+                 req_wrap = dict_req_wrap <.> mkWpTyApps in_inst_tys
+                 pat = noLoc $ ConPatOut { pat_con = noLoc con
                                          , pat_tvs = ex_tvs
                                          , pat_dicts = eqs_vars ++ theta_vars
                                          , pat_binds = emptyTcEvBinds
                                          , pat_args = PrefixCon $ map nlVarPat arg_ids
                                          , pat_arg_tys = in_inst_tys
-                                         , pat_wrap = idHsWrapper }
-           ; let wrapped_rhs | null eq_spec = rhs
-                             | otherwise    = mkLHsWrap (mkWpCast (mkTcSubCo wrap_co)) rhs
-           ; return (mkSimpleMatch [pat] wrapped_rhs) }
+                                         , pat_wrap = req_wrap }
+
+           ; return (mkSimpleMatch [pat] wrapped_rhs)  }
 
 -- Here is where we desugar the Template Haskell brackets and escapes
 
@@ -682,13 +719,13 @@ dsExpr (EViewPat      {})  = panic "dsExpr:EViewPat"
 dsExpr (ELazyPat      {})  = panic "dsExpr:ELazyPat"
 dsExpr (HsType        {})  = panic "dsExpr:HsType"
 dsExpr (HsDo          {})  = panic "dsExpr:HsDo"
-
+dsExpr (HsRecFld      {})  = panic "dsExpr:HsRecFld"
 
 
 findField :: [LHsRecField Id arg] -> Name -> [arg]
-findField rbinds lbl
-  = [rhs | L _ (HsRecField { hsRecFieldId = id, hsRecFieldArg = rhs }) <- rbinds
-         , lbl == idName (unLoc id) ]
+findField rbinds sel
+  = [hsRecFieldArg fld | L _ fld <- rbinds
+                       , sel == idName (unLoc $ hsRecFieldId fld) ]
 
 {-
 %--------------------------------------------------------------------
@@ -819,7 +856,7 @@ dsDo stmts
     goL [] = panic "dsDo"
     goL (L loc stmt:lstmts) = putSrcSpanDs loc (go loc stmt lstmts)
 
-    go _ (LastStmt body _) stmts
+    go _ (LastStmt body _ _) stmts
       = ASSERT( null stmts ) dsLExpr body
         -- The 'return' op isn't used for 'do' expressions
 
@@ -830,7 +867,7 @@ dsDo stmts
            ; rest <- goL stmts
            ; return (mkApps then_expr2 [rhs2, rest]) }
 
-    go _ (LetStmt binds) stmts
+    go _ (LetStmt (L _ binds)) stmts
       = do { rest <- goL stmts
            ; dsLocalBinds binds rest }
 
@@ -846,13 +883,45 @@ dsDo stmts
             ; match_code <- handle_failure pat match fail_op
             ; return (mkApps bind_op' [rhs', Lam var match_code]) }
 
+    go _ (ApplicativeStmt args mb_join body_ty) stmts
+      = do {
+             let
+               (pats, rhss) = unzip (map (do_arg . snd) args)
+
+               do_arg (ApplicativeArgOne pat expr) =
+                 (pat, dsLExpr expr)
+               do_arg (ApplicativeArgMany stmts ret pat) =
+                 (pat, dsDo (stmts ++ [noLoc $ mkLastStmt (noLoc ret)]))
+
+               arg_tys = map hsLPatType pats
+
+           ; rhss' <- sequence rhss
+           ; ops' <- mapM dsExpr (map fst args)
+
+           ; let body' = noLoc $ HsDo DoExpr (noLoc stmts) body_ty
+
+           ; let fun = L noSrcSpan $ HsLam $
+                   MG { mg_alts = noLoc [mkSimpleMatch pats body']
+                      , mg_arg_tys = arg_tys
+                      , mg_res_ty = body_ty
+                      , mg_origin = Generated }
+
+           ; fun' <- dsLExpr fun
+           ; let mk_ap_call l (op,r) = mkApps op [l,r]
+                 expr = foldl mk_ap_call fun' (zip ops' rhss')
+           ; case mb_join of
+               Nothing -> return expr
+               Just join_op ->
+                 do { join_op' <- dsExpr join_op
+                    ; return (App join_op' expr) } }
+
     go loc (RecStmt { recS_stmts = rec_stmts, recS_later_ids = later_ids
                     , recS_rec_ids = rec_ids, recS_ret_fn = return_op
                     , recS_mfix_fn = mfix_op, recS_bind_fn = bind_op
                     , recS_rec_rets = rec_rets, recS_ret_ty = body_ty }) stmts
       = goL (new_bind_stmt : stmts)  -- rec_ids can be empty; eg  rec { print 'x' }
       where
-        new_bind_stmt = L loc $ BindStmt (mkBigLHsPatTup later_pats)
+        new_bind_stmt = L loc $ BindStmt (mkBigLHsPatTupId later_pats)
                                          mfix_app bind_op
                                          noSyntaxExpr  -- Tuple cannot fail
 
@@ -862,12 +931,14 @@ dsDo stmts
         later_pats   = rec_tup_pats
         rets         = map noLoc rec_rets
         mfix_app     = nlHsApp (noLoc mfix_op) mfix_arg
-        mfix_arg     = noLoc $ HsLam (MG { mg_alts = [mkSimpleMatch [mfix_pat] body]
-                                         , mg_arg_tys = [tup_ty], mg_res_ty = body_ty
-                                         , mg_origin = Generated })
-        mfix_pat     = noLoc $ LazyPat $ mkBigLHsPatTup rec_tup_pats
-        body         = noLoc $ HsDo DoExpr (rec_stmts ++ [ret_stmt]) body_ty
-        ret_app      = nlHsApp (noLoc return_op) (mkBigLHsTup rets)
+        mfix_arg     = noLoc $ HsLam
+                           (MG { mg_alts = noLoc [mkSimpleMatch [mfix_pat] body]
+                               , mg_arg_tys = [tup_ty], mg_res_ty = body_ty
+                               , mg_origin = Generated })
+        mfix_pat     = noLoc $ LazyPat $ mkBigLHsPatTupId rec_tup_pats
+        body         = noLoc $ HsDo
+                                DoExpr (noLoc (rec_stmts ++ [ret_stmt])) body_ty
+        ret_app      = nlHsApp (noLoc return_op) (mkBigLHsTupId rets)
         ret_stmt     = noLoc $ mkLastStmt ret_app
                      -- This LastStmt will be desugared with dsDo,
                      -- which ignores the return_op in the LastStmt,
@@ -952,10 +1023,9 @@ badMonadBind rhs elt_ty flag_doc
 --
 mkSptEntryName :: SrcSpan -> DsM Name
 mkSptEntryName loc = do
-    uniq <- newUnique
     mod  <- getModule
     occ  <- mkWrapperName "sptEntry"
-    return $ mkExternalName uniq mod occ loc
+    newGlobalBinder mod occ loc
   where
     mkWrapperName what
       = do dflags <- getDynFlags

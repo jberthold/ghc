@@ -1,5 +1,3 @@
-setTestOpts(only_compiler_types(['ghc']))
-
 if config.have_vanilla:
     vanilla = '--enable-library-vanilla'
 else:
@@ -10,7 +8,7 @@ if config.have_profiling:
 else:
     prof = '--disable-library-profiling'
 
-if config.have_shared_libs:
+if not config.compiler_profiled and config.have_shared_libs:
     dyn = '--enable-shared'
 else:
     dyn = '--disable-shared'

@@ -29,7 +29,7 @@ module InstEnv (
 
 #include "HsVersions.h"
 
-import CoreSyn (IsOrphan(..), isOrphan, notOrphan)
+import CoreSyn ( IsOrphan(..), isOrphan, notOrphan, chooseOrphanAnchor )
 import Module
 import Class
 import Var
@@ -203,7 +203,9 @@ instanceSig ispec = tcSplitDFunTy (idType (is_dfun ispec))
 mkLocalInstance :: DFunId -> OverlapFlag
                 -> [TyVar] -> Class -> [Type]
                 -> ClsInst
--- Used for local instances, where we can safely pull on the DFunId
+-- Used for local instances, where we can safely pull on the DFunId.
+-- Consider using newClsInst instead; this will also warn if
+-- the instance is an orphan.
 mkLocalInstance dfun oflag tvs cls tys
   = ClsInst { is_flag = oflag, is_dfun = dfun
             , is_tvs = tvs
@@ -234,12 +236,9 @@ mkLocalInstance dfun oflag tvs cls tys
     mb_ns | null fds   = [choose_one arg_names]
           | otherwise  = map do_one fds
     do_one (_ltvs, rtvs) = choose_one [ns | (tv,ns) <- cls_tvs `zip` arg_names
-                                          , not (tv `elem` rtvs)]
+                                            , not (tv `elem` rtvs)]
 
-    choose_one :: [NameSet] -> IsOrphan
-    choose_one nss = case nameSetElems (unionNameSets nss) of
-                        []      -> IsOrphan
-                        (n : _) -> NotOrphan (nameOccName n)
+    choose_one nss = chooseOrphanAnchor (nameSetElems (unionNameSets nss))
 
 mkImportedInstance :: Name
                    -> [Maybe Name]
@@ -270,8 +269,12 @@ instanceCantMatch :: [Maybe Name] -> [Maybe Name] -> Bool
 -- (instanceCantMatch tcs1 tcs2) returns True if tcs1 cannot
 -- possibly be instantiated to actual, nor vice versa;
 -- False is non-committal
-instanceCantMatch (Just t : ts) (Just a : as) = t/=a || instanceCantMatch ts as
-instanceCantMatch _             _             =  False  -- Safe
+instanceCantMatch (mt : ts) (ma : as) = itemCantMatch mt ma || instanceCantMatch ts as
+instanceCantMatch _         _         =  False  -- Safe
+
+itemCantMatch :: Maybe Name -> Maybe Name -> Bool
+itemCantMatch (Just t) (Just a) = t /= a
+itemCantMatch _        _        = False
 
 {-
 Note [When exactly is an instance decl an orphan?]

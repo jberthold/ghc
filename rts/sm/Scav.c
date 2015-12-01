@@ -359,22 +359,34 @@ STATIC_INLINE GNUC_ATTR_HOT void
 scavenge_thunk_srt(const StgInfoTable *info)
 {
     StgThunkInfoTable *thunk_info;
+    nat bitmap;
 
     if (!major_gc) return;
 
     thunk_info = itbl_to_thunk_itbl(info);
-    scavenge_srt((StgClosure **)GET_SRT(thunk_info), thunk_info->i.srt_bitmap);
+    bitmap = thunk_info->i.srt_bitmap;
+    if (bitmap) {
+        // don't read srt_offset if bitmap==0, because it doesn't exist
+        // and so the memory might not be readable.
+        scavenge_srt((StgClosure **)GET_SRT(thunk_info), bitmap);
+    }
 }
 
 STATIC_INLINE GNUC_ATTR_HOT void
 scavenge_fun_srt(const StgInfoTable *info)
 {
     StgFunInfoTable *fun_info;
+    nat bitmap;
 
     if (!major_gc) return;
 
     fun_info = itbl_to_fun_itbl(info);
-    scavenge_srt((StgClosure **)GET_FUN_SRT(fun_info), fun_info->i.srt_bitmap);
+    bitmap = fun_info->i.srt_bitmap;
+    if (bitmap) {
+        // don't read srt_offset if bitmap==0, because it doesn't exist
+        // and so the memory might not be readable.
+        scavenge_srt((StgClosure **)GET_FUN_SRT(fun_info), bitmap);
+    }
 }
 
 /* -----------------------------------------------------------------------------
@@ -637,7 +649,7 @@ scavenge_block (bdescr *bd)
 
     case ARR_WORDS:
         // nothing to follow
-        p += arr_words_sizeW((StgArrWords *)p);
+        p += arr_words_sizeW((StgArrBytes *)p);
         break;
 
     case MUT_ARR_PTRS_CLEAN:
@@ -1672,7 +1684,7 @@ scavenge_capability_mut_lists (Capability *cap)
 static void
 scavenge_static(void)
 {
-  StgClosure* p;
+  StgClosure *flagged_p, *p;
   const StgInfoTable *info;
 
   debugTrace(DEBUG_gc, "scavenging static objects");
@@ -1690,10 +1702,11 @@ scavenge_static(void)
      * be more stuff on this list after each evacuation...
      * (static_objects is a global)
      */
-    p = gct->static_objects;
-    if (p == END_OF_STATIC_LIST) {
+    flagged_p = gct->static_objects;
+    if (flagged_p == END_OF_STATIC_OBJECT_LIST) {
           break;
     }
+    p = UNTAG_STATIC_LIST_PTR(flagged_p);
 
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(p));
     info = get_itbl(p);
@@ -1708,7 +1721,7 @@ scavenge_static(void)
      */
     gct->static_objects = *STATIC_LINK(info,p);
     *STATIC_LINK(info,p) = gct->scavenged_static_objects;
-    gct->scavenged_static_objects = p;
+    gct->scavenged_static_objects = flagged_p;
 
     switch (info -> type) {
 
@@ -2066,7 +2079,7 @@ loop:
     work_to_do = rtsFalse;
 
     // scavenge static objects
-    if (major_gc && gct->static_objects != END_OF_STATIC_LIST) {
+    if (major_gc && gct->static_objects != END_OF_STATIC_OBJECT_LIST) {
         IF_DEBUG(sanity, checkStaticObjects(gct->static_objects));
         scavenge_static();
     }

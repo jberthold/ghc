@@ -60,7 +60,7 @@ module OccName (
         mkDerivedTyConOcc, mkNewTyCoOcc, mkClassOpAuxOcc,
         mkCon2TagOcc, mkTag2ConOcc, mkMaxTagOcc,
         mkClassDataConOcc, mkDictOcc, mkIPOcc,
-        mkSpecOcc, mkForeignExportOcc, mkRepEqOcc, mkGenOcc1, mkGenOcc2,
+        mkSpecOcc, mkForeignExportOcc, mkRepEqOcc,
         mkGenD, mkGenR, mkGen1R, mkGenRCo, mkGenC, mkGenS,
         mkDataTOcc, mkDataCOcc, mkDataConWorkerOcc,
         mkSuperDictSelOcc, mkSuperDictAuxOcc,
@@ -71,6 +71,8 @@ module OccName (
         mkPDatasTyConOcc, mkPDatasDataConOcc,
         mkPReprTyConOcc,
         mkPADFunOcc,
+        mkRecFldSelOcc,
+        mkTyConRepUserOcc, mkTyConRepSysOcc,
 
         -- ** Deconstruction
         occNameFS, occNameString, occNameSpace,
@@ -106,34 +108,13 @@ import DynFlags
 import UniqFM
 import UniqSet
 import FastString
+import FastStringEnv
 import Outputable
 import Lexeme
 import Binary
+import Module
 import Data.Char
 import Data.Data
-
-{-
-************************************************************************
-*                                                                      *
-              FastStringEnv
-*                                                                      *
-************************************************************************
-
-FastStringEnv can't be in FastString because the env depends on UniqFM
--}
-
-type FastStringEnv a = UniqFM a         -- Keyed by FastString
-
-
-emptyFsEnv  :: FastStringEnv a
-lookupFsEnv :: FastStringEnv a -> FastString -> Maybe a
-extendFsEnv :: FastStringEnv a -> FastString -> a -> FastStringEnv a
-mkFsEnv     :: [(FastString,a)] -> FastStringEnv a
-
-emptyFsEnv  = emptyUFM
-lookupFsEnv = lookupUFM
-extendFsEnv = addToUFM
-mkFsEnv     = listToUFM
 
 {-
 ************************************************************************
@@ -602,11 +583,12 @@ mkDataConWrapperOcc, mkWorkerOcc,
         mkMatcherOcc, mkBuilderOcc,
         mkDefaultMethodOcc,
         mkGenDefMethodOcc, mkDerivedTyConOcc, mkClassDataConOcc, mkDictOcc,
-        mkIPOcc, mkSpecOcc, mkForeignExportOcc, mkRepEqOcc, mkGenOcc1, mkGenOcc2,
-        mkGenD, mkGenR, mkGen1R, mkGenRCo,
+        mkIPOcc, mkSpecOcc, mkForeignExportOcc, mkRepEqOcc,
+        mkGenR, mkGen1R, mkGenRCo,
         mkDataTOcc, mkDataCOcc, mkDataConWorkerOcc, mkNewTyCoOcc,
         mkInstTyCoOcc, mkEqPredCoOcc, mkClassOpAuxOcc,
-        mkCon2TagOcc, mkTag2ConOcc, mkMaxTagOcc
+        mkCon2TagOcc, mkTag2ConOcc, mkMaxTagOcc,
+        mkTyConRepUserOcc, mkTyConRepSysOcc
    :: OccName -> OccName
 
 -- These derived variables have a prefix that no Haskell value could have
@@ -629,24 +611,47 @@ mkNewTyCoOcc        = mk_simple_deriv tcName   "NTCo:"  -- Coercion for newtypes
 mkInstTyCoOcc       = mk_simple_deriv tcName   "TFCo:"   -- Coercion for type functions
 mkEqPredCoOcc       = mk_simple_deriv tcName   "$co"
 
--- used in derived instances
+-- Used in derived instances
 mkCon2TagOcc        = mk_simple_deriv varName  "$con2tag_"
 mkTag2ConOcc        = mk_simple_deriv varName  "$tag2con_"
 mkMaxTagOcc         = mk_simple_deriv varName  "$maxtag_"
 
--- Generic derivable classes (old)
-mkGenOcc1           = mk_simple_deriv varName  "$gfrom"
-mkGenOcc2           = mk_simple_deriv varName  "$gto"
+-- TyConRepName stuff; see Note [Grand plan for Typeable] in TcTypeable
+-- incluing the wrinkle about mkSpecialTyConRepName
+mkTyConRepSysOcc occ = mk_simple_deriv varName prefix occ
+  where
+    prefix | isDataOcc occ = "$tc'"
+           | otherwise     = "$tc"
 
--- Generic deriving mechanism (new)
-mkGenD         = mk_simple_deriv tcName "D1"
+mkTyConRepUserOcc occ = mk_simple_deriv varName prefix occ
+  where
+    -- *User-writable* prefix, for types in gHC_TYPES
+    prefix | isDataOcc occ = "tc'"
+           | otherwise     = "tc"
 
-mkGenC :: OccName -> Int -> OccName
-mkGenC occ m   = mk_deriv tcName ("C1_" ++ show m) (occNameString occ)
+-- Generic deriving mechanism
 
-mkGenS :: OccName -> Int -> Int -> OccName
-mkGenS occ m n = mk_deriv tcName ("S1_" ++ show m ++ "_" ++ show n)
-                   (occNameString occ)
+-- | Generate a module-unique name, to be used e.g. while generating new names
+-- for Generics types. We use module unit id to avoid name clashes when
+-- package imports is used.
+mkModPrefix :: Module -> String
+mkModPrefix mod = pk ++ "_" ++ mn
+  where
+    pk = unitIdString (moduleUnitId mod)
+    mn = moduleNameString (moduleName mod)
+
+mkGenD :: Module -> OccName -> OccName
+mkGenD mod = mk_simple_deriv tcName ("D1_" ++ mkModPrefix mod ++ "_")
+
+mkGenC :: Module -> OccName -> Int -> OccName
+mkGenC mod occ m   =
+  mk_deriv tcName ("C1_" ++ show m) $
+    mkModPrefix mod ++ "_" ++ occNameString occ
+
+mkGenS :: Module -> OccName -> Int -> Int -> OccName
+mkGenS mod occ m n =
+  mk_deriv tcName ("S1_" ++ show m ++ "_" ++ show n) $
+    mkModPrefix mod ++ "_" ++ occNameString occ
 
 mkGenR   = mk_simple_deriv tcName "Rep_"
 mkGen1R  = mk_simple_deriv tcName "Rep1_"
@@ -674,6 +679,10 @@ mkPDataTyConOcc    = mk_simple_deriv_with tcName   "VP:"
 mkPDatasTyConOcc   = mk_simple_deriv_with tcName   "VPs:"
 mkPDataDataConOcc  = mk_simple_deriv_with dataName "VPD:"
 mkPDatasDataConOcc = mk_simple_deriv_with dataName "VPDs:"
+
+-- Overloaded record field selectors
+mkRecFldSelOcc :: String -> OccName
+mkRecFldSelOcc   = mk_deriv varName "$sel"
 
 mk_simple_deriv :: NameSpace -> String -> OccName -> OccName
 mk_simple_deriv sp px occ = mk_deriv sp px (occNameString occ)

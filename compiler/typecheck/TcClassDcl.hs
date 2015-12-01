@@ -9,17 +9,18 @@ Typechecking class declarations
 {-# LANGUAGE CPP #-}
 
 module TcClassDcl ( tcClassSigs, tcClassDecl2,
-                    findMethodBind, instantiateMethod, 
+                    findMethodBind, instantiateMethod,
                     tcClassMinimalDef,
                     HsSigFun, mkHsSigFun, lookupHsSig, emptyHsSigs,
-                    tcMkDeclCtxt, tcAddDeclCtxt, badMethodErr
+                    tcMkDeclCtxt, tcAddDeclCtxt, badMethodErr,
+                    tcATDefault
                   ) where
 
 #include "HsVersions.h"
 
 import HsSyn
 import TcEnv
-import TcPat( addInlinePrags, completeSigPolyId )
+import TcPat( addInlinePrags, completeIdSigPolyId, lookupPragEnv, emptyPragEnv )
 import TcEvidence( idHsWrapper )
 import TcBinds
 import TcUnify
@@ -30,13 +31,21 @@ import TcType
 import TcRnMonad
 import BuildTyCl( TcMethInfo )
 import Class
+import Coercion ( pprCoAxiom )
+import DynFlags
+import FamInst
+import FamInstEnv
 import Id
 import Name
 import NameEnv
 import NameSet
 import Var
+import VarEnv
+import VarSet
 import Outputable
 import SrcLoc
+import TyCon
+import TypeRep
 import Maybes
 import BasicTypes
 import Bag
@@ -45,6 +54,7 @@ import BooleanFormula
 import Util
 
 import Control.Monad
+import Data.List ( mapAccumL )
 
 {-
 Dictionary handling
@@ -87,16 +97,16 @@ Death to "ExpandingDicts".
 ************************************************************************
 -}
 
-tcClassSigs :: Name                  -- Name of the class
+tcClassSigs :: Name                -- Name of the class
             -> [LSig Name]
             -> LHsBinds Name
-            -> TcM ([TcMethInfo],    -- Exactly one for each method
-                    NameEnv Type)    -- Types of the generic-default methods
+            -> TcM [TcMethInfo]    -- Exactly one for each method
 tcClassSigs clas sigs def_methods
   = do { traceTc "tcClassSigs 1" (ppr clas)
 
        ; gen_dm_prs <- concat <$> mapM (addLocM tc_gen_sig) gen_sigs
-       ; let gen_dm_env = mkNameEnv gen_dm_prs
+       ; let gen_dm_env :: NameEnv Type
+             gen_dm_env = mkNameEnv gen_dm_prs
 
        ; op_info <- concat <$> mapM (addLocM (tc_sig gen_dm_env)) vanilla_sigs
 
@@ -110,22 +120,22 @@ tcClassSigs clas sigs def_methods
                    -- Generic signature without value binding
 
        ; traceTc "tcClassSigs 2" (ppr clas)
-       ; return (op_info, gen_dm_env) }
+       ; return op_info }
   where
     vanilla_sigs = [L loc (nm,ty) | L loc (TypeSig    nm ty _) <- sigs]
     gen_sigs     = [L loc (nm,ty) | L loc (GenericSig nm ty) <- sigs]
     dm_bind_names :: [Name]     -- These ones have a value binding in the class decl
     dm_bind_names = [op | L _ (FunBind {fun_id = L _ op}) <- bagToList def_methods]
 
-    tc_sig genop_env (op_names, op_hs_ty)
+    tc_sig gen_dm_env (op_names, op_hs_ty)
       = do { traceTc "ClsSig 1" (ppr op_names)
            ; op_ty <- tcClassSigType op_hs_ty   -- Class tyvars already in scope
            ; traceTc "ClsSig 2" (ppr op_names)
-           ; return [ (op_name, f op_name, op_ty) | L _ op_name <- op_names ] }
+           ; return [ (op_name, op_ty, f op_name) | L _ op_name <- op_names ] }
            where
-             f nm | nm `elemNameEnv` genop_env = GenericDM
-                  | nm `elem` dm_bind_names    = VanillaDM
-                  | otherwise                  = NoDM
+             f nm | Just ty <- lookupNameEnv gen_dm_env nm = Just (GenericDM ty)
+                  | nm `elem` dm_bind_names                = Just VanillaDM
+                  | otherwise                              = Nothing
 
     tc_gen_sig (op_names, gen_hs_ty)
       = do { gen_op_ty <- tcClassSigType gen_hs_ty
@@ -157,25 +167,14 @@ tcClassDecl2 (L loc (ClassDecl {tcdLName = class_name, tcdSigs = sigs,
         -- And since ds is big, it doesn't get inlined, so we don't get good
         -- default methods.  Better to make separate AbsBinds for each
         ; let (tyvars, _, _, op_items) = classBigSig clas
-              prag_fn     = mkPragFun sigs default_binds
+              prag_fn     = mkPragEnv sigs default_binds
               sig_fn      = mkHsSigFun sigs
               clas_tyvars = snd (tcSuperSkolTyVars tyvars)
               pred        = mkClassPred clas (mkTyVarTys clas_tyvars)
         ; this_dict <- newEvVar pred
 
-        ; let tc_item (sel_id, dm_info)
-                = case dm_info of
-                    DefMeth dm_name    -> tc_dm sel_id dm_name False
-                    GenDefMeth dm_name -> tc_dm sel_id dm_name True
-                       -- For GenDefMeth, warn if the user specifies a signature
-                       -- with redundant constraints; but not for DefMeth, where
-                       -- the default method may well be 'error' or something
-                    NoDefMeth          -> do { mapM_ (addLocM (badDmPrag sel_id))
-                                                     (prag_fn (idName sel_id))
-                                             ; return emptyBag }
-              tc_dm = tcDefMeth clas clas_tyvars this_dict
-                                default_binds sig_fn prag_fn
-
+        ; let tc_item = tcDefMeth clas clas_tyvars this_dict
+                                  default_binds sig_fn prag_fn
         ; dm_binds <- tcExtendTyVarEnv clas_tyvars $
                       mapM tc_item op_items
 
@@ -184,19 +183,25 @@ tcClassDecl2 (L loc (ClassDecl {tcdLName = class_name, tcdSigs = sigs,
 tcClassDecl2 d = pprPanic "tcClassDecl2" (ppr d)
 
 tcDefMeth :: Class -> [TyVar] -> EvVar -> LHsBinds Name
-          -> HsSigFun -> PragFun -> Id -> Name -> Bool
+          -> HsSigFun -> TcPragEnv -> ClassOpItem
           -> TcM (LHsBinds TcId)
--- Generate code for polymorphic default methods only (hence DefMeth)
--- (Generic default methods have turned into instance decls by now.)
+-- Generate code for default methods
 -- This is incompatible with Hugs, which expects a polymorphic
 -- default method for every class op, regardless of whether or not
 -- the programmer supplied an explicit default decl for the class.
 -- (If necessary we can fix that, but we don't have a convenient Id to hand.)
-tcDefMeth clas tyvars this_dict binds_in
-          hs_sig_fn prag_fn sel_id dm_name warn_redundant
+
+tcDefMeth _ _ _ _ _ prag_fn (sel_id, Nothing)
+  = do { -- No default method
+         mapM_ (addLocM (badDmPrag sel_id))
+               (lookupPragEnv prag_fn (idName sel_id))
+       ; return emptyBag }
+
+tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
+          (sel_id, Just (dm_name, dm_spec))
   | Just (L bind_loc dm_bind, bndr_loc) <- findMethodBind sel_name binds_in
-    -- First look up the default method -- it should be there!
-  = do { global_dm_id  <- tcLookupId dm_name
+  = do { -- First look up the default method -- It should be there!
+         global_dm_id  <- tcLookupId dm_name
        ; global_dm_id  <- addInlinePrags global_dm_id prags
        ; local_dm_name <- setSrcSpan bndr_loc (newLocalName sel_name)
             -- Base the local_dm_name on the selector name, because
@@ -207,8 +212,8 @@ tcDefMeth clas tyvars this_dict binds_in
                 (ptext (sLit "Ignoring SPECIALISE pragmas on default method")
                  <+> quotes (ppr sel_name))
 
-       ; let hs_ty       = lookupHsSig hs_sig_fn sel_name
-                           `orElse` pprPanic "tc_dm" (ppr sel_name)
+       ; let hs_ty = lookupHsSig hs_sig_fn sel_name
+                     `orElse` pprPanic "tc_dm" (ppr sel_name)
              -- We need the HsType so that we can bring the right
              -- type variables into scope
              --
@@ -225,18 +230,26 @@ tcDefMeth clas tyvars this_dict binds_in
                              -- Substitute the local_meth_name for the binder
                              -- NB: the binding is always a FunBind
 
-       ; local_dm_sig <- instTcTySig hs_ty local_dm_ty Nothing [] local_dm_name
-       ; let local_dm_sig' = local_dm_sig { sig_warn_redundant = warn_redundant }
+             warn_redundant = case dm_spec of
+                                GenericDM {} -> True
+                                VanillaDM    -> False
+                -- For GenericDM, warn if the user specifies a signature
+                -- with redundant constraints; but not for VanillaDM, where
+                -- the default method may well be 'error' or something
+
+             ctxt = FunSigCtxt sel_name warn_redundant
+
+       ; local_dm_sig <- instTcTySig ctxt hs_ty local_dm_ty Nothing [] local_dm_name
         ; (ev_binds, (tc_bind, _))
                <- checkConstraints (ClsSkol clas) tyvars [this_dict] $
-                  tcPolyCheck NonRecursive no_prag_fn local_dm_sig'
+                  tcPolyCheck NonRecursive no_prag_fn local_dm_sig
                               (L bind_loc lm_bind)
 
         ; let export = ABE { abe_poly  = global_dm_id
                            -- We have created a complete type signature in
                            -- instTcTySig, hence it is safe to call
                            -- completeSigPolyId
-                           , abe_mono  = completeSigPolyId local_dm_sig'
+                           , abe_mono  = completeIdSigPolyId local_dm_sig
                            , abe_wrap  = idHsWrapper
                            , abe_prags = IsDefaultMethod }
               full_bind = AbsBinds { abs_tvs      = tyvars
@@ -250,8 +263,8 @@ tcDefMeth clas tyvars this_dict binds_in
   | otherwise = pprPanic "tcDefMeth" (ppr sel_id)
   where
     sel_name = idName sel_id
-    prags    = prag_fn sel_name
-    no_prag_fn  _ = []          -- No pragmas for local_meth_id;
+    prags    = lookupPragEnv prag_fn sel_name
+    no_prag_fn = emptyPragEnv   -- No pragmas for local_meth_id;
                                 -- they are all for meth_id
 
 ---------------
@@ -271,8 +284,8 @@ tcClassMinimalDef _clas sigs op_info
     -- By default require all methods without a default
     -- implementation whose names don't start with '_'
     defMindef :: ClassMinimalDef
-    defMindef = mkAnd [ mkVar name
-                      | (name, NoDM, _) <- op_info
+    defMindef = mkAnd [ noLoc (mkVar name)
+                      | (name, _, Nothing) <- op_info
                       , not (startsWithUnderscore (getOccName name)) ]
 
 instantiateMethod :: Class -> Id -> [TcType] -> TcType
@@ -331,8 +344,8 @@ findMinimalDef :: [LSig Name] -> Maybe ClassMinimalDef
 findMinimalDef = firstJusts . map toMinimalDef
   where
     toMinimalDef :: LSig Name -> Maybe ClassMinimalDef
-    toMinimalDef (L _ (MinimalSig _ bf)) = Just (fmap unLoc bf)
-    toMinimalDef _                       = Nothing
+    toMinimalDef (L _ (MinimalSig _ (L _ bf))) = Just (fmap unLoc bf)
+    toMinimalDef _                             = Nothing
 
 {-
 Note [Polymorphic methods]
@@ -417,3 +430,64 @@ warningMinimalDefIncomplete mindef
   = vcat [ ptext (sLit "The MINIMAL pragma does not require:")
          , nest 2 (pprBooleanFormulaNice mindef)
          , ptext (sLit "but there is no default implementation.") ]
+
+tcATDefault :: Bool -- If a warning should be emitted when a default instance
+                    -- definition is not provided by the user
+            -> SrcSpan
+            -> TvSubst
+            -> NameSet
+            -> ClassATItem
+            -> TcM [FamInst]
+-- ^ Construct default instances for any associated types that
+-- aren't given a user definition
+-- Returns [] or singleton
+tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
+  -- User supplied instances ==> everything is OK
+  | tyConName fam_tc `elemNameSet` defined_ats
+  = return []
+
+  -- No user instance, have defaults ==> instatiate them
+   -- Example:   class C a where { type F a b :: *; type F a b = () }
+   --            instance C [x]
+   -- Then we want to generate the decl:   type F [x] b = ()
+  | Just (rhs_ty, _loc) <- defs
+  = do { let (subst', pat_tys') = mapAccumL subst_tv inst_subst
+                                            (tyConTyVars fam_tc)
+             rhs'     = substTy subst' rhs_ty
+             tv_set'  = tyVarsOfTypes pat_tys'
+             tvs'     = varSetElemsKvsFirst tv_set'
+       ; rep_tc_name <- newFamInstTyConName (L loc (tyConName fam_tc)) pat_tys'
+       ; let axiom = mkSingleCoAxiom Nominal rep_tc_name tvs'
+                                     fam_tc pat_tys' rhs'
+           -- NB: no validity check. We check validity of default instances
+           -- in the class definition. Because type instance arguments cannot
+           -- be type family applications and cannot be polytypes, the
+           -- validity check is redundant.
+
+       ; traceTc "mk_deflt_at_instance" (vcat [ ppr fam_tc, ppr rhs_ty
+                                              , pprCoAxiom axiom ])
+       ; fam_inst <- ASSERT( tyVarsOfType rhs' `subVarSet` tv_set' )
+                     newFamInst SynFamilyInst axiom
+       ; return [fam_inst] }
+
+   -- No defaults ==> generate a warning
+  | otherwise  -- defs = Nothing
+  = do { when emit_warn $ warnMissingAT (tyConName fam_tc)
+       ; return [] }
+  where
+    subst_tv subst tc_tv
+      | Just ty <- lookupVarEnv (getTvSubstEnv subst) tc_tv
+      = (subst, ty)
+      | otherwise
+      = (extendTvSubst subst tc_tv ty', ty')
+      where
+        ty' = mkTyVarTy (updateTyVarKind (substTy subst) tc_tv)
+
+warnMissingAT :: Name -> TcM ()
+warnMissingAT name
+  = do { warn <- woptM Opt_WarnMissingMethods
+       ; traceTc "warn" (ppr name <+> ppr warn)
+       ; warnTc warn  -- Warn only if -fwarn-missing-methods
+                (ptext (sLit "No explicit") <+> text "associated type"
+                    <+> ptext (sLit "or default declaration for     ")
+                    <+> quotes (ppr name)) }

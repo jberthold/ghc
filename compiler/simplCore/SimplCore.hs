@@ -15,15 +15,15 @@ import CoreSyn
 import HscTypes
 import CSE              ( cseProgram )
 import Rules            ( mkRuleBase, unionRuleBase,
-                          extendRuleBaseList, ruleCheckProgram, addSpecInfo, )
+                          extendRuleBaseList, ruleCheckProgram, addRuleInfo, )
 import PprCore          ( pprCoreBindings, pprCoreExpr )
 import OccurAnal        ( occurAnalysePgm, occurAnalyseExpr )
 import IdInfo
-import CoreUtils        ( coreBindsSize, coreBindsStats, exprSize,
-                          mkTicks, stripTicksTop )
+import CoreStats        ( coreBindsSize, coreBindsStats, exprSize )
+import CoreUtils        ( mkTicks, stripTicksTop )
 import CoreLint         ( showPass, endPass, lintPassResult, dumpPassResult,
                           lintAnnots )
-import Simplify         ( simplTopBinds, simplExpr, simplRule )
+import Simplify         ( simplTopBinds, simplExpr, simplRules )
 import SimplUtils       ( simplEnvForGHCi, activeRule )
 import SimplEnv
 import SimplMonad
@@ -68,15 +68,18 @@ import Plugins          ( installCoreToDos )
 -}
 
 core2core :: HscEnv -> ModGuts -> IO ModGuts
-core2core hsc_env guts
+core2core hsc_env guts@(ModGuts { mg_module  = mod
+                                , mg_loc     = loc
+                                , mg_deps    = deps
+                                , mg_rdr_env = rdr_env })
   = do { us <- mkSplitUniqSupply 's'
        -- make sure all plugins are loaded
 
        ; let builtin_passes = getCoreToDo dflags
-             orph_mods = mkModuleSet (mg_module guts : dep_orphs (mg_deps guts))
+             orph_mods = mkModuleSet (mod : dep_orphs deps)
        ;
        ; (guts2, stats) <- runCoreM hsc_env hpt_rule_base us mod
-                                    orph_mods print_unqual $
+                                    orph_mods print_unqual loc $
                            do { all_passes <- addPluginPasses builtin_passes
                               ; runCorePasses all_passes guts }
 
@@ -87,15 +90,14 @@ core2core hsc_env guts
        ; return guts2 }
   where
     dflags         = hsc_dflags hsc_env
-    home_pkg_rules = hptRules hsc_env (dep_mods (mg_deps guts))
+    home_pkg_rules = hptRules hsc_env (dep_mods deps)
     hpt_rule_base  = mkRuleBase home_pkg_rules
-    mod            = mg_module guts
+    print_unqual   = mkPrintUnqualified dflags rdr_env
     -- mod: get the module out of the current HscEnv so we can retrieve it from the monad.
     -- This is very convienent for the users of the monad (e.g. plugins do not have to
     -- consume the ModGuts to find the module) but somewhat ugly because mg_module may
     -- _theoretically_ be changed during the Core pipeline (it's part of ModGuts), which
     -- would mean our cached value would go out of date.
-    print_unqual = mkPrintUnqualified dflags (mg_rdr_env guts)
 
 {-
 ************************************************************************
@@ -107,7 +109,7 @@ core2core hsc_env guts
 
 getCoreToDo :: DynFlags -> [CoreToDo]
 getCoreToDo dflags
-  = core_todo
+  = flatten_todos core_todo
   where
     opt_level     = optLevel           dflags
     phases        = simplPhases        dflags
@@ -125,6 +127,7 @@ getCoreToDo dflags
     static_args   = gopt Opt_StaticArgumentTransformation dflags
     rules_on      = gopt Opt_EnableRewriteRules           dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
+    ww_on         = gopt Opt_WorkerWrapper                dflags
 
     maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
 
@@ -185,12 +188,16 @@ getCoreToDo dflags
                           -- Don't do case-of-case transformations.
                           -- This makes full laziness work better
 
+    strictness_pass = if ww_on
+                       then [CoreDoStrictness,CoreDoWorkerWrapper]
+                       else [CoreDoStrictness]
+
+
     -- New demand analyser
-    demand_analyser = (CoreDoPasses ([
-                           CoreDoStrictness,
-                           CoreDoWorkerWrapper,
-                           simpl_phase 0 ["post-worker-wrapper"] max_iter
-                           ]))
+    demand_analyser = (CoreDoPasses (
+                           strictness_pass ++
+                           [simpl_phase 0 ["post-worker-wrapper"] max_iter]
+                           ))
 
     core_todo =
      if opt_level == 0 then
@@ -307,14 +314,20 @@ getCoreToDo dflags
         -- Final clean-up simplification:
         simpl_phase 0 ["final"] max_iter,
 
-        runWhen late_dmd_anal $ CoreDoPasses [
-            CoreDoStrictness,
-            CoreDoWorkerWrapper,
-            simpl_phase 0 ["post-late-ww"] max_iter
-          ],
+        runWhen late_dmd_anal $ CoreDoPasses (
+            strictness_pass ++
+            [simpl_phase 0 ["post-late-ww"] max_iter]
+          ),
 
         maybe_rule_check (Phase 0)
      ]
+
+    -- Remove 'CoreDoNothing' and flatten 'CoreDoPasses' for clarity.
+    flatten_todos [] = []
+    flatten_todos (CoreDoNothing : rest) = flatten_todos rest
+    flatten_todos (CoreDoPasses passes : rest) =
+      flatten_todos passes ++ flatten_todos rest
+    flatten_todos (todo : rest) = todo : flatten_todos rest
 
 -- Loading plugins
 
@@ -659,7 +672,7 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                       -- for imported Ids.  Eg  RULE map my_f = blah
                       -- If we have a substitution my_f :-> other_f, we'd better
                       -- apply it to the rule to, or it'll never match
-                  ; rules1 <- mapM (simplRule env1 Nothing) rules
+                  ; rules1 <- simplRules env1 Nothing rules
 
                   ; return (getFloatBinds env1, rules1) } ;
 
@@ -869,7 +882,7 @@ shortOutIndirections binds
     -- These exported Ids are the subjects  of the indirection-elimination
     exp_ids            = map fst $ varEnvElts ind_env
     exp_id_set         = mkVarSet exp_ids
-    no_need_to_flatten = all (null . specInfoRules . idSpecialisation) exp_ids
+    no_need_to_flatten = all (null . ruleInfoRules . idSpecialisation) exp_ids
     binds'             = concatMap zap binds
 
     zap (NonRec bndr rhs) = [NonRec b r | (b,r) <- zapPair (bndr,rhs)]
@@ -927,7 +940,7 @@ hasShortableIdInfo :: Id -> Bool
 -- so we can safely discard it
 -- See Note [Messing up the exported Id's IdInfo]
 hasShortableIdInfo id
-  =  isEmptySpecInfo (specInfo info)
+  =  isEmptyRuleInfo (ruleInfo info)
   && isDefaultInlinePragma (inlinePragInfo info)
   && not (isStableUnfolding (unfoldingInfo info))
   where
@@ -949,8 +962,8 @@ transferIdInfo exported_id local_id
     transfer exp_info = exp_info `setStrictnessInfo`    strictnessInfo local_info
                                  `setUnfoldingInfo`     unfoldingInfo local_info
                                  `setInlinePragInfo`    inlinePragInfo local_info
-                                 `setSpecInfo`          addSpecInfo (specInfo exp_info) new_info
-    new_info = setSpecInfoHead (idName exported_id)
-                               (specInfo local_info)
+                                 `setRuleInfo`          addRuleInfo (ruleInfo exp_info) new_info
+    new_info = setRuleInfoHead (idName exported_id)
+                               (ruleInfo local_info)
         -- Remember to set the function-name field of the
         -- rules as we transfer them from one function to another

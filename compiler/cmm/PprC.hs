@@ -180,6 +180,7 @@ pprStmt stmt =
                           -- large.
 
     CmmTick _ -> empty
+    CmmUnwind{} -> empty
 
     CmmAssign dest src -> pprAssign dflags dest src
 
@@ -249,7 +250,7 @@ pprStmt stmt =
           = pprCall fn cconv hresults hargs
 
     CmmBranch ident          -> pprBranch ident
-    CmmCondBranch expr yes no -> pprCondBranch expr yes no
+    CmmCondBranch expr yes no _ -> pprCondBranch expr yes no
     CmmCall { cml_target = expr } -> mkJMP_ (pprExpr expr) <> semi
     CmmSwitch arg ids        -> sdocWithDynFlags $ \dflags ->
                                 pprSwitch dflags arg ids
@@ -762,6 +763,7 @@ pprCallishMachOp_for_C mop
         MO_U_QuotRem  {} -> unsupported
         MO_U_QuotRem2 {} -> unsupported
         MO_Add2       {} -> unsupported
+        MO_SubWordC   {} -> unsupported
         MO_AddIntC    {} -> unsupported
         MO_SubIntC    {} -> unsupported
         MO_U_Mul2     {} -> unsupported
@@ -1005,12 +1007,12 @@ instance Functor TE where
       fmap = liftM
 
 instance Applicative TE where
-      pure = return
+      pure a = TE $ \s -> (a, s)
       (<*>) = ap
 
 instance Monad TE where
    TE m >>= k  = TE $ \s -> case m s of (a, s') -> unTE (k a) s'
-   return a    = TE $ \s -> (a, s)
+   return = pure
 
 te_lbl :: CLabel -> TE ()
 te_lbl lbl = TE $ \(temps,lbls) -> ((), (temps, Map.insert lbl () lbls))
@@ -1042,7 +1044,7 @@ te_Stmt (CmmUnsafeForeignCall target rs es)
   = do  te_Target target
         mapM_ te_temp rs
         mapM_ te_Expr es
-te_Stmt (CmmCondBranch e _ _)   = te_Expr e
+te_Stmt (CmmCondBranch e _ _ _) = te_Expr e
 te_Stmt (CmmSwitch e _)         = te_Expr e
 te_Stmt (CmmCall { cml_target = e }) = te_Expr e
 te_Stmt _                       = return ()

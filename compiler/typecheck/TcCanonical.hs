@@ -29,7 +29,6 @@ import Outputable
 import DynFlags( DynFlags )
 import VarSet
 import RdrName
-import DataCon ( dataConName )
 
 import Pair
 import Util
@@ -229,17 +228,12 @@ place to add their superclasses is canonicalisation.  See Note [Add
 superclasses only during canonicalisation].  Here is what we do:
 
   Givens:   Add all their superclasses as Givens.
-            They may be needed to prove Wanteds
+            They may be needed to prove Wanteds.
 
-  Wanteds:  Do nothing.
-
-  Deriveds: Add all their superclasses as Derived.
+  Wanteds/Derived:
+            Add all their superclasses as Derived.
             The sole reason is to expose functional dependencies
             in superclasses or equality superclasses.
-
-            We only do this in the improvement phase, if solving has
-            not succeeded; see Note [The improvement story] in
-            TcInteract
 
 Examples of how adding superclasses as Derived is useful
 
@@ -260,6 +254,24 @@ Examples of how adding superclasses as Derived is useful
          [D] F a ~ beta
     Now we we get [D] beta ~ b, and can solve that.
 
+    -- Example (tcfail138)
+      class L a b | a -> b
+      class (G a, L a b) => C a b
+
+      instance C a b' => G (Maybe a)
+      instance C a b  => C (Maybe a) a
+      instance L (Maybe a) a
+
+    When solving the superclasses of the (C (Maybe a) a) instance, we get
+      [G] C a b, and hance by superclasses, [G] G a, [G] L a b
+      [W] G (Maybe a)
+    Use the instance decl to get
+      [W] C a beta
+    Generate its derived superclass
+      [D] L a beta.  Now using fundeps, combine with [G] L a b to get
+      [D] beta ~ b
+    which is what we want.
+
 ---------- Historical note -----------
 Example of why adding superclass of a Wanted as a Given would
 be terrible, see Note [Do not add superclasses of solved dictionaries]
@@ -269,7 +281,7 @@ in TcSMonad, which has this example:
 Suppose we are trying to solve
   [G] d1 : Ord a
   [W] d2 : C [a]
-If we (bogusly) added the superclass of d2 as Gievn we'd have
+If we (bogusly) added the superclass of d2 as Given we'd have
   [G] d1 : Ord a
   [W] d2 : C [a]
   [G] d3 : Ord [a]   -- Superclass of d2, bogus
@@ -279,8 +291,8 @@ Then we'll use the instance decl to give
   [G] d3 : Ord [a]   -- Superclass of d2, bogus
   [W] d4: Ord [a]
 
-ANd now we could bogusly solve d4 from d3.
-
+And now we could bogusly solve d4 from d3.
+---------- End of historical note -----------
 
 Note [Add superclasses only during canonicalisation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -318,36 +330,40 @@ newSCWorkFromFlavored :: CtEvidence -> Class -> [Xi] -> TcS ()
 -- Returns superclasses, see Note [Adding superclasses]
 newSCWorkFromFlavored flavor cls xis
   | CtGiven { ctev_evar = evar, ctev_loc = loc } <- flavor
-  = do { let size = sizeTypes xis
-             loc' | isCTupleClass cls
-                  = loc   -- For tuple predicates, just take them apart, without
-                          -- adding their (large) size into the chain.  When we
-                          -- get down to a base predicate, we'll include its size.
-                          -- Trac #10335
-                  | otherwise
-                  = case ctLocOrigin loc of
-                       GivenOrigin InstSkol
-                         -> loc { ctl_origin = GivenOrigin (InstSC size) }
-                       GivenOrigin (InstSC n)
-                         -> loc { ctl_origin = GivenOrigin (InstSC (n `max` size)) }
-                       _ -> loc
-                    -- See Note [Solving superclass constraints] in TcInstDcls
-                    -- for explantation of loc'
-
-       ; given_evs <- newGivenEvVars loc' (mkEvScSelectors (EvId evar) cls xis)
+  = do { given_evs <- newGivenEvVars (mk_given_loc loc)
+                                     (mkEvScSelectors (EvId evar) cls xis)
        ; emitWorkNC given_evs }
 
   | isEmptyVarSet (tyVarsOfTypes xis)
   = return () -- Wanteds with no variables yield no deriveds.
               -- See Note [Improvement from Ground Wanteds]
 
-  | otherwise -- Derived case, just add those SC that can lead to improvement.
+  | otherwise -- Wanted/Derived case, just add those SC that can lead to improvement.
   = do { let sc_rec_theta = transSuperClasses cls xis
              impr_theta   = filter isImprovementPred sc_rec_theta
              loc          = ctEvLoc flavor
        ; traceTcS "newSCWork/Derived" $ text "impr_theta =" <+> ppr impr_theta
        ; emitNewDeriveds loc impr_theta }
 
+  where
+    size = sizeTypes xis
+    mk_given_loc loc
+       | isCTupleClass cls
+       = loc   -- For tuple predicates, just take them apart, without
+               -- adding their (large) size into the chain.  When we
+               -- get down to a base predicate, we'll include its size.
+               -- Trac #10335
+
+       | GivenOrigin skol_info <- ctLocOrigin loc
+         -- See Note [Solving superclass constraints] in TcInstDcls
+         -- for explantation of this transformation for givens
+       = case skol_info of
+            InstSkol -> loc { ctl_origin = GivenOrigin (InstSC size) }
+            InstSC n -> loc { ctl_origin = GivenOrigin (InstSC (n `max` size)) }
+            _        -> loc
+
+       | otherwise  -- Probably doesn't happen, since this function
+       = loc        -- is only used for Givens, but does no harm
 
 {-
 ************************************************************************
@@ -582,7 +598,7 @@ can_eq_newtype_nc rdr_env ev swapped co ty1 ty1' ty2 ps_ty2
          -- check for blowing our stack:
          -- See Note [Newtypes can blow the stack]
        ; checkReductionDepth (ctEvLoc ev) ty1
-       ; markDataConsAsUsed rdr_env (tyConAppTyCon ty1)
+       ; addUsedDataCons rdr_env (tyConAppTyCon ty1)
            -- we have actually used the newtype constructor here, so
            -- make sure we don't warn about importing it!
 
@@ -590,15 +606,6 @@ can_eq_newtype_nc rdr_env ev swapped co ty1 ty1' ty2 ps_ty2
                            (mkTcSymCo co) (mkTcReflCo Representational ps_ty2)
          `andWhenContinue` \ new_ev ->
          can_eq_nc False new_ev ReprEq ty1' ty1' ty2 ps_ty2 }
-
--- | Mark all the datacons of the given 'TyCon' as used in this module,
--- avoiding "redundant import" warnings.
-markDataConsAsUsed :: GlobalRdrEnv -> TyCon -> TcS ()
-markDataConsAsUsed rdr_env tc = addUsedRdrNamesTcS
-  [ greUsedRdrName gre
-  | dc <- tyConDataCons tc
-  , gre : _  <- return $ lookupGRE_Name rdr_env (dataConName dc)
-  , not (isLocalGRE gre) ]
 
 ---------
 -- ^ Decompose a type application.
@@ -921,7 +928,7 @@ If we see (T s1 t1 ~ T s2 t2), then we can just decompose to
   (s1 ~ s2, t1 ~ t2)
 and push those back into the work list.  But if
   s1 = K k1    s2 = K k2
-then we will jus decomopose s1~s2, and it might be better to
+then we will just decomopose s1~s2, and it might be better to
 do so on the spot.  An important special case is where s1=s2,
 and we get just Refl.
 
@@ -999,6 +1006,23 @@ and the Id newtype is unwrapped. This is assured by requiring only flat
 types in canEqTyVar *and* having the newtype-unwrapping check above
 the tyvar check in can_eq_nc.
 
+Note [Occurs check error]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+If we have an occurs check error, are we necessarily hosed? Say our
+tyvar is tv1 and the type it appears in is xi2. Because xi2 is function
+free, then if we're computing w.r.t. nominal equality, then, yes, we're
+hosed. Nothing good can come from (a ~ [a]). If we're computing w.r.t.
+representational equality, this is a little subtler. Once again, (a ~R [a])
+is a bad thing, but (a ~R N a) for a newtype N might be just fine. This
+means also that (a ~ b a) might be fine, because `b` might become a newtype.
+
+So, we must check: does tv1 appear in xi2 under any type constructor that
+is generative w.r.t. representational equality? That's what isTyVarUnderDatatype
+does. (The other name I considered, isTyVarUnderTyConGenerativeWrtReprEq was
+a bit verbose. And the shorter name gets the point across.)
+
+See also #10715, which induced this addition.
+
 -}
 
 canCFunEqCan :: CtEvidence
@@ -1074,12 +1098,14 @@ canEqTyVar2 dflags ev eq_rel swapped tv1 xi2
   | otherwise  -- Occurs check error
   = rewriteEqEvidence ev eq_rel swapped xi1 xi2 co1 co2
     `andWhenContinue` \ new_ev ->
-    case eq_rel of
-      NomEq  -> do { emitInsoluble (mkNonCanonical new_ev)
+    if eq_rel == NomEq || isTyVarUnderDatatype tv1 xi2
+      -- See Note [Occurs check error]
+
+    then do { emitInsoluble (mkNonCanonical new_ev)
               -- If we have a ~ [a], it is not canonical, and in particular
               -- we don't want to rewrite existing inerts with it, otherwise
               -- we'd risk divergence in the constraint solver
-                   ; stopWith new_ev "Occurs check" }
+            ; stopWith new_ev "Occurs check" }
 
         -- A representational equality with an occurs-check problem isn't
         -- insoluble! For example:
@@ -1087,9 +1113,9 @@ canEqTyVar2 dflags ev eq_rel swapped tv1 xi2
         -- We might learn that b is the newtype Id.
         -- But, the occurs-check certainly prevents the equality from being
         -- canonical, and we might loop if we were to use it in rewriting.
-      ReprEq -> do { traceTcS "Occurs-check in representational equality"
+    else do { traceTcS "Occurs-check in representational equality"
                               (ppr xi1 $$ ppr xi2)
-                   ; continueWith (CIrredEvCan { cc_ev = new_ev }) }
+            ; continueWith (CIrredEvCan { cc_ev = new_ev }) }
   where
     role = eqRelRole eq_rel
     xi1  = mkTyVarTy tv1
@@ -1111,7 +1137,7 @@ canEqTyVarTyVar ev eq_rel swapped tv1 tv2
   | incompat_kind   = incompatibleKind ev xi1 k1 xi2 k2
 
 -- We don't do this any more
--- See Note [Orientation of equalities with fmvs] in TcSMonad
+-- See Note [Orientation of equalities with fmvs] in TcFlatten
 --  | isFmvTyVar tv1  = do_fmv swapped            tv1 xi1 xi2 co1 co2
 --  | isFmvTyVar tv2  = do_fmv (flipSwap swapped) tv2 xi2 xi1 co2 co1
 
@@ -1142,7 +1168,7 @@ canEqTyVarTyVar ev eq_rel swapped tv1 tv2
                                , cc_rhs = xi2, cc_eq_rel = eq_rel })
 
 {- We don't do this any more
-   See Note [Orientation of equalities with fmvs] in TcSMonad
+   See Note [Orientation of equalities with fmvs] in TcFlatten
     -- tv1 is the flatten meta-var
     do_fmv swapped tv1 xi1 xi2 co1 co2
       | same_kind

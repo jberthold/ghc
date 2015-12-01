@@ -311,7 +311,7 @@ nextEra( void )
 FILE *hp_file;
 static char *hp_filename;
 
-void initProfiling1 (void)
+void initProfiling (void)
 {
 }
 
@@ -549,9 +549,9 @@ fprint_ccs(FILE *fp, CostCentreStack *ccs, nat max_length)
 }
 
 rtsBool
-strMatchesSelector( char* str, char* sel )
+strMatchesSelector( const char* str, const char* sel )
 {
-   char* p;
+   const char* p;
    // debugBelch("str_matches_selector %s %s\n", str, sel);
    while (1) {
        // Compare str against wherever we've got to in sel.
@@ -1023,7 +1023,7 @@ heapCensusChain( Census *census, bdescr *bd )
 
             case ARR_WORDS:
                 prim = rtsTrue;
-                size = arr_words_sizeW((StgArrWords*)p);
+                size = arr_words_sizeW((StgArrBytes*)p);
                 break;
 
             case MUT_ARR_PTRS_CLEAN:

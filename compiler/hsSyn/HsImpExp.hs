@@ -13,7 +13,8 @@ module HsImpExp where
 import Module           ( ModuleName )
 import HsDoc            ( HsDocString )
 import OccName          ( HasOccName(..), isTcOcc, isSymOcc )
-import BasicTypes       ( SourceText )
+import BasicTypes       ( SourceText, StringLiteral(..) )
+import FieldLabel       ( FieldLbl(..) )
 
 import Outputable
 import FastString
@@ -44,14 +45,14 @@ data ImportDecl name
       ideclSourceSrc :: Maybe SourceText,
                                  -- Note [Pragma source text] in BasicTypes
       ideclName      :: Located ModuleName, -- ^ Module name.
-      ideclPkgQual   :: Maybe (SourceText,FastString),  -- ^ Package qualifier.
-      ideclSource    :: Bool,              -- ^ True <=> {-\# SOURCE \#-} import
-      ideclSafe      :: Bool,               -- ^ True => safe import
-      ideclQualified :: Bool,               -- ^ True => qualified
-      ideclImplicit  :: Bool,               -- ^ True => implicit import (of Prelude)
-      ideclAs        :: Maybe ModuleName,   -- ^ as Module
+      ideclPkgQual   :: Maybe StringLiteral,  -- ^ Package qualifier.
+      ideclSource    :: Bool,          -- ^ True <=> {-\# SOURCE \#-} import
+      ideclSafe      :: Bool,          -- ^ True => safe import
+      ideclQualified :: Bool,          -- ^ True => qualified
+      ideclImplicit  :: Bool,          -- ^ True => implicit import (of Prelude)
+      ideclAs        :: Maybe ModuleName,  -- ^ as Module
       ideclHiding    :: Maybe (Bool, Located [LIE name])
-                                            -- ^ (True => hiding, names)
+                                       -- ^ (True => hiding, names)
     }
      -- ^
      --  'ApiAnnotation.AnnKeywordId's
@@ -96,8 +97,8 @@ instance (OutputableBndr name, HasOccName name) => Outputable (ImportDecl name) 
         pp_implicit False = empty
         pp_implicit True = ptext (sLit ("(implicit)"))
 
-        pp_pkg Nothing      = empty
-        pp_pkg (Just (_,p)) = doubleQuotes (ftext p)
+        pp_pkg Nothing                     = empty
+        pp_pkg (Just (StringLiteral _ p)) = doubleQuotes (ftext p)
 
         pp_qual False   = empty
         pp_qual True    = ptext (sLit "qualified")
@@ -140,11 +141,13 @@ data IE name
         --             'ApiAnnotation.AnnType'
 
         -- For details on above see note [Api annotations] in ApiAnnotation
+        -- See Note [Located RdrNames] in HsExpr
   | IEThingAbs  (Located name)     -- ^ Class/Type (can't tell)
         --  - 'ApiAnnotation.AnnKeywordId's : 'ApiAnnotation.AnnPattern',
         --             'ApiAnnotation.AnnType','ApiAnnotation.AnnVal'
 
         -- For details on above see note [Api annotations] in ApiAnnotation
+        -- See Note [Located RdrNames] in HsExpr
   | IEThingAll  (Located name)     -- ^ Class/Type plus all methods/constructors
         --
         -- - 'ApiAnnotation.AnnKeywordId's : 'ApiAnnotation.AnnOpen',
@@ -152,9 +155,14 @@ data IE name
         --                                 'ApiAnnotation.AnnType'
 
         -- For details on above see note [Api annotations] in ApiAnnotation
+        -- See Note [Located RdrNames] in HsExpr
 
-  | IEThingWith (Located name) [Located name]
+  | IEThingWith (Located name)
+                IEWildcard
+                [Located name]
+                [Located (FieldLbl name)]
                  -- ^ Class/Type plus some methods/constructors
+                 -- and record fields; see Note [IEThingWith]
         -- - 'ApiAnnotation.AnnKeywordId's : 'ApiAnnotation.AnnOpen',
         --                                   'ApiAnnotation.AnnClose',
         --                                   'ApiAnnotation.AnnComma',
@@ -171,22 +179,41 @@ data IE name
   | IEDocNamed          String           -- ^ Reference to named doc
   deriving (Eq, Data, Typeable)
 
+data IEWildcard = NoIEWildcard | IEWildcard Int deriving (Eq, Data, Typeable)
+
+{-
+Note [IEThingWith]
+~~~~~~~~~~~~~~~~~~
+
+A definition like
+
+    module M ( T(MkT, x) ) where
+      data T = MkT { x :: Int }
+
+gives rise to
+
+    IEThingWith T [MkT] [FieldLabel "x" False x)]           (without DuplicateRecordFields)
+    IEThingWith T [MkT] [FieldLabel "x" True $sel:x:MkT)]   (with    DuplicateRecordFields)
+
+See Note [Representing fields in AvailInfo] in Avail for more details.
+-}
+
 ieName :: IE name -> name
-ieName (IEVar (L _ n))         = n
-ieName (IEThingAbs  (L _ n))   = n
-ieName (IEThingWith (L _ n) _) = n
-ieName (IEThingAll  (L _ n))   = n
+ieName (IEVar (L _ n))              = n
+ieName (IEThingAbs  (L _ n))        = n
+ieName (IEThingWith (L _ n) _ _ _)  = n
+ieName (IEThingAll  (L _ n))        = n
 ieName _ = panic "ieName failed pattern match!"
 
 ieNames :: IE a -> [a]
-ieNames (IEVar       (L _ n)   ) = [n]
-ieNames (IEThingAbs  (L _ n)   ) = [n]
-ieNames (IEThingAll  (L _ n)   ) = [n]
-ieNames (IEThingWith (L _ n) ns) = n : map unLoc ns
-ieNames (IEModuleContents _    ) = []
-ieNames (IEGroup          _ _  ) = []
-ieNames (IEDoc            _    ) = []
-ieNames (IEDocNamed       _    ) = []
+ieNames (IEVar       (L _ n)   )     = [n]
+ieNames (IEThingAbs  (L _ n)   )     = [n]
+ieNames (IEThingAll  (L _ n)   )     = [n]
+ieNames (IEThingWith (L _ n) _ ns _) = n : map unLoc ns
+ieNames (IEModuleContents _    )     = []
+ieNames (IEGroup          _ _  )     = []
+ieNames (IEDoc            _    )     = []
+ieNames (IEDocNamed       _    )     = []
 
 pprImpExp :: (HasOccName name, OutputableBndr name) => name -> SDoc
 pprImpExp name = type_pref <+> pprPrefixOcc name
@@ -199,11 +226,20 @@ instance (HasOccName name, OutputableBndr name) => Outputable (IE name) where
     ppr (IEVar          var)    = pprPrefixOcc (unLoc var)
     ppr (IEThingAbs     thing)  = pprImpExp (unLoc thing)
     ppr (IEThingAll      thing) = hcat [pprImpExp (unLoc thing), text "(..)"]
-    ppr (IEThingWith thing withs)
+    ppr (IEThingWith thing wc withs flds)
         = pprImpExp (unLoc thing) <> parens (fsep (punctuate comma
-                                            (map pprImpExp $ map unLoc withs)))
+                                              ppWiths ++
+                                              map (ppr . flLabel . unLoc) flds))
+      where
+        ppWiths =
+          case wc of
+              NoIEWildcard ->
+                map (pprImpExp . unLoc) withs
+              IEWildcard pos ->
+                let (bs, as) = splitAt pos (map (pprImpExp . unLoc) withs)
+                in bs ++ [text ".."] ++ as
     ppr (IEModuleContents mod')
         = ptext (sLit "module") <+> ppr mod'
-    ppr (IEGroup n _)           = text ("<IEGroup: " ++ (show n) ++ ">")
+    ppr (IEGroup n _)           = text ("<IEGroup: " ++ show n ++ ">")
     ppr (IEDoc doc)             = ppr doc
     ppr (IEDocNamed string)     = text ("<IEDocNamed: " ++ string ++ ">")

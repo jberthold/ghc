@@ -1,5 +1,3 @@
-setTestOpts(only_compiler_types(['ghc']))
-
 test('driver011',
      extra_clean(['A011.hi', 'A011.o']),
      run_command,
@@ -384,7 +382,10 @@ test('T7060',
 test('T7130', normal, compile_fail, ['-fflul-laziness'])
 test('T7563', when(unregisterised(), skip), run_command,
      ['$MAKE -s --no-print-directory T7563'])
-test('T6037', expect_broken(6037), run_command,
+test('T6037',
+     # The testsuite doesn't know how to set a non-Unicode locale on Windows or Mac OS X
+     [when(opsys('mingw32'), expect_fail), when(opsys('darwin'), expect_fail)],
+     run_command,
      ['$MAKE -s --no-print-directory T6037'])
 test('T2507',
      # The testsuite doesn't know how to set a non-Unicode locale on Windows or Mac OS X
@@ -399,7 +400,9 @@ test('T8959a',
 
 test('T703', normal, run_command, ['$MAKE -s --no-print-directory T703'])
 test('T2182', normal, run_command, ['$MAKE -s --no-print-directory T2182'])
-test('T8101', normal, compile, ['-Wall -fno-code'])
+test('T8101', expect_broken(10600), compile, ['-Wall -fno-code'])
+test('T8101b', expect_broken(10600), multimod_compile,
+     ['T8101b', '-Wall -fno-code'])
 
 def build_T9050(name, way):
      return simple_build(name + '.cmm', way, '-outputdir=. ', 0, '', 0, 0, 0)
@@ -443,3 +446,17 @@ test('T10182',
      extra_clean(['T10182.o', 'T10182a.o', 'T10182.o-boot', 'T10182.hi', 'T10182a.hi', 'T10182.hi-boot']),
      run_command,
      ['$MAKE -s --no-print-directory T10182'])
+     
+test('T365',
+     [extra_clean(['test_preprocessor.txt']),
+      pre_cmd('touch test_preprocessor.txt'),
+      unless(opsys('mingw32'), skip)],
+      compile_fail,
+      [''])
+
+test('T9360a', normal, run_command, ['{compiler} --interactive -e ""'])
+test('T9360b', normal, run_command, ['{compiler} -e "" --interactive'])
+
+test('T10970', normal, compile_and_run, ['-hide-all-packages -package base -package containers'])
+test('T10970a', normal, compile_and_run, [''])
+test('T4931', normal, compile_and_run, [''])

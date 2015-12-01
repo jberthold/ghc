@@ -79,7 +79,8 @@ for opt,arg in opts:
         config.no_print_summary = True
 
     if opt == '--only':
-        config.only.append(arg)
+        config.run_only_some_tests = True
+        config.only.add(arg)
 
     if opt == '--way':
         if (arg not in config.run_ways and arg not in config.compile_ways and arg not in config.other_ways):
@@ -210,11 +211,17 @@ from testlib import *
 if windows or darwin:
     pkginfo = getStdout([config.ghc_pkg, 'dump'])
     topdir = config.libdir
+    if windows:
+        mingw = os.path.join(topdir, '../mingw/bin')
+        os.environ['PATH'] = os.pathsep.join([os.environ.get("PATH", ""), mingw])
     for line in pkginfo.split('\n'):
         if line.startswith('library-dirs:'):
             path = line.rstrip()
             path = re.sub('^library-dirs: ', '', path)
-            path = re.sub('\\$topdir', topdir, path)
+            # Use string.replace instead of re.sub, because re.sub
+            # interprets backslashes in the replacement string as
+            # escape sequences.
+            path = path.replace('$topdir', topdir)
             if path.startswith('"'):
                 path = re.sub('^"(.*)"$', '\\1', path)
                 path = re.sub('\\\\(.)', '\\1', path)
@@ -280,6 +287,11 @@ for file in t_files:
         print('*** framework failure: found an error while executing ', file, ':')
         t.n_framework_failures = t.n_framework_failures + 1
         traceback.print_exc()
+
+if config.only:
+    # See Note [Mutating config.only]
+    sys.stderr.write("ERROR: tests not found: {0}\n".format(list(config.only)))
+    sys.exit(1)
 
 if config.list_broken:
     global brokens

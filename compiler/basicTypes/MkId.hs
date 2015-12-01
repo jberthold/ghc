@@ -30,7 +30,7 @@ module MkId (
         wiredInIds, ghcPrimIds,
         unsafeCoerceName, unsafeCoerceId, realWorldPrimId,
         voidPrimId, voidArgId,
-        nullAddrId, seqId, lazyId, lazyIdKey,
+        nullAddrId, seqId, lazyId, lazyIdKey, runRWId,
         coercionTokenId, magicDictId, coerceId,
         proxyHashId,
 
@@ -120,7 +120,7 @@ is right here.
 
 wiredInIds :: [Id]
 wiredInIds
-  =  [lazyId, dollarId, oneShotId]
+  =  [lazyId, dollarId, oneShotId, runRWId]
   ++ errorIds           -- Defined in MkCore
   ++ ghcPrimIds
 
@@ -295,7 +295,7 @@ mkDictSelId name clas
                    -- for why alwaysInlinePragma
 
          | otherwise
-         = base_info `setSpecInfo` mkSpecInfo [rule]
+         = base_info `setRuleInfo` mkRuleInfo [rule]
                    -- Add a magic BuiltinRule, but no unfolding
                    -- so that the rule is always available to fire.
                    -- See Note [ClassOp/DFun selection] in TcInstDcls
@@ -465,8 +465,14 @@ newtype DataConBoxer = DCB ([Type] -> [Var] -> UniqSM ([Var], [CoreBind]))
                        -- Bind these src-level vars, returning the
                        -- rep-level vars to bind in the pattern
 
-mkDataConRep :: DynFlags -> FamInstEnvs -> Name -> DataCon -> UniqSM DataConRep
-mkDataConRep dflags fam_envs wrap_name data_con
+mkDataConRep :: DynFlags
+             -> FamInstEnvs
+             -> Name
+             -> Maybe [HsImplBang]
+                -- See Note [Bangs on imported data constructors]
+             -> DataCon
+             -> UniqSM DataConRep
+mkDataConRep dflags fam_envs wrap_name mb_bangs data_con
   | not wrapper_reqd
   = return NoDataConRep
 
@@ -488,9 +494,9 @@ mkDataConRep dflags fam_envs wrap_name data_con
                              -- so it not make sure that the CAF info is sane
 
              wrap_sig = mkClosedStrictSig wrap_arg_dmds (dataConCPR data_con)
-             wrap_arg_dmds = map mk_dmd (dropList eq_spec wrap_bangs)
+             wrap_arg_dmds = map mk_dmd arg_ibangs
              mk_dmd str | isBanged str = evalDmd
-                        | otherwise    = topDmd
+                        | otherwise           = topDmd
                  -- The Cpr info can be important inside INLINE rhss, where the
                  -- wrapper constructor isn't inlined.
                  -- And the argument strictness can be important too; we
@@ -511,7 +517,7 @@ mkDataConRep dflags fam_envs wrap_name data_con
                      , dcr_boxer   = mk_boxer boxers
                      , dcr_arg_tys = rep_tys
                      , dcr_stricts = rep_strs
-                     , dcr_bangs   = dropList ev_tys wrap_bangs }) }
+                     , dcr_bangs   = arg_ibangs }) }
 
   where
     (univ_tvs, ex_tvs, eq_spec, theta, orig_arg_tys, _) = dataConFullSig data_con
@@ -519,8 +525,9 @@ mkDataConRep dflags fam_envs wrap_name data_con
     tycon        = dataConTyCon data_con       -- The representation TyCon (not family)
     wrap_ty      = dataConUserType data_con
     ev_tys       = eqSpecPreds eq_spec ++ theta
-    all_arg_tys  = ev_tys                         ++ orig_arg_tys
-    orig_bangs   = map mk_pred_strict_mark ev_tys ++ dataConSrcBangs data_con
+    all_arg_tys  = ev_tys ++ orig_arg_tys
+    ev_ibangs    = map mk_pred_strict_mark ev_tys
+    orig_bangs   = dataConSrcBangs data_con
 
     wrap_arg_tys = theta ++ orig_arg_tys
     wrap_arity   = length wrap_arg_tys
@@ -528,15 +535,22 @@ mkDataConRep dflags fam_envs wrap_name data_con
              -- Because we are going to apply the eq_spec args manually in the
              -- wrapper
 
-    (wrap_bangs, rep_tys_w_strs, wrappers)
-       = unzip3 (zipWith (dataConArgRep dflags fam_envs) all_arg_tys orig_bangs)
+    arg_ibangs =
+      case mb_bangs of
+        Nothing    -> zipWith (dataConSrcToImplBang dflags fam_envs)
+                              orig_arg_tys orig_bangs
+        Just bangs -> bangs
+
+    (rep_tys_w_strs, wrappers)
+      = unzip (zipWith dataConArgRep all_arg_tys (ev_ibangs ++ arg_ibangs))
+
     (unboxers, boxers) = unzip wrappers
     (rep_tys, rep_strs) = unzip (concat rep_tys_w_strs)
 
     wrapper_reqd = not (isNewTyCon tycon)  -- Newtypes have only a worker
-                && (any isBanged orig_bangs   -- Some forcing/unboxing
-                                              -- (includes eq_spec)
-                    || isFamInstTyCon tycon)  -- Cast result
+                && (any isBanged (ev_ibangs ++ arg_ibangs)
+                      -- Some forcing/unboxing (includes eq_spec)
+                    || isFamInstTyCon tycon) -- Cast result
 
     initial_wrap_app = Var (dataConWorkId data_con)
                       `mkTyApps`  res_ty_args
@@ -572,70 +586,98 @@ mkDataConRep dflags fam_envs wrap_name data_con
            ; expr <- mk_rep_app prs (mkVarApps con_app rep_ids)
            ; return (unbox_fn expr) }
 
+{-
+Note [Bangs on imported data constructors]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+We pass Maybe [HsImplBang] to mkDataConRep to make use of HsImplBangs
+from imported modules.
+
+- Nothing <=> use HsSrcBangs
+- Just bangs <=> use HsImplBangs
+
+For imported types we can't work it all out from the HsSrcBangs,
+because we want to be very sure to follow what the original module
+(where the data type was declared) decided, and that depends on what
+flags were enabled when it was compiled. So we record the decisions in
+the interface file.
+
+The HsImplBangs passed are in 1-1 correspondence with the
+dataConOrigArgTys of the DataCon.
+
+-}
+
 -------------------------
 newLocal :: Type -> UniqSM Var
 newLocal ty = do { uniq <- getUniqueM
                  ; return (mkSysLocal (fsLit "dt") uniq ty) }
 
--------------------------
-dataConArgRep
+-- | Unpack/Strictness decisions from source module
+dataConSrcToImplBang
    :: DynFlags
    -> FamInstEnvs
    -> Type
-   -> HsSrcBang     -- For DataCons defined in this module, this is the
-                    --    bang/unpack annotation that the programmer wrote
-                    -- For DataCons imported from an interface file, this
-                    --    is the HsImplBang implementation decision taken
-                    --    by the compiler in the defining module; just follow
-                    --    it slavishly, so that we make the same decision as
-                    --    in the defining module
-   -> ( HsImplBang                 -- Implementation decision about unpack strategy
-      , [(Type, StrictnessMark)]   -- Rep types
-      , (Unboxer, Boxer) )
+   -> HsSrcBang
+   -> HsImplBang
 
-dataConArgRep _ _ arg_ty HsNoBang
-  = (HsNoBang, [(arg_ty, NotMarkedStrict)], (unitUnboxer, unitBoxer))
+dataConSrcToImplBang dflags fam_envs arg_ty
+              (HsSrcBang ann unpk NoSrcStrict)
+  | xopt Opt_StrictData dflags -- StrictData => strict field
+  = dataConSrcToImplBang dflags fam_envs arg_ty
+                  (HsSrcBang ann unpk SrcStrict)
+  | otherwise -- no StrictData => lazy field
+  = HsLazy
 
-dataConArgRep _ _ arg_ty (HsSrcBang _ _ False)  -- No '!'
-  = (HsNoBang, [(arg_ty, NotMarkedStrict)], (unitUnboxer, unitBoxer))
+dataConSrcToImplBang _ _ _ (HsSrcBang _ _ SrcLazy)
+  = HsLazy
 
-dataConArgRep dflags fam_envs arg_ty
-    (HsSrcBang _ unpk_prag True)  -- {-# UNPACK #-} !
+dataConSrcToImplBang dflags fam_envs arg_ty
+    (HsSrcBang _ unpk_prag SrcStrict)
   | not (gopt Opt_OmitInterfacePragmas dflags) -- Don't unpack if -fomit-iface-pragmas
           -- Don't unpack if we aren't optimising; rather arbitrarily,
           -- we use -fomit-iface-pragmas as the indication
   , let mb_co   = topNormaliseType_maybe fam_envs arg_ty
                      -- Unwrap type families and newtypes
         arg_ty' = case mb_co of { Just (_,ty) -> ty; Nothing -> arg_ty }
-  , isUnpackableType fam_envs arg_ty'
-  , (rep_tys, wrappers) <- dataConArgUnpack arg_ty'
+  , isUnpackableType dflags fam_envs arg_ty'
+  , (rep_tys, _) <- dataConArgUnpack arg_ty'
   , case unpk_prag of
-      Nothing -> gopt Opt_UnboxStrictFields dflags
-              || (gopt Opt_UnboxSmallStrictFields dflags
-                   && length rep_tys <= 1)  -- See Note [Unpack one-wide fields]
-      Just unpack_me -> unpack_me
+      NoSrcUnpack ->
+        gopt Opt_UnboxStrictFields dflags
+            || (gopt Opt_UnboxSmallStrictFields dflags
+                && length rep_tys <= 1) -- See Note [Unpack one-wide fields]
+      srcUnpack -> isSrcUnpacked srcUnpack
   = case mb_co of
-      Nothing          -> (HsUnpack Nothing,   rep_tys, wrappers)
-      Just (co,rep_ty) -> (HsUnpack (Just co), rep_tys, wrapCo co rep_ty wrappers)
+      Nothing     -> HsUnpack Nothing
+      Just (co,_) -> HsUnpack (Just co)
 
-  | otherwise  -- Record the strict-but-no-unpack decision
-  = strict_but_not_unpacked arg_ty
+  | otherwise -- Record the strict-but-no-unpack decision
+  = HsStrict
 
-dataConArgRep _ _ arg_ty HsStrict
-  = strict_but_not_unpacked arg_ty
 
-dataConArgRep _ _ arg_ty (HsUnpack Nothing)
+-- | Wrappers/Workser and representation following Unpack/Strictness
+-- decisions
+dataConArgRep
+  :: Type
+  -> HsImplBang
+  -> ([(Type,StrictnessMark)] -- Rep types
+     ,(Unboxer,Boxer))
+
+dataConArgRep arg_ty HsLazy
+  = ([(arg_ty, NotMarkedStrict)], (unitUnboxer, unitBoxer))
+
+dataConArgRep arg_ty HsStrict
+  = ([(arg_ty, MarkedStrict)], (seqUnboxer, unitBoxer))
+
+dataConArgRep arg_ty (HsUnpack Nothing)
   | (rep_tys, wrappers) <- dataConArgUnpack arg_ty
-  = (HsUnpack Nothing, rep_tys, wrappers)
+  = (rep_tys, wrappers)
 
-dataConArgRep _ _ _ (HsUnpack (Just co))
+dataConArgRep _ (HsUnpack (Just co))
   | let co_rep_ty = pSnd (coercionKind co)
   , (rep_tys, wrappers) <- dataConArgUnpack co_rep_ty
-  = (HsUnpack (Just co), rep_tys, wrapCo co co_rep_ty wrappers)
+  = (rep_tys, wrapCo co co_rep_ty wrappers)
 
-strict_but_not_unpacked :: Type -> (HsImplBang, [(Type,StrictnessMark)], (Unboxer, Boxer))
-strict_but_not_unpacked arg_ty
-  = (HsStrict, [(arg_ty, MarkedStrict)], (seqUnboxer, unitBoxer))
 
 -------------------------
 wrapCo :: Coercion -> Type -> (Unboxer, Boxer) -> (Unboxer, Boxer)
@@ -695,13 +737,13 @@ dataConArgUnpack arg_ty
   = pprPanic "dataConArgUnpack" (ppr arg_ty)
     -- An interface file specified Unpacked, but we couldn't unpack it
 
-isUnpackableType :: FamInstEnvs -> Type -> Bool
+isUnpackableType :: DynFlags -> FamInstEnvs -> Type -> Bool
 -- True if we can unpack the UNPACK the argument type
 -- See Note [Recursive unboxing]
 -- We look "deeply" inside rather than relying on the DataCons
 -- we encounter on the way, because otherwise we might well
 -- end up relying on ourselves!
-isUnpackableType fam_envs ty
+isUnpackableType dflags fam_envs ty
   | Just (tc, _) <- splitTyConApp_maybe ty
   , Just con <- tyConSingleAlgDataCon_maybe tc
   , isVanillaDataCon con
@@ -728,11 +770,15 @@ isUnpackableType fam_envs ty
          -- NB: dataConSrcBangs gives the *user* request;
          -- We'd get a black hole if we used dataConImplBangs
 
-    attempt_unpack (HsUnpack {})                  = True
-    attempt_unpack (HsSrcBang _ (Just unpk) bang) = bang && unpk
-    attempt_unpack (HsSrcBang _  Nothing bang)     = bang  -- Be conservative
-    attempt_unpack HsStrict                       = False
-    attempt_unpack HsNoBang                       = False
+    attempt_unpack (HsSrcBang _ SrcUnpack NoSrcStrict)
+      = xopt Opt_StrictData dflags
+    attempt_unpack (HsSrcBang _ SrcUnpack SrcStrict)
+      = True
+    attempt_unpack (HsSrcBang _  NoSrcUnpack SrcStrict)
+      = True  -- Be conservative
+    attempt_unpack (HsSrcBang _  NoSrcUnpack NoSrcStrict)
+      = xopt Opt_StrictData dflags -- Be conservative
+    attempt_unpack _ = False
 
 {-
 Note [Unpack one-wide fields]
@@ -797,10 +843,11 @@ heavy lifting.  This one line makes every GADT take a word less
 space for each equality predicate, so it's pretty important!
 -}
 
-mk_pred_strict_mark :: PredType -> HsSrcBang
+mk_pred_strict_mark :: PredType -> HsImplBang
 mk_pred_strict_mark pred
-  | isEqPred pred = HsUnpack Nothing    -- Note [Unpack equality predicates]
-  | otherwise     = HsNoBang
+  | isEqPred pred = HsUnpack Nothing
+  -- Note [Unpack equality predicates]
+  | otherwise     = HsLazy
 
 {-
 ************************************************************************
@@ -815,7 +862,7 @@ wrapNewTypeBody :: TyCon -> [Type] -> CoreExpr -> CoreExpr
 --      newtype T a = MkT (a,Int)
 --      MkT :: forall a. (a,Int) -> T a
 --      MkT = /\a. \(x:(a,Int)). x `cast` sym (CoT a)
--- where CoT is the coercion TyCon assoicated with the newtype
+-- where CoT is the coercion TyCon associated with the newtype
 --
 -- The call (wrapNewTypeBody T [a] e) returns the
 -- body of the wrapper, namely
@@ -864,7 +911,8 @@ wrapTypeFamInstBody :: CoAxiom br -> Int -> [Type] -> CoreExpr -> CoreExpr
 wrapTypeFamInstBody axiom ind args body
   = mkCast body (mkSymCo (mkAxInstCo Representational axiom ind args))
 
-wrapTypeUnbranchedFamInstBody :: CoAxiom Unbranched -> [Type] -> CoreExpr -> CoreExpr
+wrapTypeUnbranchedFamInstBody :: CoAxiom Unbranched -> [Type] -> CoreExpr
+                              -> CoreExpr
 wrapTypeUnbranchedFamInstBody axiom
   = wrapTypeFamInstBody axiom 0
 
@@ -879,7 +927,8 @@ unwrapTypeFamInstScrut :: CoAxiom br -> Int -> [Type] -> CoreExpr -> CoreExpr
 unwrapTypeFamInstScrut axiom ind args scrut
   = mkCast scrut (mkAxInstCo Representational axiom ind args)
 
-unwrapTypeUnbranchedFamInstScrut :: CoAxiom Unbranched -> [Type] -> CoreExpr -> CoreExpr
+unwrapTypeUnbranchedFamInstScrut :: CoAxiom Unbranched -> [Type] -> CoreExpr
+                                 -> CoreExpr
 unwrapTypeUnbranchedFamInstScrut axiom
   = unwrapTypeFamInstScrut axiom 0
 
@@ -903,7 +952,7 @@ mkPrimOpId prim_op
     id   = mkGlobalId (PrimOpId prim_op) name ty info
 
     info = noCafIdInfo
-           `setSpecInfo`          mkSpecInfo (maybeToList $ primOpRules name prim_op)
+           `setRuleInfo`          mkRuleInfo (maybeToList $ primOpRules name prim_op)
            `setArityInfo`         arity
            `setStrictnessInfo`    strict_sig
            `setInlinePragInfo`    neverInlinePragma
@@ -941,8 +990,11 @@ mkFCallId dflags uniq fcall ty
     (_, tau)        = tcSplitForAllTys ty
     (arg_tys, _)    = tcSplitFunTys tau
     arity           = length arg_tys
-    strict_sig      = mkClosedStrictSig (replicate arity evalDmd) topRes
 
+    strict_sig      = mkClosedStrictSig (replicate arity topDmd) topRes
+    -- the call does not claim to be strict in its arguments, since they
+    -- may be lifted (foreign import prim) and the called code doen't
+    -- necessarily force them. See Trac #11076.
 {-
 ************************************************************************
 *                                                                      *
@@ -1005,7 +1057,8 @@ another gun with which to shoot yourself in the foot.
 
 lazyIdName, unsafeCoerceName, nullAddrName, seqName,
    realWorldName, voidPrimIdName, coercionTokenName,
-   magicDictName, coerceName, proxyName, dollarName, oneShotName :: Name
+   magicDictName, coerceName, proxyName, dollarName, oneShotName,
+   runRWName :: Name
 unsafeCoerceName  = mkWiredInIdName gHC_PRIM  (fsLit "unsafeCoerce#")  unsafeCoerceIdKey  unsafeCoerceId
 nullAddrName      = mkWiredInIdName gHC_PRIM  (fsLit "nullAddr#")      nullAddrIdKey      nullAddrId
 seqName           = mkWiredInIdName gHC_PRIM  (fsLit "seq")            seqIdKey           seqId
@@ -1018,6 +1071,7 @@ coerceName        = mkWiredInIdName gHC_PRIM  (fsLit "coerce")         coerceKey
 proxyName         = mkWiredInIdName gHC_PRIM  (fsLit "proxy#")         proxyHashKey       proxyHashId
 dollarName        = mkWiredInIdName gHC_BASE  (fsLit "$")              dollarIdKey        dollarId
 oneShotName       = mkWiredInIdName gHC_MAGIC (fsLit "oneShot")        oneShotKey         oneShotId
+runRWName         = mkWiredInIdName gHC_MAGIC (fsLit "runRW#")         runRWKey           runRWId
 
 dollarId :: Id  -- Note [dollarId magic]
 dollarId = pcMiscPrelId dollarName ty
@@ -1041,7 +1095,7 @@ proxyHashId
     ty      = mkForAllTys [kv, tv] (mkProxyPrimTy k t)
     kv      = kKiVar
     k       = mkTyVarTy kv
-    tv:_    = tyVarList k
+    [tv]    = mkTemplateTyVars [k]
     t       = mkTyVarTy tv
 
 ------------------------------------------------
@@ -1076,7 +1130,7 @@ seqId = pcMiscPrelId seqName ty info
   where
     info = noCafIdInfo `setInlinePragInfo` inline_prag
                        `setUnfoldingInfo`  mkCompulsoryUnfolding rhs
-                       `setSpecInfo`       mkSpecInfo [seq_cast_rule]
+                       `setRuleInfo`       mkRuleInfo [seq_cast_rule]
 
     inline_prag = alwaysInlinePragma `setInlinePragmaActivation` ActiveAfter 0
                   -- Make 'seq' not inline-always, so that simpleOptExpr
@@ -1086,7 +1140,6 @@ seqId = pcMiscPrelId seqName ty info
 
     ty  = mkForAllTys [alphaTyVar,betaTyVar]
                       (mkFunTy alphaTy (mkFunTy betaTy betaTy))
-              -- NB argBetaTyVar; see Note [seqId magic]
 
     [x,y] = mkTemplateLocals [alphaTy, betaTy]
     rhs = mkLams [alphaTyVar,betaTyVar,x,y] (Case (Var x) x betaTy [(DEFAULT, [], Var y)])
@@ -1102,8 +1155,15 @@ seqId = pcMiscPrelId seqName ty info
 match_seq_of_cast :: RuleFun
     -- See Note [Built-in RULES for seq]
 match_seq_of_cast _ _ _ [Type _, Type res_ty, Cast scrut co]
-  = Just (Var seqId `mkApps` [Type (pFst (coercionKind co)), Type res_ty,
-                              scrut])
+  = Just (fun `App` scrut)
+  where
+    fun      = Lam x $ Lam y $
+               Case (Var x) x res_ty [(DEFAULT,[],Var y)]
+               -- Generate a Case directly, not a call to seq, which
+               -- might be ill-kinded if res_ty is unboxed
+    [x,y]    = mkTemplateLocals [scrut_ty, res_ty]
+    scrut_ty = pFst (coercionKind co)
+
 match_seq_of_cast _ _ _ _ = Nothing
 
 ------------------------------------------------
@@ -1118,12 +1178,25 @@ oneShotId = pcMiscPrelId oneShotName ty info
   where
     info = noCafIdInfo `setInlinePragInfo` alwaysInlinePragma
                        `setUnfoldingInfo`  mkCompulsoryUnfolding rhs
-    ty  = mkForAllTys [alphaTyVar, betaTyVar] (mkFunTy fun_ty fun_ty)
+    ty  = mkForAllTys [openAlphaTyVar, openBetaTyVar] (mkFunTy fun_ty fun_ty)
     fun_ty = mkFunTy alphaTy betaTy
     [body, x] = mkTemplateLocals [fun_ty, alphaTy]
     x' = setOneShotLambda x
-    rhs = mkLams [alphaTyVar, betaTyVar, body, x'] $ Var body `App` Var x
+    rhs = mkLams [openAlphaTyVar, openBetaTyVar, body, x'] $ Var body `App` Var x
 
+runRWId :: Id -- See Note [runRW magic] in this module
+runRWId = pcMiscPrelId runRWName ty info
+  where
+    info    = noCafIdInfo `setInlinePragInfo` neverInlinePragma
+    -- State# RealWorld
+    stateRW = mkTyConApp statePrimTyCon [realWorldTy]
+    -- (# State# RealWorld, o #)
+    ret_ty  = mkTyConApp unboxedPairTyCon [stateRW, openAlphaTy]
+    -- State# RealWorld -> (# State# RealWorld, o #)
+    arg_ty  = stateRW `mkFunTy` ret_ty
+    -- (State# RealWorld -> (# State# RealWorld, o #))
+    --   -> (# State# RealWorld, o #)
+    ty      = mkForAllTys [openAlphaTyVar] (arg_ty `mkFunTy` ret_ty)
 
 --------------------------------------------------------------------------------
 magicDictId :: Id  -- See Note [magicDictId magic]
@@ -1184,9 +1257,12 @@ Note [seqId magic]
 ~~~~~~~~~~~~~~~~~~
 'GHC.Prim.seq' is special in several ways.
 
-a) Its second arg can have an unboxed type
+a) In source Haskell its second arg can have an unboxed type
       x `seq` (v +# w)
-   Hence its second type variable has ArgKind
+   But see Note [Typing rule for seq] in TcExpr, which
+   explains why we give seq itself an ordinary type
+         seq :: forall a b. a -> b -> b
+   and treat it as a language construct from a typing point of view.
 
 b) Its fixity is set in LoadIface.ghcPrimIface
 
@@ -1194,8 +1270,6 @@ c) It has quite a bit of desugaring magic.
    See DsUtils.hs Note [Desugaring seq (1)] and (2) and (3)
 
 d) There is some special rule handing: Note [User-defined RULES for seq]
-
-e) See Note [Typing rule for seq] in TcExpr.
 
 Note [User-defined RULES for seq]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1263,12 +1337,54 @@ See Trac #3259 for a real world example.
 lazyId is defined in GHC.Base, so we don't *have* to inline it.  If it
 appears un-applied, we'll end up just calling it.
 
+Note [runRW magic]
+~~~~~~~~~~~~~~~~~~
+Some definitions, for instance @runST@, must have careful control over float out
+of the bindings in their body. Consider this use of @runST@,
+
+    f x = runST ( \ s -> let (a, s')  = newArray# 100 [] s
+                             (_, s'') = fill_in_array_or_something a x s'
+                         in freezeArray# a s'' )
+
+If we inline @runST@, we'll get:
+
+    f x = let (a, s')  = newArray# 100 [] realWorld#{-NB-}
+              (_, s'') = fill_in_array_or_something a x s'
+          in freezeArray# a s''
+
+And now if we allow the @newArray#@ binding to float out to become a CAF,
+we end up with a result that is totally and utterly wrong:
+
+    f = let (a, s')  = newArray# 100 [] realWorld#{-NB-} -- YIKES!!!
+        in \ x ->
+            let (_, s'') = fill_in_array_or_something a x s'
+            in freezeArray# a s''
+
+All calls to @f@ will share a {\em single} array! Clearly this is nonsense and
+must be prevented.
+
+This is what @runRW#@ gives us: by being inlined extremely late in the
+optimization (right before lowering to STG, in CorePrep), we can ensure that
+no further floating will occur. This allows us to safely inline things like
+@runST@, which are otherwise needlessly expensive (see #10678 and #5916).
+
+While the definition of @GHC.Magic.runRW#@, we override its type in @MkId@
+to be open-kinded,
+
+    runRW# :: (o :: OpenKind) => (State# RealWorld -> (# State# RealWorld, o #))
+                              -> (# State# RealWorld, o #)
+
+
 Note [The oneShot function]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In the context of making left-folds fuse somewhat okish (see ticket #7994
 and Note [Left folds via right fold]) it was determined that it would be useful
 if library authors could explicitly tell the compiler that a certain lambda is
 called at most once. The oneShot function allows that.
+
+'oneShot' is open kinded, i.e. the type variables can refer to unlifted
+types as well (Trac #10744); e.g.
+   oneShot (\x:Int# -> x +# 1#)
 
 Like most magic functions it has a compulsary unfolding, so there is no need
 for a real definition somewhere. We have one in GHC.Magic for the convenience
@@ -1293,7 +1409,6 @@ Also see https://ghc.haskell.org/trac/ghc/wiki/OneShot.
 
 Note [magicDictId magic]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
-
 The identifier `magicDict` is just a place-holder, which is used to
 implement a primitve that we cannot define in Haskell but we can write
 in Core.  It is declared with a place-holder type:
@@ -1327,13 +1442,12 @@ Next, we add a built-in Prelude rule (see prelude/PrelRules.hs),
 which will replace the RHS of this definition with the appropriate
 definition in Core.  The rewrite rule works as follows:
 
-magicDict@t (wrap@a@b f) x y
+  magicDict @t (wrap @a @b f) x y
 ---->
-f (x `cast` co a) y
+  f (x `cast` co a) y
 
 The `co` coercion is the newtype-coercion extracted from the type-class.
 The type class is obtain by looking at the type of wrap.
-
 
 
 -------------------------------------------------------------

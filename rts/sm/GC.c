@@ -45,7 +45,6 @@
 #include "RetainerProfile.h"
 #include "LdvProfile.h"
 #include "RaiseAsync.h"
-#include "Papi.h"
 #include "Stable.h"
 #include "CheckUnload.h"
 
@@ -138,6 +137,9 @@ long copied;        // *words* copied & scavenged during this GC
 
 rtsBool work_stealing;
 
+nat static_flag = STATIC_FLAG_B;
+nat prev_static_flag = STATIC_FLAG_A;
+
 DECLARE_GCT
 
 /* -----------------------------------------------------------------------------
@@ -145,7 +147,6 @@ DECLARE_GCT
    -------------------------------------------------------------------------- */
 
 static void mark_root               (void *user, StgClosure **root);
-static void zero_static_object_list (StgClosure* first_static);
 static void prepare_collected_gen   (generation *gen);
 static void prepare_uncollected_gen (generation *gen);
 static void init_gc_thread          (gc_thread *t);
@@ -249,6 +250,12 @@ GarbageCollect (nat collect_gen,
    */
   N = collect_gen;
   major_gc = (N == RtsFlags.GcFlags.generations-1);
+
+  if (major_gc) {
+      prev_static_flag = static_flag;
+      static_flag =
+          static_flag == STATIC_FLAG_A ? STATIC_FLAG_B : STATIC_FLAG_A;
+  }
 
 #if defined(THREADED_RTS)
   work_stealing = RtsFlags.ParFlags.parGcLoadBalancingEnabled &&
@@ -698,20 +705,6 @@ GarbageCollect (nat collect_gen,
   resetStaticObjectForRetainerProfiling(gct->scavenged_static_objects);
 #endif
 
-  // zero the scavenged static object list
-  if (major_gc) {
-      nat i;
-      if (n_gc_threads == 1) {
-          zero_static_object_list(gct->scavenged_static_objects);
-      } else {
-          for (i = 0; i < n_gc_threads; i++) {
-              if (!gc_threads[i]->idle) {
-                  zero_static_object_list(gc_threads[i]->scavenged_static_objects);
-              }
-          }
-      }
-  }
-
   // Start any pending finalizers.  Must be after
   // updateStableTables() and stableUnlock() (see #4221).
   RELEASE_SM_LOCK;
@@ -823,10 +816,6 @@ new_gc_thread (nat n, gc_thread *t)
     t->gc_count = 0;
 
     init_gc_thread(t);
-
-#ifdef USE_PAPI
-    t->papi_events = -1;
-#endif
 
     for (g = 0; g < RtsFlags.GcFlags.generations; g++)
     {
@@ -1060,14 +1049,6 @@ gcWorkerThread (Capability *cap)
     debugTrace(DEBUG_gc, "GC thread %d standing by...", gct->thread_index);
     ACQUIRE_SPIN_LOCK(&gct->gc_spin);
 
-#ifdef USE_PAPI
-    // start performance counters in this thread...
-    if (gct->papi_events == -1) {
-        papi_init_eventset(&gct->papi_events);
-    }
-    papi_thread_start_gc1_count(gct->papi_events);
-#endif
-
     init_gc_thread(gct);
 
     traceEventGcWork(gct->cap);
@@ -1087,11 +1068,6 @@ gcWorkerThread (Capability *cap)
     // only reachable via weak pointers.  To fix this problem would
     // require another GC barrier, which is too high a price.
     pruneSparkQueue(cap);
-#endif
-
-#ifdef USE_PAPI
-    // count events in this thread towards the GC totals
-    papi_thread_stop_gc1_count(gct->papi_events);
 #endif
 
     // Wait until we're told to continue
@@ -1453,8 +1429,8 @@ collect_pinned_object_blocks (void)
 static void
 init_gc_thread (gc_thread *t)
 {
-    t->static_objects = END_OF_STATIC_LIST;
-    t->scavenged_static_objects = END_OF_STATIC_LIST;
+    t->static_objects = END_OF_STATIC_OBJECT_LIST;
+    t->scavenged_static_objects = END_OF_STATIC_OBJECT_LIST;
     t->scan_bd = NULL;
     t->mut_lists = t->cap->mut_lists;
     t->evac_gen_no = 0;
@@ -1489,24 +1465,6 @@ mark_root(void *user USED_IF_THREADS, StgClosure **root)
     evacuate(root);
 
     SET_GCT(saved_gct);
-}
-
-/* -----------------------------------------------------------------------------
-   Initialising the static object & mutable lists
-   -------------------------------------------------------------------------- */
-
-static void
-zero_static_object_list(StgClosure* first_static)
-{
-  StgClosure* p;
-  StgClosure* link;
-  const StgInfoTable *info;
-
-  for (p = first_static; p != END_OF_STATIC_LIST; p = link) {
-    info = get_itbl(p);
-    link = *STATIC_LINK(info, p);
-    *STATIC_LINK(info,p) = NULL;
-  }
 }
 
 /* ----------------------------------------------------------------------------
@@ -1754,7 +1712,7 @@ static void gcCAFs(void)
     p = debug_caf_list;
     prev = NULL;
 
-    for (p = debug_caf_list; p != (StgIndStatic*)END_OF_STATIC_LIST;
+    for (p = debug_caf_list; p != (StgIndStatic*)END_OF_CAF_LIST;
          p = (StgIndStatic*)p->saved_info) {
 
         info = get_itbl((StgClosure*)p);

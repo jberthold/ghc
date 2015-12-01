@@ -18,6 +18,7 @@ import OccurAnal
 
 import HscTypes
 import PrelNames
+import MkId             ( realWorldPrimId )
 import CoreUtils
 import CoreArity
 import CoreFVs
@@ -30,7 +31,6 @@ import Type
 import Literal
 import Coercion
 import TcEnv
-import TcRnMonad
 import TyCon
 import Demand
 import Var
@@ -57,8 +57,13 @@ import Config
 import Name             ( NamedThing(..), nameSrcSpan )
 import SrcLoc           ( SrcSpan(..), realSrcLocSpan, mkRealSrcLoc )
 import Data.Bits
+import MonadUtils       ( mapAccumLM )
 import Data.List        ( mapAccumL )
 import Control.Monad
+
+#if __GLASGOW_HASKELL__ < 710
+import Control.Applicative
+#endif
 
 {-
 -- ---------------------------------------------------------------------------
@@ -216,7 +221,7 @@ mkDataConWorkers dflags mod_loc data_tycons
    -- If we want to generate debug info, we put a source note on the
    -- worker. This is useful, especially for heap profiling.
    tick_it name
-     | not (gopt Opt_Debug dflags)           = id
+     | debugLevel dflags == 0                = id
      | RealSrcSpan span <- nameSrcSpan name  = tick span
      | Just file <- ml_hs_file mod_loc       = tick (span1 file)
      | otherwise                             = tick (span1 "???")
@@ -507,9 +512,19 @@ cpeRhsE env (Lit (LitInteger i _))
 cpeRhsE _env expr@(Lit {}) = return (emptyFloats, expr)
 cpeRhsE env expr@(Var {})  = cpeApp env expr
 
-cpeRhsE env (Var f `App` _ `App` arg)
+cpeRhsE env (Var f `App` _{-type-} `App` arg)
   | f `hasKey` lazyIdKey          -- Replace (lazy a) by a
   = cpeRhsE env arg               -- See Note [lazyId magic] in MkId
+
+    -- See Note [runRW magic] in MkId
+  | f `hasKey` runRWKey           -- Replace (runRW# f) by (f realWorld#),
+  = case arg of                   -- beta reducing if possible
+      Lam s body -> cpeRhsE env (substExpr (text "runRW#") subst body)
+        where subst = extendIdSubst emptySubst s (Var realWorldPrimId)
+                      -- XXX I think we can use emptySubst here
+                      -- because realWorldPrimId is a global variable
+                      -- and so cannot be bound by a lambda in body
+      _          -> cpeRhsE env (arg `App` Var realWorldPrimId)
 
 cpeRhsE env expr@(App {}) = cpeApp env expr
 
@@ -1153,21 +1168,21 @@ data CorePrepEnv = CPE {
 lookupMkIntegerName :: DynFlags -> HscEnv -> IO Id
 lookupMkIntegerName dflags hsc_env
     = guardIntegerUse dflags $ liftM tyThingId $
-      initTcForLookup hsc_env (tcLookupGlobal mkIntegerName)
+      lookupGlobal hsc_env mkIntegerName
 
 lookupIntegerSDataConName :: DynFlags -> HscEnv -> IO (Maybe DataCon)
 lookupIntegerSDataConName dflags hsc_env = case cIntegerLibraryType of
-    IntegerGMP -> guardIntegerUse dflags $ liftM Just $
-                  initTcForLookup hsc_env (tcLookupDataCon integerSDataConName)
+    IntegerGMP -> guardIntegerUse dflags $ liftM (Just . tyThingDataCon) $
+                  lookupGlobal hsc_env integerSDataConName
     IntegerSimple -> return Nothing
 
 -- | Helper for 'lookupMkIntegerName' and 'lookupIntegerSDataConName'
 guardIntegerUse :: DynFlags -> IO a -> IO a
 guardIntegerUse dflags act
-  | thisPackage dflags == primPackageKey
-    = return $ panic "Can't use Integer in ghc-prim"
-  | thisPackage dflags == integerPackageKey
-    = return $ panic "Can't use Integer in integer-*"
+  | thisPackage dflags == primUnitId
+  = return $ panic "Can't use Integer in ghc-prim"
+  | thisPackage dflags == integerUnitId
+  = return $ panic "Can't use Integer in integer-*"
   | otherwise = act
 
 mkInitialCorePrepEnv :: DynFlags -> HscEnv -> IO CorePrepEnv
@@ -1214,7 +1229,7 @@ cpCloneBndr env bndr
        -- so that we can drop more stuff as dead code.
        -- See also Note [Dead code in CorePrep]
        let bndr'' = bndr' `setIdUnfolding` noUnfolding
-                          `setIdSpecialisation` emptySpecInfo
+                          `setIdSpecialisation` emptyRuleInfo
        return (extendCorePrepEnv env bndr bndr'', bndr'')
 
   | otherwise   -- Top level things, which we don't want

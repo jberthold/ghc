@@ -44,6 +44,7 @@ import Outputable
 import SrcLoc
 import Util
 import Panic
+import UniqSupply
 import MonadUtils       ( liftIO )
 
 -- Imports for --abi-hash
@@ -80,6 +81,19 @@ main = do
    initGCStatistics -- See Note [-Bsymbolic and hooks]
    hSetBuffering stdout LineBuffering
    hSetBuffering stderr LineBuffering
+
+   -- Handle GHC-specific character encoding flags, allowing us to control how
+   -- GHC produces output regardless of OS.
+   env <- getEnvironment
+   case lookup "GHC_CHARENC" env of
+    Just "UTF-8" -> do
+     hSetEncoding stdout utf8
+     hSetEncoding stderr utf8
+    _ -> do
+     -- Avoid GHC erroring out when trying to display unhandled characters
+     hSetTranslit stdout
+     hSetTranslit stderr
+
    GHC.defaultErrorHandler defaultFatalMessager defaultFlushOut $ do
     -- 1. extract the -B flag from the args
     argv0 <- getArgs
@@ -222,6 +236,7 @@ main' postLoadMode dflags0 args flagWarnings = do
     printInfoForUser (dflags6 { pprCols = 200 })
                      (pkgQual dflags6) (pprModuleMap dflags6)
 
+  liftIO $ initUniqSupply (initialUnique dflags6) (uniqueIncrement dflags6)
         ---------------- Final sanity checking -----------
   liftIO $ checkOptions postLoadMode dflags6 srcs objs
 
@@ -315,7 +330,7 @@ checkOptions mode dflags srcs objs = do
    when ((filter (not . wayRTSOnly) (ways dflags) /= interpWays)
          && isInterpretiveMode mode) $
       do throwGhcException (UsageError
-                   "--interactive can't be used with -prof.")
+                   "--interactive can't be used with -prof or -static.")
         -- -ohi sanity check
    if (isJust (outputHi dflags) &&
       (isCompManagerMode mode || srcs `lengthExceeds` 1))
@@ -475,6 +490,10 @@ isDoMakeMode :: Mode -> Bool
 isDoMakeMode (Right (Right DoMake)) = True
 isDoMakeMode _ = False
 
+isDoEvalMode :: Mode -> Bool
+isDoEvalMode (Right (Right (DoEval _))) = True
+isDoEvalMode _ = False
+
 #ifdef GHCI
 isInteractiveMode :: PostLoadMode -> Bool
 isInteractiveMode DoInteractive = True
@@ -611,6 +630,15 @@ setMode newMode newFlag = liftEwM $ do
                       | isShowGhcUsageMode newMode &&
                         isDoInteractiveMode oldMode ->
                             ((showGhciUsageMode, newFlag), [])
+
+                    -- If we have both -e and --interactive then -e always wins
+                    _ | isDoEvalMode oldMode &&
+                        isDoInteractiveMode newMode ->
+                            ((oldMode, oldFlag), [])
+                      | isDoEvalMode newMode &&
+                        isDoInteractiveMode oldMode ->
+                            ((newMode, newFlag), [])
+
                     -- Otherwise, --help/--version/--numeric-version always win
                       | isDominantFlag oldMode -> ((oldMode, oldFlag), [])
                       | isDominantFlag newMode -> ((newMode, newFlag), [])
@@ -811,8 +839,8 @@ Generates a combined hash of the ABI for modules Data.Foo and
 System.Bar.  The modules must already be compiled, and appropriate -i
 options may be necessary in order to find the .hi files.
 
-This is used by Cabal for generating the InstalledPackageId for a
-package.  The InstalledPackageId must change when the visible ABI of
+This is used by Cabal for generating the ComponentId for a
+package.  The ComponentId must change when the visible ABI of
 the package chagnes, so during registration Cabal calls ghc --abi-hash
 to get a hash of the package's ABI.
 -}

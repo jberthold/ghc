@@ -34,10 +34,8 @@ import ErrUtils
 import Finder
 import GhcMonad
 import HeaderInfo
-import HsSyn
 import HscTypes
 import Module
-import RdrName          ( RdrName )
 import TcIface          ( typecheckIface )
 import TcRnMonad        ( initIfaceCheck )
 
@@ -137,7 +135,7 @@ data LoadHowMuch
 --
 -- This function implements the core of GHC's @--make@ mode.  It preprocesses,
 -- compiles and loads the specified modules, avoiding re-compilation wherever
--- possible.  Depending on the target (see 'DynFlags.hscTarget') compilating
+-- possible.  Depending on the target (see 'DynFlags.hscTarget') compiling
 -- and loading may result in files being created on disk.
 --
 -- Calls the 'defaultWarnErrLogger' after each compiling each module, whether
@@ -162,9 +160,12 @@ load how_much = do
     -- (see msDeps)
     let all_home_mods = [ms_mod_name s
                         | s <- mod_graph, not (isBootSummary s)]
-        bad_boot_mods = [s        | s <- mod_graph, isBootSummary s,
-                                    not (ms_mod_name s `elem` all_home_mods)]
-    ASSERT( null bad_boot_mods ) return ()
+    -- TODO: Figure out what the correct form of this assert is. It's violated
+    -- when you have HsBootMerge nodes in the graph: then you'll have hs-boot
+    -- files without corresponding hs files.
+    --  bad_boot_mods = [s        | s <- mod_graph, isBootSummary s,
+    --                              not (ms_mod_name s `elem` all_home_mods)]
+    -- ASSERT( null bad_boot_mods ) return ()
 
     -- check that the module given in HowMuch actually exists, otherwise
     -- topSortModuleGraph will bomb later.
@@ -325,18 +326,20 @@ load how_much = do
             a_root_is_Main = any ((==main_mod).ms_mod) mod_graph
             do_linking = a_root_is_Main || no_hs_main || ghcLink dflags == LinkDynLib || ghcLink dflags == LinkStaticLib
 
-          when (ghcLink dflags == LinkBinary
-                && isJust ofile && not do_linking) $
-            liftIO $ debugTraceMsg dflags 1 $
-                text ("Warning: output was redirected with -o, " ++
-                      "but no output will be generated\n" ++
-                      "because there is no " ++
-                      moduleNameString (moduleName main_mod) ++ " module.")
-
           -- link everything together
           linkresult <- liftIO $ link (ghcLink dflags) dflags do_linking (hsc_HPT hsc_env1)
 
-          loadFinish Succeeded linkresult
+          if ghcLink dflags == LinkBinary && isJust ofile && not do_linking
+             then do
+                liftIO $ errorMsg dflags $ text
+                   ("output was redirected with -o, " ++
+                    "but no output will be generated\n" ++
+                    "because there is no " ++
+                    moduleNameString (moduleName main_mod) ++ " module.")
+                -- This should be an error, not a warning (#10895).
+                loadFinish Failed linkresult
+             else
+                loadFinish Succeeded linkresult
 
      else
        -- Tricky.  We need to back out the effects of compiling any
@@ -1544,7 +1547,8 @@ nodeMapElts = Map.elems
 warnUnnecessarySourceImports :: GhcMonad m => [SCC ModSummary] -> m ()
 warnUnnecessarySourceImports sccs = do
   dflags <- getDynFlags
-  logWarnings (listToBag (concatMap (check dflags . flattenSCC) sccs))
+  when (wopt Opt_WarnUnusedImports dflags)
+    (logWarnings (listToBag (concatMap (check dflags . flattenSCC) sccs)))
   where check dflags ms =
            let mods_in_this_cycle = map ms_mod_name ms in
            [ warn dflags i | m <- ms, i <- ms_home_srcimps m,
@@ -1607,7 +1611,7 @@ downsweep hsc_env old_summaries excl_mods allow_dup_roots
         calcDeps summ
           | HsigFile <- ms_hsc_src summ
           , Just m <- getSigOf (hsc_dflags hsc_env) (moduleName (ms_mod summ))
-          , modulePackageKey m == thisPackage (hsc_dflags hsc_env)
+          , moduleUnitId m == thisPackage (hsc_dflags hsc_env)
                       = (noLoc (moduleName m), NotBoot) : msDeps summ
           | otherwise = msDeps summ
 
@@ -1694,9 +1698,9 @@ msDeps s =
     concat [ [(m,IsBoot), (m,NotBoot)] | m <- ms_home_srcimps s ]
         ++ [ (m,NotBoot) | m <- ms_home_imps s ]
 
-home_imps :: [Located (ImportDecl RdrName)] -> [Located ModuleName]
-home_imps imps = [ ideclName i |  L _ i <- imps,
-                                  isLocal (fmap snd $ ideclPkgQual i) ]
+home_imps :: [(Maybe FastString, Located ModuleName)] -> [Located ModuleName]
+home_imps imps = [ lmodname |  (mb_pkg, lmodname) <- imps,
+                                  isLocal mb_pkg ]
   where isLocal Nothing = True
         isLocal (Just pkg) | pkg == fsLit "this" = True -- "this" is special
         isLocal _ = False
@@ -1883,7 +1887,7 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
                          just_found location mod
                 | otherwise ->
                         -- Drop external-pkg
-                        ASSERT(modulePackageKey mod /= thisPackage dflags)
+                        ASSERT(moduleUnitId mod /= thisPackage dflags)
                         return Nothing
 
              err -> return $ Just $ Left $ noModError dflags loc wanted_mod err

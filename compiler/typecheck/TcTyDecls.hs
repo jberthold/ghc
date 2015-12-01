@@ -14,39 +14,54 @@ files for imported data types.
 module TcTyDecls(
         calcRecFlags, RecTyInfo(..),
         calcSynCycles, calcClassCycles,
-        RoleAnnots, extractRoleAnnots, emptyRoleAnnots, lookupRoleAnnots
+
+        -- * Roles
+        RoleAnnots, extractRoleAnnots, emptyRoleAnnots, lookupRoleAnnots,
+
+        -- * Implicits
+        tcAddImplicits,
+
+        -- * Record selectors
+        mkRecSelBinds, mkOneRecordSelector
     ) where
 
 #include "HsVersions.h"
 
-import TypeRep
+import TcRnMonad
+import TcEnv
+import TcTypeable( mkTypeableBinds )
+import TcBinds( tcRecSelBinds, addTypecheckedBinds )
+import TypeRep( Type(..) )
+import TcType
+import TysWiredIn( unitTy )
+import MkCore( rEC_SEL_ERROR_ID )
 import HsSyn
 import Class
 import Type
-import Kind
 import HscTypes
 import TyCon
+import ConLike
 import DataCon
-import Var
 import Name
 import NameEnv
+import RdrName ( mkVarUnqual )
+import Id
+import IdInfo
 import VarEnv
 import VarSet
 import NameSet
 import Coercion ( ltRole )
-import Avail
 import Digraph
 import BasicTypes
 import SrcLoc
+import Unique ( mkBuiltinUnique )
 import Outputable
 import UniqSet
 import Util
 import Maybes
 import Data.List
-
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
+import Bag
+import FastString ( fastStringToByteString )
 
 import Control.Monad
 
@@ -359,21 +374,20 @@ data RecTyInfo = RTI { rti_promotable :: Bool
                      , rti_roles      :: Name -> [Role]
                      , rti_is_rec     :: Name -> RecFlag }
 
-calcRecFlags :: ModDetails -> Bool  -- hs-boot file?
-             -> RoleAnnots -> [TyThing] -> RecTyInfo
+calcRecFlags :: SelfBootInfo -> Bool  -- hs-boot file?
+             -> RoleAnnots -> [TyCon] -> RecTyInfo
 -- The 'boot_names' are the things declared in M.hi-boot, if M is the current module.
 -- Any type constructors in boot_names are automatically considered loop breakers
-calcRecFlags boot_details is_boot mrole_env tyclss
+-- Recursion of newtypes/data types can happen via
+-- the class TyCon, so all_tycons includes the class tycons
+calcRecFlags boot_details is_boot mrole_env all_tycons
   = RTI { rti_promotable = is_promotable
         , rti_roles      = roles
         , rti_is_rec     = is_rec }
   where
     rec_tycon_names = mkNameSet (map tyConName all_tycons)
-    all_tycons = mapMaybe getTyCon tyclss
-                   -- Recursion of newtypes/data types can happen via
-                   -- the class TyCon, so tyclss includes the class tycons
 
-    is_promotable = all (isPromotableTyCon rec_tycon_names) all_tycons
+    is_promotable = all (computeTyConPromotability rec_tycon_names) all_tycons
 
     roles = inferRoles is_boot mrole_env all_tycons
 
@@ -381,7 +395,9 @@ calcRecFlags boot_details is_boot mrole_env tyclss
     is_rec n | n `elemNameSet` rec_names = Recursive
              | otherwise                 = NonRecursive
 
-    boot_name_set = availsToNameSet (md_exports boot_details)
+    boot_name_set = case boot_details of
+                      NoSelfBoot                -> emptyNameSet
+                      SelfBoot { sb_tcs = tcs } -> tcs
     rec_names = boot_name_set     `unionNameSet`
                 nt_loop_breakers  `unionNameSet`
                 prod_loop_breakers
@@ -449,10 +465,6 @@ calcRecFlags boot_details is_boot mrole_env tyclss
 new_tc_rhs :: TyCon -> Type
 new_tc_rhs tc = snd (newTyConRhs tc)    -- Ignore the type variables
 
-getTyCon :: TyThing -> Maybe TyCon
-getTyCon (ATyCon tc) = Just tc
-getTyCon _           = Nothing
-
 findLoopBreakers :: [(TyCon, [TyCon])] -> [Name]
 -- Finds a set of tycons that cut all loops
 findLoopBreakers deps
@@ -461,70 +473,6 @@ findLoopBreakers deps
     go edges = [ name
                | CyclicSCC ((tc,_,_) : edges') <- stronglyConnCompFromEdgedVerticesR edges,
                  name <- tyConName tc : go edges']
-
-{-
-************************************************************************
-*                                                                      *
-                  Promotion calculation
-*                                                                      *
-************************************************************************
-
-See Note [Checking whether a group is promotable]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We only want to promote a TyCon if all its data constructors
-are promotable; it'd be very odd to promote some but not others.
-
-But the data constructors may mention this or other TyCons.
-
-So we treat the recursive uses as all OK (ie promotable) and
-do one pass to check that each TyCon is promotable.
-
-Currently type synonyms are not promotable, though that
-could change.
--}
-
-isPromotableTyCon :: NameSet -> TyCon -> Bool
-isPromotableTyCon rec_tycons tc
-  =  isAlgTyCon tc    -- Only algebraic; not even synonyms
-                      -- (we could reconsider the latter)
-  && ok_kind (tyConKind tc)
-  && case algTyConRhs tc of
-       DataTyCon { data_cons = cs }   -> all ok_con cs
-       NewTyCon { data_con = c }      -> ok_con c
-       AbstractTyCon {}               -> False
-       DataFamilyTyCon {}             -> False
-       TupleTyCon { tup_sort = sort } -> case sort of
-                                           BoxedTuple      -> True
-                                           UnboxedTuple    -> False
-                                           ConstraintTuple -> False
-  where
-    ok_kind kind = all isLiftedTypeKind args && isLiftedTypeKind res
-            where  -- Checks for * -> ... -> * -> *
-              (args, res) = splitKindFunTys kind
-
-    -- See Note [Promoted data constructors] in TyCon
-    ok_con con = all (isLiftedTypeKind . tyVarKind) ex_tvs
-              && null eq_spec   -- No constraints
-              && null theta
-              && all (isPromotableType rec_tycons) orig_arg_tys
-       where
-         (_, ex_tvs, eq_spec, theta, orig_arg_tys, _) = dataConFullSig con
-
-
-isPromotableType :: NameSet -> Type -> Bool
--- Must line up with DataCon.promoteType
--- But the function lives here because we must treat the
--- *recursive* tycons as promotable
-isPromotableType rec_tcs con_arg_ty
-  = go con_arg_ty
-  where
-    go (TyConApp tc tys) =  tys `lengthIs` tyConArity tc
-                         && (tyConName tc `elemNameSet` rec_tcs
-                             || isJust (promotableTyCon_maybe tc))
-                         && all go tys
-    go (FunTy arg res)   = go arg && go res
-    go (TyVarTy {})      = True
-    go _                 = False
 
 {-
 ************************************************************************
@@ -804,11 +752,11 @@ instance Functor RoleM where
     fmap = liftM
 
 instance Applicative RoleM where
-    pure = return
+    pure x = RM $ \_ state -> (x, state)
     (<*>) = ap
 
 instance Monad RoleM where
-  return x = RM $ \_ state -> (x, state)
+  return = pure
   a >>= f  = RM $ \m_info state -> let (a', state') = unRM a m_info state in
                                    unRM (f a') m_info state'
 
@@ -850,3 +798,261 @@ updateRoleEnv name n role
                                   role_env' = extendNameEnv role_env name roles' in
                               RIS { role_env = role_env', update = True }
                          else state )
+
+
+{- *********************************************************************
+*                                                                      *
+                Building implicits
+*                                                                      *
+********************************************************************* -}
+
+tcAddImplicits :: [TyCon] -> TcM TcGblEnv
+tcAddImplicits tycons
+  = discardWarnings $
+    tcExtendGlobalEnvImplicit implicit_things  $
+    tcExtendGlobalValEnv def_meth_ids          $
+    do { traceTc "tcAddImplicits" $ vcat
+            [ text "tycons" <+> ppr tycons
+            , text "implicits" <+> ppr implicit_things ]
+       ; (typeable_ids, typeable_binds) <- mkTypeableBinds tycons
+       ; gbl_env <- tcExtendGlobalValEnv typeable_ids
+                    $ tcRecSelBinds $ mkRecSelBinds tycons
+       ; return (gbl_env `addTypecheckedBinds` typeable_binds) }
+ where
+   implicit_things = concatMap implicitTyConThings tycons
+   def_meth_ids    = mkDefaultMethodIds tycons
+
+mkDefaultMethodIds :: [TyCon] -> [Id]
+-- We want to put the default-method Ids (both vanilla and generic)
+-- into the type environment so that they are found when we typecheck
+-- the filled-in default methods of each instance declaration
+-- See Note [Default method Ids and Template Haskell]
+mkDefaultMethodIds tycons
+  = [ mkExportedLocalId VanillaId dm_name (mk_dm_ty cls sel_id dm_spec)
+    | tc <- tycons
+    , Just cls <- [tyConClass_maybe tc]
+    , (sel_id, Just (dm_name, dm_spec)) <- classOpItems cls ]
+  where
+    mk_dm_ty :: Class -> Id -> DefMethSpec Type -> Type
+    mk_dm_ty _ sel_id VanillaDM        = idType sel_id
+    mk_dm_ty cls _   (GenericDM dm_ty) = mkSigmaTy cls_tvs [pred] dm_ty
+       where
+         cls_tvs = classTyVars cls
+         pred    = mkClassPred cls (mkTyVarTys cls_tvs)
+
+{-
+************************************************************************
+*                                                                      *
+                Building record selectors
+*                                                                      *
+************************************************************************
+-}
+
+{-
+-}
+{-
+Note [Default method Ids and Template Haskell]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider this (Trac #4169):
+   class Numeric a where
+     fromIntegerNum :: a
+     fromIntegerNum = ...
+
+   ast :: Q [Dec]
+   ast = [d| instance Numeric Int |]
+
+When we typecheck 'ast' we have done the first pass over the class decl
+(in tcTyClDecls), but we have not yet typechecked the default-method
+declarations (because they can mention value declarations).  So we
+must bring the default method Ids into scope first (so they can be seen
+when typechecking the [d| .. |] quote, and typecheck them later.
+-}
+
+mkRecSelBinds :: [TyCon] -> HsValBinds Name
+-- NB We produce *un-typechecked* bindings, rather like 'deriving'
+--    This makes life easier, because the later type checking will add
+--    all necessary type abstractions and applications
+mkRecSelBinds tycons
+  = ValBindsOut binds sigs
+  where
+    (sigs, binds) = unzip rec_sels
+    rec_sels = map mkRecSelBind [ (tc,fld)
+                                | tc <- tycons
+                                , fld <- tyConFieldLabels tc ]
+
+mkRecSelBind :: (TyCon, FieldLabel) -> (LSig Name, (RecFlag, LHsBinds Name))
+mkRecSelBind (tycon, fl)
+  = mkOneRecordSelector all_cons (RecSelData tycon) fl
+  where
+    all_cons     = map RealDataCon (tyConDataCons tycon)
+
+mkOneRecordSelector :: [ConLike] -> RecSelParent -> FieldLabel
+                    -> (LSig Name, (RecFlag, LHsBinds Name))
+mkOneRecordSelector all_cons idDetails fl
+  = (L loc (IdSig sel_id), (NonRecursive, unitBag (L loc sel_bind)))
+  where
+    loc    = getSrcSpan sel_name
+    lbl      = flLabel fl
+    sel_name = flSelector fl
+
+    sel_id = mkExportedLocalId rec_details sel_name sel_ty
+    rec_details = RecSelId { sel_tycon = idDetails, sel_naughty = is_naughty }
+
+    -- Find a representative constructor, con1
+    cons_w_field = conLikesWithFields all_cons [lbl]
+    con1 = ASSERT( not (null cons_w_field) ) head cons_w_field
+
+    -- Selector type; Note [Polymorphic selectors]
+    field_ty   = conLikeFieldType con1 lbl
+    data_tvs   = tyVarsOfType data_ty
+    is_naughty = not (tyVarsOfType field_ty `subVarSet` data_tvs)
+    (field_tvs, field_theta, field_tau) = tcSplitSigmaTy field_ty
+    sel_ty | is_naughty = unitTy  -- See Note [Naughty record selectors]
+           | otherwise  = mkForAllTys (varSetElemsKvsFirst $
+                                       data_tvs `extendVarSetList` field_tvs) $
+                          mkPhiTy (conLikeStupidTheta con1) $   -- Urgh!
+                          mkPhiTy field_theta               $   -- Urgh!
+                          -- req_theta is empty for normal DataCon
+                          mkPhiTy req_theta                 $
+                          mkFunTy data_ty field_tau
+
+    -- Make the binding: sel (C2 { fld = x }) = x
+    --                   sel (C7 { fld = x }) = x
+    --    where cons_w_field = [C2,C7]
+    sel_bind = mkTopFunBind Generated sel_lname alts
+      where
+        alts | is_naughty = [mkSimpleMatch [] unit_rhs]
+             | otherwise =  map mk_match cons_w_field ++ deflt
+    mk_match con = mkSimpleMatch [L loc (mk_sel_pat con)]
+                                 (L loc (HsVar (L loc field_var)))
+    mk_sel_pat con = ConPatIn (L loc (getName con)) (RecCon rec_fields)
+    rec_fields = HsRecFields { rec_flds = [rec_field], rec_dotdot = Nothing }
+    rec_field  = noLoc (HsRecField
+                        { hsRecFieldLbl = L loc (FieldOcc (mkVarUnqual lbl)
+                                                 sel_name)
+                        , hsRecFieldArg = L loc (VarPat (L loc field_var))
+                        , hsRecPun = False })
+    sel_lname = L loc sel_name
+    field_var = mkInternalName (mkBuiltinUnique 1) (getOccName sel_name) loc
+
+    -- Add catch-all default case unless the case is exhaustive
+    -- We do this explicitly so that we get a nice error message that
+    -- mentions this particular record selector
+    deflt | all dealt_with all_cons = []
+          | otherwise = [mkSimpleMatch [L loc (WildPat placeHolderType)]
+                            (mkHsApp (L loc (HsVar
+                                            (L loc (getName rEC_SEL_ERROR_ID))))
+                                     (L loc (HsLit msg_lit)))]
+
+        -- Do not add a default case unless there are unmatched
+        -- constructors.  We must take account of GADTs, else we
+        -- get overlap warning messages from the pattern-match checker
+        -- NB: we need to pass type args for the *representation* TyCon
+        --     to dataConCannotMatch, hence the calculation of inst_tys
+        --     This matters in data families
+        --              data instance T Int a where
+        --                 A :: { fld :: Int } -> T Int Bool
+        --                 B :: { fld :: Int } -> T Int Char
+    dealt_with :: ConLike -> Bool
+    dealt_with (PatSynCon _) = False -- We can't predict overlap
+    dealt_with con@(RealDataCon dc) =
+      con `elem` cons_w_field || dataConCannotMatch inst_tys dc
+
+    (univ_tvs, _, eq_spec, _, req_theta, _, data_ty) = conLikeFullSig con1
+
+    inst_tys = substTyVars (mkTopTvSubst eq_spec) univ_tvs
+
+    unit_rhs = mkLHsTupleExpr []
+    msg_lit = HsStringPrim "" (fastStringToByteString lbl)
+
+{-
+Note [Polymorphic selectors]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When a record has a polymorphic field, we pull the foralls out to the front.
+   data T = MkT { f :: forall a. [a] -> a }
+Then f :: forall a. T -> [a] -> a
+NOT  f :: T -> forall a. [a] -> a
+
+This is horrid.  It's only needed in deeply obscure cases, which I hate.
+The only case I know is test tc163, which is worth looking at.  It's far
+from clear that this test should succeed at all!
+
+Note [Naughty record selectors]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A "naughty" field is one for which we can't define a record
+selector, because an existential type variable would escape.  For example:
+        data T = forall a. MkT { x,y::a }
+We obviously can't define
+        x (MkT v _) = v
+Nevertheless we *do* put a RecSelId into the type environment
+so that if the user tries to use 'x' as a selector we can bleat
+helpfully, rather than saying unhelpfully that 'x' is not in scope.
+Hence the sel_naughty flag, to identify record selectors that don't really exist.
+
+In general, a field is "naughty" if its type mentions a type variable that
+isn't in the result type of the constructor.  Note that this *allows*
+GADT record selectors (Note [GADT record selectors]) whose types may look
+like     sel :: T [a] -> a
+
+For naughty selectors we make a dummy binding
+   sel = ()
+for naughty selectors, so that the later type-check will add them to the
+environment, and they'll be exported.  The function is never called, because
+the tyepchecker spots the sel_naughty field.
+
+Note [GADT record selectors]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For GADTs, we require that all constructors with a common field 'f' have the same
+result type (modulo alpha conversion).  [Checked in TcTyClsDecls.checkValidTyCon]
+E.g.
+        data T where
+          T1 { f :: Maybe a } :: T [a]
+          T2 { f :: Maybe a, y :: b  } :: T [a]
+          T3 :: T Int
+
+and now the selector takes that result type as its argument:
+   f :: forall a. T [a] -> Maybe a
+
+Details: the "real" types of T1,T2 are:
+   T1 :: forall r a.   (r~[a]) => a -> T r
+   T2 :: forall r a b. (r~[a]) => a -> b -> T r
+
+So the selector loooks like this:
+   f :: forall a. T [a] -> Maybe a
+   f (a:*) (t:T [a])
+     = case t of
+         T1 c   (g:[a]~[c]) (v:Maybe c)       -> v `cast` Maybe (right (sym g))
+         T2 c d (g:[a]~[c]) (v:Maybe c) (w:d) -> v `cast` Maybe (right (sym g))
+         T3 -> error "T3 does not have field f"
+
+Note the forall'd tyvars of the selector are just the free tyvars
+of the result type; there may be other tyvars in the constructor's
+type (e.g. 'b' in T2).
+
+Note the need for casts in the result!
+
+Note [Selector running example]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+It's OK to combine GADTs and type families.  Here's a running example:
+
+        data instance T [a] where
+          T1 { fld :: b } :: T [Maybe b]
+
+The representation type looks like this
+        data :R7T a where
+          T1 { fld :: b } :: :R7T (Maybe b)
+
+and there's coercion from the family type to the representation type
+        :CoR7T a :: T [a] ~ :R7T a
+
+The selector we want for fld looks like this:
+
+        fld :: forall b. T [Maybe b] -> b
+        fld = /\b. \(d::T [Maybe b]).
+              case d `cast` :CoR7T (Maybe b) of
+                T1 (x::b) -> x
+
+The scrutinee of the case has type :R7T (Maybe b), which can be
+gotten by appying the eq_spec to the univ_tvs of the data con.
+
+-}

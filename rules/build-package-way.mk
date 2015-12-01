@@ -23,26 +23,30 @@ $(call hs-objs,$1,$2,$3)
 # The .a/.so library file, indexed by two different sets of vars:
 # the first is indexed by the dir, distdir and way
 # the second is indexed by the package id, distdir and way
-$1_$2_$3_LIB_FILE = libHS$$($1_$2_LIB_NAME)$$($3_libsuf)
+$1_$2_$3_LIB_FILE = libHS$$($1_$2_COMPONENT_ID)$$($3_libsuf)
 $1_$2_$3_LIB = $1/$2/build/$$($1_$2_$3_LIB_FILE)
-$$($1_$2_LIB_NAME)_$2_$3_LIB = $$($1_$2_$3_LIB)
+$$($1_$2_COMPONENT_ID)_$2_$3_LIB = $$($1_$2_$3_LIB)
 
 ifeq "$$(HostOS_CPP)" "mingw32"
 ifneq "$$($1_$2_dll0_HS_OBJS)" ""
-$1_$2_$3_LIB0_ROOT = HS$$($1_$2_LIB_NAME)-0$$($3_libsuf)
+$1_$2_$3_LIB0_ROOT = HS$$($1_$2_COMPONENT_ID)-0$$($3_libsuf)
 $1_$2_$3_LIB0_NAME = lib$$($1_$2_$3_LIB0_ROOT)
 $1_$2_$3_LIB0 = $1/$2/build/$$($1_$2_$3_LIB0_NAME)
 endif
 endif
 
 # Note [inconsistent distdirs]
+#
 # hack: the DEPS_LIBS mechanism assumes that the distdirs for packages
 # that depend on each other are the same, but that is not the case for
 # ghc where we use stage1/stage2 rather than dist/dist-install.
 # Really we should use a consistent scheme for distdirs, but in the
 # meantime we work around it by defining ghc-<ver>_dist-install_way_LIB:
+#
+# A similar hack is applied to the PROGRAM_DEP_LIB mechanism in
+# rules/build-package.mk.
 ifeq "$$($1_PACKAGE) $2" "ghc stage2"
-$$($1_$2_LIB_NAME)_dist-install_$3_LIB = $$($1_$2_$3_LIB)
+$$($1_$2_COMPONENT_ID)_dist-install_$3_LIB = $$($1_$2_$3_LIB)
 endif
 
 # All the .a/.so library file dependencies for this library.
@@ -50,8 +54,8 @@ endif
 # The $(subst stage2,dist-install,..) is needed due to Note
 # [inconsistent distdirs].
 #
-# NB: Use DEP_LIB_NAMES for the /directory/ parameter.
-$1_$2_$3_DEPS_LIBS=$$(foreach dep,$$($1_$2_DEP_LIB_NAMES),$$($$(dep)_$(subst stage2,dist-install,$2)_$3_LIB))
+# NB: Use DEP_COMPONENT_IDS for the /directory/ parameter.
+$1_$2_$3_DEPS_LIBS=$$(foreach dep,$$($1_$2_DEP_COMPONENT_IDS),$$($$(dep)_$(subst stage2,dist-install,$2)_$3_LIB))
 
 $1_$2_$3_NON_HS_OBJS = $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS)  $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
 $1_$2_$3_ALL_OBJS = $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_NON_HS_OBJS)
@@ -85,16 +89,17 @@ $$($1_$2_$3_LIB0) : $$($1_$2_$3_ALL_OBJS) $$(ALL_RTS_LIBS) $$($1_$2_$3_DEPS_LIBS
 	$$(call build-dll,$1,$2,$3,,$$($1_$2_dll0_HS_OBJS) $$($1_$2_$3_NON_HS_OBJS),$$($1_$2_$3_LIB0))
 endif
 
-else
-
+else # ifneq "$$(HostOS_CPP)" "mingw32"
 $$($1_$2_$3_LIB) : $$($1_$2_$3_ALL_OBJS) $$(ALL_RTS_LIBS) $$($1_$2_$3_DEPS_LIBS)
 	$$(call cmd,$1_$2_HC) $$($1_$2_$3_ALL_HC_OPTS) $$($1_$2_$3_GHC_LD_OPTS) $$($1_$2_$3_ALL_OBJS) \
          -shared -dynamic -dynload deploy \
 	 $$(addprefix -l,$$($1_$2_EXTRA_LIBRARIES)) $$(addprefix -L,$$($1_$2_EXTRA_LIBDIRS)) \
          -no-auto-link-packages \
          -o $$@
-endif
-else
+endif # "$$(HostOS_CPP)" "mingw32"
+
+else # ifneq "$3" "dyn"
+
 # Build the ordinary .a library
 $$($1_$2_$3_LIB) : $$($1_$2_$3_ALL_OBJS)
 	$$(call removeFiles,$$@ $$@.contents)
@@ -119,7 +124,7 @@ $$($1_$2_$3_LIB0) :
 endif
 endif
 
-endif
+endif # "$3" "dyn"
 
 $(call all-target,$1_$2,all_$1_$2_$3)
 $(call all-target,$1_$2_$3,$$($1_$2_$3_LIB))
@@ -131,32 +136,38 @@ BINDIST_LIBS += $$($1_$2_$3_LIB)
 BINDIST_LIBS += $$($1_$2_$3_LIB0)
 endif
 
+ifeq "$$($1_$2_SplitSections)" "YES"
+ifeq "$(LdIsGNULd)" "YES"
+$1_$2_LD_SCRIPT = driver/utils/merge_sections.ld
+endif
+endif
+
 # Build the GHCi library
 ifeq "$$(DYNAMIC_GHC_PROGRAMS)" "YES"
 $1_$2_GHCI_LIB = $$($1_$2_dyn_LIB)
 else
 ifeq "$3" "v"
-$1_$2_GHCI_LIB = $1/$2/build/HS$$($1_$2_LIB_NAME).$$($3_osuf)
+$1_$2_GHCI_LIB = $1/$2/build/HS$$($1_$2_COMPONENT_ID).$$($3_osuf)
 ifeq "$$($1_$2_BUILD_GHCI_LIB)" "YES"
 # Don't put bootstrapping packages in the bindist
 ifneq "$4" "0"
 BINDIST_LIBS += $$($1_$2_GHCI_LIB)
 endif
 endif
-$$($1_$2_GHCI_LIB) : $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
-	$$(call cmd,LD) $$(CONF_LD_LINKER_OPTS_STAGE$4) -r -o $$@ $$(EXTRA_LD_OPTS) $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
+$$($1_$2_GHCI_LIB) : $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS) $$($1_$2_LD_SCRIPT)
+	$$(call cmd,LD) $$(CONF_LD_LINKER_OPTS_STAGE$4) -r $$(if $$($1_$2_LD_SCRIPT),-T $$($1_$2_LD_SCRIPT)) -o $$@ $$(EXTRA_LD_OPTS) $$($1_$2_$3_HS_OBJS) $$($1_$2_$3_CMM_OBJS) $$($1_$2_$3_C_OBJS) $$($1_$2_$3_S_OBJS) $$($1_$2_EXTRA_OBJS)
 
 ifeq "$$($1_$2_BUILD_GHCI_LIB)" "YES"
 # Don't bother making ghci libs for bootstrapping packages
 ifneq "$4" "0"
 $(call all-target,$1_$2,$$($1_$2_GHCI_LIB))
 endif
-endif
-endif
-endif
+endif # "$$($1_$2_BUILD_GHCI_LIB)" "YES"
+endif # "$3" "v"
+endif # "$$(DYNAMIC_GHC_PROGRAMS)" "YES"
 
 $(call profEnd, build-package-way($1,$2,$3))
-endef
+endef # build-package-way
 
 # $1 = dir
 # $2 = distdir

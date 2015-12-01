@@ -42,7 +42,7 @@ import Platform
 -- Our intermediate code:
 import BasicTypes
 import BlockId
-import Module           ( primPackageKey )
+import Module           ( primUnitId )
 import PprCmm           ()
 import CmmUtils
 import CmmSwitch
@@ -58,7 +58,6 @@ import OrdList
 import Outputable
 import Unique
 import FastString
-import FastBool         ( isFastTrue )
 import DynFlags
 import Util
 
@@ -178,9 +177,10 @@ stmtToInstrs stmt = do
        -> genCCall dflags is32Bit target result_regs args
 
     CmmBranch id          -> genBranch id
-    CmmCondBranch arg true false -> do b1 <- genCondJump true arg
-                                       b2 <- genBranch false
-                                       return (b1 `appOL` b2)
+    CmmCondBranch arg true false _ -> do
+      b1 <- genCondJump true arg
+      b2 <- genBranch false
+      return (b1 `appOL` b2)
     CmmSwitch arg ids -> do dflags <- getDynFlags
                             genSwitch dflags arg ids
     CmmCall { cml_target = arg
@@ -1176,7 +1176,7 @@ amodeCouldBeClobbered :: Platform -> AddrMode -> Bool
 amodeCouldBeClobbered platform amode = any (regClobbered platform) (addrModeRegs amode)
 
 regClobbered :: Platform -> Reg -> Bool
-regClobbered platform (RegReal (RealRegSingle rr)) = isFastTrue (freeReg platform rr)
+regClobbered platform (RegReal (RealRegSingle rr)) = freeReg platform rr
 regClobbered _ _ = False
 
 -- getOperand: the operand is not required to remain valid across the
@@ -1224,6 +1224,7 @@ isOperand _ _            = False
 memConstant :: Int -> CmmLit -> NatM Amode
 memConstant align lit = do
   lbl <- getNewLabelNat
+  let rosection = Section ReadOnlyData lbl
   dflags <- getDynFlags
   (addr, addr_code) <- if target32Bit (targetPlatform dflags)
                        then do dynRef <- cmmMakeDynamicReference
@@ -1234,7 +1235,7 @@ memConstant align lit = do
                                return (addr, addr_code)
                        else return (ripRel (ImmCLbl lbl), nilOL)
   let code =
-        LDATA ReadOnlyData (align, Statics lbl [CmmStaticLit lit])
+        LDATA rosection (align, Statics lbl [CmmStaticLit lit])
         `consOL` addr_code
   return (Amode addr code)
 
@@ -1818,7 +1819,7 @@ genCCall dflags is32Bit (PrimTarget (MO_PopCnt width)) dest_regs@[dst]
             genCCall dflags is32Bit target dest_regs args
   where
     format = intFormat width
-    lbl = mkCmmCodeLabel primPackageKey (fsLit (popCntLabel width))
+    lbl = mkCmmCodeLabel primUnitId (fsLit (popCntLabel width))
 
 genCCall dflags is32Bit (PrimTarget (MO_Clz width)) dest_regs@[dst] args@[src]
   | is32Bit && width == W64 = do
@@ -1850,7 +1851,7 @@ genCCall dflags is32Bit (PrimTarget (MO_Clz width)) dest_regs@[dst] args@[src]
     bw = widthInBits width
     platform = targetPlatform dflags
     format = if width == W8 then II16 else intFormat width
-    lbl = mkCmmCodeLabel primPackageKey (fsLit (clzLabel width))
+    lbl = mkCmmCodeLabel primUnitId (fsLit (clzLabel width))
 
 genCCall dflags is32Bit (PrimTarget (MO_Ctz width)) [dst] [src]
   | is32Bit, width == W64 = do
@@ -1914,7 +1915,7 @@ genCCall dflags is32Bit (PrimTarget (MO_UF_Conv width)) dest_regs args = do
                                            CmmMayReturn)
     genCCall dflags is32Bit target dest_regs args
   where
-    lbl = mkCmmCodeLabel primPackageKey (fsLit (word2FloatLabel width))
+    lbl = mkCmmCodeLabel primUnitId (fsLit (word2FloatLabel width))
 
 genCCall dflags is32Bit (PrimTarget (MO_AtomicRMW width amop)) [dst] [addr, n] = do
     Amode amode addr_code <-
@@ -2065,10 +2066,12 @@ genCCall _ is32Bit target dest_regs args = do
                           ADC format (OpImm (ImmInteger 0)) (OpReg reg_h)
                return code
         _ -> panic "genCCall: Wrong number of arguments/results for add2"
+    (PrimTarget (MO_SubWordC width), [res_r, res_c]) ->
+        addSubIntC platform SUB_CC (const Nothing) CARRY width res_r res_c args
     (PrimTarget (MO_AddIntC width), [res_r, res_c]) ->
-        addSubIntC platform ADD_CC (Just . ADD_CC) width res_r res_c args
+        addSubIntC platform ADD_CC (Just . ADD_CC) OFLO width res_r res_c args
     (PrimTarget (MO_SubIntC width), [res_r, res_c]) ->
-        addSubIntC platform SUB_CC (const Nothing) width res_r res_c args
+        addSubIntC platform SUB_CC (const Nothing) OFLO width res_r res_c args
     (PrimTarget (MO_U_Mul2 width), [res_h, res_l]) ->
         case args of
         [arg_x, arg_y] ->
@@ -2083,7 +2086,7 @@ genCCall _ is32Bit target dest_regs args = do
                                 MOV format (OpReg rdx) (OpReg reg_h),
                                 MOV format (OpReg rax) (OpReg reg_l)]
                return code
-        _ -> panic "genCCall: Wrong number of arguments/results for add2"
+        _ -> panic "genCCall: Wrong number of arguments/results for mul2"
 
     _ -> if is32Bit
          then genCCall32' dflags target dest_regs args
@@ -2122,7 +2125,8 @@ genCCall _ is32Bit target dest_regs args = do
         divOp _ _ _ _ _ _ _
             = panic "genCCall: Wrong number of results for divOp"
 
-        addSubIntC platform instr mrevinstr width res_r res_c [arg_x, arg_y]
+        addSubIntC platform instr mrevinstr cond width
+                   res_r res_c [arg_x, arg_y]
             = do let format = intFormat width
                  rCode <- anyReg =<< trivialCode width (instr format)
                                        (mrevinstr format) arg_x arg_y
@@ -2130,10 +2134,11 @@ genCCall _ is32Bit target dest_regs args = do
                  let reg_c = getRegisterReg platform True (CmmLocal res_c)
                      reg_r = getRegisterReg platform True (CmmLocal res_r)
                      code = rCode reg_r `snocOL`
-                            SETCC OFLO (OpReg reg_tmp) `snocOL`
+                            SETCC cond (OpReg reg_tmp) `snocOL`
                             MOVZxL II8 (OpReg reg_tmp) (OpReg reg_c)
+
                  return code
-        addSubIntC _ _ _ _ _ _ _
+        addSubIntC _ _ _ _ _ _ _ _
             = panic "genCCall: Wrong number of arguments/results for addSubIntC"
 
 genCCall32' :: DynFlags
@@ -2576,6 +2581,7 @@ outOfLineCmmOp mop res args
               MO_Add2 {}       -> unsupported
               MO_AddIntC {}    -> unsupported
               MO_SubIntC {}    -> unsupported
+              MO_SubWordC {}   -> unsupported
               MO_U_Mul2 {}     -> unsupported
               MO_WriteBarrier  -> unsupported
               MO_Touch         -> unsupported
@@ -2594,50 +2600,48 @@ genSwitch dflags expr targets
         (reg,e_code) <- getSomeReg (cmmOffset dflags expr offset)
         lbl <- getNewLabelNat
         dflags <- getDynFlags
+        let is32bit = target32Bit (targetPlatform dflags)
+            os = platformOS (targetPlatform dflags)
+            -- Might want to use .rodata.<function we're in> instead, but as
+            -- long as it's something unique it'll work out since the
+            -- references to the jump table are in the appropriate section.
+            rosection = case os of
+              -- on Mac OS X/x86_64, put the jump table in the text section to
+              -- work around a limitation of the linker.
+              -- ld64 is unable to handle the relocations for
+              --     .quad L1 - L0
+              -- if L0 is not preceded by a non-anonymous label in its section.
+              OSDarwin | not is32bit -> Section Text lbl
+              _ -> Section ReadOnlyData lbl
         dynRef <- cmmMakeDynamicReference dflags DataReference lbl
         (tableReg,t_code) <- getSomeReg $ dynRef
         let op = OpAddr (AddrBaseIndex (EABaseReg tableReg)
                                        (EAIndex reg (wORD_SIZE dflags)) (ImmInt 0))
 
-        return $ if target32Bit (targetPlatform dflags)
+        return $ if is32bit || os == OSDarwin
                  then e_code `appOL` t_code `appOL` toOL [
                                 ADD (intFormat (wordWidth dflags)) op (OpReg tableReg),
-                                JMP_TBL (OpReg tableReg) ids ReadOnlyData lbl
+                                JMP_TBL (OpReg tableReg) ids rosection lbl
                        ]
-                 else case platformOS (targetPlatform dflags) of
-                      OSDarwin ->
-                          -- on Mac OS X/x86_64, put the jump table
-                          -- in the text section to work around a
-                          -- limitation of the linker.
-                          -- ld64 is unable to handle the relocations for
-                          --     .quad L1 - L0
-                          -- if L0 is not preceded by a non-anonymous
-                          -- label in its section.
-                          e_code `appOL` t_code `appOL` toOL [
-                                   ADD (intFormat (wordWidth dflags)) op (OpReg tableReg),
-                                   JMP_TBL (OpReg tableReg) ids Text lbl
-                           ]
-                      _ ->
-                          -- HACK: On x86_64 binutils<2.17 is only able
-                          -- to generate PC32 relocations, hence we only
-                          -- get 32-bit offsets in the jump table. As
-                          -- these offsets are always negative we need
-                          -- to properly sign extend them to 64-bit.
-                          -- This hack should be removed in conjunction
-                          -- with the hack in PprMach.hs/pprDataItem
-                          -- once binutils 2.17 is standard.
-                          e_code `appOL` t_code `appOL` toOL [
-                                   MOVSxL II32 op (OpReg reg),
-                                   ADD (intFormat (wordWidth dflags)) (OpReg reg) (OpReg tableReg),
-                                   JMP_TBL (OpReg tableReg) ids ReadOnlyData lbl
-                           ]
+                 else -- HACK: On x86_64 binutils<2.17 is only able to generate
+                      -- PC32 relocations, hence we only get 32-bit offsets in
+                      -- the jump table. As these offsets are always negative
+                      -- we need to properly sign extend them to 64-bit. This
+                      -- hack should be removed in conjunction with the hack in
+                      -- PprMach.hs/pprDataItem once binutils 2.17 is standard.
+                      e_code `appOL` t_code `appOL` toOL [
+                               MOVSxL II32 op (OpReg reg),
+                               ADD (intFormat (wordWidth dflags)) (OpReg reg)
+                                   (OpReg tableReg),
+                               JMP_TBL (OpReg tableReg) ids rosection lbl
+                       ]
   | otherwise
   = do
         (reg,e_code) <- getSomeReg (cmmOffset dflags expr offset)
         lbl <- getNewLabelNat
         let op = OpAddr (AddrBaseIndex EABaseNone (EAIndex reg (wORD_SIZE dflags)) (ImmCLbl lbl))
             code = e_code `appOL` toOL [
-                    JMP_TBL op ids ReadOnlyData lbl
+                    JMP_TBL op ids (Section ReadOnlyData lbl) lbl
                  ]
         return code
   where (offset, ids) = switchTargetsToTable targets

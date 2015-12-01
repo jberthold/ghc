@@ -5,7 +5,7 @@
 --   We should be able to factor out the common parts.
 module Vectorise.Generic.PData
   ( buildPDataTyCon
-  , buildPDatasTyCon ) 
+  , buildPDatasTyCon )
 where
 
 import Vectorise.Monad
@@ -31,7 +31,7 @@ import Control.Monad
 -- buildPDataTyCon ------------------------------------------------------------
 -- | Build the PData instance tycon for a given type constructor.
 buildPDataTyCon :: TyCon -> TyCon -> SumRepr -> VM FamInst
-buildPDataTyCon orig_tc vect_tc repr 
+buildPDataTyCon orig_tc vect_tc repr
  = fixV $ \fam_inst ->
    do let repr_tc = dataFamInstRepTyCon fam_inst
       name' <- mkLocalisedName mkPDataTyConOcc orig_name
@@ -59,7 +59,7 @@ buildDataFamInst name' fam_tc vect_tc rhs
                            rec_flag    -- FIXME: is this ok?
                            False       -- Not promotable
                            False       -- not GADT syntax
-                           (FamInstTyCon ax fam_tc pat_tys)
+                           (DataFamInstTyCon ax fam_tc pat_tys)
       ; liftDs $ newFamInst (DataFamilyInst rep_tc) ax }
  where
     tyvars    = tyConTyVars vect_tc
@@ -79,7 +79,9 @@ buildPDataDataCon orig_name vect_tc repr_tc repr
       fam_envs  <- readGEnv global_fam_inst_env
       liftDs $ buildDataCon fam_envs dc_name
                             False                  -- not infix
-                            (map (const HsNoBang) comp_tys)
+                            NotPromoted            -- not promotable
+                            (map (const no_bang) comp_tys)
+                            (Just $ map (const HsLazy) comp_tys)
                             []                     -- no field labels
                             tvs
                             []                     -- no existentials
@@ -88,12 +90,14 @@ buildPDataDataCon orig_name vect_tc repr_tc repr
                             comp_tys
                             (mkFamilyTyConApp repr_tc (mkTyVarTys tvs))
                             repr_tc
+  where
+    no_bang = HsSrcBang Nothing NoSrcUnpack NoSrcStrict
 
 
 -- buildPDatasTyCon -----------------------------------------------------------
 -- | Build the PDatas instance tycon for a given type constructor.
 buildPDatasTyCon :: TyCon -> TyCon -> SumRepr -> VM FamInst
-buildPDatasTyCon orig_tc vect_tc repr 
+buildPDatasTyCon orig_tc vect_tc repr
  = fixV $ \fam_inst ->
    do let repr_tc = dataFamInstRepTyCon fam_inst
       name'       <- mkLocalisedName mkPDatasTyConOcc orig_name
@@ -118,7 +122,9 @@ buildPDatasDataCon orig_name vect_tc repr_tc repr
       fam_envs <- readGEnv global_fam_inst_env
       liftDs $ buildDataCon fam_envs dc_name
                             False                  -- not infix
-                            (map (const HsNoBang) comp_tys)
+                            NotPromoted            -- not promotable
+                            (map (const no_bang) comp_tys)
+                            (Just $ map (const HsLazy) comp_tys)
                             []                     -- no field labels
                             tvs
                             []                     -- no existentials
@@ -127,11 +133,13 @@ buildPDatasDataCon orig_name vect_tc repr_tc repr
                             comp_tys
                             (mkFamilyTyConApp repr_tc (mkTyVarTys tvs))
                             repr_tc
+  where
+     no_bang = HsSrcBang Nothing NoSrcUnpack NoSrcStrict
 
 
 -- Utils ----------------------------------------------------------------------
 -- | Flatten a SumRepr into a list of data constructor types.
-mkSumTys 
+mkSumTys
         :: (SumRepr -> Type)
         -> (Type -> VM Type)
         -> SumRepr
@@ -158,4 +166,3 @@ mk_fam_inst :: TyCon -> TyCon -> (TyCon, [Type])
 mk_fam_inst fam_tc arg_tc
   = (fam_tc, [mkTyConApp arg_tc . mkTyVarTys $ tyConTyVars arg_tc])
 -}
-

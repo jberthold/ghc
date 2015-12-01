@@ -47,6 +47,7 @@ module Coercion (
 
         -- ** Free variables
         tyCoVarsOfCo, tyCoVarsOfCos, coVarsOfCo, coercionSize,
+        tyCoVarsOfCoAcc, tyCoVarsOfCosAcc,
 
         -- ** Substitution
         CvSubstEnv, emptyCvSubstEnv,
@@ -107,6 +108,7 @@ import Data.Traversable (traverse, sequenceA)
 #endif
 import FastString
 import ListSetOps
+import FV
 
 import qualified Data.Data as Data hiding ( TyCon )
 import Control.Arrow ( first )
@@ -188,7 +190,8 @@ data Coercion
 
   -- These are destructors
 
-  | NthCo  Int         Coercion     -- Zero-indexed; decomposes (T t0 ... tn)
+  | NthCo  Int         Coercion  -- Zero-indexed; decomposes (T t0 ... tn)
+                                 -- and (F t0 ... tn), assuming F is injective.
     -- :: _ -> e -> ?? (inverse of TyConAppCo, see Note [TyConAppCo roles])
     -- See Note [NthCo and newtypes]
 
@@ -553,24 +556,45 @@ isCoVarType ty      -- Tests for t1 ~# t2, the unboxed equality
       Nothing       -> False
 
 tyCoVarsOfCo :: Coercion -> VarSet
+tyCoVarsOfCo co = runFVSet $ tyCoVarsOfCoAcc co
 -- Extracts type and coercion variables from a coercion
-tyCoVarsOfCo (Refl _ ty)           = tyVarsOfType ty
-tyCoVarsOfCo (TyConAppCo _ _ cos)  = tyCoVarsOfCos cos
-tyCoVarsOfCo (AppCo co1 co2)       = tyCoVarsOfCo co1 `unionVarSet` tyCoVarsOfCo co2
-tyCoVarsOfCo (ForAllCo tv co)      = tyCoVarsOfCo co `delVarSet` tv
-tyCoVarsOfCo (CoVarCo v)           = unitVarSet v
-tyCoVarsOfCo (AxiomInstCo _ _ cos) = tyCoVarsOfCos cos
-tyCoVarsOfCo (UnivCo _ _ ty1 ty2)  = tyVarsOfType ty1 `unionVarSet` tyVarsOfType ty2
-tyCoVarsOfCo (SymCo co)            = tyCoVarsOfCo co
-tyCoVarsOfCo (TransCo co1 co2)     = tyCoVarsOfCo co1 `unionVarSet` tyCoVarsOfCo co2
-tyCoVarsOfCo (NthCo _ co)          = tyCoVarsOfCo co
-tyCoVarsOfCo (LRCo _ co)           = tyCoVarsOfCo co
-tyCoVarsOfCo (InstCo co ty)        = tyCoVarsOfCo co `unionVarSet` tyVarsOfType ty
-tyCoVarsOfCo (SubCo co)            = tyCoVarsOfCo co
-tyCoVarsOfCo (AxiomRuleCo _ ts cs) = tyVarsOfTypes ts `unionVarSet` tyCoVarsOfCos cs
 
 tyCoVarsOfCos :: [Coercion] -> VarSet
-tyCoVarsOfCos = mapUnionVarSet tyCoVarsOfCo
+tyCoVarsOfCos cos = runFVSet $ tyCoVarsOfCosAcc cos
+
+tyCoVarsOfCoAcc :: Coercion -> FV
+tyCoVarsOfCoAcc (Refl _ ty) fv_cand in_scope acc =
+  tyVarsOfTypeAcc ty fv_cand in_scope acc
+tyCoVarsOfCoAcc (TyConAppCo _ _ cos) fv_cand in_scope acc =
+  tyCoVarsOfCosAcc cos fv_cand in_scope acc
+tyCoVarsOfCoAcc (AppCo co1 co2) fv_cand in_scope acc =
+  (tyCoVarsOfCoAcc co1 `unionFV` tyCoVarsOfCoAcc co2) fv_cand in_scope acc
+tyCoVarsOfCoAcc (ForAllCo tv co) fv_cand in_scope acc =
+  delFV tv (tyCoVarsOfCoAcc co) fv_cand in_scope acc
+tyCoVarsOfCoAcc (CoVarCo v) fv_cand in_scope acc = oneVar v fv_cand in_scope acc
+tyCoVarsOfCoAcc (AxiomInstCo _ _ cos) fv_cand in_scope acc =
+  tyCoVarsOfCosAcc cos fv_cand in_scope acc
+tyCoVarsOfCoAcc (UnivCo _ _ ty1 ty2) fv_cand in_scope acc =
+  (tyVarsOfTypeAcc ty1 `unionFV` tyVarsOfTypeAcc ty2) fv_cand in_scope acc
+tyCoVarsOfCoAcc (SymCo co) fv_cand in_scope acc =
+  tyCoVarsOfCoAcc co fv_cand in_scope acc
+tyCoVarsOfCoAcc (TransCo co1 co2) fv_cand in_scope acc =
+  (tyCoVarsOfCoAcc co1 `unionFV` tyCoVarsOfCoAcc co2) fv_cand in_scope acc
+tyCoVarsOfCoAcc (NthCo _ co) fv_cand in_scope acc =
+  tyCoVarsOfCoAcc co fv_cand in_scope acc
+tyCoVarsOfCoAcc (LRCo _ co) fv_cand in_scope acc =
+  tyCoVarsOfCoAcc co fv_cand in_scope acc
+tyCoVarsOfCoAcc (InstCo co ty) fv_cand in_scope acc =
+  (tyCoVarsOfCoAcc co `unionFV` tyVarsOfTypeAcc ty) fv_cand in_scope acc
+tyCoVarsOfCoAcc (SubCo co) fv_cand in_scope acc =
+  tyCoVarsOfCoAcc co fv_cand in_scope acc
+tyCoVarsOfCoAcc (AxiomRuleCo _ ts cs) fv_cand in_scope acc =
+  (tyVarsOfTypesAcc ts `unionFV` tyCoVarsOfCosAcc cs) fv_cand in_scope acc
+
+tyCoVarsOfCosAcc :: [Coercion] -> FV
+tyCoVarsOfCosAcc (co:cos) fv_cand in_scope acc =
+  (tyCoVarsOfCoAcc co `unionFV` tyCoVarsOfCosAcc cos) fv_cand in_scope acc
+tyCoVarsOfCosAcc [] fv_cand in_scope acc = noVars fv_cand in_scope acc
 
 coVarsOfCo :: Coercion -> VarSet
 -- Extract *coerction* variables only.  Tiresome to repeat the code, but easy.
@@ -753,29 +777,39 @@ ppr_forall_co p ty
     split1 tvs ty               = (reverse tvs, ty)
 
 pprCoAxiom :: CoAxiom br -> SDoc
-pprCoAxiom ax@(CoAxiom { co_ax_tc = tc, co_ax_branches = branches })
-  = hang (ptext (sLit "axiom") <+> ppr ax <+> dcolon)
-       2 (vcat (map (pprCoAxBranch tc) $ fromBranchList branches))
+pprCoAxiom ax@(CoAxiom { co_ax_branches = branches })
+  = hang (text "axiom" <+> ppr ax <+> dcolon)
+       2 (vcat (map (ppr_co_ax_branch (const ppr) ax) $ fromBranches branches))
 
-pprCoAxBranch :: TyCon -> CoAxBranch -> SDoc
-pprCoAxBranch fam_tc (CoAxBranch { cab_tvs = tvs
-                                 , cab_lhs = lhs
-                                 , cab_rhs = rhs })
-  = hang (pprUserForAll tvs)
-       2 (hang (pprTypeApp fam_tc lhs) 2 (equals <+> (ppr rhs)))
+pprCoAxBranch :: CoAxiom br -> CoAxBranch -> SDoc
+pprCoAxBranch = ppr_co_ax_branch pprRhs
+  where
+    pprRhs fam_tc (TyConApp tycon _)
+      | isDataFamilyTyCon fam_tc
+      = pprDataCons tycon
+    pprRhs _ rhs = ppr rhs
 
 pprCoAxBranchHdr :: CoAxiom br -> BranchIndex -> SDoc
-pprCoAxBranchHdr ax@(CoAxiom { co_ax_tc = fam_tc, co_ax_name = name }) index
-  | CoAxBranch { cab_lhs = tys, cab_loc = loc } <- coAxiomNthBranch ax index
-  = hang (pprTypeApp fam_tc tys)
-       2 (ptext (sLit "-- Defined") <+> ppr_loc loc)
+pprCoAxBranchHdr ax index = pprCoAxBranch ax (coAxiomNthBranch ax index)
+
+ppr_co_ax_branch :: (TyCon -> Type -> SDoc) -> CoAxiom br -> CoAxBranch -> SDoc
+ppr_co_ax_branch ppr_rhs
+              (CoAxiom { co_ax_tc = fam_tc, co_ax_name = name })
+              (CoAxBranch { cab_tvs = tvs
+                          , cab_lhs = lhs
+                          , cab_rhs = rhs
+                          , cab_loc = loc })
+  = foldr1 (flip hangNotEmpty 2)
+        [ pprUserForAll tvs
+        , pprTypeApp fam_tc lhs <+> equals <+> ppr_rhs fam_tc rhs
+        , text "-- Defined" <+> pprLoc loc ]
   where
-        ppr_loc loc
+        pprLoc loc
           | isGoodSrcSpan loc
-          = ptext (sLit "at") <+> ppr (srcSpanStart loc)
+          = text "at" <+> ppr (srcSpanStart loc)
 
           | otherwise
-          = ptext (sLit "in") <+>
+          = text "in" <+>
               quotes (ppr (nameModule name))
 
 {-
@@ -1214,7 +1248,7 @@ mkNewTypeCo name tycon tvs roles rhs_ty
             , co_ax_implicit = True  -- See Note [Implicit axioms] in TyCon
             , co_ax_role     = Representational
             , co_ax_tc       = tycon
-            , co_ax_branches = FirstBranch branch }
+            , co_ax_branches = unbranched branch }
   where branch = CoAxBranch { cab_loc     = getSrcSpan name
                             , cab_tvs     = tvs
                             , cab_lhs     = mkTyVarTys tvs

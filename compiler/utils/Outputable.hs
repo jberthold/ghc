@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP, ImplicitParams #-}
 {-
 (c) The University of Glasgow 2006-2012
 (c) The GRASP Project, Glasgow University, 1992-1998
@@ -16,14 +17,15 @@ module Outputable (
         -- * Pretty printing combinators
         SDoc, runSDoc, initSDocContext,
         docToSDoc,
-        interppSP, interpp'SP, pprQuotedList, pprWithCommas, quotedListWithOr,
-        empty, nest,
+        interppSP, interpp'SP,
+        pprQuotedList, pprWithCommas, quotedListWithOr, quotedListWithNor,
+        empty, isEmpty, nest,
         char,
         text, ftext, ptext, ztext,
         int, intWithCommas, integer, float, double, rational,
         parens, cparen, brackets, braces, quotes, quote,
         doubleQuotes, angleBrackets, paBrackets,
-        semi, comma, colon, dcolon, space, equals, dot,
+        semi, comma, colon, dcolon, space, equals, dot, vbar,
         arrow, larrow, darrow, arrowt, larrowt, arrowtt, larrowtt,
         lparen, rparen, lbrack, rbrack, lbrace, rbrace, underscore,
         blankLine, forAllLit,
@@ -31,8 +33,8 @@ module Outputable (
         ($$), ($+$), vcat,
         sep, cat,
         fsep, fcat,
-        hang, punctuate, ppWhen, ppUnless,
-        speakNth, speakNTimes, speakN, speakNOf, plural, isOrAre,
+        hang, hangNotEmpty, punctuate, ppWhen, ppUnless,
+        speakNth, speakN, speakNOf, plural, isOrAre, doOrDoes,
 
         coloured, PprColour, colType, colCoerc, colDataCon,
         colBinder, bold, keyword,
@@ -61,6 +63,7 @@ module Outputable (
         reallyAlwaysQualify, reallyAlwaysQualifyNames,
         alwaysQualify, alwaysQualifyNames, alwaysQualifyModules,
         neverQualify, neverQualifyNames, neverQualifyModules,
+        alwaysQualifyPackages, neverQualifyPackages,
         QualifyName(..), queryQual,
         sdocWithDynFlags, sdocWithPlatform,
         getPprStyle, withPprStyle, withPprStyleDoc,
@@ -71,9 +74,9 @@ module Outputable (
         mkUserStyle, cmdlineParserStyle, Depth(..),
 
         -- * Error handling and debugging utilities
-        pprPanic, pprSorry, assertPprPanic, pprPanicFastInt, pprPgmError,
-        pprTrace, warnPprTrace,
-        trace, pgmError, panic, sorry, panicFastInt, assertPanic,
+        pprPanic, pprSorry, assertPprPanic, pprPgmError,
+        pprTrace, warnPprTrace, pprSTrace,
+        trace, pgmError, panic, sorry, assertPanic,
         pprDebugAndThen,
     ) where
 
@@ -81,12 +84,11 @@ import {-# SOURCE #-}   DynFlags( DynFlags,
                                   targetPlatform, pprUserLength, pprCols,
                                   useUnicode, useUnicodeSyntax,
                                   unsafeGlobalDynFlags )
-import {-# SOURCE #-}   Module( PackageKey, Module, ModuleName, moduleName )
+import {-# SOURCE #-}   Module( UnitId, Module, ModuleName, moduleName )
 import {-# SOURCE #-}   OccName( OccName )
 import {-# SOURCE #-}   StaticFlags( opt_PprStyle_Debug, opt_NoDebugOutput )
 
 import FastString
-import FastTypes
 import qualified Pretty
 import Util
 import Platform
@@ -109,6 +111,10 @@ import Data.Graph (SCC(..))
 
 import GHC.Fingerprint
 import GHC.Show         ( showMultiLineString )
+#if __GLASGOW_HASKELL__ > 710
+import GHC.Stack
+import GHC.Exception
+#endif
 
 {-
 ************************************************************************
@@ -159,7 +165,7 @@ data PrintUnqualified = QueryQualify {
 -- | given an /original/ name, this function tells you which module
 -- name it should be qualified with when printing for the user, if
 -- any.  For example, given @Control.Exception.catch@, which is in scope
--- as @Exception.catch@, this fuction will return @Just "Exception"@.
+-- as @Exception.catch@, this function will return @Just "Exception"@.
 -- Note that the return value is a ModuleName, not a Module, because
 -- in source code, names are qualified by ModuleNames.
 type QueryQualifyName = Module -> OccName -> QualifyName
@@ -169,8 +175,8 @@ type QueryQualifyName = Module -> OccName -> QualifyName
 type QueryQualifyModule = Module -> Bool
 
 -- | For a given package, we need to know whether to print it with
--- the package key to disambiguate it.
-type QueryQualifyPackage = PackageKey -> Bool
+-- the unit id to disambiguate it.
+type QueryQualifyPackage = UnitId -> Bool
 
 -- See Note [Printing original names] in HscTypes
 data QualifyName   -- Given P:M.T
@@ -295,8 +301,8 @@ pprDeeper d = SDoc $ \ctx -> case ctx of
     runSDoc d ctx{sdocStyle = PprUser q (PartWay (n-1))}
   _ -> runSDoc d ctx
 
+-- | Truncate a list that is longer than the current depth.
 pprDeeperList :: ([SDoc] -> SDoc) -> [SDoc] -> SDoc
--- Truncate a list that list that is longer than the current depth
 pprDeeperList f ds
   | null ds   = f []
   | otherwise = SDoc work
@@ -433,25 +439,32 @@ showSDocDebug dflags d = renderWithStyle dflags d PprDebug
 
 renderWithStyle :: DynFlags -> SDoc -> PprStyle -> String
 renderWithStyle dflags sdoc sty
-  = Pretty.showDoc PageMode (pprCols dflags) $
-    runSDoc sdoc (initSDocContext dflags sty)
+  = let s = Pretty.style{ Pretty.mode = PageMode,
+                          Pretty.lineLength = pprCols dflags }
+    in Pretty.renderStyle s $ runSDoc sdoc (initSDocContext dflags sty)
 
 -- This shows an SDoc, but on one line only. It's cheaper than a full
 -- showSDoc, designed for when we're getting results like "Foo.bar"
 -- and "foo{uniq strictness}" so we don't want fancy layout anyway.
 showSDocOneLine :: DynFlags -> SDoc -> String
 showSDocOneLine dflags d
- = Pretty.showDoc OneLineMode (pprCols dflags) $
-   runSDoc d (initSDocContext dflags defaultUserStyle)
+ = let s = Pretty.style{ Pretty.mode = OneLineMode,
+                         Pretty.lineLength = pprCols dflags } in
+   Pretty.renderStyle s $ runSDoc d (initSDocContext dflags defaultUserStyle)
 
 showSDocDumpOneLine :: DynFlags -> SDoc -> String
 showSDocDumpOneLine dflags d
- = Pretty.showDoc OneLineMode irrelevantNCols $
-   runSDoc d (initSDocContext dflags defaultDumpStyle)
+ = let s = Pretty.style{ Pretty.mode = OneLineMode,
+                         Pretty.lineLength = irrelevantNCols } in
+   Pretty.renderStyle s $ runSDoc d (initSDocContext dflags defaultDumpStyle)
 
 irrelevantNCols :: Int
 -- Used for OneLineMode and LeftMode when number of cols isn't used
 irrelevantNCols = 1
+
+isEmpty :: DynFlags -> SDoc -> Bool
+isEmpty dflags sdoc = Pretty.isEmpty $ runSDoc sdoc dummySDocContext
+   where dummySDocContext = initSDocContext dflags PprDebug
 
 docToSDoc :: Doc -> SDoc
 docToSDoc d = SDoc (\_ -> d)
@@ -495,8 +508,7 @@ angleBrackets d = char '<' <> d <> char '>'
 paBrackets d    = ptext (sLit "[:") <> d <> ptext (sLit ":]")
 
 cparen :: Bool -> SDoc -> SDoc
-
-cparen b d     = SDoc $ Pretty.cparen b . runSDoc d
+cparen b d = SDoc $ Pretty.maybeParens b . runSDoc d
 
 -- 'quotes' encloses something in single quotes...
 -- but it omits them if the thing begins or ends in a single quote
@@ -513,7 +525,7 @@ quotes d =
              ('\'' : _, _)       -> pp_d
              _other              -> Pretty.quotes pp_d
 
-semi, comma, colon, equals, space, dcolon, underscore, dot :: SDoc
+semi, comma, colon, equals, space, dcolon, underscore, dot, vbar :: SDoc
 arrow, larrow, darrow, arrowt, larrowt, arrowtt, larrowtt :: SDoc
 lparen, rparen, lbrack, rbrack, lbrace, rbrace, blankLine :: SDoc
 
@@ -522,8 +534,8 @@ dcolon     = unicodeSyntax (char '∷') (docToSDoc $ Pretty.ptext (sLit "::"))
 arrow      = unicodeSyntax (char '→') (docToSDoc $ Pretty.ptext (sLit "->"))
 larrow     = unicodeSyntax (char '←') (docToSDoc $ Pretty.ptext (sLit "<-"))
 darrow     = unicodeSyntax (char '⇒') (docToSDoc $ Pretty.ptext (sLit "=>"))
-arrowt     = unicodeSyntax (char '↣') (docToSDoc $ Pretty.ptext (sLit ">-"))
-larrowt    = unicodeSyntax (char '↢') (docToSDoc $ Pretty.ptext (sLit "-<"))
+arrowt     = unicodeSyntax (char '⤚') (docToSDoc $ Pretty.ptext (sLit ">-"))
+larrowt    = unicodeSyntax (char '⤙') (docToSDoc $ Pretty.ptext (sLit "-<"))
 arrowtt    = unicodeSyntax (char '⤜') (docToSDoc $ Pretty.ptext (sLit ">>-"))
 larrowtt   = unicodeSyntax (char '⤛') (docToSDoc $ Pretty.ptext (sLit "-<<"))
 semi       = docToSDoc $ Pretty.semi
@@ -533,6 +545,7 @@ equals     = docToSDoc $ Pretty.equals
 space      = docToSDoc $ Pretty.space
 underscore = char '_'
 dot        = char '.'
+vbar       = char '|'
 lparen     = docToSDoc $ Pretty.lparen
 rparen     = docToSDoc $ Pretty.rparen
 lbrack     = docToSDoc $ Pretty.lbrack
@@ -597,6 +610,12 @@ hang :: SDoc  -- ^ The header
       -> SDoc -- ^ The hung body, indented and placed below the header
       -> SDoc
 hang d1 n d2   = SDoc $ \sty -> Pretty.hang (runSDoc d1 sty) n (runSDoc d2 sty)
+
+-- | This behaves like 'hang', but does not indent the second document
+-- when the header is empty.
+hangNotEmpty :: SDoc -> Int -> SDoc -> SDoc
+hangNotEmpty d1 n d2 =
+    SDoc $ \sty -> Pretty.hangNotEmpty (runSDoc d1 sty) n (runSDoc d2 sty)
 
 punctuate :: SDoc   -- ^ The punctuation
           -> [SDoc] -- ^ The list that will have punctuation added between every adjacent pair of elements
@@ -905,6 +924,11 @@ quotedListWithOr :: [SDoc] -> SDoc
 quotedListWithOr xs@(_:_:_) = quotedList (init xs) <+> ptext (sLit "or") <+> quotes (last xs)
 quotedListWithOr xs = quotedList xs
 
+quotedListWithNor :: [SDoc] -> SDoc
+-- [x,y,z]  ==>  `x', `y' nor `z'
+quotedListWithNor xs@(_:_:_) = quotedList (init xs) <+> ptext (sLit "nor") <+> quotes (last xs)
+quotedListWithNor xs = quotedList xs
+
 {-
 ************************************************************************
 *                                                                      *
@@ -973,16 +997,6 @@ speakNOf 0 d = ptext (sLit "no") <+> d <> char 's'
 speakNOf 1 d = ptext (sLit "one") <+> d                 -- E.g. "one argument"
 speakNOf n d = speakN n <+> d <> char 's'               -- E.g. "three arguments"
 
--- | Converts a strictly positive integer into a number of times:
---
--- > speakNTimes 1 = text "once"
--- > speakNTimes 2 = text "twice"
--- > speakNTimes 4 = text "4 times"
-speakNTimes :: Int {- >=1 -} -> SDoc
-speakNTimes t | t == 1     = ptext (sLit "once")
-              | t == 2     = ptext (sLit "twice")
-              | otherwise  = speakN t <+> ptext (sLit "times")
-
 -- | Determines the pluralisation suffix appropriate for the length of a list:
 --
 -- > plural [] = char 's'
@@ -1000,6 +1014,15 @@ plural _   = char 's'
 isOrAre :: [a] -> SDoc
 isOrAre [_] = ptext (sLit "is")
 isOrAre _   = ptext (sLit "are")
+
+-- | Determines the form of to do appropriate for the length of a list:
+--
+-- > doOrDoes [] = ptext (sLit "do")
+-- > doOrDoes ["Hello"] = ptext (sLit "does")
+-- > doOrDoes ["Hello", "World"] = ptext (sLit "do")
+doOrDoes :: [a] -> SDoc
+doOrDoes [_] = ptext (sLit "does")
+doOrDoes _   = ptext (sLit "do")
 
 {-
 ************************************************************************
@@ -1029,9 +1052,16 @@ pprTrace str doc x
    | opt_NoDebugOutput = x
    | otherwise         = pprDebugAndThen unsafeGlobalDynFlags trace (text str) doc x
 
-pprPanicFastInt :: String -> SDoc -> FastInt
--- ^ Specialization of pprPanic that can be safely used with 'FastInt'
-pprPanicFastInt heading pretty_msg = panicDocFastInt heading pretty_msg
+
+-- | If debug output is on, show some 'SDoc' on the screen along
+-- with a call stack when available.
+#if __GLASGOW_HASKELL__ > 710
+pprSTrace :: (?location :: CallStack) => SDoc -> a -> a
+pprSTrace = pprTrace (showCallStack ?location)
+#else
+pprSTrace :: SDoc -> a -> a
+pprSTrace = pprTrace "no callstack info"
+#endif
 
 warnPprTrace :: Bool -> String -> Int -> SDoc -> a -> a
 -- ^ Just warn about an assertion failure, recording the given file and line number.

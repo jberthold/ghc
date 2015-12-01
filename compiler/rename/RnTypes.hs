@@ -13,7 +13,7 @@ module RnTypes (
         rnHsKind, rnLHsKind, rnLHsMaybeKind,
         rnHsSigType, rnLHsInstType, rnConDeclFields,
         newTyVarNameRn, rnLHsTypeWithWildCards,
-        rnHsSigTypeWithWildCards,
+        rnHsSigTypeWithWildCards, rnLTyVar, collectWildCards,
 
         -- Precence related stuff
         mkOpAppRn, mkNegAppRn, mkOpFormRn, mkConOpPatRn,
@@ -21,7 +21,7 @@ module RnTypes (
 
         -- Binding related stuff
         warnContextQuantification, warnUnusedForAlls,
-        bindSigTyVarsFV, bindHsTyVars, rnHsBndrSig,
+        bindSigTyVarsFV, bindHsTyVars, rnHsBndrSig, rnLHsTyVarBndr,
         extractHsTyRdrTyVars, extractHsTysRdrTyVars,
         extractRdrKindSigVars, extractDataDefnKindVars,
         filterInScope
@@ -40,6 +40,7 @@ import TysPrim          ( funTyConName )
 import Name
 import SrcLoc
 import NameSet
+import FieldLabel
 
 import Util
 import BasicTypes       ( compareFixity, funTyFixity, negateFixity,
@@ -143,9 +144,9 @@ rnHsTyKi :: Bool -> HsDocContext -> HsType RdrName -> RnM (HsType Name, FreeVars
 rnHsTyKi isType doc ty@HsForAllTy{}
   = rnHsTyKiForAll isType doc (flattenTopLevelHsForAllTy ty)
 
-rnHsTyKi isType _ (HsTyVar rdr_name)
+rnHsTyKi isType _ (HsTyVar (L l rdr_name))
   = do { name <- rnTyVar isType rdr_name
-       ; return (HsTyVar name, unitFV name) }
+       ; return (HsTyVar (L l name), unitFV name) }
 
 -- If we see (forall a . ty), without foralls on, the forall will give
 -- a sensible error message, but we don't want to complain about the dot too
@@ -177,7 +178,7 @@ rnHsTyKi isType doc (HsBangTy b ty)
 rnHsTyKi _ doc ty@(HsRecTy flds)
   = do { addErr (hang (ptext (sLit "Record syntax is illegal here:"))
                     2 (ppr ty))
-       ; (flds', fvs) <- rnConDeclFields doc flds
+       ; (flds', fvs) <- rnConDeclFields [] doc flds
        ; return (HsRecTy flds', fvs) }
 
 rnHsTyKi isType doc (HsFunTy ty1 ty2)
@@ -285,11 +286,11 @@ rnHsTyKi isType _doc (HsWildCardTy (AnonWildCard PlaceHolder))
     do { loc <- getSrcSpanM
        ; uniq <- newUnique
        ; let name = mkInternalName uniq (mkTyVarOcc "_") loc
-       ; return (HsWildCardTy (AnonWildCard name), emptyFVs) }
+       ; return (HsWildCardTy (AnonWildCard (L loc name)), emptyFVs) }
          -- emptyFVs: this occurrence does not refer to a
          --           binding, so don't treat it as a free variable
 
-rnHsTyKi isType doc (HsWildCardTy (NamedWildCard rdr_name))
+rnHsTyKi isType doc (HsWildCardTy (NamedWildCard (L l rdr_name)))
   = ASSERT( isType )
     do { not_in_scope <- isNothing `fmap` lookupOccRn_maybe rdr_name
        ; when not_in_scope $
@@ -299,7 +300,7 @@ rnHsTyKi isType doc (HsWildCardTy (NamedWildCard rdr_name))
          failWith $ text "Unexpected wild card:" <+> quotes (ppr rdr_name) $$
                     docOfHsDocContext doc
        ; name <- rnTyVar isType rdr_name
-       ; return (HsWildCardTy (NamedWildCard name), emptyFVs) }
+       ; return (HsWildCardTy (NamedWildCard (L l name)), emptyFVs) }
          -- emptyFVs: this occurrence does not refer to a
          --           binding, so don't treat it as a free variable
 
@@ -365,6 +366,10 @@ rnTyVar is_type rdr_name
   | is_type   = lookupTypeOccRn rdr_name
   | otherwise = lookupKindOccRn rdr_name
 
+rnLTyVar :: Bool -> Located RdrName -> RnM (Located Name)
+rnLTyVar is_type (L loc rdr_name) = do
+  tyvar' <- rnTyVar is_type rdr_name
+  return (L loc tyvar')
 
 --------------
 rnLHsTypes :: HsDocContext -> [LHsType RdrName]
@@ -447,22 +452,11 @@ bindHsTyVars doc mb_assoc kv_bndrs tv_bndrs thing_inside
        ; bindLocalNamesFV kv_names $
     do { let tv_names_w_loc = hsLTyVarLocNames tv_bndrs
 
-             rn_tv_bndr :: LHsTyVarBndr RdrName -> RnM (LHsTyVarBndr Name, FreeVars)
-             rn_tv_bndr (L loc (UserTyVar rdr))
-               = do { nm <- newTyVarNameRn mb_assoc rdr_env loc rdr
-                    ; return (L loc (UserTyVar nm), emptyFVs) }
-             rn_tv_bndr (L loc (KindedTyVar (L lv rdr) kind))
-               = do { sig_ok <- xoptM Opt_KindSignatures
-                    ; unless sig_ok (badSigErr False doc kind)
-                    ; nm <- newTyVarNameRn mb_assoc rdr_env loc rdr
-                    ; (kind', fvs) <- rnLHsKind doc kind
-                    ; return (L loc (KindedTyVar (L lv nm) kind'), fvs) }
-
        -- Check for duplicate or shadowed tyvar bindrs
        ; checkDupRdrNames tv_names_w_loc
        ; when (isNothing mb_assoc) (checkShadowedRdrNames tv_names_w_loc)
 
-       ; (tv_bndrs', fvs1) <- mapFvRn rn_tv_bndr tvs
+       ; (tv_bndrs', fvs1) <- mapFvRn (rnLHsTyVarBndr doc mb_assoc rdr_env) tvs
        ; (res, fvs2) <- bindLocalNamesFV (map hsLTyVarName tv_bndrs') $
                         do { inner_rdr_env <- getLocalRdrEnv
                            ; traceRn (text "bhtv" <+> vcat
@@ -472,6 +466,18 @@ bindHsTyVars doc mb_assoc kv_bndrs tv_bndrs thing_inside
                                  , ppr all_kvs, ppr rdr_env, ppr inner_rdr_env ])
                            ; thing_inside (HsQTvs { hsq_tvs = tv_bndrs', hsq_kvs = kv_names }) }
        ; return (res, fvs1 `plusFV` fvs2) } }
+
+rnLHsTyVarBndr :: HsDocContext -> Maybe a -> LocalRdrEnv
+               -> LHsTyVarBndr RdrName -> RnM (LHsTyVarBndr Name, FreeVars)
+rnLHsTyVarBndr _ mb_assoc rdr_env (L loc (UserTyVar (L l rdr)))
+  = do { nm <- newTyVarNameRn mb_assoc rdr_env loc rdr
+       ; return (L loc (UserTyVar (L l nm)), emptyFVs) }
+rnLHsTyVarBndr doc mb_assoc rdr_env (L loc (KindedTyVar (L lv rdr) kind))
+  = do { sig_ok <- xoptM Opt_KindSignatures
+       ; unless sig_ok (badSigErr False doc kind)
+       ; nm <- newTyVarNameRn mb_assoc rdr_env loc rdr
+       ; (kind', fvs) <- rnLHsKind doc kind
+       ; return (L loc (KindedTyVar (L lv nm) kind'), fvs) }
 
 newTyVarNameRn :: Maybe a -> LocalRdrEnv -> SrcSpan -> RdrName -> RnM Name
 newTyVarNameRn mb_assoc rdr_env loc rdr
@@ -489,17 +495,18 @@ rnHsBndrSig :: HsDocContext
 rnHsBndrSig doc (HsWB { hswb_cts = ty@(L loc _) }) thing_inside
   = do { sig_ok <- xoptM Opt_ScopedTypeVariables
        ; unless sig_ok (badSigErr True doc ty)
-       ; let (kv_bndrs, tv_bndrs) = extractHsTyRdrTyVars ty
-       ; name_env <- getLocalRdrEnv
-       ; tv_names <- newLocalBndrsRn [L loc tv | tv <- tv_bndrs
-                                               , not (tv `elemLocalRdrEnv` name_env) ]
-       ; kv_names <- newLocalBndrsRn [L loc kv | kv <- kv_bndrs
-                                               , not (kv `elemLocalRdrEnv` name_env) ]
+       ; rdr_env <- getLocalRdrEnv
+       ; let (kv_bndrs, tv_bndrs) = filterInScope rdr_env $
+                                    extractHsTyRdrTyVars ty
+       ; kv_names <- newLocalBndrsRn (map (L loc) kv_bndrs)
+       ; tv_names <- newLocalBndrsRn (map (L loc) tv_bndrs)
        ; bindLocalNamesFV kv_names $
          bindLocalNamesFV tv_names $
     do { (ty', fvs1, wcs) <- rnLHsTypeWithWildCards doc ty
-       ; (res, fvs2) <- thing_inside (HsWB { hswb_cts = ty', hswb_kvs = kv_names,
-                                             hswb_tvs = tv_names, hswb_wcs = wcs })
+       ; (res, fvs2) <- thing_inside (HsWB { hswb_cts = ty'
+                                           , hswb_kvs = kv_names
+                                           , hswb_tvs = tv_names
+                                           , hswb_wcs = wcs })
        ; return (res, fvs1 `plusFV` fvs2) } }
 
 overlappingKindVars :: HsDocContext -> [RdrName] -> SDoc
@@ -542,7 +549,17 @@ dataKindsErr is_type thing
 -- cards to bind.
 rnHsSigTypeWithWildCards :: SDoc -> LHsType RdrName
                          -> RnM (LHsType Name, FreeVars, [Name])
-rnHsSigTypeWithWildCards doc_str = rnLHsTypeWithWildCards (TypeSigCtx doc_str)
+rnHsSigTypeWithWildCards doc_str ty
+  = rnLHsTypeWithWildCards (TypeSigCtx doc_str) ty'
+  where
+    ty' = extractExtraCtsWc `fmap` flattenTopLevelLHsForAllTy ty
+    -- When there is a wild card at the end of the context, remove it and add
+    -- its location as the extra-constraints wild card in the HsForAllTy.
+    extractExtraCtsWc (HsForAllTy flag _ bndrs (L l ctxt) ty)
+      | Just (ctxt', ct) <- snocView ctxt
+      , L lx (HsWildCardTy (AnonWildCard _)) <- ignoreParens ct
+      = HsForAllTy flag (Just lx) bndrs (L l ctxt') ty
+    extractExtraCtsWc ty = ty
 
 -- | Variant of @rnLHsType@ that supports wild cards. The third element of the
 -- tuple consists of the freshly generated names of the anonymous wild cards
@@ -551,31 +568,19 @@ rnHsSigTypeWithWildCards doc_str = rnLHsTypeWithWildCards (TypeSigCtx doc_str)
 rnLHsTypeWithWildCards  :: HsDocContext -> LHsType RdrName
                         -> RnM (LHsType Name, FreeVars, [Name])
 rnLHsTypeWithWildCards doc ty
-  = do { -- When there is a wild card at the end of the context, remove it and
-         -- add its location as the extra-constraints wild card in the
-         -- HsForAllTy.
-         let ty' = extractExtraCtsWc `fmap` flattenTopLevelLHsForAllTy ty
-
-       ; checkValidPartialType doc ty'
-
+  = do { checkValidPartialType doc ty
        ; rdr_env <- getLocalRdrEnv
        -- Filter out named wildcards that are already in scope
-       ; let (_, wcs) = collectWildCards ty'
-             nwcs = [L loc n | L loc (NamedWildCard n) <- wcs
+       ; let (_, wcs) = collectWildCards ty
+             nwcs = [L loc n | L _ (NamedWildCard (L loc n)) <- wcs
                              , not (elemLocalRdrEnv n rdr_env) ]
        ; bindLocatedLocalsRn nwcs $ \nwcs' -> do {
-         (ty'', fvs) <- rnLHsType doc ty'
+         (ty', fvs) <- rnLHsType doc ty
        -- Add the anonymous wildcards that have been given names during
        -- renaming
-       ; let (_, wcs') = collectWildCards ty''
+       ; let (_, wcs') = collectWildCards ty'
              awcs      = filter (isAnonWildCard . unLoc) wcs'
-       ; return (ty'', fvs, nwcs' ++ map (HsSyn.wildCardName . unLoc) awcs) } }
-  where
-    extractExtraCtsWc (HsForAllTy flag _ bndrs (L l ctxt) ty)
-      | Just (ctxt', ct) <- snocView ctxt
-      , L lx (HsWildCardTy (AnonWildCard _)) <- ignoreParens ct
-      = HsForAllTy flag (Just lx) bndrs (L l ctxt') ty
-    extractExtraCtsWc ty = ty
+       ; return (ty', fvs, nwcs' ++ map (HsSyn.wildCardName . unLoc) awcs) } }
 
 -- | Extract all wild cards from a type. The named and anonymous
 -- extra-constraints wild cards are returned separately to be able to give
@@ -584,7 +589,7 @@ collectWildCards
   :: Eq name => LHsType name
   -> ([Located (HsWildCardInfo name)],  -- extra-constraints wild cards
       [Located (HsWildCardInfo name)])  -- wild cards
-collectWildCards lty = (nubBy sameWildCard extra, nubBy sameWildCard wcs)
+collectWildCards lty = (extra, nubBy sameNamedWildCard wcs)
   where
     (extra, wcs) = go lty
     go (L loc ty) = case ty of
@@ -648,10 +653,21 @@ checkValidPartialType doc lty
            -- If there was a valid extra-constraints wild card, it should have
            -- already been removed and its location should be stored in the
            -- HsForAllTy
-           (if isJust extra
-            then text "Only a single extra-constraints wild card is allowed"
-            else fcat [ text "An extra-constraints wild card must occur"
-                      , text "at the end of the constraints" ]) $$
+           (case extra of
+             Just _ ->
+               -- We're in a top-level context with an extracted
+               -- extra-constraints wild card.
+               text "Only a single extra-constraints wild card is allowed"
+             _ | TypeSigCtx _ <- doc ->
+               -- We're in a top-level context, but the extra-constraints wild
+               -- card didn't occur at the end.
+               fcat [ text "An extra-constraints wild card must occur"
+                    , text "at the end of the constraints" ]
+             _ ->
+               -- We're not in a top-level context, so no extra-constraints
+               -- wild cards are supported.
+               fcat [ text "An extra-constraints wild card is only allowed"
+                    , text "in the top-level context" ]) $$
            docOfHsDocContext doc
 
        ; whenNonEmpty isAnonWildCard inCtxt $ \(L loc _) ->
@@ -690,23 +706,46 @@ checkValidPartialType doc lty
 
 {-
 *********************************************************
-*                                                      *
-\subsection{Contexts and predicates}
-*                                                      *
+*                                                       *
+        ConDeclField
+*                                                       *
 *********************************************************
+
+When renaming a ConDeclField, we have to find the FieldLabel
+associated with each field.  But we already have all the FieldLabels
+available (since they were brought into scope by
+RnNames.getLocalNonValBinders), so we just take the list as an
+argument, build a map and look them up.
 -}
 
-rnConDeclFields :: HsDocContext -> [LConDeclField RdrName]
+rnConDeclFields :: [FieldLabel] -> HsDocContext -> [LConDeclField RdrName]
                 -> RnM ([LConDeclField Name], FreeVars)
-rnConDeclFields doc fields = mapFvRn (rnField doc) fields
+rnConDeclFields fls doc fields = mapFvRn (rnField fl_env doc) fields
+  where
+    fl_env = mkFsEnv [ (flLabel fl, fl) | fl <- fls ]
 
-rnField :: HsDocContext -> LConDeclField RdrName
+rnField :: FastStringEnv FieldLabel -> HsDocContext -> LConDeclField RdrName
         -> RnM (LConDeclField Name, FreeVars)
-rnField doc (L l (ConDeclField names ty haddock_doc))
-  = do { new_names <- mapM lookupLocatedTopBndrRn names
+rnField fl_env doc (L l (ConDeclField names ty haddock_doc))
+  = do { let new_names = map (fmap lookupField) names
        ; (new_ty, fvs) <- rnLHsType doc ty
        ; new_haddock_doc <- rnMbLHsDoc haddock_doc
        ; return (L l (ConDeclField new_names new_ty new_haddock_doc), fvs) }
+  where
+    lookupField :: FieldOcc RdrName -> FieldOcc Name
+    lookupField (FieldOcc rdr _) = FieldOcc rdr (flSelector fl)
+      where
+        lbl = occNameFS $ rdrNameOcc rdr
+        fl  = expectJust "rnField" $ lookupFsEnv fl_env lbl
+
+
+{-
+*********************************************************
+*                                                       *
+        Contexts
+*                                                       *
+*********************************************************
+-}
 
 rnContext :: HsDocContext -> LHsContext RdrName -> RnM (LHsContext Name, FreeVars)
 rnContext doc (L loc cxt)
@@ -829,9 +868,9 @@ mkOpAppRn e1 op fix e2                  -- Default case, no rearrangment
 
 ----------------------------
 get_op :: LHsExpr Name -> Name
--- An unbound name could be either HsVar or HsUnboundVra
+-- An unbound name could be either HsVar or HsUnboundVar
 -- See RnExpr.rnUnboundVar
-get_op (L _ (HsVar n))          = n
+get_op (L _ (HsVar (L _ n)))    = n
 get_op (L _ (HsUnboundVar occ)) = mkUnboundName (mkRdrUnqual occ)
 get_op other                    = pprPanic "get_op" (ppr other)
 
@@ -915,7 +954,7 @@ checkPrecMatch :: Name -> MatchGroup Name body -> RnM ()
   --   eg  a `op` b `C` c = ...
   -- See comments with rnExpr (OpApp ...) about "deriving"
 
-checkPrecMatch op (MG { mg_alts = ms })
+checkPrecMatch op (MG { mg_alts = L _ ms })
   = mapM_ check ms
   where
     check (L _ (Match _ (L l1 p1 : L l2 p2 :_) _ _))
@@ -1042,9 +1081,9 @@ opTyErr op ty@(HsOpTy ty1 _ _)
           | otherwise
           = ptext (sLit "Use TypeOperators to allow operators in types")
 
-    forall_head (L _ (HsTyVar tv))   = tv == forall_tv_RDR
-    forall_head (L _ (HsAppTy ty _)) = forall_head ty
-    forall_head _other               = False
+    forall_head (L _ (HsTyVar (L _ tv))) = tv == forall_tv_RDR
+    forall_head (L _ (HsAppTy ty _))     = forall_head ty
+    forall_head _other                   = False
 opTyErr _ ty = pprPanic "opTyErr: Not an op" (ppr ty)
 
 {-
@@ -1107,9 +1146,14 @@ extractHsTysRdrTyVars ty
   = case extract_ltys ty ([],[]) of
      (kvs, tvs) -> (nub kvs, nub tvs)
 
-extractRdrKindSigVars :: Maybe (LHsKind RdrName) -> [RdrName]
-extractRdrKindSigVars Nothing = []
-extractRdrKindSigVars (Just k) = nub (fst (extract_lkind k ([],[])))
+extractRdrKindSigVars :: LFamilyResultSig RdrName -> [RdrName]
+extractRdrKindSigVars (L _ resultSig)
+    | KindSig k                        <- resultSig = kindRdrNameFromSig k
+    | TyVarSig (L _ (KindedTyVar _ k)) <- resultSig = kindRdrNameFromSig k
+    | TyVarSig (L _ (UserTyVar _))     <- resultSig = []
+    | otherwise = [] -- this can only be NoSig but pattern exhasutiveness
+                     -- checker complains about "NoSig <- resultSig"
+    where kindRdrNameFromSig k = nub (fst (extract_lkind k ([],[])))
 
 extractDataDefnKindVars :: HsDataDefn RdrName -> [RdrName]
 -- Get the scoped kind variables mentioned free in the constructor decls
@@ -1148,7 +1192,7 @@ extract_lkind kind (acc_kvs, acc_tvs) = case extract_lty kind ([], acc_kvs) of
 extract_lty :: LHsType RdrName -> FreeKiTyVars -> FreeKiTyVars
 extract_lty (L _ ty) acc
   = case ty of
-      HsTyVar tv                -> extract_tv tv acc
+      HsTyVar (L _ tv)          -> extract_tv tv acc
       HsBangTy _ ty             -> extract_lty ty acc
       HsRecTy flds              -> foldr (extract_lty . cd_fld_type . unLoc) acc
                                          flds

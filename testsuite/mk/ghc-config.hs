@@ -25,6 +25,7 @@ main = do
   getGhcFieldOrFail fields "GhcRTSWays" "RTS ways"
   getGhcFieldOrDefault fields "GhcDynamicByDefault" "Dynamic by default" "NO"
   getGhcFieldOrDefault fields "GhcDynamic" "GHC Dynamic" "NO"
+  getGhcFieldOrDefault fields "GhcProfiled" "GHC Profiled" "NO"
   getGhcFieldProgWithDefault fields "AR" "ar command" "ar"
   getGhcFieldProgWithDefault fields "LLC" "LLVM llc command" "llc"
 
@@ -33,6 +34,12 @@ main = do
           | parseVersion v >= [7,5] -> "package-db"
         _ -> "package-conf"
   putStrLn $ "GhcPackageDbFlag" ++ '=':pkgdb_flag
+
+  let minGhcVersion711 = case lookup "Project version" fields of
+        Just v
+          | parseVersion v >= [7,11] -> "YES"
+        _ -> "NO"
+  putStrLn $ "MinGhcVersion711" ++ '=':minGhcVersion711
 
 
 getGhcFieldOrFail :: [(String,String)] -> String -> String -> IO ()

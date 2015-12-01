@@ -1,10 +1,5 @@
 # coding=utf8
 
-def normaliseTransformersPackageKey(str):
-    return re.sub('transformers-[^@]+@[A-Za-z0-9]+', 'transformers-<VERSION>@<HASH>', str)
-
-setTestOpts(when(compiler_profiled(), skip))
-
 test('ghci001', combined_output, ghci_script, ['ghci001.script'])
 test('ghci002', combined_output, ghci_script, ['ghci002.script'])
 test('ghci003', combined_output, ghci_script, ['ghci003.script'])
@@ -126,7 +121,7 @@ test('T5836', normal, ghci_script, ['T5836.script'])
 test('T5979',
     [reqlib('transformers'),
      normalise_slashes,
-     normalise_errmsg_fun(normaliseTransformersPackageKey)],
+     normalise_version("transformers")],
     ghci_script, ['T5979.script'])
 test('T5975a',
      [pre_cmd('touch föøbàr1.hs'),
@@ -161,6 +156,9 @@ test('T7627', normal, ghci_script, ['T7627.script'])
 test('T7627b', normal, ghci_script, ['T7627b.script'])
 test('T7586', normal, ghci_script, ['T7586.script'])
 test('T4175', normal, ghci_script, ['T4175.script'])
+test('T6018ghci', normal, ghci_script, ['T6018ghci.script'])
+test('T6018ghcifail', normal, ghci_script, ['T6018ghcifail.script'])
+test('T6018ghcirnfail', normal, ghci_script, ['T6018ghcirnfail.script'])
 test('T7730', combined_output, ghci_script, ['T7730.script'])
 test('T7872', normal, ghci_script, ['T7872.script'])
 test('T7873', normal, ghci_script, ['T7873.script'])
@@ -205,10 +203,10 @@ test('T9878',
     [extra_clean(['T9878.hi','T9878.o'])],
     ghci_script, ['T9878.script'])
 test('T9878b',
-    [ when(opsys('mingw32'), expect_broken(9878)),
-      extra_run_opts('-fobject-code'),
+    [ extra_run_opts('-fobject-code'),
       extra_clean(['T9878b.hi','T9878b.o'])],
     ghci_script, ['T9878b.script'])
+test('T10018', normal, ghci_script, ['T10018.script'])
 test('T10122', normal, ghci_script, ['T10122.script'])
 
 test('T10321', normal, ghci_script, ['T10321.script'])
@@ -223,3 +221,8 @@ test('T10466', normal, ghci_script, ['T10466.script'])
 test('T10501', normal, ghci_script, ['T10501.script'])
 test('T10508', normal, ghci_script, ['T10508.script'])
 test('T10520', normal, ghci_script, ['T10520.script'])
+test('T10989',
+    [
+      extra_clean(['dummy.hs', 'dummy.lhs', 'dummy.tags'])
+    ],
+    ghci_script, ['T10989.script'])

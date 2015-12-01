@@ -187,6 +187,10 @@ INSTALL_LIBS += $(includes_GHCCONSTANTS_HASKELL_VALUE)
 DERIVE_CONSTANTS_FLAGS += --gcc-program "$(WhatGccIsCalled)"
 DERIVE_CONSTANTS_FLAGS += $(addprefix --gcc-flag$(space),$(includes_CC_OPTS) -fcommon)
 DERIVE_CONSTANTS_FLAGS += --nm-program "$(NM)"
+ifneq "$(OBJDUMP)" ""
+DERIVE_CONSTANTS_FLAGS += --objdump-program "$(OBJDUMP)"
+endif
+DERIVE_CONSTANTS_FLAGS += --target-os "$(TargetOS_CPP)"
 
 ifneq "$(BINDIST)" "YES"
 $(includes_DERIVEDCONSTANTS):           $$(includes_H_CONFIG) $$(includes_H_PLATFORM) $$(includes_H_VERSION) $$(includes_H_FILES) $$(rts_H_FILES)
@@ -226,10 +230,10 @@ install: install_includes
 
 .PHONY: install_includes
 install_includes :
-	$(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)")
+	$(INSTALL_DIR) "$(DESTDIR)$(ghcheaderdir)"
 	$(foreach d,$(includes_H_SUBDIRS), \
-	    $(call INSTALL_DIR,"$(DESTDIR)$(ghcheaderdir)/$d") && \
-	    $(call INSTALL_HEADER,$(INSTALL_OPTS),includes/$d/*.h,"$(DESTDIR)$(ghcheaderdir)/$d/") && \
+	    $(INSTALL_DIR) "$(DESTDIR)$(ghcheaderdir)/$d" && \
+	    $(INSTALL_HEADER) $(INSTALL_OPTS) includes/$d/*.h "$(DESTDIR)$(ghcheaderdir)/$d/" && \
 	) true
-	$(call INSTALL_HEADER,$(INSTALL_OPTS),$(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_H_VERSION) $(includes_DERIVEDCONSTANTS),"$(DESTDIR)$(ghcheaderdir)/")
+	$(INSTALL_HEADER) $(INSTALL_OPTS) $(includes_H_CONFIG) $(includes_H_PLATFORM) $(includes_H_VERSION) $(includes_DERIVEDCONSTANTS) "$(DESTDIR)$(ghcheaderdir)/"
 

@@ -110,6 +110,15 @@ else
 $1_$2_SplitObjs = NO
 endif
 endif
+# Disable split sections when building with stage0, it won't be supported yet
+# and it's probably not very relevant anyway (smaller stage1 ghc?).
+ifeq "$$($1_$2_SplitSections)" ""
+ifeq "$3" "1"
+$1_$2_SplitSections = $(SplitSections)
+else
+$1_$2_SplitSections = NO
+endif
+endif
 
 $(call hs-sources,$1,$2)
 $(call c-sources,$1,$2)
@@ -133,7 +142,15 @@ $$(foreach way,$$($1_$2_WAYS),$$(eval \
 # If dyn libs are not being built then $$($1_$2_dyn_LIB) will just
 # expand to the empty string, and be ignored.
 $1_$2_PROGRAM_DEP_LIB = $$($1_$2_v_LIB) $$($1_$2_dyn_LIB)
-$$($1_$2_LIB_NAME)_$2_PROGRAM_DEP_LIB = $$($1_$2_PROGRAM_DEP_LIB)
+$$($1_$2_COMPONENT_ID)_$2_PROGRAM_DEP_LIB = $$($1_$2_PROGRAM_DEP_LIB)
+
+# See Note [inconsistent distdirs] in rules/build-package-way.mk.
+ifeq "$$($1_PACKAGE) $2" "ghc stage1"
+$$($1_$2_COMPONENT_ID)_dist-boot_PROGRAM_DEP_LIB = $$($1_$2_PROGRAM_DEP_LIB)
+endif
+ifeq "$$($1_PACKAGE) $2" "ghc stage2"
+$$($1_$2_COMPONENT_ID)_dist-install_PROGRAM_DEP_LIB = $$($1_$2_PROGRAM_DEP_LIB)
+endif
 
 # C and S files are possibly built the "dyn" way.
 ifeq "$$(BuildSharedLibs)" "YES"

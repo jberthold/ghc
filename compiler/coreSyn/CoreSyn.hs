@@ -68,7 +68,7 @@ module CoreSyn (
         deAnnotate, deAnnotate', deAnnAlt, collectAnnBndrs,
 
         -- * Orphanhood
-        IsOrphan(..), isOrphan, notOrphan,
+        IsOrphan(..), isOrphan, notOrphan, chooseOrphanAnchor,
 
         -- * Core rule data types
         CoreRule(..), RuleBase,
@@ -233,6 +233,10 @@ These data types are the heart of the compiler
 --       The inner case does not need a @Red@ alternative, because @x@
 --       can't be @Red@ at that program point.
 --
+--    5. Floating-point values must not be scrutinised against literals.
+--       See Trac #9238 and Note [Rules for floating-point comparisons]
+--       in PrelRules for rationale.
+--
 -- *  Cast an expression to a particular type.
 --    This is used to implement @newtype@s (a @newtype@ constructor or
 --    destructor just becomes a 'Cast' in Core) and GADTs.
@@ -329,6 +333,9 @@ simplifier calling findAlt with argument (LitAlt 3).  No no.  Integer
 literals are an opaque encoding of an algebraic data type, not of
 an unlifted literal, like all the others.
 
+Also, we do not permit case analysis with literal patterns on floating-point
+types. See Trac #9238 and Note [Rules for floating-point comparisons] in
+PrelRules for the rationale for this restriction.
 
 -------------------------- CoreSyn INVARIANTS ---------------------------
 
@@ -722,6 +729,21 @@ isOrphan _ = False
 notOrphan :: IsOrphan -> Bool
 notOrphan NotOrphan{} = True
 notOrphan _ = False
+
+chooseOrphanAnchor :: [Name] -> IsOrphan
+-- Something (rule, instance) is relate to all the Names in this
+-- list. Choose one of them to be an "anchor" for the orphan.  We make
+-- the choice deterministic to avoid gratuitious changes in the ABI
+-- hash (Trac #4012).  Specficially, use lexicographic comparison of
+-- OccName rather than comparing Uniques
+--
+-- NB: 'minimum' use Ord, and (Ord OccName) works lexicographically
+--
+chooseOrphanAnchor local_names
+  | null local_names = IsOrphan
+  | otherwise        = NotOrphan (minimum occs)
+  where
+    occs = map nameOccName local_names
 
 instance Binary IsOrphan where
     put_ bh IsOrphan = putByte bh 0

@@ -63,12 +63,12 @@ module TcType (
   -- Predicates.
   -- Again, newtypes are opaque
   eqType, eqTypes, eqPred, cmpType, cmpTypes, cmpPred, eqTypeX,
-  pickyEqType, tcEqType, tcEqKind,
+  tcEqType, tcEqKind,
   isSigmaTy, isRhoTy, isOverloadedTy,
-  isDoubleTy, isFloatTy, isIntTy, isWordTy, isStringTy,
+  isFloatingTy, isDoubleTy, isFloatTy, isIntTy, isWordTy, isStringTy,
   isIntegerTy, isBoolTy, isUnitTy, isCharTy,
   isTauTy, isTauTyCon, tcIsTyVarTy, tcIsForAllTy,
-  isPredTy, isTyVarClassPred, isTyVarExposed,
+  isPredTy, isTyVarClassPred, isTyVarExposed, isTyVarUnderDatatype,
   checkValidClsArgs, hasTyVarHead,
   isRigidEqPred, isRigidTy,
 
@@ -82,7 +82,7 @@ module TcType (
 
   ---------------------------------
   -- Predicate types
-  mkMinimalBySCs, transSuperClasses, transSuperClassesPred, 
+  mkMinimalBySCs, transSuperClasses, transSuperClassesPred,
   immSuperClasses,
   isImprovementPred,
 
@@ -143,6 +143,7 @@ module TcType (
   isPrimitiveType,
 
   tyVarsOfType, tyVarsOfTypes, closeOverKinds,
+  tyVarsOfTypeList, tyVarsOfTypesList,
   tcTyVarsOfType, tcTyVarsOfTypes,
 
   pprKind, pprParendKind, pprSigmaType,
@@ -346,11 +347,9 @@ instance Outputable MetaDetails where
   ppr (Indirect ty) = ptext (sLit "Indirect") <+> ppr ty
 
 data MetaInfo
-   = TauTv Bool    -- This MetaTv is an ordinary unification variable
+   = TauTv         -- This MetaTv is an ordinary unification variable
                    -- A TauTv is always filled in with a tau-type, which
                    -- never contains any ForAlls.
-                   -- The boolean is true when the meta var originates
-                   -- from a wildcard.
 
    | ReturnTv      -- Can unify with *anything*. Used to convert a
                    -- type "checking" algorithm into a type inference algorithm.
@@ -372,16 +371,25 @@ data MetaInfo
 -- in the places where we need to an expression has that type
 
 data UserTypeCtxt
-  = FunSigCtxt Name Bool    -- Function type signature, when checking the type
-                            -- Also used for types in SPECIALISE pragmas
-                            -- Bool = True  <=> report redundant class constraints
-                            --        False <=> do not
-                            -- See Note [Tracking redundant constraints] in TcSimplify
+  = FunSigCtxt      -- Function type signature, when checking the type
+                    -- Also used for types in SPECIALISE pragmas
+       Name              -- Name of the function
+       Bool              -- True <=> report redundant constraints
+                            -- This is usually True, but False for
+                            --   * Record selectors (not important here)
+                            --   * Class and instance methods.  Here
+                            --     the code may legitimately be more
+                            --     polymorphic than the signature
+                            --     generated from the class
+                            --     declaration
 
   | InfSigCtxt Name     -- Inferred type for function
   | ExprSigCtxt         -- Expression type signature
+
   | ConArgCtxt Name     -- Data constructor argument
   | TySynCtxt Name      -- RHS of a type synonym decl
+  | PatSynCtxt Name     -- Type sig for a pattern synonym
+                        --   eg  pattern C :: Int -> T
   | PatSigCtxt          -- Type sig in pattern
                         --   eg  f (x::t) = ...
                         --   or  (x::t, y) = e
@@ -426,6 +434,7 @@ data UserTypeCtxt
 
 newtype TcLevel = TcLevel Int deriving( Eq, Ord )
   -- See Note [TcLevel and untouchable type variables] for what this Int is
+  -- See also Note [TcLevel assignment]
 
 {-
 Note [TcLevel and untouchable type variables]
@@ -450,7 +459,6 @@ Note [TcLevel and untouchable type variables]
     (GivenInv)  The free variables of the ic_given of an
                 implication are all untouchable; ie their level
                 numbers are LESS THAN the ic_tclvl of the implication
-
 
 Note [Skolem escape prevention]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -484,15 +492,35 @@ emerges. If we (wrongly) spontaneously solved it to get uf := beta,
 the whole implication disappears but when we pop out again we are left with
 (F Int ~ uf) which will be unified by our final zonking stage and
 uf will get unified *once more* to (F Int).
+
+Note [TcLevel assignment]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+We arrange the TcLevels like this
+
+   1   Top level
+   2     Flatten-meta-vars of level 3
+   3   First-level implication constraints
+   4     Flatten-meta-vars of level 5
+   5   Second-level implication constraints
+   ...etc...
+
+The even-numbered levels are for the flatten-meta-variables assigned
+at the next level in.  Eg for a second-level implication conststraint
+(level 5), the flatten meta-vars are level 4, which makes them untouchable.
+The flatten meta-vars could equally well all have level 0, or just NotALevel
+since they do not live across implications.
 -}
 
 fmvTcLevel :: TcLevel -> TcLevel
+-- See Note [TcLevel assignment]
 fmvTcLevel (TcLevel n) = TcLevel (n-1)
 
 topTcLevel :: TcLevel
+-- See Note [TcLevel assignment]
 topTcLevel = TcLevel 1   -- 1 = outermost level
 
 pushTcLevel :: TcLevel -> TcLevel
+-- See Note [TcLevel assignment]
 pushTcLevel (TcLevel us) = TcLevel (us + 2)
 
 strictlyDeeperThan :: TcLevel -> TcLevel -> Bool
@@ -530,11 +558,10 @@ pprTcTyVarDetails (MetaTv { mtv_info = info, mtv_tclvl = tclvl })
   = pp_info <> colon <> ppr tclvl
   where
     pp_info = case info of
-                ReturnTv    -> ptext (sLit "ret")
-                TauTv True  -> ptext (sLit "twc")
-                TauTv False -> ptext (sLit "tau")
-                SigTv       -> ptext (sLit "sig")
-                FlatMetaTv  -> ptext (sLit "fuv")
+                ReturnTv   -> ptext (sLit "ret")
+                TauTv      -> ptext (sLit "tau")
+                SigTv      -> ptext (sLit "sig")
+                FlatMetaTv -> ptext (sLit "fuv")
 
 pprUserTypeCtxt :: UserTypeCtxt -> SDoc
 pprUserTypeCtxt (FunSigCtxt n _)  = ptext (sLit "the type signature for") <+> quotes (ppr n)
@@ -543,6 +570,7 @@ pprUserTypeCtxt (RuleSigCtxt n)   = ptext (sLit "a RULE for") <+> quotes (ppr n)
 pprUserTypeCtxt ExprSigCtxt       = ptext (sLit "an expression type signature")
 pprUserTypeCtxt (ConArgCtxt c)    = ptext (sLit "the type of the constructor") <+> quotes (ppr c)
 pprUserTypeCtxt (TySynCtxt c)     = ptext (sLit "the RHS of the type synonym") <+> quotes (ppr c)
+pprUserTypeCtxt (PatSynCtxt c)    = ptext (sLit "the type signature for pattern synonym") <+> quotes (ppr c)
 pprUserTypeCtxt ThBrackCtxt       = ptext (sLit "a Template Haskell quotation [t|...|]")
 pprUserTypeCtxt PatSigCtxt        = ptext (sLit "a pattern type signature")
 pprUserTypeCtxt ResSigCtxt        = ptext (sLit "a result type signature")
@@ -568,6 +596,7 @@ pprSigCtxt ctxt extra pp_ty
     pp_sig (FunSigCtxt n _) = pp_n_colon n
     pp_sig (ConArgCtxt n)   = pp_n_colon n
     pp_sig (ForSigCtxt n)   = pp_n_colon n
+    pp_sig (PatSynCtxt n)   = pp_n_colon n
     pp_sig _                = pp_ty
 
     pp_n_colon n = pprPrefixOcc n <+> dcolon <+> pp_ty
@@ -1139,26 +1168,6 @@ tcEqType ty1 ty2
     gos env (t1:ts1) (t2:ts2) = go env t1 t2 && gos env ts1 ts2
     gos _ _ _ = False
 
-pickyEqType :: TcType -> TcType -> Bool
--- Check when two types _look_ the same, _including_ synonyms.
--- So (pickyEqType String [Char]) returns False
-pickyEqType ty1 ty2
-  = go init_env ty1 ty2
-  where
-    init_env = mkRnEnv2 (mkInScopeSet (tyVarsOfType ty1 `unionVarSet` tyVarsOfType ty2))
-    go env (TyVarTy tv1)       (TyVarTy tv2)     = rnOccL env tv1 == rnOccR env tv2
-    go _   (LitTy lit1)        (LitTy lit2)      = lit1 == lit2
-    go env (ForAllTy tv1 t1)   (ForAllTy tv2 t2) = go env (tyVarKind tv1) (tyVarKind tv2)
-                                                && go (rnBndr2 env tv1 tv2) t1 t2
-    go env (AppTy s1 t1)       (AppTy s2 t2)     = go env s1 s2 && go env t1 t2
-    go env (FunTy s1 t1)       (FunTy s2 t2)     = go env s1 s2 && go env t1 t2
-    go env (TyConApp tc1 ts1) (TyConApp tc2 ts2) = (tc1 == tc2) && gos env ts1 ts2
-    go _ _ _ = False
-
-    gos _   []       []       = True
-    gos env (t1:ts1) (t2:ts2) = go env t1 t2 && gos env ts1 ts2
-    gos _ _ _ = False
-
 {-
 Note [Occurs check expansion]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1195,11 +1204,11 @@ instance Functor OccCheckResult where
       fmap = liftM
 
 instance Applicative OccCheckResult where
-      pure = return
+      pure = OC_OK
       (<*>) = ap
 
 instance Monad OccCheckResult where
-  return x = OC_OK x
+  return            = pure
   OC_OK x     >>= k = k x
   OC_Forall   >>= _ = OC_Forall
   OC_NonTyVar >>= _ = OC_NonTyVar
@@ -1271,8 +1280,8 @@ occurCheckExpand dflags tv ty
     -- it and try again.
     go ty@(TyConApp tc tys)
       = case do { tys <- mapM go tys; return (mkTyConApp tc tys) } of
-          OC_OK ty 
-              | impredicative || isTauTyCon tc 
+          OC_OK ty
+              | impredicative || isTauTyCon tc
               -> return ty  -- First try to eliminate the tyvar from the args
               | otherwise
               -> OC_Forall  -- A type synonym with a forall on the RHS
@@ -1285,7 +1294,7 @@ canUnifyWithPolyType dflags details kind
   = case details of
       MetaTv { mtv_info = ReturnTv } -> True      -- See Note [ReturnTv]
       MetaTv { mtv_info = SigTv }    -> False
-      MetaTv { mtv_info = TauTv _ }  -> xopt Opt_ImpredicativeTypes dflags
+      MetaTv { mtv_info = TauTv }    -> xopt Opt_ImpredicativeTypes dflags
                                      || isOpenTypeKind kind
                                           -- Note [OpenTypeKind accepts foralls]
       _other                         -> True
@@ -1322,7 +1331,7 @@ Note [Kind polymorphic type classes]
     class C f where...   -- C :: forall k. k -> Constraint
     g :: forall (f::*). C f => f -> f
 
-Here the (C f) in the signature is really (C * f), and we 
+Here the (C f) in the signature is really (C * f), and we
 don't want to complain that the * isn't a type variable!
 -}
 
@@ -1343,7 +1352,7 @@ checkValidClsArgs flexible_contexts kts
   | otherwise         = all hasTyVarHead tys
   where
     (_, tys) = span isKind kts  -- see Note [Kind polymorphic type classes]
-   
+
 hasTyVarHead :: Type -> Bool
 -- Returns true of (a t1 .. tn), where 'a' is a type variable
 hasTyVarHead ty                 -- Haskell 98 allows predicates of form
@@ -1401,7 +1410,7 @@ immSuperClasses cls tys
 
 isImprovementPred :: PredType -> Bool
 -- Either it's an equality, or has some functional dependency
-isImprovementPred ty 
+isImprovementPred ty
   = case classifyPredType ty of
       EqPred NomEq t1 t2 -> not (t1 `tcEqType` t2)
       EqPred ReprEq _ _  -> False
@@ -1451,6 +1460,11 @@ isUnitTy       = is_tc unitTyConKey
 isCharTy       = is_tc charTyConKey
 isAnyTy        = is_tc anyTyConKey
 
+-- | Does a type represent a floating-point number?
+isFloatingTy :: Type -> Bool
+isFloatingTy ty = isFloatTy ty || isDoubleTy ty
+
+-- | Is a type 'String'?
 isStringTy :: Type -> Bool
 isStringTy ty
   = case tcSplitTyConApp_maybe ty of
@@ -1477,6 +1491,25 @@ isTyVarExposed _  (FunTy {})      = False
 isTyVarExposed tv (AppTy fun arg) = isTyVarExposed tv fun
                                  || isTyVarExposed tv arg
 isTyVarExposed _  (ForAllTy {})   = False
+
+-- | Does the given tyvar appear under a type generative w.r.t.
+-- representational equality? See Note [Occurs check error] in
+-- TcCanonical for the motivation for this function.
+isTyVarUnderDatatype :: TcTyVar -> TcType -> Bool
+isTyVarUnderDatatype tv = go False
+  where
+    go under_dt ty | Just ty' <- tcView ty = go under_dt ty'
+    go under_dt (TyVarTy tv') = under_dt && (tv == tv')
+    go under_dt (TyConApp tc tys) = let under_dt' = under_dt ||
+                                                    isGenerativeTyCon tc
+                                                      Representational
+                                    in any (go under_dt') tys
+    go _        (LitTy {}) = False
+    go _        (FunTy arg res) = go True arg || go True res
+    go under_dt (AppTy fun arg) = go under_dt fun || go under_dt arg
+    go under_dt (ForAllTy tv' inner_ty)
+      | tv' == tv = False
+      | otherwise = go under_dt inner_ty
 
 isRigidTy :: TcType -> Bool
 isRigidTy ty
@@ -1592,8 +1625,9 @@ orphNamesOfCoCon :: CoAxiom br -> NameSet
 orphNamesOfCoCon (CoAxiom { co_ax_tc = tc, co_ax_branches = branches })
   = orphNamesOfTyCon tc `unionNameSet` orphNamesOfCoAxBranches branches
 
-orphNamesOfCoAxBranches :: BranchList CoAxBranch br -> NameSet
-orphNamesOfCoAxBranches = brListFoldr (unionNameSet . orphNamesOfCoAxBranch) emptyNameSet
+orphNamesOfCoAxBranches :: Branches br -> NameSet
+orphNamesOfCoAxBranches
+  = foldr (unionNameSet . orphNamesOfCoAxBranch) emptyNameSet . fromBranches
 
 orphNamesOfCoAxBranch :: CoAxBranch -> NameSet
 orphNamesOfCoAxBranch (CoAxBranch { cab_lhs = lhs, cab_rhs = rhs })
@@ -1891,4 +1925,3 @@ size_type (ForAllTy _ ty)   = size_type ty
 
 sizeTypes :: [Type] -> TypeSize
 sizeTypes tys = sum (map sizeType tys)
-

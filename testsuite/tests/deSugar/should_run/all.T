@@ -46,4 +46,9 @@ test('DsStaticPointers',
      ],
      compile_and_run, [''])
 test('T8952', normal, compile_and_run, [''])
+test('T9238', normal, compile_and_run, [''])
 test('T9844', normal, compile_and_run, [''])
+test('T10215', normal, compile_and_run, [''])
+test('DsStrictData', normal, compile_and_run, [''])
+test('DsStrict', normal, compile_and_run, [''])
+test('DsStrictLet', normal, compile_and_run, ['-O'])

@@ -1,6 +1,4 @@
 
-setTestOpts(when(compiler_profiled(), skip))
-
 # We only want to run these tests with GHCi
 def just_ghci( name, opts ):
   opts.only_ways = ['ghci']
@@ -23,3 +21,4 @@ test('T8377',      just_ghci, compile_and_run, [''])
 test('T9914',      just_ghci, ghci_script, ['T9914.script'])
 test('T9915',      just_ghci, ghci_script, ['T9915.script'])
 test('T10145',     just_ghci, ghci_script, ['T10145.script'])
+test('T7253',      just_ghci, ghci_script, ['T7253.script'])

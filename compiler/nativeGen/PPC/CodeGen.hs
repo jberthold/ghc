@@ -160,9 +160,10 @@ stmtToInstrs stmt = do
        -> genCCall target result_regs args
 
     CmmBranch id          -> genBranch id
-    CmmCondBranch arg true false -> do b1 <- genCondJump true arg
-                                       b2 <- genBranch false
-                                       return (b1 `appOL` b2)
+    CmmCondBranch arg true false _ -> do
+      b1 <- genCondJump true arg
+      b2 <- genBranch false
+      return (b1 `appOL` b2)
     CmmSwitch arg ids -> do dflags <- getDynFlags
                             genSwitch dflags arg ids
     CmmCall { cml_target = arg } -> genJump arg
@@ -649,8 +650,8 @@ getRegister' _ (CmmLit (CmmFloat f frep)) = do
     Amode addr addr_code <- getAmode D dynRef
     let format = floatFormat frep
         code dst =
-            LDATA ReadOnlyData (Statics lbl
-                                   [CmmStaticLit (CmmFloat f frep)])
+            LDATA (Section ReadOnlyData lbl)
+                  (Statics lbl [CmmStaticLit (CmmFloat f frep)])
             `consOL` (addr_code `snocOL` LD format dst addr)
     return (Any format code)
 
@@ -671,8 +672,7 @@ getRegister' dflags (CmmLit lit)
        let rep = cmmLitType dflags lit
            format = cmmTypeFormat rep
            code dst =
-            LDATA ReadOnlyData (Statics lbl
-                                   [CmmStaticLit lit])
+            LDATA (Section ReadOnlyData lbl) (Statics lbl [CmmStaticLit lit])
             `consOL` (addr_code `snocOL` LD format dst addr)
        return (Any format code)
 
@@ -1467,6 +1467,7 @@ genCCall' dflags gcp target dest_regs args
                     MO_U_QuotRem {}  -> unsupported
                     MO_U_QuotRem2 {} -> unsupported
                     MO_Add2 {}       -> unsupported
+                    MO_SubWordC {}   -> unsupported
                     MO_AddIntC {}    -> unsupported
                     MO_SubIntC {}    -> unsupported
                     MO_U_Mul2 {}     -> unsupported
@@ -1528,7 +1529,7 @@ generateJumpTableForInstr dflags (BCTR ids (Just lbl)) =
                       jumpTableEntryRel (Just blockid)
                         = CmmStaticLit (CmmLabelDiffOff blockLabel lbl 0)
                             where blockLabel = mkAsmTempLabel (getUnique blockid)
-    in Just (CmmData ReadOnlyData (Statics lbl jumpTable))
+    in Just (CmmData (Section ReadOnlyData lbl) (Statics lbl jumpTable))
 generateJumpTableForInstr _ _ = Nothing
 
 -- -----------------------------------------------------------------------------
@@ -1719,7 +1720,7 @@ coerceInt2FP' ArchPPC fromRep toRep x = do
     Amode addr addr_code <- getAmode D dynRef
     let
         code' dst = code `appOL` maybe_exts `appOL` toOL [
-                LDATA ReadOnlyData $ Statics lbl
+                LDATA (Section ReadOnlyData lbl) $ Statics lbl
                                  [CmmStaticLit (CmmInt 0x43300000 W32),
                                   CmmStaticLit (CmmInt 0x80000000 W32)],
                 XORIS itmp src (ImmInt 0x8000),

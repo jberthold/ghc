@@ -6,7 +6,8 @@ module Vectorise.Type.TyConDecl (
 import Vectorise.Type.Type
 import Vectorise.Monad
 import Vectorise.Env( GlobalEnv( global_fam_inst_env ) )
-import BuildTyCl( buildClass, buildDataCon )
+import BuildTyCl( TcMethInfo, buildClass, buildDataCon )
+import OccName
 import Class
 import Type
 import TyCon
@@ -83,13 +84,13 @@ vectTyConDecl tycon name'
            -- return the type constructor of the vectorised class
        ; return tycon'
        }
-                      
+
        -- Regular algebraic type constructor — for now, Haskell 2011-style only
   | isAlgTyCon tycon
   = do { unless (all isVanillaDataCon (tyConDataCons tycon)) $
            do dflags <- getDynFlags
               cantVectorise dflags "Currently only Haskell 2011 datatypes are supported" (ppr tycon)
-  
+
            -- vectorise the data constructor of the class tycon
        ; rhs' <- vectAlgTyConRhs tycon (algTyConRhs tycon)
 
@@ -98,7 +99,8 @@ vectTyConDecl tycon name'
              gadt_flag = isGadtSyntaxTyCon tycon
 
            -- build the vectorised type constructor
-       ; return $ buildAlgTyCon 
+       ; tc_rep_name <- mkDerivedName mkTyConRepUserOcc name'
+       ; return $ buildAlgTyCon
                     name'                   -- new name
                     (tyConTyVars tycon)     -- keep original type vars
                     (map (const Nominal) (tyConRoles tycon)) -- all roles are N for safety
@@ -108,7 +110,7 @@ vectTyConDecl tycon name'
                     rec_flag                -- whether recursive
                     False                   -- Not promotable
                     gadt_flag               -- whether in GADT syntax
-                    NoParentTyCon           
+                    (VanillaAlgTyCon tc_rep_name)
        }
 
   -- some other crazy thing that we don't handle
@@ -118,7 +120,7 @@ vectTyConDecl tycon name'
 
 -- |Vectorise a class method.  (Don't enter it into the vectorisation map yet.)
 --
-vectMethod :: Id -> DefMeth -> Type -> VM (Name, DefMethSpec, Type)
+vectMethod :: Id -> DefMethInfo -> Type -> VM TcMethInfo
 vectMethod id defMeth ty
  = do {   -- Vectorise the method type.
       ; ty' <- vectType ty
@@ -126,7 +128,7 @@ vectMethod id defMeth ty
           -- Create a name for the vectorised method.
       ; id' <- mkVectId id ty'
 
-      ; return  (Var.varName id', defMethSpecOfDefMeth defMeth, ty')
+      ; return  (Var.varName id', ty', defMethSpecOfDefMeth defMeth)
       }
 
 -- |Vectorise the RHS of an algebraic type.
@@ -135,8 +137,6 @@ vectAlgTyConRhs :: TyCon -> AlgTyConRhs -> VM AlgTyConRhs
 vectAlgTyConRhs tc (AbstractTyCon {})
   = do dflags <- getDynFlags
        cantVectorise dflags "Can't vectorise imported abstract type" (ppr tc)
-vectAlgTyConRhs _tc DataFamilyTyCon
-  = return DataFamilyTyCon
 vectAlgTyConRhs _tc (DataTyCon { data_cons = data_cons
                                , is_enum   = is_enum
                                })
@@ -184,7 +184,9 @@ vectDataCon dc
        ; liftDs $ buildDataCon fam_envs
                     name'
                     (dataConIsInfix dc)            -- infix if the original is
+                    NotPromoted                    -- Vectorised type is not promotable
                     (dataConSrcBangs dc)           -- strictness as original constructor
+                    (Just $ dataConImplBangs dc)
                     []                             -- no labelled fields for now
                     univ_tvs                       -- universally quantified vars
                     []                             -- no existential tvs for now

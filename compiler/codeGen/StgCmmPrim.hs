@@ -318,14 +318,19 @@ emitPrimOp dflags [] WriteMutVarOp [mutv,var]
                 [(CmmReg (CmmGlobal BaseReg), AddrHint), (mutv,AddrHint)]
 
 --  #define sizzeofByteArrayzh(r,a) \
---     r = ((StgArrWords *)(a))->bytes
+--     r = ((StgArrBytes *)(a))->bytes
 emitPrimOp dflags [res] SizeofByteArrayOp [arg]
    = emit $ mkAssign (CmmLocal res) (cmmLoadIndexW dflags arg (fixedHdrSizeW dflags) (bWord dflags))
 
 --  #define sizzeofMutableByteArrayzh(r,a) \
---      r = ((StgArrWords *)(a))->bytes
+--      r = ((StgArrBytes *)(a))->bytes
 emitPrimOp dflags [res] SizeofMutableByteArrayOp [arg]
    = emitPrimOp dflags [res] SizeofByteArrayOp [arg]
+
+--  #define getSizzeofMutableByteArrayzh(r,a) \
+--      r = ((StgArrBytes *)(a))->bytes
+emitPrimOp dflags [res] GetSizeofMutableByteArrayOp [arg]
+   = emitAssign (CmmLocal res) (cmmLoadIndexW dflags arg (fixedHdrSizeW dflags) (bWord dflags))
 
 
 --  #define touchzh(o)                  /* nothing */
@@ -412,7 +417,9 @@ emitPrimOp _      []  WriteSmallArrayOp [obj,ix,v] = doWriteSmallPtrArrayOp obj 
 -- Getting the size of pointer arrays
 
 emitPrimOp dflags [res] SizeofArrayOp [arg]
-   = emit $ mkAssign (CmmLocal res) (cmmLoadIndexW dflags arg (fixedHdrSizeW dflags + oFFSET_StgMutArrPtrs_ptrs dflags) (bWord dflags))
+   = emit $ mkAssign (CmmLocal res) (cmmLoadIndexW dflags arg
+    (fixedHdrSizeW dflags + bytesToWordsRoundUp dflags (oFFSET_StgMutArrPtrs_ptrs dflags))
+        (bWord dflags))
 emitPrimOp dflags [res] SizeofMutableArrayOp [arg]
    = emitPrimOp dflags [res] SizeofArrayOp [arg]
 emitPrimOp dflags [res] SizeofArrayArrayOp [arg]
@@ -423,7 +430,8 @@ emitPrimOp dflags [res] SizeofMutableArrayArrayOp [arg]
 emitPrimOp dflags [res] SizeofSmallArrayOp [arg] =
     emit $ mkAssign (CmmLocal res)
     (cmmLoadIndexW dflags arg
-     (fixedHdrSizeW dflags + oFFSET_StgSmallMutArrPtrs_ptrs dflags) (bWord dflags))
+     (fixedHdrSizeW dflags + bytesToWordsRoundUp dflags (oFFSET_StgSmallMutArrPtrs_ptrs dflags))
+        (bWord dflags))
 emitPrimOp dflags [res] SizeofSmallMutableArrayOp [arg] =
     emitPrimOp dflags [res] SizeofSmallArrayOp [arg]
 
@@ -808,12 +816,17 @@ callishPrimOpSupported dflags op
       WordQuotRemOp  | ncg && x86ish  -> Left (MO_U_QuotRem  (wordWidth dflags))
                      | otherwise      -> Right (genericWordQuotRemOp dflags)
 
-      WordQuotRem2Op | ncg && x86ish  -> Left (MO_U_QuotRem2 (wordWidth dflags))
+      WordQuotRem2Op | (ncg && x86ish)
+                          || llvm     -> Left (MO_U_QuotRem2 (wordWidth dflags))
                      | otherwise      -> Right (genericWordQuotRem2Op dflags)
 
       WordAdd2Op     | (ncg && x86ish)
                          || llvm      -> Left (MO_Add2       (wordWidth dflags))
                      | otherwise      -> Right genericWordAdd2Op
+
+      WordSubCOp     | (ncg && x86ish)
+                         || llvm      -> Left (MO_SubWordC   (wordWidth dflags))
+                     | otherwise      -> Right genericWordSubCOp
 
       IntAddCOp      | (ncg && x86ish)
                          || llvm      -> Left (MO_AddIntC    (wordWidth dflags))
@@ -823,7 +836,8 @@ callishPrimOpSupported dflags op
                          || llvm      -> Left (MO_SubIntC    (wordWidth dflags))
                      | otherwise      -> Right genericIntSubCOp
 
-      WordMul2Op     | ncg && x86ish  -> Left (MO_U_Mul2     (wordWidth dflags))
+      WordMul2Op     | ncg && x86ish
+                         || llvm      -> Left (MO_U_Mul2     (wordWidth dflags))
                      | otherwise      -> Right genericWordMul2Op
 
       _ -> pprPanic "emitPrimOp: can't translate PrimOp " (ppr op)
@@ -929,6 +943,19 @@ genericWordAdd2Op [res_h, res_l] [arg_x, arg_y]
                (or (toTopHalf (CmmReg (CmmLocal r2)))
                    (bottomHalf (CmmReg (CmmLocal r1))))]
 genericWordAdd2Op _ _ = panic "genericWordAdd2Op"
+
+genericWordSubCOp :: GenericOp
+genericWordSubCOp [res_r, res_c] [aa, bb] = do
+  dflags <- getDynFlags
+  emit $ catAGraphs
+    [ -- Put the result into 'res_r'.
+      mkAssign (CmmLocal res_r) $
+        CmmMachOp (mo_wordSub dflags) [aa, bb]
+      -- Set 'res_c' to 1 if 'bb > aa' and to 0 otherwise.
+    , mkAssign (CmmLocal res_c) $
+        CmmMachOp (mo_wordUGt dflags) [bb, aa]
+    ]
+genericWordSubCOp _ _ = panic "genericWordSubCOp"
 
 genericIntAddCOp :: GenericOp
 genericIntAddCOp [res_r, res_c] [aa, bb]
@@ -1630,7 +1657,7 @@ doNewByteArrayOp res_r n = do
 
     base <- allocHeapClosure rep info_ptr curCCS
                      [ (mkIntExpr dflags n,
-                        hdr_size + oFFSET_StgArrWords_bytes dflags)
+                        hdr_size + oFFSET_StgArrBytes_bytes dflags)
                      ]
 
     emit $ mkAssign (CmmLocal res_r) base

@@ -1,4 +1,4 @@
-test('cg001', only_compiler_types(['ghc']), compile, [''])
+test('cg001', normal, compile, [''])
 test('cg002', normal, compile, [''])
 test('cg003', only_ways(['optasm']), compile, [''])
 test('cg004', normal, compile, [''])
@@ -31,3 +31,4 @@ test('debug', extra_clean(['debug.cmm']),
      ['$MAKE -s --no-print-directory debug'])
 test('T9964', normal, compile, ['-O'])
 test('T10518', [cmm_src], compile, [''])
+test('T10667', normal, compile, ['-g'])

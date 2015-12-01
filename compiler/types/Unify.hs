@@ -6,7 +6,7 @@ module Unify (
         -- Matching of types:
         --      the "tc" prefix indicates that matching always
         --      respects newtypes (rather than looking through them)
-        tcMatchTy, tcMatchTys, tcMatchTyX,
+        tcMatchTy, tcUnifyTyWithTFs, tcMatchTys, tcMatchTyX, tcMatchTysX,
         ruleMatchTyX, tcMatchPreds,
 
         MatchEnv(..), matchList,
@@ -29,8 +29,14 @@ import Kind
 import Type
 import TyCon
 import TypeRep
+import Util ( filterByList )
+import Outputable
+import FastString (sLit)
 
-import Control.Monad (liftM, ap)
+import Control.Monad (liftM, foldM, ap)
+#if __GLASGOW_HASKELL__ > 710
+import qualified Control.Monad.Fail as MonadFail
+#endif
 #if __GLASGOW_HASKELL__ < 709
 import Control.Applicative (Applicative(..))
 #endif
@@ -77,14 +83,11 @@ tcMatchTy :: TyVarSet           -- Template tyvars
           -> Type               -- Target
           -> Maybe TvSubst      -- One-shot; in principle the template
                                 -- variables could be free in the target
-
 tcMatchTy tmpls ty1 ty2
-  = case match menv emptyTvSubstEnv ty1 ty2 of
-        Just subst_env -> Just (TvSubst in_scope subst_env)
-        Nothing        -> Nothing
+  = tcMatchTyX tmpls init_subst ty1 ty2
   where
-    menv     = ME { me_tmpls = tmpls, me_env = mkRnEnv2 in_scope }
-    in_scope = mkInScopeSet (tmpls `unionVarSet` tyVarsOfType ty2)
+    init_subst = mkTvSubst in_scope emptyTvSubstEnv
+    in_scope   = mkInScopeSet (tmpls `unionVarSet` tyVarsOfType ty2)
         -- We're assuming that all the interesting
         -- tyvars in ty1 are in tmpls
 
@@ -93,18 +96,12 @@ tcMatchTys :: TyVarSet          -- Template tyvars
            -> [Type]            -- Target
            -> Maybe TvSubst     -- One-shot; in principle the template
                                 -- variables could be free in the target
-
 tcMatchTys tmpls tys1 tys2
-  = case match_tys menv emptyTvSubstEnv tys1 tys2 of
-        Just subst_env -> Just (TvSubst in_scope subst_env)
-        Nothing        -> Nothing
+  = tcMatchTysX tmpls init_subst tys1 tys2
   where
-    menv     = ME { me_tmpls = tmpls, me_env = mkRnEnv2 in_scope }
-    in_scope = mkInScopeSet (tmpls `unionVarSet` tyVarsOfTypes tys2)
-        -- We're assuming that all the interesting
-        -- tyvars in tys1 are in tmpls
+    init_subst = mkTvSubst in_scope emptyTvSubstEnv
+    in_scope   = mkInScopeSet (tmpls `unionVarSet` tyVarsOfTypes tys2)
 
--- This is similar, but extends a substitution
 tcMatchTyX :: TyVarSet          -- Template tyvars
            -> TvSubst           -- Substitution to extend
            -> Type              -- Template
@@ -112,10 +109,23 @@ tcMatchTyX :: TyVarSet          -- Template tyvars
            -> Maybe TvSubst
 tcMatchTyX tmpls (TvSubst in_scope subst_env) ty1 ty2
   = case match menv subst_env ty1 ty2 of
-        Just subst_env -> Just (TvSubst in_scope subst_env)
-        Nothing        -> Nothing
+        Just subst_env' -> Just (TvSubst in_scope subst_env')
+        Nothing         -> Nothing
   where
     menv = ME {me_tmpls = tmpls, me_env = mkRnEnv2 in_scope}
+
+tcMatchTysX :: TyVarSet          -- Template tyvars
+            -> TvSubst           -- Substitution to extend
+            -> [Type]            -- Template
+            -> [Type]            -- Target
+            -> Maybe TvSubst     -- One-shot; in principle the template
+                                 -- variables could be free in the target
+tcMatchTysX tmpls (TvSubst in_scope subst_env) tys1 tys2
+  = case match_tys menv subst_env tys1 tys2 of
+        Just subst_env' -> Just (TvSubst in_scope subst_env')
+        Nothing         -> Nothing
+  where
+    menv = ME { me_tmpls = tmpls, me_env = mkRnEnv2 in_scope }
 
 tcMatchPreds
         :: [TyVar]                      -- Bind these
@@ -166,7 +176,7 @@ match menv subst (TyVarTy tv1) ty2
     else Nothing        -- ty2 doesn't match
 
   | tv1' `elemVarSet` me_tmpls menv
-  = if any (inRnEnvR rn_env) (varSetElems (tyVarsOfType ty2))
+  = if any (inRnEnvR rn_env) (tyVarsOfTypeList ty2)
     then Nothing        -- Occurs check
                         -- ezyang: Is this really an occurs check?  It seems
                         -- to just reject matching \x. A against \x. x (maintaining
@@ -386,6 +396,62 @@ tcUnifyTy ty1 ty2
       Unifiable subst -> Just subst
       _other          -> Nothing
 
+-- | Unify two types, treating type family applications as possibly unifying
+-- with anything and looking through injective type family applications.
+tcUnifyTyWithTFs :: Bool -> Type -> Type -> Maybe TvSubst
+-- This algorithm is a direct implementation of the "Algorithm U" presented in
+-- the paper "Injective type families for Haskell", Figures 2 and 3.  Equation
+-- numbers in the comments refer to equations from the paper.
+tcUnifyTyWithTFs twoWay t1 t2 = niFixTvSubst `fmap` go t1 t2 emptyTvSubstEnv
+    where
+      go :: Type -> Type -> TvSubstEnv -> Maybe TvSubstEnv
+      -- look through type synonyms
+      go t1 t2 theta | Just t1' <- tcView t1 = go t1' t2  theta
+      go t1 t2 theta | Just t2' <- tcView t2 = go t1  t2' theta
+      -- proper unification
+      go (TyVarTy tv) t2 theta
+          -- Equation (1)
+          | Just t1' <- lookupVarEnv theta tv
+          = go t1' t2 theta
+          | otherwise = let t2' = Type.substTy (niFixTvSubst theta) t2
+                        in if tv `elemVarEnv` tyVarsOfType t2'
+                           -- Equation (2)
+                           then Just theta
+                           -- Equation (3)
+                           else Just $ extendVarEnv theta tv t2'
+      -- Equation (4)
+      go t1 t2@(TyVarTy _) theta | twoWay = go t2 t1 theta
+      -- Equation (5)
+      go (AppTy s1 s2) ty theta | Just(t1, t2) <- splitAppTy_maybe ty =
+          go s1 t1 theta >>= go s2 t2
+      go ty (AppTy s1 s2) theta | Just(t1, t2) <- splitAppTy_maybe ty =
+          go s1 t1 theta >>= go s2 t2
+
+      go (TyConApp tc1 tys1) (TyConApp tc2 tys2) theta
+        -- Equation (6)
+        | isAlgTyCon tc1 && isAlgTyCon tc2 && tc1 == tc2
+        = let tys = zip tys1 tys2
+          in foldM (\theta' (t1,t2) -> go t1 t2 theta') theta tys
+
+        -- Equation (7)
+        | isTypeFamilyTyCon tc1 && isTypeFamilyTyCon tc2 && tc1 == tc2
+        , Injective inj <- familyTyConInjectivityInfo tc1
+        = let tys1' = filterByList inj tys1
+              tys2' = filterByList inj tys2
+              injTys = zip tys1' tys2'
+          in foldM (\theta' (t1,t2) -> go t1 t2 theta') theta injTys
+
+        -- Equations (8)
+        | isTypeFamilyTyCon tc1
+        = Just theta
+
+        -- Equations (9)
+        | isTypeFamilyTyCon tc2, twoWay
+        = Just theta
+
+      -- Equation (10)
+      go _ _ _ = Nothing
+
 -----------------
 tcUnifyTys :: (TyVar -> BindFlag)
            -> [Type] -> [Type]
@@ -413,6 +479,11 @@ tcUnifyTysFG :: (TyVar -> BindFlag)
              -> UnifyResult
 tcUnifyTysFG bind_fn tys1 tys2
   = initUM bind_fn (unify_tys tys1 tys2)
+
+instance Outputable a => Outputable (UnifyResultM a) where
+  ppr SurelyApart    = ptext (sLit "SurelyApart")
+  ppr (Unifiable x)  = ptext (sLit "Unifiable") <+> ppr x
+  ppr (MaybeApart x) = ptext (sLit "MaybeApart") <+> ppr x
 
 {-
 ************************************************************************
@@ -647,11 +718,11 @@ instance Functor UM where
       fmap = liftM
 
 instance Applicative UM where
-      pure = return
+      pure a = UM (\_tvs subst  -> Unifiable (a, subst))
       (<*>) = ap
 
 instance Monad UM where
-  return a = UM (\_tvs subst  -> Unifiable (a, subst))
+  return   = pure
   fail _   = UM (\_tvs _subst -> SurelyApart) -- failed pattern match
   m >>= k  = UM (\tvs  subst  -> case unUM m tvs subst of
                            Unifiable (v, subst') -> unUM (k v) tvs subst'
@@ -660,6 +731,11 @@ instance Monad UM where
                                Unifiable (v', subst'') -> MaybeApart (v', subst'')
                                other                   -> other
                            SurelyApart -> SurelyApart)
+
+#if __GLASGOW_HASKELL__ > 710
+instance MonadFail.MonadFail UM where
+    fail _   = UM (\_tvs _subst -> SurelyApart) -- failed pattern match
+#endif
 
 -- returns an idempotent substitution
 initUM :: (TyVar -> BindFlag) -> UM () -> UnifyResult

@@ -19,6 +19,7 @@ module TcHsType (
 
                 -- Kind-checking types
                 -- No kind generalisation, no checkValidType
+        tcWildcardBinders,
         kcHsTyVarBndrs, tcHsTyVarBndrs,
         tcHsLiftedType, tcHsOpenType,
         tcLHsType, tcCheckLHsType, tcCheckLHsTypeAndGen,
@@ -71,7 +72,7 @@ import Util
 
 import Data.Maybe( isNothing )
 import Control.Monad ( unless, when, zipWithM )
-import PrelNames( ipClassName, funTyConKey, allNameStrings )
+import PrelNames( funTyConKey, allNameStrings )
 
 {-
         ----------------------------
@@ -358,7 +359,7 @@ tc_hs_type (HsRecTy _)         _ = panic "tc_hs_type: record" -- Unwrapped by co
       -- signatures) should have been removed by now
 
 ---------- Functions and applications
-tc_hs_type hs_ty@(HsTyVar name) exp_kind
+tc_hs_type hs_ty@(HsTyVar (L _ name)) exp_kind
   = do { (ty, k) <- tcTyVar name
        ; checkExpectedKind hs_ty k exp_kind
        ; return ty }
@@ -449,7 +450,7 @@ tc_hs_type hs_ty@(HsTupleTy HsBoxedOrConstraintTuple hs_tys) exp_kind@(EK exp_k 
        ; sequence_ [ setSrcSpan loc $
                      checkExpectedKind ty kind
                         (expArgKind (ptext (sLit "a tuple")) arg_kind n)
-                   | (ty@(L loc _),kind,n) <- zip3 hs_tys kinds [1..] ]
+                   | (L loc ty, kind, n) <- zip3 hs_tys kinds [1..] ]
 
        ; finish_tuple hs_ty tup_sort tys exp_kind }
 
@@ -465,10 +466,9 @@ tc_hs_type hs_ty@(HsTupleTy hs_tup_sort tys) exp_kind
 
 
 --------- Promoted lists and tuples
-tc_hs_type hs_ty@(HsExplicitListTy _k tys) exp_kind
-  = do { tks <- mapM tc_infer_lhs_type tys
-       ; let taus = map fst tks
-       ; kind <- unifyKinds (ptext (sLit "In a promoted list")) tks
+tc_hs_type hs_ty@(HsExplicitListTy _k hs_tys) exp_kind
+  = do { (taus, kinds) <- mapAndUnzipM tc_infer_lhs_type hs_tys
+       ; kind <- unifyKinds (ptext (sLit "In a promoted list")) hs_tys kinds
        ; checkExpectedKind hs_ty (mkPromotedListTy kind) exp_kind
        ; return (foldr (mk_cons kind) (mk_nil kind) taus) }
   where
@@ -489,7 +489,6 @@ tc_hs_type hs_ty@(HsExplicitTupleTy _ tys) exp_kind
 tc_hs_type ipTy@(HsIParamTy n ty) exp_kind
   = do { ty' <- tc_lhs_type ty ekLifted
        ; checkExpectedKind ipTy constraintKind exp_kind
-       ; ipClass <- tcLookupClass ipClassName
        ; let n' = mkStrLitTy $ hsIPNameFS n
        ; return (mkClassPred ipClass [n',ty'])
        }
@@ -497,7 +496,7 @@ tc_hs_type ipTy@(HsIParamTy n ty) exp_kind
 tc_hs_type ty@(HsEqTy ty1 ty2) exp_kind
   = do { (ty1', kind1) <- tc_infer_lhs_type ty1
        ; (ty2', kind2) <- tc_infer_lhs_type ty2
-       ; checkExpectedKind ty2 kind2
+       ; checkExpectedKind (unLoc ty2) kind2
               (EK kind1 msg_fn)
        ; checkExpectedKind ty constraintKind exp_kind
        ; return (mkNakedTyConApp eqTyCon [kind1, ty1', ty2']) }
@@ -508,14 +507,14 @@ tc_hs_type ty@(HsEqTy ty1 ty2) exp_kind
 --------- Misc
 tc_hs_type (HsKindSig ty sig_k) exp_kind
   = do { sig_k' <- tcLHsKind sig_k
-       ; checkExpectedKind ty sig_k' exp_kind
+       ; checkExpectedKind (unLoc ty) sig_k' exp_kind
        ; tc_lhs_type ty (EK sig_k' msg_fn) }
   where
     msg_fn pkind = ptext (sLit "The signature specified kind")
                    <+> quotes (pprKind pkind)
 
-tc_hs_type (HsCoreTy ty) exp_kind
-  = do { checkExpectedKind ty (typeKind ty) exp_kind
+tc_hs_type hs_ty@(HsCoreTy ty) exp_kind
+  = do { checkExpectedKind hs_ty (typeKind ty) exp_kind
        ; return ty }
 
 
@@ -659,7 +658,7 @@ tcTyVar name         -- Could be a tyvar, a tycon, or a datacon
            AGlobal (ATyCon tc) -> inst_tycon (mkTyConApp tc) (tyConKind tc)
 
            AGlobal (AConLike (RealDataCon dc))
-             | Just tc <- promoteDataCon_maybe dc
+             | Promoted tc <- promoteDataCon_maybe dc
              -> do { data_kinds <- xoptM Opt_DataKinds
                    ; unless data_kinds $ promotionErr name NoDataKinds
                    ; inst_tycon (mkTyConApp tc) (tyConKind tc) }
@@ -922,6 +921,19 @@ addTypeCtxt (L _ ty) thing
 ************************************************************************
 -}
 
+tcWildcardBinders :: [Name]
+                  -> ([(Name,TcTyVar)] -> TcM a)
+                  -> TcM a
+tcWildcardBinders wcs thing_inside
+  = do { wc_prs <- mapM new_wildcard wcs
+       ; tcExtendTyVarEnv2 wc_prs $
+         thing_inside wc_prs }
+  where
+   new_wildcard :: Name -> TcM (Name, TcTyVar)
+   new_wildcard name = do { kind <- newMetaKindVar
+                          ; tv   <- newFlexiTyVar kind
+                          ; return (name, tv) }
+
 mkKindSigVar :: Name -> TcM KindVar
 -- Use the specified name; don't clone it
 mkKindSigVar n
@@ -937,7 +949,7 @@ kcScopedKindVars :: [Name] -> TcM a -> TcM a
 -- bind each scoped kind variable (k in this case) to a fresh
 -- kind skolem variable
 kcScopedKindVars kv_ns thing_inside
-  = do { kvs <- mapM (\n -> newSigTyVar n superKind) kv_ns
+  = do { kvs <- mapM newSigKindVar kv_ns
                      -- NB: use mutable signature variables
        ; tcExtendTyVarEnv2 (kv_ns `zip` kvs) thing_inside }
 
@@ -952,21 +964,21 @@ kcHsTyVarBndrs :: Bool    -- ^ True <=> the decl being checked has a CUSK
                                   -- with the other info
 kcHsTyVarBndrs cusk (HsQTvs { hsq_kvs = kv_ns, hsq_tvs = hs_tvs }) thing_inside
   = do { kvs <- if cusk
-                then mapM mkKindSigVar kv_ns
-                else mapM (\n -> newSigTyVar n superKind) kv_ns
+                then mapM mkKindSigVar  kv_ns
+                else mapM newSigKindVar kv_ns
        ; tcExtendTyVarEnv2 (kv_ns `zip` kvs) $
     do { nks <- mapM (kc_hs_tv . unLoc) hs_tvs
        ; (res_kind, stuff) <- tcExtendKindEnv nks thing_inside
        ; let full_kind = mkArrowKinds (map snd nks) res_kind
              kvs       = filter (not . isMetaTyVar) $
-                         varSetElems $ tyVarsOfType full_kind
+                         tyVarsOfTypeList full_kind
              gen_kind  = if cusk
                          then mkForAllTys kvs full_kind
                          else full_kind
        ; return (gen_kind, stuff) } }
   where
     kc_hs_tv :: HsTyVarBndr Name -> TcM (Name, TcKind)
-    kc_hs_tv (UserTyVar n)
+    kc_hs_tv (UserTyVar (L _ n))
       = do { mb_thing <- tcLookupLcl_maybe n
            ; kind <- case mb_thing of
                        Just (AThing k) -> return k
@@ -1116,7 +1128,7 @@ kcTyClTyVars name (HsQTvs { hsq_kvs = kvs, hsq_tvs = hs_tvs }) thing_inside
     -- to match the kind variables they mention against the ones
     -- we've freshly brought into scope
     kc_tv :: LHsTyVarBndr Name -> Kind -> TcM (Name, Kind)
-    kc_tv (L _ (UserTyVar n)) exp_k
+    kc_tv (L _ (UserTyVar (L _ n))) exp_k
       = return (n, exp_k)
     kc_tv (L _ (KindedTyVar (L _ n) hs_k)) exp_k
       = do { k <- tcLHsKind hs_k
@@ -1142,7 +1154,8 @@ tcTyClTyVars tycon (HsQTvs { hsq_kvs = hs_kvs, hsq_tvs = hs_tvs }) thing_inside
                               -- There may be fewer of these than the kvs of
                               -- the type constructor, of course
     do { thing <- tcLookup tycon
-       ; let { kind = case thing of
+       ; let { kind = case thing of -- The kind of the tycon has been worked out
+                                    -- by the previous pass, and is fully zonked
                         AThing kind -> kind
                         _ -> panic "tcTyClTyVars"
                      -- We only call tcTyClTyVars during typechecking in
@@ -1158,11 +1171,12 @@ tcTyClTyVars tycon (HsQTvs { hsq_kvs = hs_kvs, hsq_tvs = hs_tvs }) thing_inside
     -- e.g.   class C a_29 where
     --           type T b_30 a_29 :: *
     -- Here the a_29 is shared
-    tc_hs_tv (L _ (UserTyVar n))        kind = return (mkTyVar n kind)
+    tc_hs_tv (L _ (UserTyVar (L _ n))) kind
+       = return (mkTyVar n kind)
     tc_hs_tv (L _ (KindedTyVar (L _ n) hs_k)) kind
-                                        = do { tc_kind <- tcLHsKind hs_k
-                                             ; checkKind kind tc_kind
-                                             ; return (mkTyVar n kind) }
+       = do { tc_kind <- tcLHsKind hs_k
+            ; checkKind kind tc_kind
+            ; return (mkTyVar n kind) }
 
 -----------------------------------
 tcDataKindSig :: Kind -> TcM [TyVar]
@@ -1266,16 +1280,15 @@ tcHsPatSigType :: UserTypeCtxt
 tcHsPatSigType ctxt (HsWB { hswb_cts = hs_ty, hswb_kvs = sig_kvs,
                             hswb_tvs = sig_tvs, hswb_wcs = sig_wcs })
   = addErrCtxt (pprSigCtxt ctxt empty (ppr hs_ty)) $
-    do  { kvs <- mapM new_kv sig_kvs
+    tcWildcardBinders sig_wcs $ \ nwc_binds ->
+    do  { emitWildcardHoleConstraints nwc_binds
+        ; kvs <- mapM new_kv sig_kvs
         ; tvs <- mapM new_tv sig_tvs
-        ; nwc_tvs <- mapM newWildcardVarMetaKind sig_wcs
-        ; let nwc_binds = sig_wcs `zip` nwc_tvs
-              ktv_binds = (sig_kvs `zip` kvs) ++ (sig_tvs `zip` tvs)
-        ; sig_ty <- tcExtendTyVarEnv2 (ktv_binds ++ nwc_binds) $
+        ; let ktv_binds = (sig_kvs `zip` kvs) ++ (sig_tvs `zip` tvs)
+        ; sig_ty <- tcExtendTyVarEnv2 ktv_binds $
                     tcHsLiftedType hs_ty
         ; sig_ty <- zonkSigType sig_ty
         ; checkValidType ctxt sig_ty
-        ; emitWildcardHoleConstraints (zip sig_wcs nwc_tvs)
         ; return (sig_ty, ktv_binds, nwc_binds) }
   where
     new_kv name = new_tkv name superKind
@@ -1440,12 +1453,12 @@ expArgKind exp kind arg_no = EK kind msg_fn
             , nest 2 $ ptext (sLit "should have kind")
               <+> quotes (pprKind pkind) ]
 
-unifyKinds :: SDoc -> [(TcType, TcKind)] -> TcM TcKind
-unifyKinds fun act_kinds
+unifyKinds :: SDoc -> [LHsType Name] -> [TcKind] -> TcM TcKind
+unifyKinds fun hs_tys act_kinds
   = do { kind <- newMetaKindVar
-       ; let check (arg_no, (ty, act_kind))
-               = checkExpectedKind ty act_kind (expArgKind (quotes fun) kind arg_no)
-       ; mapM_ check (zip [1..] act_kinds)
+       ; let check (arg_no, L _ hs_ty, act_kind)
+               = checkExpectedKind hs_ty act_kind (expArgKind (quotes fun) kind arg_no)
+       ; mapM_ check (zip3 [1..] hs_tys act_kinds)
        ; return kind }
 
 checkKind :: TcKind -> TcKind -> TcM ()
@@ -1455,7 +1468,7 @@ checkKind act_kind exp_kind
            Just EQ -> return ()
            _       -> unifyKindMisMatch act_kind exp_kind }
 
-checkExpectedKind :: Outputable a => a -> TcKind -> ExpKind -> TcM ()
+checkExpectedKind :: HsType Name -> TcKind -> ExpKind -> TcM ()
 -- A fancy wrapper for 'unifyKindX', which tries
 -- to give decent error messages.
 --      (checkExpectedKind ty act_kind exp_kind)
@@ -1499,15 +1512,7 @@ checkExpectedKind ty act_kind (EK exp_kind ek_ctxt)
                                 OC_Occurs -> True
                                 _bad      -> False
 
-            err | isLiftedTypeKind exp_kind && isUnliftedTypeKind act_kind
-                = ptext (sLit "Expecting a lifted type, but") <+> quotes (ppr ty)
-                    <+> ptext (sLit "is unlifted")
-
-                | isUnliftedTypeKind exp_kind && isLiftedTypeKind act_kind
-                = ptext (sLit "Expecting an unlifted type, but") <+> quotes (ppr ty)
-                    <+> ptext (sLit "is lifted")
-
-                | occurs_check   -- Must precede the "more args expected" check
+            err | occurs_check   -- Must precede the "more args expected" check
                 = ptext (sLit "Kind occurs check") $$ more_info
 
                 | n_exp_as < n_act_as     -- E.g. [Maybe]
@@ -1522,9 +1527,24 @@ checkExpectedKind ty act_kind (EK exp_kind ek_ctxt)
                 | otherwise               -- E.g. Monad [Int]
                 = more_info
 
-            more_info = sep [ ek_ctxt tidy_exp_kind <> comma
-                            , nest 2 $ ptext (sLit "but") <+> quotes (ppr ty)
-                              <+> ptext (sLit "has kind") <+> quotes (pprKind tidy_act_kind)]
+            more_info
+                | isLiftedTypeKind exp_kind && isUnliftedTypeKind act_kind
+                = ptext (sLit "Expecting a lifted type, but") <+> quotes (ppr ty)
+                    <+> ptext (sLit "is unlifted")
+
+                | isUnliftedTypeKind exp_kind && isLiftedTypeKind act_kind
+                = ptext (sLit "Expecting an unlifted type, but") <+> quotes (ppr ty)
+                    <+> ptext (sLit "is lifted")
+
+                | isSubOpenTypeKind exp_kind
+                , isConstraintKind act_kind
+                = ptext (sLit "Constraint") <+> quotes (ppr ty)
+                    <+> ptext (sLit "used as a type")
+
+                | otherwise
+                = sep [ ek_ctxt tidy_exp_kind <> comma
+                      , nest 2 $ ptext (sLit "but") <+> quotes (ppr ty)
+                        <+> ptext (sLit "has kind") <+> quotes (pprKind tidy_act_kind) ]
 
       ; traceTc "checkExpectedKind 1" (ppr ty $$ ppr tidy_act_kind $$ ppr tidy_exp_kind $$ ppr env1 $$ ppr env2)
       ; failWithTcM (env2, err) } } }
@@ -1551,8 +1571,8 @@ tc_lhs_kind (L span ki) = setSrcSpan span (tc_hs_kind ki)
 
 -- The main worker
 tc_hs_kind :: HsKind Name -> TcM Kind
-tc_hs_kind (HsTyVar tc)    = tc_kind_var_app tc []
-tc_hs_kind k@(HsAppTy _ _) = tc_kind_app k []
+tc_hs_kind (HsTyVar (L _ tc)) = tc_kind_var_app tc []
+tc_hs_kind k@(HsAppTy _ _)    = tc_kind_app k []
 
 tc_hs_kind (HsParTy ki) = tc_lhs_kind ki
 
@@ -1578,11 +1598,11 @@ tc_hs_kind k = pprPanic "tc_hs_kind" (ppr k)
 
 -- Special case for kind application
 tc_kind_app :: HsKind Name -> [LHsKind Name] -> TcM Kind
-tc_kind_app (HsAppTy ki1 ki2) kis = tc_kind_app (unLoc ki1) (ki2:kis)
-tc_kind_app (HsTyVar tc)      kis = do { arg_kis <- mapM tc_lhs_kind kis
+tc_kind_app (HsAppTy ki1 ki2)  kis = tc_kind_app (unLoc ki1) (ki2:kis)
+tc_kind_app (HsTyVar (L _ tc)) kis = do { arg_kis <- mapM tc_lhs_kind kis
                                        ; tc_kind_var_app tc arg_kis }
-tc_kind_app ki                _   = failWithTc (quotes (ppr ki) <+>
-                                    ptext (sLit "is not a kind constructor"))
+tc_kind_app ki                 _   = failWithTc (quotes (ppr ki) <+>
+                                     ptext (sLit "is not a kind constructor"))
 
 tc_kind_var_app :: Name -> [Kind] -> TcM Kind
 -- Special case for * and Constraint kinds
@@ -1605,10 +1625,10 @@ tc_kind_var_app name arg_kis
              -> do { data_kinds <- xoptM Opt_DataKinds
                    ; unless data_kinds $ addErr (dataKindsErr name)
                    ; case promotableTyCon_maybe tc of
-                       Just prom_tc | arg_kis `lengthIs` tyConArity prom_tc
+                       Promoted prom_tc | arg_kis `lengthIs` tyConArity prom_tc
                                -> return (mkTyConApp prom_tc arg_kis)
-                       Just _  -> tycon_err tc "is not fully applied"
-                       Nothing -> tycon_err tc "is not promotable" }
+                       Promoted _  -> tycon_err tc "is not fully applied"
+                       NotPromoted -> tycon_err tc "is not promotable" }
 
            -- A lexically scoped kind variable
            ATyVar _ kind_var

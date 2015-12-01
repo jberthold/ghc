@@ -102,6 +102,8 @@ endif
 	@echo 'cGhcWithSMP           = "$(GhcWithSMP)"'                     >> $@
 	@echo 'cGhcRTSWays           :: String'                             >> $@
 	@echo 'cGhcRTSWays           = "$(GhcRTSWays)"'                     >> $@
+	@echo 'cGhcRtsWithLibdw      :: String'                             >> $@
+	@echo 'cGhcRtsWithLibdw      = "$(GhcRtsWithLibdw)"'                >> $@
 	@echo 'cGhcEnableTablesNextToCode :: String'                        >> $@
 	@echo 'cGhcEnableTablesNextToCode = "$(GhcEnableTablesNextToCode)"' >> $@
 	@echo 'cLeadingUnderscore    :: String'                             >> $@
@@ -384,6 +386,19 @@ endif
 compiler/stage2/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
 compiler/stage3/build/Parser_HC_OPTS += -O0 -fno-ignore-interface-pragmas -fcmm-sink
 
+# On IBM AIX we need to wrokaround XCOFF's TOC limitations (see also
+# comment in `aclocal.m4` about `-mminimal-toc` for more details)
+# However, Parser.hc defines so many symbols that `-mminimal-toc`
+# generates instructions with offsets exceeding the PPC offset
+# addressing limits.  So we need to counter-act this via `-mfull-toc`
+# which disables a preceding `-mminimal-toc` again.
+ifeq "$(HostOS_CPP)" "aix"
+compiler/stage1/build/Parser_HC_OPTS += -optc-mfull-toc
+endif
+ifeq "$(TargetOS_CPP)" "aix"
+compiler/stage2/build/Parser_HC_OPTS += -optc-mfull-toc
+compiler/stage3/build/Parser_HC_OPTS += -optc-mfull-toc
+endif
 
 ifeq "$(GhcProfiled)" "YES"
 # If we're profiling GHC then we want SCCs.  However, adding -auto-all
@@ -447,13 +462,13 @@ ifeq "$(compiler_stage1_VERSION_MUNGED)" "YES"
 compiler_stage1_MUNGED_VERSION = $(subst .$(ProjectPatchLevel),,$(ProjectVersion))
 define compiler_PACKAGE_MAGIC
 compiler_stage1_VERSION = $(compiler_stage1_MUNGED_VERSION)
-compiler_stage1_PACKAGE_KEY = $(subst .$(ProjectPatchLevel),,$(compiler_stage1_PACKAGE_KEY))
-compiler_stage1_LIB_NAME = $(subst .$(ProjectPatchLevel),,$(compiler_stage1_LIB_NAME))
+compiler_stage1_COMPONENT_ID = $(subst .$(ProjectPatchLevel),,$(compiler_stage1_COMPONENT_ID))
+compiler_stage1_COMPONENT_ID = $(subst .$(ProjectPatchLevel),,$(compiler_stage1_COMPONENT_ID))
 endef
 
-# NB: the PACKAGE_KEY munging has no effect for new-style package keys
+# NB: the COMPONENT_ID munging has no effect for new-style unit ids
 # (which indeed, have nothing version like in them, but are important for
-# old-style package keys which do.)  The subst operation is idempotent, so
+# old-style unit ids which do.)  The subst operation is idempotent, so
 # as long as we do it at least once we should be good.
 
 # Don't register the non-munged package
@@ -466,6 +481,9 @@ endif
 compiler_stage1_SplitObjs = NO
 compiler_stage2_SplitObjs = NO
 compiler_stage3_SplitObjs = NO
+compiler_stage1_SplitSections = NO
+compiler_stage2_SplitSections = NO
+compiler_stage3_SplitSections = NO
 
 # There are too many symbols in the ghc package for a Windows DLL.
 # We therefore need to split some of the modules off into a separate
@@ -496,6 +514,8 @@ compiler_stage2_dll0_MODULES = \
 	CoreTidy \
 	CoreUnfold \
 	CoreUtils \
+	CoreSeq \
+	CoreStats \
 	CostCentre \
 	Ctype \
 	DataCon \
@@ -506,15 +526,16 @@ compiler_stage2_dll0_MODULES = \
 	Encoding \
 	ErrUtils \
 	Exception \
-	ExtsCompat46 \
 	FamInstEnv \
 	FastFunctions \
 	FastMutInt \
 	FastString \
-	FastTypes \
+	FastStringEnv \
+	FieldLabel \
 	Fingerprint \
 	FiniteMap \
 	ForeignCall \
+	FV \
 	Hooks \
 	HsBinds \
 	HsDecls \
@@ -581,6 +602,8 @@ compiler_stage2_dll0_MODULES = \
 	TysPrim \
 	TysWiredIn \
 	Unify \
+	UniqDFM \
+	UniqDSet \
 	UniqFM \
 	UniqSet \
 	UniqSupply \
@@ -617,7 +640,6 @@ compiler_stage2_dll0_MODULES += \
 	CodeGen.Platform.SPARC \
 	CodeGen.Platform.X86 \
 	CodeGen.Platform.X86_64 \
-	FastBool \
 	Hoopl \
 	Hoopl.Dataflow \
 	InteractiveEvalTypes \
@@ -644,6 +666,7 @@ compiler_stage2_dll0_HS_OBJS = \
     $(patsubst %,compiler/stage2/build/%.$(dyn_osuf),$(subst .,/,$(compiler_stage2_dll0_MODULES)))
 
 # if stage is set to something other than "1" or "", disable stage 1
+# See Note [Stage1Only vs stage=1] in mk/config.mk.in.
 ifneq "$(filter-out 1,$(stage))" ""
 compiler_stage1_NOT_NEEDED = YES
 endif
@@ -665,8 +688,8 @@ $(eval $(call build-package,compiler,stage3,2))
 define keepCAFsForGHCiDynOnly
 # $1 = stage
 # $2 = way
-ifeq "$$(findstring dyn, $1)" ""
-compiler_stage$1_$2_C_OBJS := $$(filter-out %/keepCAFsForGHCi.o,$$(compiler_stage$1_$2_C_OBJS))
+ifeq "$$(findstring dyn, $2)" ""
+compiler_stage$1_$2_C_OBJS := $$(filter-out %/keepCAFsForGHCi.$$($2_osuf),$$(compiler_stage$1_$2_C_OBJS))
 endif
 endef
 $(foreach w,$(compiler_stage1_WAYS),$(eval $(call keepCAFsForGHCiDynOnly,1,$w)))

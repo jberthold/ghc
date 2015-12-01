@@ -1,4 +1,3 @@
-setTestOpts(only_compiler_types(['ghc']))
 setTestOpts(omit_ways(['optasm']))
 
 test('SimpleFail1a', normal, compile_fail, [''])
@@ -137,3 +136,6 @@ test('T7788', normal, compile_fail, [''])
 test('T8550', normal, compile_fail, [''])
 test('T9554', normal, compile_fail, [''])
 test('T10141', normal, compile_fail, [''])
+test('T10817', normal, compile_fail, [''])
+test('T10899', normal, compile_fail, [''])
+test('T11136', normal, compile_fail, [''])

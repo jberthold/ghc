@@ -23,7 +23,8 @@ class TestConfig:
         self.rootdirs = []
 
         # Run these tests only (run all tests if empty)
-        self.only = []
+        self.run_only_some_tests = False
+        self.only = set()
 
         # Accept new output which differs from the sample?
         self.accept = 0
@@ -54,13 +55,10 @@ class TestConfig:
         # Verbosity level
         self.verbose = 3
 
-        # run the "fast" version of the test suite
-        self.fast = 0
+        # See Note [validate and testsuite speed] in toplevel Makefile.
+        self.speed = 1
 
         self.list_broken = False
-
-        # Compiler type (ghc, hugs, nhc, etc.)
-        self.compiler_type = ''
 
         # Path to the compiler
         self.compiler = ''
@@ -166,10 +164,6 @@ def getTestRun():
 
 class TestOptions:
    def __init__(self):
-       # if not None then we look for namebase.stderr etc rather than
-       # using the test name
-       self.with_namebase = None
-
        # skip this test?
        self.skip = 0
 

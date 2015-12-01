@@ -1,5 +1,3 @@
-setTestOpts(only_compiler_types(['ghc']))
-
 # setTestOpts(only_ways(['normal']));
 # Not only-normal: want optimisation too, to check coercion optimiser
 
@@ -54,7 +52,7 @@ test('arrow', normal, compile, [''])
 test('tdpe', normal, compile, [''])
 test('Nilsson', when(fast(), skip), compile, [''])
 
-if config.fast:
+if fast():
     test('records', normal, compile, [''])
 else:
     test('records', normal, compile_and_run, [''])

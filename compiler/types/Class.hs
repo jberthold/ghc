@@ -7,10 +7,10 @@
 
 module Class (
         Class,
-        ClassOpItem, DefMeth (..),
+        ClassOpItem,
         ClassATItem(..),
         ClassMinimalDef,
-        defMethSpecOfDefMeth,
+        DefMethInfo, pprDefMethInfo, defMethSpecOfDefMeth,
 
         FunDep, pprFundeps, pprFunDep,
 
@@ -29,6 +29,7 @@ import Name
 import BasicTypes
 import Unique
 import Util
+import SrcLoc
 import Outputable
 import FastString
 import BooleanFormula (BooleanFormula)
@@ -89,30 +90,33 @@ data Class
 -- For details on above see note [Api annotations] in ApiAnnotation
 type FunDep a = ([a],[a])
 
-type ClassOpItem = (Id, DefMeth)
+type ClassOpItem = (Id, DefMethInfo)
         -- Selector function; contains unfolding
         -- Default-method info
 
-data DefMeth = NoDefMeth                -- No default method
-             | DefMeth Name             -- A polymorphic default method
-             | GenDefMeth Name          -- A generic default method
-             deriving Eq
+type DefMethInfo = Maybe (Name, DefMethSpec Type)
+   -- Nothing                    No default method
+   -- Just ($dm, VanillaDM)      A polymorphic default method, name $dm
+   -- Just ($gm, GenericDM ty)   A generic default method, name $gm, type ty
+   --                              The generic dm type is *not* quantified
+   --                              over the class variables; ie has the
+   --                              class vaiables free
 
 data ClassATItem
   = ATI TyCon         -- See Note [Associated type tyvar names]
-        (Maybe Type)  -- Default associated type (if any) from this template
+        (Maybe (Type, SrcSpan))
+                      -- Default associated type (if any) from this template
                       -- Note [Associated type defaults]
 
 type ClassMinimalDef = BooleanFormula Name -- Required methods
 
--- | Convert a `DefMethSpec` to a `DefMeth`, which discards the name field in
+-- | Convert a `DefMethInfo` to a `DefMethSpec`, which discards the name field in
 --   the `DefMeth` constructor of the `DefMeth`.
-defMethSpecOfDefMeth :: DefMeth -> DefMethSpec
+defMethSpecOfDefMeth :: DefMethInfo -> Maybe (DefMethSpec Type)
 defMethSpecOfDefMeth meth
  = case meth of
-        NoDefMeth       -> NoDM
-        DefMeth _       -> VanillaDM
-        GenDefMeth _    -> GenericDM
+     Nothing        -> Nothing
+     Just (_, spec) -> Just spec
 
 {-
 Note [Associated type defaults]
@@ -147,6 +151,8 @@ Note that
    the default Type rhs
 
 The @mkClass@ function fills in the indirect superclasses.
+
+The SrcSpan is for the entire original declaration.
 -}
 
 mkClass :: [TyVar]
@@ -279,14 +285,15 @@ instance NamedThing Class where
 instance Outputable Class where
     ppr c = ppr (getName c)
 
-instance Outputable DefMeth where
-    ppr (DefMeth n)    =  ptext (sLit "Default method") <+> ppr n
-    ppr (GenDefMeth n) =  ptext (sLit "Generic default method") <+> ppr n
-    ppr NoDefMeth      =  empty   -- No default method
+pprDefMethInfo :: DefMethInfo -> SDoc
+pprDefMethInfo Nothing                  = empty   -- No default method
+pprDefMethInfo (Just (n, VanillaDM))    = ptext (sLit "Default method") <+> ppr n
+pprDefMethInfo (Just (n, GenericDM ty)) = ptext (sLit "Generic default method")
+                                          <+> ppr n <+> dcolon <+> ppr ty
 
 pprFundeps :: Outputable a => [FunDep a] -> SDoc
 pprFundeps []  = empty
-pprFundeps fds = hsep (ptext (sLit "|") : punctuate comma (map pprFunDep fds))
+pprFundeps fds = hsep (vbar : punctuate comma (map pprFunDep fds))
 
 pprFunDep :: Outputable a => FunDep a -> SDoc
 pprFunDep (us, vs) = hsep [interppSP us, ptext (sLit "->"), interppSP vs]

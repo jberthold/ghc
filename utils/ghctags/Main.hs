@@ -258,7 +258,7 @@ boundValues mod group =
                        , bind <- bagToList binds
                        , x <- boundThings mod bind ]
                _other -> error "boundValues"
-      tys = [ n | ns <- map hsLTyClDeclBinders (tyClGroupConcat (hs_tyclds group))
+      tys = [ n | ns <- map (fst . hsLTyClDeclBinders) (tyClGroupConcat (hs_tyclds group))
                 , n <- map found ns ]
       fors = concat $ map forBound (hs_fords group)
              where forBound lford = case unLoc lford of
@@ -289,7 +289,7 @@ boundThings modname lbinding =
               lid id = FoundThing modname (getOccString id) loc
           in case unLoc lpat of
                WildPat _ -> tl
-               VarPat name -> lid name : tl
+               VarPat (L _ name) -> lid name : tl
                LazyPat p -> patThings p tl
                AsPat id p -> patThings p (thing id : tl)
                ParPat p -> patThings p tl

@@ -6,11 +6,6 @@
  *
  * ---------------------------------------------------------------------------*/
 
-// PAPI uses caddr_t, which is not POSIX
-#ifndef USE_PAPI
-#include "PosixSource.h"
-#endif
-
 #include "Rts.h"
 #include "RtsAPI.h"
 #include "HsFFI.h"
@@ -39,6 +34,7 @@
 #include "Globals.h"
 #include "FileLock.h"
 #include "LinkerInternals.h"
+#include "LibdwPool.h"
 
 #if defined(PROFILING)
 # include "ProfHeap.h"
@@ -58,10 +54,6 @@
 #endif
 #ifdef HAVE_LOCALE_H
 #include <locale.h>
-#endif
-
-#if USE_PAPI
-#include "Papi.h"
 #endif
 
 // Count of how many outstanding hs_init()s there have been.
@@ -184,10 +176,6 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     /* Initialise the stats department, phase 1 */
     initStats1();
 
-#ifdef USE_PAPI
-    papi_init();
-#endif
-
 #if defined(PARALLEL_RTS)
     /* NB: this really must be done after processing the RTS flags */
     IF_PAR_DEBUG(verbose,
@@ -199,9 +187,9 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
 #ifdef TRACING
     initTracing();
 #endif
-    /* Trace the startup event
-     */
-    traceEventStartup();
+
+    /* Initialise libdw session pool */
+    libdwPoolInit();
 
 #if defined(PARALLEL_RTS)
     emitStartupEvents();
@@ -260,7 +248,7 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
     initThreadLabelTable();
 #endif
 
-    initProfiling1();
+    initProfiling();
 
     /* start the virtual timer 'subsystem'. */
     initTimer();
@@ -284,10 +272,6 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
 #endif
 
     startupHpc();
-
-    // This must be done after module initialisation.
-    // ToDo: make this work in the presence of multiple hs_add_root()s.
-    initProfiling2();
 
     // ditto.
 #if defined(THREADED_RTS)

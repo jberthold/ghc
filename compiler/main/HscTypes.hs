@@ -21,7 +21,7 @@ module HscTypes (
         -- * Information about modules
         ModDetails(..), emptyModDetails,
         ModGuts(..), CgGuts(..), ForeignStubs(..), appendStubC,
-        ImportedMods, ImportedModsVal,
+        ImportedMods, ImportedModsVal(..),
 
         ModSummary(..), ms_imps, ms_mod_name, showModMsg, isBootSummary,
         msHsFilePath, msHiFilePath, msObjFilePath,
@@ -67,7 +67,7 @@ module HscTypes (
 
         -- * Interfaces
         ModIface(..), mkIfaceWarnCache, mkIfaceHashCache, mkIfaceFixCache,
-        emptyIfaceWarnCache,
+        emptyIfaceWarnCache, mi_boot,
 
         -- * Fixity
         FixityEnv, FixItem(..), lookupFixity, emptyFixityEnv,
@@ -93,7 +93,7 @@ module HscTypes (
         -- * Information on imports and exports
         WhetherHasOrphans, IsBootInterface, Usage(..),
         Dependencies(..), noDependencies,
-        NameCache(..), OrigNameCache,
+        NameCache(..), OrigNameCache, updNameCacheIO,
         IfaceExport,
 
         -- * Warnings
@@ -148,7 +148,7 @@ import VarEnv
 import VarSet
 import Var
 import Id
-import IdInfo           ( IdDetails(..) )
+import IdInfo           ( IdDetails(..), RecSelParent(..))
 import Type
 
 import ApiAnnotation    ( ApiAnns )
@@ -214,11 +214,11 @@ instance Functor Hsc where
     fmap = liftM
 
 instance Applicative Hsc where
-    pure = return
+    pure a = Hsc $ \_ w -> return (a, w)
     (<*>) = ap
 
 instance Monad Hsc where
-    return a    = Hsc $ \_ w -> return (a, w)
+    return = pure
     Hsc m >>= k = Hsc $ \e w -> do (a, w1) <- m e w
                                    case k a of
                                        Hsc k' -> k' e w1
@@ -451,7 +451,7 @@ instance Outputable TargetId where
 -- | Helps us find information about modules in the home package
 type HomePackageTable  = ModuleNameEnv HomeModInfo
         -- Domain = modules in the home package that have been fully compiled
-        -- "home" package key cached here for convenience
+        -- "home" unit id cached here for convenience
 
 -- | Helps us find information about modules in the imported packages
 type PackageIfaceTable = ModuleEnv ModIface
@@ -683,7 +683,7 @@ type FinderCache = ModuleEnv FindResult
 data FindResult
   = Found ModLocation Module
         -- ^ The module was found
-  | NoPackage PackageKey
+  | NoPackage UnitId
         -- ^ The requested package was not found
   | FoundMultiple [(Module, ModuleOrigin)]
         -- ^ _Error_: both in multiple packages
@@ -692,14 +692,14 @@ data FindResult
   | NotFound
       { fr_paths       :: [FilePath]       -- Places where I looked
 
-      , fr_pkg         :: Maybe PackageKey  -- Just p => module is in this package's
+      , fr_pkg         :: Maybe UnitId  -- Just p => module is in this package's
                                            --           manifest, but couldn't find
                                            --           the .hi file
 
-      , fr_mods_hidden :: [PackageKey]      -- Module is in these packages,
+      , fr_mods_hidden :: [UnitId]      -- Module is in these packages,
                                            --   but the *module* is hidden
 
-      , fr_pkgs_hidden :: [PackageKey]      -- Module is in these packages,
+      , fr_pkgs_hidden :: [UnitId]      -- Module is in these packages,
                                            --   but the *package* is hidden
 
       , fr_suggestions :: [ModuleSuggestion] -- Possible mis-spelled modules
@@ -733,7 +733,7 @@ data ModIface
 
         mi_orphan     :: !WhetherHasOrphans,  -- ^ Whether this module has orphans
         mi_finsts     :: !WhetherHasFamInst,  -- ^ Whether this module has family instances
-        mi_boot       :: !IsBootInterface,    -- ^ Read from an hi-boot file?
+        mi_hsc_src    :: !HscSource,          -- ^ Boot? Signature?
 
         mi_deps     :: Dependencies,
                 -- ^ The dependencies of the module.  This is
@@ -831,11 +831,16 @@ data ModIface
                 -- See Note [RnNames . Trust Own Package]
      }
 
+-- | Old-style accessor for whether or not the ModIface came from an hs-boot
+-- file.
+mi_boot :: ModIface -> Bool
+mi_boot iface = mi_hsc_src iface == HsBootFile
+
 instance Binary ModIface where
    put_ bh (ModIface {
                  mi_module    = mod,
                  mi_sig_of    = sig_of,
-                 mi_boot      = is_boot,
+                 mi_hsc_src   = hsc_src,
                  mi_iface_hash= iface_hash,
                  mi_mod_hash  = mod_hash,
                  mi_flag_hash = flag_hash,
@@ -859,7 +864,7 @@ instance Binary ModIface where
                  mi_trust     = trust,
                  mi_trust_pkg = trust_pkg }) = do
         put_ bh mod
-        put_ bh is_boot
+        put_ bh hsc_src
         put_ bh iface_hash
         put_ bh mod_hash
         put_ bh flag_hash
@@ -886,7 +891,7 @@ instance Binary ModIface where
 
    get bh = do
         mod_name    <- get bh
-        is_boot     <- get bh
+        hsc_src     <- get bh
         iface_hash  <- get bh
         mod_hash    <- get bh
         flag_hash   <- get bh
@@ -913,7 +918,7 @@ instance Binary ModIface where
         return (ModIface {
                  mi_module      = mod_name,
                  mi_sig_of      = sig_of,
-                 mi_boot        = is_boot,
+                 mi_hsc_src     = hsc_src,
                  mi_iface_hash  = iface_hash,
                  mi_mod_hash    = mod_hash,
                  mi_flag_hash   = flag_hash,
@@ -955,7 +960,7 @@ emptyModIface mod
                mi_flag_hash   = fingerprint0,
                mi_orphan      = False,
                mi_finsts      = False,
-               mi_boot        = False,
+               mi_hsc_src     = HsSrcFile,
                mi_deps        = noDependencies,
                mi_usages      = [],
                mi_exports     = [],
@@ -1022,9 +1027,18 @@ emptyModDetails
                  md_anns      = [],
                  md_vect_info = noVectInfo }
 
--- | Records the modules directly imported by a module for extracting e.g. usage information
+-- | Records the modules directly imported by a module for extracting e.g.
+-- usage information, and also to give better error message
 type ImportedMods = ModuleEnv [ImportedModsVal]
-type ImportedModsVal = (ModuleName, Bool, SrcSpan, IsSafeImport)
+data ImportedModsVal
+ = ImportedModsVal {
+        imv_name :: ModuleName,          -- ^ The name the module is imported with
+        imv_span :: SrcSpan,             -- ^ the source span of the whole import
+        imv_is_safe :: IsSafeImport,     -- ^ whether this is a safe import
+        imv_is_hiding :: Bool,           -- ^ whether this is an "hiding" import
+        imv_all_exports :: GlobalRdrEnv, -- ^ all the things the module could provide
+        imv_qualified :: Bool            -- ^ whether this is a qualified import
+        }
 
 -- | A ModGuts is carried through the compiler, accumulating stuff as it goes
 -- There is only one ModGuts at any time, the one for the module
@@ -1033,13 +1047,12 @@ type ImportedModsVal = (ModuleName, Bool, SrcSpan, IsSafeImport)
 data ModGuts
   = ModGuts {
         mg_module    :: !Module,         -- ^ Module being compiled
-        mg_boot      :: IsBootInterface, -- ^ Whether it's an hs-boot module
+        mg_hsc_src   :: HscSource,       -- ^ Whether it's an hs-boot module
+        mg_loc       :: SrcSpan,         -- ^ For error messages from inner passes
         mg_exports   :: ![AvailInfo],    -- ^ What it exports
         mg_deps      :: !Dependencies,   -- ^ What it depends on, directly or
                                          -- otherwise
-        mg_dir_imps  :: !ImportedMods,   -- ^ Directly-imported modules; used to
-                                         -- generate initialisation code
-        mg_used_names:: !NameSet,        -- ^ What the module needed (used in 'MkIface.mkIface')
+        mg_usages    :: ![Usage],        -- ^ What was used?  Used for interfaces.
 
         mg_used_th   :: !Bool,           -- ^ Did we run a TH splice?
         mg_rdr_env   :: !GlobalRdrEnv,   -- ^ Top-level lexical environment
@@ -1065,23 +1078,22 @@ data ModGuts
                                          --   (produced by desugarer & consumed by vectoriser)
         mg_vect_info :: !VectInfo,       -- ^ Pool of vectorised declarations in the module
 
-        -- The next two fields are unusual, because they give instance
-        -- environments for *all* modules in the home package, including
-        -- this module, rather than for *just* this module.
-        -- Reason: when looking up an instance we don't want to have to
-        --        look at each module in the home package in turn
-        mg_inst_env     :: InstEnv,
-        -- ^ Class instance environment from /home-package/ modules (including
-        -- this one); c.f. 'tcg_inst_env'
-        mg_fam_inst_env :: FamInstEnv,
-        -- ^ Type-family instance environment for /home-package/ modules
-        -- (including this one); c.f. 'tcg_fam_inst_env'
-        mg_safe_haskell :: SafeHaskellMode,
-        -- ^ Safe Haskell mode
-        mg_trust_pkg    :: Bool,
-        -- ^ Do we need to trust our own package for Safe Haskell?
-        -- See Note [RnNames . Trust Own Package]
-        mg_dependent_files :: [FilePath] -- ^ dependencies from addDependentFile
+                        -- The next two fields are unusual, because they give instance
+                        -- environments for *all* modules in the home package, including
+                        -- this module, rather than for *just* this module.
+                        -- Reason: when looking up an instance we don't want to have to
+                        --         look at each module in the home package in turn
+        mg_inst_env     :: InstEnv,             -- ^ Class instance environment for
+                                                -- /home-package/ modules (including this
+                                                -- one); c.f. 'tcg_inst_env'
+        mg_fam_inst_env :: FamInstEnv,          -- ^ Type-family instance environment for
+                                                -- /home-package/ modules (including this
+                                                -- one); c.f. 'tcg_fam_inst_env'
+
+        mg_safe_haskell :: SafeHaskellMode,     -- ^ Safe Haskell mode
+        mg_trust_pkg    :: Bool                 -- ^ Do we need to trust our
+                                                -- own package for Safe Haskell?
+                                                -- See Note [RnNames . Trust Own Package]
     }
 
 -- The ModGuts takes on several slightly different forms:
@@ -1089,7 +1101,6 @@ data ModGuts
 -- After simplification, the following fields change slightly:
 --      mg_rules        Orphan rules only (local ones now attached to binds)
 --      mg_binds        With rules attached
-
 
 ---------------------------------------------------------
 -- The Tidy pass forks the information about this module:
@@ -1117,7 +1128,7 @@ data CgGuts
                 -- as part of the code-gen of tycons
 
         cg_foreign   :: !ForeignStubs,   -- ^ Foreign export stubs
-        cg_dep_pkgs  :: ![PackageKey],    -- ^ Dependent packages, used to
+        cg_dep_pkgs  :: ![UnitId],    -- ^ Dependent packages, used to
                                          -- generate #includes for C code gen
         cg_hpc_info  :: !HpcInfo,        -- ^ Program coverage tick box information
         cg_modBreaks :: !ModBreaks       -- ^ Module breakpoints
@@ -1156,7 +1167,7 @@ as if they were defined in modules
    interactive:Ghci2
    ...etc...
 with each bunch of declarations using a new module, all sharing a
-common package 'interactive' (see Module.interactivePackageKey, and
+common package 'interactive' (see Module.interactiveUnitId, and
 PrelNames.mkInteractiveModule).
 
 This scheme deals well with shadowing.  For example:
@@ -1405,8 +1416,9 @@ extendInteractiveContext :: InteractiveContext
                          -> [TyThing]
                          -> [ClsInst] -> [FamInst]
                          -> Maybe [Type]
+                         -> FixityEnv
                          -> InteractiveContext
-extendInteractiveContext ictxt new_tythings new_cls_insts new_fam_insts defaults
+extendInteractiveContext ictxt new_tythings new_cls_insts new_fam_insts defaults fix_env
   = ictxt { ic_mod_index  = ic_mod_index ictxt + 1
                             -- Always bump this; even instances should create
                             -- a new mod_index (Trac #9426)
@@ -1414,7 +1426,9 @@ extendInteractiveContext ictxt new_tythings new_cls_insts new_fam_insts defaults
           , ic_rn_gbl_env = ic_rn_gbl_env ictxt `icExtendGblRdrEnv` new_tythings
           , ic_instances  = ( new_cls_insts ++ old_cls_insts
                             , new_fam_insts ++ old_fam_insts )
-          , ic_default    = defaults }
+          , ic_default    = defaults
+          , ic_fix_env    = fix_env  -- See Note [Fixity declarations in GHCi]
+          }
   where
     new_ids = [id | AnId id <- new_tythings]
     old_tythings = filterOut (shadowed_by new_ids) (ic_tythings ictxt)
@@ -1445,7 +1459,7 @@ shadowed_by ids = shadowed
 setInteractivePackage :: HscEnv -> HscEnv
 -- Set the 'thisPackage' DynFlag to 'interactive'
 setInteractivePackage hsc_env
-   = hsc_env { hsc_dflags = (hsc_dflags hsc_env) { thisPackage = interactivePackageKey } }
+   = hsc_env { hsc_dflags = (hsc_dflags hsc_env) { thisPackage = interactiveUnitId } }
 
 setInteractivePrintName :: InteractiveContext -> Name -> InteractiveContext
 setInteractivePrintName ic n = ic{ic_int_print = n}
@@ -1529,20 +1543,13 @@ exposed (say P2), so we use M.T for that, and P1:M.T for the other one.
 This is handled by the qual_mod component of PrintUnqualified, inside
 the (ppr mod) of case (3), in Name.pprModulePrefix
 
-Note [Printing package keys]
+Note [Printing unit ids]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In the old days, original names were tied to PackageIds, which directly
 corresponded to the entities that users wrote in Cabal files, and were perfectly
 suitable for printing when we need to disambiguate packages.  However, with
-PackageKey, the situation is different.  First, the key is not a human readable
-at all, so we need to consult the package database to find the appropriate
-PackageId to display.  Second, there may be multiple copies of a library visible
-with the same PackageId, in which case we need to disambiguate.  For now,
-we just emit the actual package key (which the user can go look up); however,
-another scheme is to (recursively) say which dependencies are different.
-
-NB: When we extend package keys to also have holes, we will have to disambiguate
-those as well.
+UnitId, the situation can be different: if the key is instantiated with
+some holes, we should try to give the user some more useful information.
 -}
 
 -- | Creates some functions that work out the best ways to format
@@ -1554,7 +1561,7 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
   where
   qual_name mod occ
         | [] <- unqual_gres
-        , modulePackageKey mod `elem` [primPackageKey, basePackageKey, thPackageKey]
+        , moduleUnitId mod `elem` [primUnitId, baseUnitId, thUnitId]
         , not (isDerivedOccName occ)
         = NameUnqual   -- For names from ubiquitous packages that come with GHC, if
                        -- there are no entities called unqualified 'occ', then
@@ -1600,10 +1607,10 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
 -- is only one exposed package which exports this module, don't qualify.
 mkQualModule :: DynFlags -> QueryQualifyModule
 mkQualModule dflags mod
-     | modulePackageKey mod == thisPackage dflags = False
+     | moduleUnitId mod == thisPackage dflags = False
 
      | [(_, pkgconfig)] <- lookup,
-       packageConfigId pkgconfig == modulePackageKey mod
+       packageConfigId pkgconfig == moduleUnitId mod
         -- this says: we are given a module P:M, is there just one exposed package
         -- that exposes a module M, and is it package P?
      = False
@@ -1613,10 +1620,10 @@ mkQualModule dflags mod
 
 -- | Creates a function for formatting packages based on two heuristics:
 -- (1) don't qualify if the package in question is "main", and (2) only qualify
--- with a package key if the package ID would be ambiguous.
+-- with a unit id if the package ID would be ambiguous.
 mkQualPackage :: DynFlags -> QueryQualifyPackage
 mkQualPackage dflags pkg_key
-     | pkg_key == mainPackageKey || pkg_key == interactivePackageKey
+     | pkg_key == mainUnitId || pkg_key == interactiveUnitId
         -- Skip the lookup if it's main, since it won't be in the package
         -- database!
      = False
@@ -1687,20 +1694,23 @@ implicitTyThings (AConLike cl)  = implicitConLikeThings cl
 
 implicitConLikeThings :: ConLike -> [TyThing]
 implicitConLikeThings (RealDataCon dc)
-  = map AnId (dataConImplicitIds dc)
-    -- For data cons add the worker and (possibly) wrapper
+  = dataConImplicitTyThings dc
 
 implicitConLikeThings (PatSynCon {})
   = []  -- Pattern synonyms have no implicit Ids; the wrapper and matcher
         -- are not "implicit"; they are simply new top-level bindings,
         -- and they have their own declaration in an interface file
+        -- Unless a record pat syn when there are implicit selectors
+        -- They are still not included here as `implicitConLikeThings` is
+        -- used by `tcTyClsDecls` whilst pattern synonyms are typed checked
+        -- by `tcTopValBinds`.
 
 implicitClassThings :: Class -> [TyThing]
 implicitClassThings cl
   = -- Does not include default methods, because those Ids may have
     --    their own pragmas, unfoldings etc, not derived from the Class object
     -- associated types
-    --    No extras_plus (recursive call) for the classATs, because they
+    --    No recursive call for the classATs, because they
     --    are only the family decls; they have no implicit things
     map ATyCon (classATs cl) ++
     -- superclass and operation selectors
@@ -1711,22 +1721,20 @@ implicitTyConThings tc
   = class_stuff ++
       -- fields (names of selectors)
 
-      -- (possibly) implicit newtype coercion
+      -- (possibly) implicit newtype axioms
+      -- or type family axioms
     implicitCoTyCon tc ++
 
       -- for each data constructor in order,
       --   the contructor, worker, and (possibly) wrapper
-    concatMap (extras_plus . AConLike . RealDataCon) (tyConDataCons tc)
+    [ thing | dc    <- tyConDataCons tc
+            , thing <- AConLike (RealDataCon dc) : dataConImplicitTyThings dc ]
       -- NB. record selectors are *not* implicit, they have fully-fledged
       -- bindings that pass through the compilation pipeline as normal.
   where
     class_stuff = case tyConClass_maybe tc of
         Nothing -> []
         Just cl -> implicitClassThings cl
-
--- add a thing and recursive call
-extras_plus :: TyThing -> [TyThing]
-extras_plus thing = thing : implicitTyThings thing
 
 -- For newtypes and closed type families (only) add the implicit coercion tycon
 implicitCoTyCon :: TyCon -> [TyThing]
@@ -1762,9 +1770,11 @@ tyThingParent_maybe (ATyCon tc)   = case tyConAssoc_maybe tc of
                                       Just cls -> Just (ATyCon (classTyCon cls))
                                       Nothing  -> Nothing
 tyThingParent_maybe (AnId id)     = case idDetails id of
-                                         RecSelId { sel_tycon = tc } -> Just (ATyCon tc)
-                                         ClassOpId cls               -> Just (ATyCon (classTyCon cls))
-                                         _other                      -> Nothing
+                                      RecSelId { sel_tycon = RecSelData tc } ->
+                                          Just (ATyCon tc)
+                                      ClassOpId cls               ->
+                                          Just (ATyCon (classTyCon cls))
+                                      _other                      -> Nothing
 tyThingParent_maybe _other = Nothing
 
 tyThingsTyVars :: [TyThing] -> TyVarSet
@@ -1787,14 +1797,15 @@ tyThingAvailInfo :: TyThing -> AvailInfo
 tyThingAvailInfo (ATyCon t)
    = case tyConClass_maybe t of
         Just c  -> AvailTC n (n : map getName (classMethods c)
-                  ++ map getName (classATs c))
+                                 ++ map getName (classATs c))
+                             []
              where n = getName c
-        Nothing -> AvailTC n (n : map getName dcs ++
-                                   concatMap dataConFieldLabels dcs)
-             where n = getName t
-                   dcs = tyConDataCons t
+        Nothing -> AvailTC n (n : map getName dcs) flds
+             where n    = getName t
+                   dcs  = tyConDataCons t
+                   flds = tyConFieldLabels t
 tyThingAvailInfo t
-   = Avail (getName t)
+   = avail (getName t)
 
 {-
 ************************************************************************
@@ -2075,7 +2086,7 @@ data Dependencies
                         -- I.e. modules that this one imports, or that are in the
                         --      dep_mods of those directly-imported modules
 
-         , dep_pkgs   :: [(PackageKey, Bool)]
+         , dep_pkgs   :: [(UnitId, Bool)]
                         -- ^ All packages transitively below this module
                         -- I.e. packages to which this module's direct imports belong,
                         --      or that are in the dep_pkgs of those modules
@@ -2328,6 +2339,12 @@ data NameCache
                 -- ^ Ensures that one original name gets one unique
    }
 
+updNameCacheIO :: HscEnv
+               -> (NameCache -> (NameCache, c))  -- The updating function
+               -> IO c
+updNameCacheIO hsc_env upd_fn
+  = atomicModifyIORef' (hsc_NC hsc_env) upd_fn
+
 -- | Per-module cache of original 'OccName's given 'Name's
 type OrigNameCache   = ModuleEnv (OccEnv Name)
 
@@ -2391,9 +2408,9 @@ data ModSummary
           -- ^ Timestamp of hi file, if we *only* are typechecking (it is
           -- 'Nothing' otherwise.
           -- See Note [Recompilation checking when typechecking only] and #9243
-        ms_srcimps      :: [Located (ImportDecl RdrName)],
+        ms_srcimps      :: [(Maybe FastString, Located ModuleName)],
           -- ^ Source imports of the module
-        ms_textual_imps :: [Located (ImportDecl RdrName)],
+        ms_textual_imps :: [(Maybe FastString, Located ModuleName)],
           -- ^ Non-source imports of the module from the module *text*
         ms_hspp_file    :: FilePath,
           -- ^ Filename of preprocessed source file
@@ -2407,26 +2424,12 @@ data ModSummary
 ms_mod_name :: ModSummary -> ModuleName
 ms_mod_name = moduleName . ms_mod
 
-ms_imps :: ModSummary -> [Located (ImportDecl RdrName)]
+ms_imps :: ModSummary -> [(Maybe FastString, Located ModuleName)]
 ms_imps ms =
   ms_textual_imps ms ++
   map mk_additional_import (dynFlagDependencies (ms_hspp_opts ms))
   where
-    -- This is a not-entirely-satisfactory means of creating an import
-    -- that corresponds to an import that did not occur in the program
-    -- text, such as those induced by the use of plugins (the -plgFoo
-    -- flag)
-    mk_additional_import mod_nm = noLoc $ ImportDecl {
-      ideclSourceSrc = Nothing,
-      ideclName      = noLoc mod_nm,
-      ideclPkgQual   = Nothing,
-      ideclSource    = False,
-      ideclImplicit  = True, -- Maybe implicit because not "in the program text"
-      ideclQualified = False,
-      ideclAs        = Nothing,
-      ideclHiding    = Nothing,
-      ideclSafe      = False
-    }
+    mk_additional_import mod_nm = (Nothing, noLoc mod_nm)
 
 -- The ModLocation contains both the original source filename and the
 -- filename of the cleaned-up source file after all preprocessing has been

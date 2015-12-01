@@ -17,7 +17,7 @@ module CoreSubst (
         substTy, substCo, substExpr, substExprSC, substBind, substBindSC,
         substUnfolding, substUnfoldingSC,
         lookupIdSubst, lookupTvSubst, lookupCvSubst, substIdOcc,
-        substTickish, substVarSet,
+        substTickish, substDVarSet,
 
         -- ** Operations on substitutions
         emptySubst, mkEmptySubst, mkSubst, mkOpenSubst, substInScope, isEmptySubst,
@@ -41,6 +41,7 @@ module CoreSubst (
 
 import CoreSyn
 import CoreFVs
+import CoreSeq
 import CoreUtils
 import Literal  ( Literal(MachStr) )
 import qualified Data.ByteString as BS
@@ -52,6 +53,7 @@ import qualified Coercion
         -- We are defining local versions
 import Type     hiding ( substTy, extendTvSubst, extendTvSubstList
                        , isInScope, substTyVarBndr, cloneTyVarBndr )
+import TypeRep (tyVarsOfTypeAcc)
 import Coercion hiding ( substTy, substCo, extendTvSubst, substTyVarBndr, substCoVarBndr )
 
 import TyCon       ( tyConArity )
@@ -622,12 +624,12 @@ substIdType subst@(Subst _ _ tv_env cv_env) id
 substIdInfo :: Subst -> Id -> IdInfo -> Maybe IdInfo
 substIdInfo subst new_id info
   | nothing_to_do = Nothing
-  | otherwise     = Just (info `setSpecInfo`      substSpec subst new_id old_rules
+  | otherwise     = Just (info `setRuleInfo`      substSpec subst new_id old_rules
                                `setUnfoldingInfo` substUnfolding subst old_unf)
   where
-    old_rules     = specInfo info
+    old_rules     = ruleInfo info
     old_unf       = unfoldingInfo info
-    nothing_to_do = isEmptySpecInfo old_rules && isClosedUnfolding old_unf
+    nothing_to_do = isEmptyRuleInfo old_rules && isClosedUnfolding old_unf
 
 
 ------------------
@@ -667,13 +669,13 @@ substIdOcc subst v = case lookupIdSubst (text "substIdOcc") subst v of
 
 ------------------
 -- | Substitutes for the 'Id's within the 'WorkerInfo' given the new function 'Id'
-substSpec :: Subst -> Id -> SpecInfo -> SpecInfo
-substSpec subst new_id (SpecInfo rules rhs_fvs)
-  = seqSpecInfo new_spec `seq` new_spec
+substSpec :: Subst -> Id -> RuleInfo -> RuleInfo
+substSpec subst new_id (RuleInfo rules rhs_fvs)
+  = seqRuleInfo new_spec `seq` new_spec
   where
     subst_ru_fn = const (idName new_id)
-    new_spec = SpecInfo (map (substRule subst subst_ru_fn) rules)
-                        (substVarSet subst rhs_fvs)
+    new_spec = RuleInfo (map (substRule subst subst_ru_fn) rules)
+                        (substDVarSet subst rhs_fvs)
 
 ------------------
 substRulesForImportedIds :: Subst -> [CoreRule] -> [CoreRule]
@@ -695,15 +697,16 @@ substRule _ _ rule@(BuiltinRule {}) = rule
 substRule subst subst_ru_fn rule@(Rule { ru_bndrs = bndrs, ru_args = args
                                        , ru_fn = fn_name, ru_rhs = rhs
                                        , ru_local = is_local })
-  = rule { ru_bndrs = bndrs',
-           ru_fn    = if is_local
+  = rule { ru_bndrs = bndrs'
+         , ru_fn    = if is_local
                         then subst_ru_fn fn_name
-                        else fn_name,
-           ru_args  = map (substExpr (text "subst-rule" <+> ppr fn_name) subst') args,
-           ru_rhs   = simpleOptExprWith subst' rhs }
-           -- Do simple optimisation on RHS, in case substitution lets
-           -- you improve it.  The real simplifier never gets to look at it.
+                        else fn_name
+         , ru_args  = map (substExpr doc subst') args
+         , ru_rhs   = substExpr (text "foo") subst' rhs }
+           -- Do NOT optimise the RHS (previously we did simplOptExpr here)
+           -- See Note [Substitute lazily]
   where
+    doc = ptext (sLit "subst-rule") <+> ppr fn_name
     (subst', bndrs') = substBndrs subst bndrs
 
 ------------------
@@ -719,13 +722,13 @@ substVect _subst vd@(VectClass _)    = vd
 substVect _subst vd@(VectInst _)     = vd
 
 ------------------
-substVarSet :: Subst -> VarSet -> VarSet
-substVarSet subst fvs
-  = foldVarSet (unionVarSet . subst_fv subst) emptyVarSet fvs
+substDVarSet :: Subst -> DVarSet -> DVarSet
+substDVarSet subst fvs
+  = mkDVarSet $ fst $ foldr (subst_fv subst) ([], emptyVarSet) $ dVarSetElems fvs
   where
-    subst_fv subst fv
-        | isId fv   = exprFreeVars (lookupIdSubst (text "substVarSet") subst fv)
-        | otherwise = Type.tyVarsOfType (lookupTvSubst subst fv)
+  subst_fv subst fv acc
+     | isId fv = expr_fvs (lookupIdSubst (text "substDVarSet") subst fv) isLocalVar emptyVarSet $! acc
+     | otherwise = tyVarsOfTypeAcc (lookupTvSubst subst fv) (const True) emptyVarSet $! acc
 
 ------------------
 substTickish :: Subst -> Tickish Id -> Tickish Id
@@ -733,8 +736,22 @@ substTickish subst (Breakpoint n ids) = Breakpoint n (map do_one ids)
  where do_one = getIdFromTrivialExpr . lookupIdSubst (text "subst_tickish") subst
 substTickish _subst other = other
 
-{- Note [substTickish]
+{- Note [Substitute lazily]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The functions that substitute over IdInfo must be pretty lazy, becuause
+they are knot-tied by substRecBndrs.
 
+One case in point was Trac #10627 in which a rule for a function 'f'
+referred to 'f' (at a differnet type) on the RHS.  But instead of just
+substituting in the rhs of the rule, we were calling simpleOptExpr, which
+looked at the idInfo for 'f'; result <<loop>>.
+
+In any case we don't need to optimise the RHS of rules, or unfoldings,
+because the simplifier will do that.
+
+
+Note [substTickish]
+~~~~~~~~~~~~~~~~~~~~~~
 A Breakpoint contains a list of Ids.  What happens if we ever want to
 substitute an expression for one of these Ids?
 

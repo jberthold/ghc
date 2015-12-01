@@ -28,7 +28,7 @@ module Unique (
         pprUnique,
 
         mkUniqueGrimily,                -- Used in UniqSupply only!
-        getKey, getKeyFastInt,          -- Used in Var, UniqFM, Name only!
+        getKey,                         -- Used in Var, UniqFM, Name only!
         mkUnique, unpkUnique,           -- Used in BinIface only
 
         incrUnique,                     -- Used for renumbering
@@ -48,9 +48,12 @@ module Unique (
         mkPreludeTyConUnique, mkPreludeClassUnique,
         mkPArrDataConUnique,
 
-    mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique,
+        mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique,
         mkRegSingleUnique, mkRegPairUnique, mkRegClassUnique, mkRegSubUnique,
         mkCostCentreUnique,
+
+        tyConRepNameUnique,
+        dataConWorkerUnique, dataConRepNameUnique,
 
         mkBuiltinUnique,
         mkPseudoUniqueD,
@@ -61,16 +64,15 @@ module Unique (
 #include "HsVersions.h"
 
 import BasicTypes
-import FastTypes
 import FastString
 import Outputable
--- import StaticFlags
 import Util
 
---just for implementing a fast [0,61) -> Char function
-import GHC.Exts (indexCharOffAddr#, Char(..))
+-- just for implementing a fast [0,61) -> Char function
+import GHC.Exts (indexCharOffAddr#, Char(..), Int(..))
 
 import Data.Char        ( chr, ord )
+import Data.Bits
 
 {-
 ************************************************************************
@@ -88,7 +90,7 @@ Fast comparison is everything on @Uniques@:
 -- | The type of unique identifiers that are used in many places in GHC
 -- for fast ordering and equality tests. You should generate these with
 -- the functions from the 'UniqSupply' module
-data Unique = MkUnique FastInt
+data Unique = MkUnique {-# UNPACK #-} !Int
 
 {-
 Now come the functions which construct uniques from their pieces, and vice versa.
@@ -99,24 +101,24 @@ unpkUnique      :: Unique -> (Char, Int)        -- The reverse
 
 mkUniqueGrimily :: Int -> Unique                -- A trap-door for UniqSupply
 getKey          :: Unique -> Int                -- for Var
-getKeyFastInt   :: Unique -> FastInt            -- for Var
 
-incrUnique      :: Unique -> Unique
-deriveUnique    :: Unique -> Int -> Unique
-newTagUnique    :: Unique -> Char -> Unique
+incrUnique   :: Unique -> Unique
+stepUnique   :: Unique -> Int -> Unique
+deriveUnique :: Unique -> Int -> Unique
+newTagUnique :: Unique -> Char -> Unique
 
-mkUniqueGrimily x = MkUnique (iUnbox x)
+mkUniqueGrimily = MkUnique
 
 {-# INLINE getKey #-}
-getKey (MkUnique x) = iBox x
-{-# INLINE getKeyFastInt #-}
-getKeyFastInt (MkUnique x) = x
+getKey (MkUnique x) = x
 
-incrUnique (MkUnique i) = MkUnique (i +# _ILIT(1))
+incrUnique (MkUnique i) = MkUnique (i + 1)
+stepUnique (MkUnique i) n = MkUnique (i + n)
 
 -- deriveUnique uses an 'X' tag so that it won't clash with
 -- any of the uniques produced any other way
-deriveUnique (MkUnique i) delta = mkUnique 'X' (iBox i + delta)
+-- SPJ says: this looks terribly smelly to me!
+deriveUnique (MkUnique i) delta = mkUnique 'X' (i + delta)
 
 -- newTagUnique changes the "domain" of a unique to a different char
 newTagUnique u c = mkUnique c i where (_,i) = unpkUnique u
@@ -131,17 +133,17 @@ mkUnique :: Char -> Int -> Unique       -- Builds a unique from pieces
 -- NOT EXPORTED, so that we can see all the Chars that
 --               are used in this one module
 mkUnique c i
-  = MkUnique (tag `bitOrFastInt` bits)
+  = MkUnique (tag .|. bits)
   where
-    !tag  = fastOrd (cUnbox c) `shiftLFastInt` _ILIT(24)
-    !bits = iUnbox i `bitAndFastInt` _ILIT(16777215){-``0x00ffffff''-}
+    tag  = ord c `shiftL` 24
+    bits = i .&. 16777215 {-``0x00ffffff''-}
 
 unpkUnique (MkUnique u)
   = let
         -- as long as the Char may have its eighth bit set, we
         -- really do need the logical right-shift here!
-        tag = cBox (fastChr (u `shiftRLFastInt` _ILIT(24)))
-        i   = iBox (u `bitAndFastInt` _ILIT(16777215){-``0x00ffffff''-})
+        tag = chr (u `shiftR` 24)
+        i   = u .&. 16777215 {-``0x00ffffff''-}
     in
     (tag, i)
 
@@ -161,7 +163,7 @@ hasKey          :: Uniquable a => a -> Unique -> Bool
 x `hasKey` k    = getUnique x == k
 
 instance Uniquable FastString where
- getUnique fs = mkUniqueGrimily (iBox (uniqueOfFS fs))
+ getUnique fs = mkUniqueGrimily (uniqueOfFS fs)
 
 instance Uniquable Int where
  getUnique i = mkUniqueGrimily i
@@ -178,14 +180,30 @@ use `deriving' because we want {\em precise} control of ordering
 (equality on @Uniques@ is v common).
 -}
 
+-- Note [Unique Determinism]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~
+-- The order of allocated @Uniques@ is not stable across rebuilds.
+-- The main reason for that is that typechecking interface files pulls
+-- @Uniques@ from @UniqSupply@ and the interface file for the module being
+-- currently compiled can, but doesn't have to exist.
+--
+-- It gets more complicated if you take into account that the interface
+-- files are loaded lazily and that building multiple files at once has to
+-- work for any subset of interface files present. When you add parallelism
+-- this makes @Uniques@ hopelessly random.
+--
+-- As such, to get deterministic builds, the order of the allocated
+-- @Uniques@ should not affect the final result.
+-- see also wiki/DeterministicBuilds
+
 eqUnique, ltUnique, leUnique :: Unique -> Unique -> Bool
-eqUnique (MkUnique u1) (MkUnique u2) = u1 ==# u2
-ltUnique (MkUnique u1) (MkUnique u2) = u1 <#  u2
-leUnique (MkUnique u1) (MkUnique u2) = u1 <=# u2
+eqUnique (MkUnique u1) (MkUnique u2) = u1 == u2
+ltUnique (MkUnique u1) (MkUnique u2) = u1 <  u2
+leUnique (MkUnique u1) (MkUnique u2) = u1 <= u2
 
 cmpUnique :: Unique -> Unique -> Ordering
 cmpUnique (MkUnique u1) (MkUnique u2)
-  = if u1 ==# u2 then EQ else if u1 <# u2 then LT else GT
+  = if u1 == u2 then EQ else if u1 < u2 then LT else GT
 
 instance Eq Unique where
     a == b = eqUnique a b
@@ -239,20 +257,18 @@ Code stolen from Lennart.
 
 iToBase62 :: Int -> String
 iToBase62 n_
-  = ASSERT(n_ >= 0) go (iUnbox n_) ""
+  = ASSERT(n_ >= 0) go n_ ""
   where
-    go n cs | n <# _ILIT(62)
-             = case chooseChar62 n of { c -> c `seq` (c : cs) }
-             | otherwise
-             =  case (quotRem (iBox n) 62) of { (q_, r_) ->
-                case iUnbox q_ of { q -> case iUnbox r_ of { r ->
-                case (chooseChar62 r) of { c -> c `seq`
-                (go q (c : cs)) }}}}
+    go n cs | n < 62
+            = let !c = chooseChar62 n in c : cs
+            | otherwise
+            = go q (c : cs) where (q, r) = quotRem n 62
+                                  !c = chooseChar62 r
 
-    chooseChar62 :: FastInt -> Char
+    chooseChar62 :: Int -> Char
     {-# INLINE chooseChar62 #-}
-    chooseChar62 n = C# (indexCharOffAddr# chars62 n)
-    !chars62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"#
+    chooseChar62 (I# n) = C# (indexCharOffAddr# chars62 n)
+    chars62 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"#
 
 {-
 ************************************************************************
@@ -295,14 +311,19 @@ mkPArrDataConUnique    :: Int -> Unique
 mkAlphaTyVarUnique   i = mkUnique '1' i
 mkPreludeClassUnique i = mkUnique '2' i
 
--- Prelude type constructors occupy *three* slots.
--- The first is for the tycon itself; the latter two
--- are for the generic to/from Ids.  See TysWiredIn.mk_tc_gen_info.
+--------------------------------------------------
+-- Wired-in data constructor keys occupy *three* slots:
+--    * u: the DataCon itself
+--    * u+1: its worker Id
+--    * u+2: the TyConRepName of the promoted TyCon
+-- Prelude data constructors are too simple to need wrappers.
+mkPreludeTyConUnique i                = mkUnique '3' (3*i)
+mkTupleTyConUnique Boxed           a  = mkUnique '4' (3*a)
+mkTupleTyConUnique Unboxed         a  = mkUnique '5' (3*a)
+mkCTupleTyConUnique                a  = mkUnique 'k' (3*a)
 
-mkPreludeTyConUnique i       = mkUnique '3' (3*i)
-mkTupleTyConUnique Boxed   a = mkUnique '4' (3*a)
-mkTupleTyConUnique Unboxed a = mkUnique '5' (3*a)
-mkCTupleTyConUnique        a = mkUnique 'k' (3*a)
+tyConRepNameUnique :: Unique -> Unique
+tyConRepNameUnique  u = incrUnique u
 
 -- Data constructor keys occupy *two* slots.  The first is used for the
 -- data constructor itself and its wrapper function (the function that
@@ -310,10 +331,22 @@ mkCTupleTyConUnique        a = mkUnique 'k' (3*a)
 -- used for the worker function (the function that builds the constructor
 -- representation).
 
-mkPreludeDataConUnique i       = mkUnique '6' (2*i)    -- Must be alphabetic
-mkTupleDataConUnique Boxed   a = mkUnique '7' (2*a)        -- ditto (*may* be used in C labels)
-mkTupleDataConUnique Unboxed a = mkUnique '8' (2*a)
+--------------------------------------------------
+-- Wired-in data constructor keys occupy *three* slots:
+--    * u: the DataCon itself
+--    * u+1: its worker Id
+--    * u+2: the TyConRepName of the promoted TyCon
+-- Prelude data constructors are too simple to need wrappers.
 
+mkPreludeDataConUnique i              = mkUnique '6' (3*i)    -- Must be alphabetic
+mkTupleDataConUnique Boxed          a = mkUnique '7' (3*a)    -- ditto (*may* be used in C labels)
+mkTupleDataConUnique Unboxed        a = mkUnique '8' (3*a)
+
+dataConRepNameUnique, dataConWorkerUnique :: Unique -> Unique
+dataConWorkerUnique  u = incrUnique u
+dataConRepNameUnique u = stepUnique u 2
+
+--------------------------------------------------
 mkPrimOpIdUnique op         = mkUnique '9' op
 mkPreludeMiscIdUnique  i    = mkUnique '0' i
 
@@ -345,7 +378,7 @@ mkCostCentreUnique = mkUnique 'C'
 
 mkVarOccUnique, mkDataOccUnique, mkTvOccUnique, mkTcOccUnique :: FastString -> Unique
 -- See Note [The Unique of an OccName] in OccName
-mkVarOccUnique  fs = mkUnique 'i' (iBox (uniqueOfFS fs))
-mkDataOccUnique fs = mkUnique 'd' (iBox (uniqueOfFS fs))
-mkTvOccUnique   fs = mkUnique 'v' (iBox (uniqueOfFS fs))
-mkTcOccUnique   fs = mkUnique 'c' (iBox (uniqueOfFS fs))
+mkVarOccUnique  fs = mkUnique 'i' (uniqueOfFS fs)
+mkDataOccUnique fs = mkUnique 'd' (uniqueOfFS fs)
+mkTvOccUnique   fs = mkUnique 'v' (uniqueOfFS fs)
+mkTcOccUnique   fs = mkUnique 'c' (uniqueOfFS fs)

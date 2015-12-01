@@ -118,12 +118,12 @@ instance Functor FCode where
   fmap f (FCode g) = FCode $ \i s -> case g i s of (# a, s' #) -> (# f a, s' #)
 
 instance A.Applicative FCode where
-      pure = return
+      pure = returnFC
       (<*>) = ap
 
 instance Monad FCode where
         (>>=) = thenFC
-        return = returnFC
+        return = A.pure
 
 {-# INLINE thenC #-}
 {-# INLINE thenFC #-}
@@ -498,7 +498,7 @@ withSelfLoop self_loop code = do
 instance HasDynFlags FCode where
     getDynFlags = liftM cgd_dflags getInfoDown
 
-getThisPackage :: FCode PackageKey
+getThisPackage :: FCode UnitId
 getThisPackage = liftM thisPackage getDynFlags
 
 withInfoDown :: FCode a -> CgInfoDownwards -> FCode a
@@ -576,7 +576,7 @@ getTickScope = do
 tickScope :: FCode a -> FCode a
 tickScope code = do
         info <- getInfoDown
-        if not (gopt Opt_Debug (cgd_dflags info)) then code else do
+        if debugLevel (cgd_dflags info) == 0 then code else do
           u <- newUnique
           let scope' = SubScope u (cgd_tick_scope info)
           withInfoDown code info{ cgd_tick_scope = scope' }
@@ -729,7 +729,7 @@ emitTick = emitCgStmt . CgStmt . CmmTick
 emitUnwind :: GlobalReg -> CmmExpr -> FCode ()
 emitUnwind g e = do
   dflags <- getDynFlags
-  when (gopt Opt_Debug dflags) $
+  when (debugLevel dflags > 0) $
      emitCgStmt $ CgStmt $ CmmUnwind g e
 
 emitAssign :: CmmReg  -> CmmExpr -> FCode ()
@@ -831,7 +831,7 @@ mkCmmIfThenElse e tbranch fbranch = do
   endif <- newLabelC
   tid   <- newLabelC
   fid   <- newLabelC
-  return $ catAGraphs [ mkCbranch e tid fid
+  return $ catAGraphs [ mkCbranch e tid fid Nothing
                       , mkLabel tid tscp, tbranch, mkBranch endif
                       , mkLabel fid tscp, fbranch, mkLabel endif tscp ]
 
@@ -839,14 +839,14 @@ mkCmmIfGoto :: CmmExpr -> BlockId -> FCode CmmAGraph
 mkCmmIfGoto e tid = do
   endif <- newLabelC
   tscp  <- getTickScope
-  return $ catAGraphs [ mkCbranch e tid endif, mkLabel endif tscp ]
+  return $ catAGraphs [ mkCbranch e tid endif Nothing, mkLabel endif tscp ]
 
 mkCmmIfThen :: CmmExpr -> CmmAGraph -> FCode CmmAGraph
 mkCmmIfThen e tbranch = do
   endif <- newLabelC
   tid   <- newLabelC
   tscp  <- getTickScope
-  return $ catAGraphs [ mkCbranch e tid endif
+  return $ catAGraphs [ mkCbranch e tid endif Nothing
                       , mkLabel tid tscp, tbranch, mkLabel endif tscp ]
 
 

@@ -55,6 +55,7 @@ import SysTools
 
 -- Standard libraries
 import Control.Monad
+import Control.Applicative((<|>))
 
 import Data.IORef
 import Data.List
@@ -117,7 +118,7 @@ data PersistentLinkerState
         -- The currently-loaded packages; always object code
         -- Held, as usual, in dependency order; though I am not sure if
         -- that is really important
-        pkgs_loaded :: ![PackageKey],
+        pkgs_loaded :: ![UnitId],
 
         -- we need to remember the name of previous temporary DLL/.so
         -- libraries so we can link them (see #10322)
@@ -138,10 +139,10 @@ emptyPLS _ = PersistentLinkerState {
   --
   -- The linker's symbol table is populated with RTS symbols using an
   -- explicit list.  See rts/Linker.c for details.
-  where init_pkgs = [rtsPackageKey]
+  where init_pkgs = [rtsUnitId]
 
 
-extendLoadedPkgs :: [PackageKey] -> IO ()
+extendLoadedPkgs :: [UnitId] -> IO ()
 extendLoadedPkgs pkgs =
   modifyPLS_ $ \s ->
       return s{ pkgs_loaded = pkgs ++ pkgs_loaded s }
@@ -299,39 +300,47 @@ linkCmdLineLibs dflags = do
 linkCmdLineLibs' :: DynFlags -> PersistentLinkerState -> IO PersistentLinkerState
 linkCmdLineLibs' dflags@(DynFlags { ldInputs     = cmdline_ld_inputs
                                   , libraryPaths = lib_paths}) pls =
-  do  {   -- (c) Link libraries from the command-line
-        ; let minus_ls = [ lib | Option ('-':'l':lib) <- cmdline_ld_inputs ]
-        ; libspecs <- mapM (locateLib dflags False lib_paths) minus_ls
+  do  -- (c) Link libraries from the command-line
+      let minus_ls = [ lib | Option ('-':'l':lib) <- cmdline_ld_inputs ]
+      libspecs <- mapM (locateLib dflags False lib_paths) minus_ls
 
-          -- (d) Link .o files from the command-line
-        ; classified_ld_inputs <- mapM (classifyLdInput dflags)
-                                    [ f | FileOption _ f <- cmdline_ld_inputs ]
+      -- (d) Link .o files from the command-line
+      classified_ld_inputs <- mapM (classifyLdInput dflags)
+                                [ f | FileOption _ f <- cmdline_ld_inputs ]
 
-          -- (e) Link any MacOS frameworks
-        ; let platform = targetPlatform dflags
-        ; let (framework_paths, frameworks) =
-                if platformUsesFrameworks platform
-                 then (frameworkPaths dflags, cmdlineFrameworks dflags)
-                  else ([],[])
+      -- (e) Link any MacOS frameworks
+      let platform = targetPlatform dflags
+      let (framework_paths, frameworks) =
+            if platformUsesFrameworks platform
+             then (frameworkPaths dflags, cmdlineFrameworks dflags)
+              else ([],[])
 
-          -- Finally do (c),(d),(e)
-        ; let cmdline_lib_specs = catMaybes classified_ld_inputs
-                               ++ libspecs
-                               ++ map Framework frameworks
-        ; if null cmdline_lib_specs then return pls
-                                    else do
+      -- Finally do (c),(d),(e)
+      let cmdline_lib_specs = catMaybes classified_ld_inputs
+                           ++ libspecs
+                           ++ map Framework frameworks
+      if null cmdline_lib_specs then return pls
+                                else do
 
-        { pls1 <- foldM (preloadLib dflags lib_paths framework_paths) pls
-                        cmdline_lib_specs
-        ; maybePutStr dflags "final link ... "
-        ; ok <- resolveObjs
+      -- Add directories to library search paths
+      let all_paths = let paths = framework_paths
+                               ++ lib_paths
+                               ++ [ takeDirectory dll | DLLPath dll <- libspecs ]
+                      in nub $ map normalise paths
+      pathCache <- mapM addLibrarySearchPath all_paths
 
-        ; if succeeded ok then maybePutStrLn dflags "done"
-          else throwGhcExceptionIO (ProgramError "linking extra libraries/objects failed")
+      pls1 <- foldM (preloadLib dflags lib_paths framework_paths) pls
+                    cmdline_lib_specs
+      maybePutStr dflags "final link ... "
+      ok <- resolveObjs
 
-        ; return pls1
-        }}
+      -- DLLs are loaded, reset the search paths
+      mapM_ removeLibrarySearchPath $ reverse pathCache
 
+      if succeeded ok then maybePutStrLn dflags "done"
+      else throwGhcExceptionIO (ProgramError "linking extra libraries/objects failed")
+
+      return pls1
 
 {- Note [preload packages]
 
@@ -504,24 +513,20 @@ dieWith dflags span msg = throwGhcExceptionIO (ProgramError (showSDoc dflags (mk
 
 
 checkNonStdWay :: DynFlags -> SrcSpan -> IO (Maybe FilePath)
-checkNonStdWay dflags srcspan =
-  if interpWays == haskellWays
-      then return Nothing
-    -- see #3604: object files compiled for way "dyn" need to link to the
-    -- dynamic packages, so we can't load them into a statically-linked GHCi.
-    -- we have to treat "dyn" in the same way as "prof".
-    --
-    -- In the future when GHCi is dynamically linked we should be able to relax
-    -- this, but they we may have to make it possible to load either ordinary
-    -- .o files or -dynamic .o files into GHCi (currently that's not possible
-    -- because the dynamic objects contain refs to e.g. __stginit_base_Prelude_dyn
-    -- whereas we have __stginit_base_Prelude_.
-      else if objectSuf dflags == normalObjectSuffix && not (null haskellWays)
-      then failNonStd dflags srcspan
-      else return $ Just $ if dynamicGhc
-                           then "dyn_o"
-                           else "o"
-    where haskellWays = filter (not . wayRTSOnly) (ways dflags)
+checkNonStdWay dflags srcspan
+  | interpWays == haskellWays = return Nothing
+    -- Only if we are compiling with the same ways as GHC is built
+    -- with, can we dynamically load those object files. (see #3604)
+
+  | objectSuf dflags == normalObjectSuffix && not (null haskellWays)
+  = failNonStd dflags srcspan
+
+  | otherwise = return (Just (interpTag ++ "o"))
+  where
+    haskellWays = filter (not . wayRTSOnly) (ways dflags)
+    interpTag = case mkBuildTag interpWays of
+                  "" -> ""
+                  tag -> tag ++ "_"
 
 normalObjectSuffix :: String
 normalObjectSuffix = phaseInputExt StopLn
@@ -529,18 +534,20 @@ normalObjectSuffix = phaseInputExt StopLn
 failNonStd :: DynFlags -> SrcSpan -> IO (Maybe FilePath)
 failNonStd dflags srcspan = dieWith dflags srcspan $
   ptext (sLit "Dynamic linking required, but this is a non-standard build (eg. prof).") $$
-  ptext (sLit "You need to build the program twice: once the") <+> ghciWay <+> ptext (sLit "way, and then") $$
+  ptext (sLit "You need to build the program twice: once") <+>
+  ghciWay <> ptext (sLit ", and then") $$
   ptext (sLit "in the desired way using -osuf to set the object file suffix.")
-    where ghciWay = if dynamicGhc
-                    then ptext (sLit "dynamic")
-                    else ptext (sLit "normal")
+    where ghciWay
+            | dynamicGhc = ptext (sLit "with -dynamic")
+            | rtsIsProfiled = ptext (sLit "with -prof")
+            | otherwise = ptext (sLit "the normal way")
 
 getLinkDeps :: HscEnv -> HomePackageTable
             -> PersistentLinkerState
             -> Maybe FilePath                   -- replace object suffices?
             -> SrcSpan                          -- for error messages
             -> [Module]                         -- If you need these
-            -> IO ([Linkable], [PackageKey])     -- ... then link these first
+            -> IO ([Linkable], [UnitId])     -- ... then link these first
 -- Fails with an IO exception if it can't find enough files
 
 getLinkDeps hsc_env hpt pls replace_osuf span mods
@@ -578,8 +585,8 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
         -- tree recursively.  See bug #936, testcase ghci/prog007.
     follow_deps :: [Module]             -- modules to follow
                 -> UniqSet ModuleName         -- accum. module dependencies
-                -> UniqSet PackageKey          -- accum. package dependencies
-                -> IO ([ModuleName], [PackageKey]) -- result
+                -> UniqSet UnitId          -- accum. package dependencies
+                -> IO ([ModuleName], [UnitId]) -- result
     follow_deps []     acc_mods acc_pkgs
         = return (uniqSetToList acc_mods, uniqSetToList acc_pkgs)
     follow_deps (mod:mods) acc_mods acc_pkgs
@@ -593,7 +600,7 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
           when (mi_boot iface) $ link_boot_mod_error mod
 
           let
-            pkg = modulePackageKey mod
+            pkg = moduleUnitId mod
             deps  = mi_deps iface
 
             pkg_deps = dep_pkgs deps
@@ -663,7 +670,7 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
                 ok <- doesFileExist new_file
                 if (not ok)
                    then dieWith dflags span $
-                          ptext (sLit "cannot find normal object file ")
+                          ptext (sLit "cannot find object file ")
                                 <> quotes (text new_file) $$ while_linking_expr
                    else return (DotO new_file)
             adjust_ul _ (DotA fp) = panic ("adjust_ul DotA " ++ show fp)
@@ -1023,7 +1030,7 @@ data LibrarySpec
 
    | DLL String         -- "Unadorned" name of a .DLL/.so
                         --  e.g.    On unix     "qt"  denotes "libqt.so"
-                        --          On WinDoze  "burble"  denotes "burble.DLL"
+                        --          On Windows  "burble"  denotes "burble.DLL" or "libburble.dll"
                         --  loadDLL is platform-specific and adds the lib/.so/.DLL
                         --  suffixes platform-dependently
 
@@ -1059,7 +1066,7 @@ showLS (Framework nm) = "(framework) " ++ nm
 -- automatically, and it doesn't matter what order you specify the input
 -- packages.
 --
-linkPackages :: DynFlags -> [PackageKey] -> IO ()
+linkPackages :: DynFlags -> [UnitId] -> IO ()
 -- NOTE: in fact, since each module tracks all the packages it depends on,
 --       we don't really need to use the package-config dependencies.
 --
@@ -1075,13 +1082,13 @@ linkPackages dflags new_pkgs = do
   modifyPLS_ $ \pls -> do
     linkPackages' dflags new_pkgs pls
 
-linkPackages' :: DynFlags -> [PackageKey] -> PersistentLinkerState
+linkPackages' :: DynFlags -> [UnitId] -> PersistentLinkerState
              -> IO PersistentLinkerState
 linkPackages' dflags new_pks pls = do
     pkgs' <- link (pkgs_loaded pls) new_pks
     return $! pls { pkgs_loaded = pkgs' }
   where
-     link :: [PackageKey] -> [PackageKey] -> IO [PackageKey]
+     link :: [UnitId] -> [UnitId] -> IO [UnitId]
      link pkgs new_pkgs =
          foldM link_one pkgs new_pkgs
 
@@ -1091,14 +1098,13 @@ linkPackages' dflags new_pks pls = do
 
         | Just pkg_cfg <- lookupPackage dflags new_pkg
         = do {  -- Link dependents first
-               pkgs' <- link pkgs [ resolveInstalledPackageId dflags ipid
-                                  | ipid <- depends pkg_cfg ]
+               pkgs' <- link pkgs (depends pkg_cfg)
                 -- Now link the package itself
              ; linkPackage dflags pkg_cfg
              ; return (new_pkg : pkgs') }
 
         | otherwise
-        = throwGhcExceptionIO (CmdLineError ("unknown package: " ++ packageKeyString new_pkg))
+        = throwGhcExceptionIO (CmdLineError ("unknown package: " ++ unitIdString new_pkg))
 
 
 linkPackage :: DynFlags -> PackageConfig -> IO ()
@@ -1118,7 +1124,7 @@ linkPackage dflags pkg
         -- Because of slight differences between the GHC dynamic linker and
         -- the native system linker some packages have to link with a
         -- different list of libraries when using GHCi. Examples include: libs
-        -- that are actually gnu ld scripts, and the possability that the .a
+        -- that are actually gnu ld scripts, and the possibility that the .a
         -- libs do not exactly match the .so/.dll equivalents. So if the
         -- package file provides an "extra-ghci-libraries" field then we use
         -- that instead of the "extra-libraries" field.
@@ -1138,6 +1144,11 @@ linkPackage dflags pkg
             objs       = [ obj  | Object obj     <- classifieds ]
             archs      = [ arch | Archive arch   <- classifieds ]
 
+        -- Add directories to library search paths
+        let dll_paths  = map takeDirectory known_dlls
+            all_paths  = nub $ map normalise $ dll_paths ++ dirs
+        pathCache <- mapM addLibrarySearchPath all_paths
+
         maybePutStr dflags
             ("Loading package " ++ sourcePackageIdString pkg ++ " ... ")
 
@@ -1145,6 +1156,9 @@ linkPackage dflags pkg
         when (packageName pkg `notElem` partOfGHCi) $ do
             loadFrameworks platform pkg
             mapM_ load_dyn (known_dlls ++ map (mkSOName platform) dlls)
+
+        -- DLLs are loaded, reset the search paths
+        mapM_ removeLibrarySearchPath $ reverse pathCache
 
         -- After loading all the DLLs, we can load the static objects.
         -- Ordering isn't important here, because we do one final link
@@ -1196,41 +1210,64 @@ locateLib dflags is_hs dirs lib
     -- For non-Haskell libraries (e.g. gmp, iconv):
     --   first look in library-dirs for a dynamic library (libfoo.so)
     --   then  look in library-dirs for a static library (libfoo.a)
+    --   first look in library-dirs and inplace GCC for a dynamic library (libfoo.so)
+    --   then  check for system dynamic libraries (e.g. kernel32.dll on windows)
     --   then  try "gcc --print-file-name" to search gcc's search path
+    --   then  look in library-dirs and inplace GCC for a static library (libfoo.a)
     --       for a dynamic library (#5289)
     --   otherwise, assume loadDLL can find it
     --
-  = findDll `orElse` findArchive `orElse` tryGcc `orElse` assumeDll
+  = findDll     `orElse`
+    findSysDll  `orElse`
+    tryGcc      `orElse`
+    findArchive `orElse`
+    assumeDll
 
-  | not dynamicGhc
-    -- When the GHC package was not compiled as dynamic library
-    -- (=DYNAMIC not set), we search for .o libraries or, if they
-    -- don't exist, .a libraries.
-  = findObject `orElse` findArchive `orElse` assumeDll
-
-  | otherwise
+  | dynamicGhc
     -- When the GHC package was compiled as dynamic library (=DYNAMIC set),
     -- we search for .so libraries first.
-  = findHSDll `orElse` findDynObject `orElse` assumeDll
+  = findHSDll     `orElse`
+    findDynObject `orElse`
+    assumeDll
+
+  | rtsIsProfiled
+    -- When the GHC package is profiled, only a libHSfoo_p.a archive will do.
+  = findArchive `orElse`
+    assumeDll
+
+  | otherwise
+    -- HSfoo.o is the best, but only works for the normal way
+    -- libHSfoo.a is the backup option.
+  = findObject  `orElse`
+    findArchive `orElse`
+    assumeDll
+
    where
      obj_file     = lib <.> "o"
      dyn_obj_file = lib <.> "dyn_o"
-     arch_file    = "lib" ++ lib <.> "a"
+     arch_file = "lib" ++ lib ++ lib_tag <.> "a"
+     lib_tag = if is_hs && rtsIsProfiled then "_p" else ""
 
      hs_dyn_lib_name = lib ++ '-':programName dflags ++ projectVersion dflags
      hs_dyn_lib_file = mkHsSOName platform hs_dyn_lib_name
 
      so_name = mkSOName platform lib
+     lib_so_name = "lib" ++ so_name
      dyn_lib_file = case (arch, os) of
                              (ArchX86_64, OSSolaris2) -> "64" </> so_name
                              _ -> so_name
 
      findObject     = liftM (fmap Object)  $ findFile dirs obj_file
      findDynObject  = liftM (fmap Object)  $ findFile dirs dyn_obj_file
-     findArchive    = liftM (fmap Archive) $ findFile dirs arch_file
+     findArchive    = let local  = liftM (fmap Archive) $ findFile dirs arch_file
+                          linked = liftM (fmap Archive) $ searchForLibUsingGcc dflags arch_file dirs
+                      in liftM2 (<|>) local linked
      findHSDll      = liftM (fmap DLLPath) $ findFile dirs hs_dyn_lib_file
      findDll        = liftM (fmap DLLPath) $ findFile dirs dyn_lib_file
-     tryGcc         = liftM (fmap DLLPath) $ searchForLibUsingGcc dflags so_name dirs
+     findSysDll     = fmap (fmap $ DLL . takeFileName) $ findSystemLibrary so_name
+     tryGcc         = let short = liftM (fmap DLLPath) $ searchForLibUsingGcc dflags so_name     dirs
+                          full  = liftM (fmap DLLPath) $ searchForLibUsingGcc dflags lib_so_name dirs
+                      in liftM2 (<|>) short full
 
      assumeDll   = return (DLL lib)
      infixr `orElse`
@@ -1242,7 +1279,9 @@ locateLib dflags is_hs dirs lib
 
 searchForLibUsingGcc :: DynFlags -> String -> [FilePath] -> IO (Maybe FilePath)
 searchForLibUsingGcc dflags so dirs = do
-   str <- askCc dflags (map (FileOption "-L") dirs
+   -- GCC does not seem to extend the library search path (using -L) when using
+   -- --print-file-name. So instead pass it a new base location.
+   str <- askCc dflags (map (FileOption "-B") dirs
                           ++ [Option "--print-file-name", Option so])
    let file = case lines str of
                 []  -> ""

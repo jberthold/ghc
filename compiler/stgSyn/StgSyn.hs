@@ -49,6 +49,7 @@ module StgSyn (
 import Bitmap
 import CoreSyn     ( AltCon, Tickish )
 import CostCentre  ( CostCentreStack )
+import Data.List   ( intersperse )
 import DataCon
 import DynFlags
 import FastString
@@ -174,7 +175,7 @@ function. (If the arguments were expressions, we would have to build
 their closures first.)
 
 There is no constructor for a lone variable; it would appear as
-@StgApp var [] _@.
+@StgApp var []@.
 -}
 
 type GenStgLiveVars occ = UniqSet occ
@@ -191,7 +192,7 @@ data GenStgExpr bndr occ
 *                                                                      *
 ************************************************************************
 
-There are a specialised forms of application, for constructors,
+There are specialised forms of application, for constructors,
 primitives, and literals.
 -}
 
@@ -646,7 +647,7 @@ pprStgBinding :: StgBinding -> SDoc
 pprStgBinding  bind  = pprGenStgBinding bind
 
 pprStgBindings :: [StgBinding] -> SDoc
-pprStgBindings binds = vcat (map pprGenStgBinding binds)
+pprStgBindings binds = vcat $ intersperse blankLine (map pprGenStgBinding binds)
 
 instance (Outputable bdee) => Outputable (GenStgArg bdee) where
     ppr = pprStgArg

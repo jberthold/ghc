@@ -82,6 +82,7 @@ import qualified Stream
 
 import Data.List
 import Data.Maybe
+import Data.Ord         ( comparing )
 import Control.Exception
 #if __GLASGOW_HASKELL__ < 709
 import Control.Applicative (Applicative(..))
@@ -300,7 +301,7 @@ finishNativeGen :: Instruction instr
 finishNativeGen dflags modLoc bufh@(BufHandle _ _ h) us ngs
  = do
         -- Write debug data and finish
-        let emitDw = gopt Opt_Debug dflags && not (gopt Opt_SplitObjs dflags)
+        let emitDw = debugLevel dflags > 0 && not (gopt Opt_SplitObjs dflags)
         us' <- if not emitDw then return us else do
           (dwarf, us') <- dwarfGen dflags modLoc us (ngs_debug ngs)
           emitNativeCode dflags bufh dwarf
@@ -366,16 +367,16 @@ cmmNativeGenStream dflags this_mod modLoc ncgImpl h us cmm_stream ngs
         Right (cmms, cmm_stream') -> do
 
           -- Generate debug information
-          let debugFlag = gopt Opt_Debug dflags
+          let debugFlag = debugLevel dflags > 0
               !ndbgs | debugFlag = cmmDebugGen modLoc cmms
                      | otherwise = []
               dbgMap = debugToMap ndbgs
 
           -- Insert split marker, generate native code
-          let splitFlag = gopt Opt_SplitObjs dflags
+          let splitObjs = gopt Opt_SplitObjs dflags
               split_marker = CmmProc mapEmpty mkSplitMarkerLabel [] $
                              ofBlockList (panic "split_marker_entry") []
-              cmms' | splitFlag  = split_marker : cmms
+              cmms' | splitObjs  = split_marker : cmms
                     | otherwise  = cmms
           (ngs',us') <- cmmNativeGens dflags this_mod modLoc ncgImpl h dbgMap us
                                       cmms' ngs 0
@@ -387,8 +388,10 @@ cmmNativeGenStream dflags this_mod modLoc ncgImpl h us cmm_stream ngs
 
           -- Emit & clear DWARF information when generating split
           -- object files, as we need it to land in the same object file
+          -- When using split sections, note that we do not split the debug
+          -- info but emit all the info at once in finishNativeGen.
           (ngs'', us'') <-
-            if debugFlag && splitFlag
+            if debugFlag && splitObjs
             then do (dwarf, us'') <- dwarfGen dflags modLoc us ldbgs
                     emitNativeCode dflags h dwarf
                     return (ngs' { ngs_debug = []
@@ -428,18 +431,21 @@ cmmNativeGens dflags this_mod modLoc ncgImpl h dbgMap us
              cmmNativeGen dflags this_mod modLoc ncgImpl us fileIds dbgMap
                           cmm count
 
-        let newFileIds = fileIds' `minusUFM` fileIds
+        -- Generate .file directives for every new file that has been
+        -- used. Note that it is important that we generate these in
+        -- ascending order, as Clang's 3.6 assembler complains.
+        let newFileIds = sortBy (comparing snd) $ eltsUFM $ fileIds' `minusUFM` fileIds
             pprDecl (f,n) = ptext (sLit "\t.file ") <> ppr n <+>
                             doubleQuotes (ftext f)
 
         emitNativeCode dflags h $ vcat $
-          map pprDecl (eltsUFM newFileIds) ++
+          map pprDecl newFileIds ++
           map (pprNatCmmDecl ncgImpl) native
 
         -- force evaluation all this stuff to avoid space leaks
         {-# SCC "seqString" #-} evaluate $ seqString (showSDoc dflags $ vcat $ map ppr imports)
 
-        let !labels' = if gopt Opt_Debug dflags
+        let !labels' = if debugLevel dflags > 0
                        then cmmDebugLabels isMetaInstr native else []
             !natives' = if dopt Opt_D_dump_asm_stats dflags
                         then native : ngs_natives ngs else []
@@ -975,11 +981,11 @@ instance Functor CmmOptM where
     fmap = liftM
 
 instance Applicative CmmOptM where
-    pure = return
+    pure x = CmmOptM $ \_ _ imports -> (# x, imports #)
     (<*>) = ap
 
 instance Monad CmmOptM where
-  return x = CmmOptM $ \_ _ imports -> (# x, imports #)
+  return = pure
   (CmmOptM f) >>= g =
     CmmOptM $ \dflags this_mod imports ->
                 case f dflags this_mod imports of
@@ -1046,12 +1052,12 @@ cmmStmtConFold stmt
                  args' <- mapM (cmmExprConFold DataReference) args
                  return $ CmmUnsafeForeignCall target' regs args'
 
-        CmmCondBranch test true false
+        CmmCondBranch test true false likely
            -> do test' <- cmmExprConFold DataReference test
                  return $ case test' of
                    CmmLit (CmmInt 0 _) -> CmmBranch false
                    CmmLit (CmmInt _ _) -> CmmBranch true
-                   _other -> CmmCondBranch test' true false
+                   _other -> CmmCondBranch test' true false likely
 
         CmmSwitch expr ids
            -> do expr' <- cmmExprConFold DataReference expr
@@ -1118,15 +1124,15 @@ cmmExprNative referenceKind expr = do
         CmmReg (CmmGlobal EagerBlackholeInfo)
           | arch == ArchPPC && not (gopt Opt_PIC dflags)
           -> cmmExprNative referenceKind $
-             CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageKey (fsLit "__stg_EAGER_BLACKHOLE_info")))
+             CmmLit (CmmLabel (mkCmmCodeLabel rtsUnitId (fsLit "__stg_EAGER_BLACKHOLE_info")))
         CmmReg (CmmGlobal GCEnter1)
           | arch == ArchPPC && not (gopt Opt_PIC dflags)
           -> cmmExprNative referenceKind $
-             CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageKey (fsLit "__stg_gc_enter_1")))
+             CmmLit (CmmLabel (mkCmmCodeLabel rtsUnitId (fsLit "__stg_gc_enter_1")))
         CmmReg (CmmGlobal GCFun)
           | arch == ArchPPC && not (gopt Opt_PIC dflags)
           -> cmmExprNative referenceKind $
-             CmmLit (CmmLabel (mkCmmCodeLabel rtsPackageKey (fsLit "__stg_gc_fun")))
+             CmmLit (CmmLabel (mkCmmCodeLabel rtsUnitId (fsLit "__stg_gc_fun")))
 
         other
            -> return other

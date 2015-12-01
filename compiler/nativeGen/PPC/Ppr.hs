@@ -7,18 +7,7 @@
 -----------------------------------------------------------------------------
 
 {-# OPTIONS_GHC -fno-warn-orphans #-}
-module PPC.Ppr (
-        pprNatCmmDecl,
-        pprBasicBlock,
-        pprSectionHeader,
-        pprData,
-        pprInstr,
-        pprFormat,
-        pprImm,
-        pprDataItem,
-)
-
-where
+module PPC.Ppr (pprNatCmmDecl) where
 
 import PPC.Regs
 import PPC.Instr
@@ -49,7 +38,7 @@ import Data.Bits
 
 pprNatCmmDecl :: NatCmmDecl CmmStatics Instr -> SDoc
 pprNatCmmDecl (CmmData section dats) =
-  pprSectionHeader section $$ pprDatas dats
+  pprSectionAlign section $$ pprDatas dats
 
 pprNatCmmDecl proc@(CmmProc top_info lbl _ (ListGraph blocks)) =
   case topInfoTable proc of
@@ -59,7 +48,7 @@ pprNatCmmDecl proc@(CmmProc top_info lbl _ (ListGraph blocks)) =
          []     -> -- special case for split markers:
            pprLabel lbl
          blocks -> -- special case for code without info table:
-           pprSectionHeader Text $$
+           pprSectionAlign (Section Text lbl) $$
            (case platformArch platform of
               ArchPPC_64 ELF_V1 -> pprFunctionDescriptor lbl
               ArchPPC_64 ELF_V2 -> pprFunctionPrologue lbl
@@ -69,22 +58,21 @@ pprNatCmmDecl proc@(CmmProc top_info lbl _ (ListGraph blocks)) =
 
     Just (Statics info_lbl _) ->
       sdocWithPlatform $ \platform ->
+      pprSectionAlign (Section Text info_lbl) $$
       (if platformHasSubsectionsViaSymbols platform
-          then pprSectionHeader Text $$
-               ppr (mkDeadStripPreventer info_lbl) <> char ':'
+          then ppr (mkDeadStripPreventer info_lbl) <> char ':'
           else empty) $$
       vcat (map (pprBasicBlock top_info) blocks) $$
-         -- above: Even the first block gets a label, because with branch-chain
-         -- elimination, it might be the target of a goto.
-            (if platformHasSubsectionsViaSymbols platform
-             then
-             -- See Note [Subsections Via Symbols]
-                      text "\t.long "
-                  <+> ppr info_lbl
-                  <+> char '-'
-                  <+> ppr (mkDeadStripPreventer info_lbl)
-             else empty)
-
+      -- above: Even the first block gets a label, because with branch-chain
+      -- elimination, it might be the target of a goto.
+      (if platformHasSubsectionsViaSymbols platform
+       then
+       -- See Note [Subsections Via Symbols]
+                text "\t.long "
+            <+> ppr info_lbl
+            <+> char '-'
+            <+> ppr (mkDeadStripPreventer info_lbl)
+       else empty)
 
 pprFunctionDescriptor :: CLabel -> SDoc
 pprFunctionDescriptor lab = pprGloblDecl lab
@@ -124,7 +112,7 @@ pprBasicBlock info_env (BasicBlock blockid instrs)
     maybe_infotable = case mapLookup blockid info_env of
        Nothing   -> empty
        Just (Statics info_lbl info) ->
-           pprSectionHeader Text $$
+           pprSectionAlign (Section Text info_lbl) $$
            vcat (map pprData info) $$
            pprLabel info_lbl
 
@@ -246,10 +234,10 @@ pprFormat x
                 FF32        -> sLit "fs"
                 FF64        -> sLit "fd"
                 _        -> panic "PPC.Ppr.pprFormat: no match")
-                
-                
+
+
 pprCond :: Cond -> SDoc
-pprCond c 
+pprCond c
  = ptext (case c of {
                 ALWAYS  -> sLit "";
                 EQQ        -> sLit "eq";        NE    -> sLit "ne";
@@ -314,35 +302,33 @@ pprAddr (AddrRegImm r1 (ImmInteger i)) = hcat [ integer i, char '(', pprReg r1, 
 pprAddr (AddrRegImm r1 imm) = hcat [ pprImm imm, char '(', pprReg r1, char ')' ]
 
 
-pprSectionHeader :: Section -> SDoc
-pprSectionHeader seg =
+pprSectionAlign :: Section -> SDoc
+pprSectionAlign sec@(Section seg _) =
  sdocWithPlatform $ \platform ->
  let osDarwin = platformOS platform == OSDarwin
      ppc64    = not $ target32Bit platform
- in
- case seg of
-  Text              -> text ".text\n\t.align 2"
-  Data
-   | ppc64          -> text ".data\n.align 3"
-   | otherwise      -> text ".data\n.align 2"
-  ReadOnlyData
-   | osDarwin       -> text ".const\n\t.align 2"
-   | ppc64          -> text ".section .rodata\n\t.align 3"
-   | otherwise      -> text ".section .rodata\n\t.align 2"
-  RelocatableReadOnlyData
-   | osDarwin       -> text ".const_data\n\t.align 2"
-   | ppc64          -> text ".data\n\t.align 3"
-   | otherwise      -> text ".data\n\t.align 2"
-  UninitialisedData
-   | osDarwin       -> text ".const_data\n\t.align 2"
-   | ppc64          -> text ".section .bss\n\t.align 3"
-   | otherwise      -> text ".section .bss\n\t.align 2"
-  ReadOnlyData16
-   | osDarwin       -> text ".const\n\t.align 4"
-   | otherwise      -> text ".section .rodata\n\t.align 4"
-  OtherSection _ ->
-      panic "PprMach.pprSectionHeader: unknown section"
-
+     align    = ptext $ case seg of
+       Text              -> sLit ".align 2"
+       Data
+        | ppc64          -> sLit ".align 3"
+        | otherwise      -> sLit ".align 2"
+       ReadOnlyData
+        | osDarwin       -> sLit ".align 2"
+        | ppc64          -> sLit ".align 3"
+        | otherwise      -> sLit ".align 2"
+       RelocatableReadOnlyData
+        | osDarwin       -> sLit ".align 2"
+        | ppc64          -> sLit ".align 3"
+        | otherwise      -> sLit ".align 2"
+       UninitialisedData
+        | osDarwin       -> sLit ".align 2"
+        | ppc64          -> sLit ".align 3"
+        | otherwise      -> sLit ".align 2"
+       ReadOnlyData16
+        | osDarwin       -> sLit ".align 4"
+        | otherwise      -> sLit ".align 4"
+       OtherSection _    -> panic "PprMach.pprSectionAlign: unknown section"
+ in pprSectionHeader platform sec $$ align
 
 pprDataItem :: CmmLit -> SDoc
 pprDataItem lit
@@ -373,7 +359,7 @@ pprDataItem lit
         ppr_item II64 (CmmInt x _) dflags
            | not(archPPC_64 dflags) =
                 [ptext (sLit "\t.long\t")
-                    <> int (fromIntegral 
+                    <> int (fromIntegral
                         (fromIntegral (x `shiftR` 32) :: Word32)),
                  ptext (sLit "\t.long\t")
                     <> int (fromIntegral (fromIntegral x :: Word32))]
@@ -437,6 +423,15 @@ pprInstr (LD fmt reg addr) = hcat [
         ptext (sLit ", "),
         pprAddr addr
     ]
+pprInstr (LDFAR fmt reg (AddrRegImm source off)) =
+   sdocWithPlatform $ \platform -> vcat [
+         pprInstr (ADDIS (tmpReg platform) source (HA off)),
+         pprInstr (LD fmt reg (AddrRegImm (tmpReg platform) (LO off)))
+    ]
+
+pprInstr (LDFAR _ _ _) =
+   panic "PPC.Ppr.pprInstr LDFAR: no match"
+
 pprInstr (LA fmt reg addr) = hcat [
         char '\t',
         ptext (sLit "l"),
@@ -467,6 +462,14 @@ pprInstr (ST fmt reg addr) = hcat [
         ptext (sLit ", "),
         pprAddr addr
     ]
+pprInstr (STFAR fmt reg (AddrRegImm source off)) =
+   sdocWithPlatform $ \platform -> vcat [
+         pprInstr (ADDIS (tmpReg platform) source (HA off)),
+         pprInstr (ST fmt reg (AddrRegImm (tmpReg platform) (LO off)))
+    ]
+
+pprInstr (STFAR _ _ _) =
+   panic "PPC.Ppr.pprInstr STFAR: no match"
 pprInstr (STU fmt reg addr) = hcat [
         char '\t',
         ptext (sLit "st"),
@@ -494,7 +497,7 @@ pprInstr (LI reg imm) = hcat [
         ptext (sLit ", "),
         pprImm imm
     ]
-pprInstr (MR reg1 reg2) 
+pprInstr (MR reg1 reg2)
     | reg1 == reg2 = empty
     | otherwise = hcat [
         char '\t',
@@ -693,6 +696,26 @@ pprInstr (EXTS fmt reg1 reg2) = hcat [
 pprInstr (NEG reg1 reg2) = pprUnary (sLit "neg") reg1 reg2
 pprInstr (NOT reg1 reg2) = pprUnary (sLit "not") reg1 reg2
 
+pprInstr (SR II32 reg1 reg2 (RIImm (ImmInt i))) | i < 0  || i > 31 =
+    -- Handle the case where we are asked to shift a 32 bit register by
+    -- less than zero or more than 31 bits. We convert this into a clear
+    -- of the destination register.
+    -- Fixes ticket http://ghc.haskell.org/trac/ghc/ticket/5900
+    pprInstr (XOR reg1 reg2 (RIReg reg2))
+
+pprInstr (SL II32 reg1 reg2 (RIImm (ImmInt i))) | i < 0  || i > 31 =
+    -- As above for SR, but for left shifts.
+    -- Fixes ticket http://ghc.haskell.org/trac/ghc/ticket/10870
+    pprInstr (XOR reg1 reg2 (RIReg reg2))
+
+pprInstr (SRA II32 reg1 reg2 (RIImm (ImmInt i))) | i > 31 =
+    -- PT: I don't know what to do for negative shift amounts:
+    -- For now just panic.
+    --
+    -- For shift amounts greater than 31 set all bit to the
+    -- value of the sign bit, this also what sraw does.
+    pprInstr (SRA II32 reg1 reg2 (RIImm (ImmInt 31)))
+
 pprInstr (SL fmt reg1 reg2 ri) =
          let op = case fmt of
                        II32 -> "slw"
@@ -700,12 +723,6 @@ pprInstr (SL fmt reg1 reg2 ri) =
                        _    -> panic "PPC.Ppr.pprInstr: shift illegal size"
          in pprLogic (sLit op) reg1 reg2 (limitShiftRI fmt ri)
 
-pprInstr (SR II32 reg1 reg2 (RIImm (ImmInt i))) | i > 31 || i < 0 =
-    -- Handle the case where we are asked to shift a 32 bit register by
-    -- less than zero or more than 31 bits. We convert this into a clear
-    -- of the destination register.
-    -- Fixes ticket http://ghc.haskell.org/trac/ghc/ticket/5900
-    pprInstr (XOR reg1 reg2 (RIReg reg2))
 pprInstr (SR fmt reg1 reg2 ri) =
          let op = case fmt of
                        II32 -> "srw"
@@ -732,7 +749,7 @@ pprInstr (RLWINM reg1 reg2 sh mb me) = hcat [
         ptext (sLit ", "),
         int me
     ]
-    
+
 pprInstr (FADD fmt reg1 reg2 reg3) = pprBinaryF (sLit "fadd") fmt reg1 reg2 reg3
 pprInstr (FSUB fmt reg1 reg2 reg3) = pprBinaryF (sLit "fsub") fmt reg1 reg2 reg3
 pprInstr (FMUL fmt reg1 reg2 reg3) = pprBinaryF (sLit "fmul") fmt reg1 reg2 reg3
@@ -799,6 +816,22 @@ pprInstr LWSYNC = ptext (sLit "\tlwsync")
 
 pprInstr NOP = ptext (sLit "\tnop")
 
+pprInstr (UPDATE_SP fmt amount@(ImmInt offset))
+   | fits16Bits offset = vcat [
+       pprInstr (LD fmt r0 (AddrRegImm sp (ImmInt 0))),
+       pprInstr (STU fmt r0 (AddrRegImm sp amount))
+     ]
+
+pprInstr (UPDATE_SP fmt amount)
+   = sdocWithPlatform $ \platform ->
+       let tmp = tmpReg platform in
+         vcat [
+           pprInstr (LD fmt r0 (AddrRegImm sp (ImmInt 0))),
+           pprInstr (ADDIS tmp sp (HA amount)),
+           pprInstr (ADD tmp tmp (RIImm (LO amount))),
+           pprInstr (STU fmt r0 (AddrRegReg sp tmp))
+         ]
+
 -- pprInstr _ = panic "pprInstr (ppc)"
 
 
@@ -841,7 +874,7 @@ pprBinaryF op fmt reg1 reg2 reg3 = hcat [
         ptext (sLit ", "),
         pprReg reg3
     ]
-    
+
 pprRI :: RI -> SDoc
 pprRI (RIReg r) = pprReg r
 pprRI (RIImm r) = pprImm r

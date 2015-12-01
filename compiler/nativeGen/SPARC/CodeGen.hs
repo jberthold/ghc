@@ -148,9 +148,10 @@ stmtToInstrs stmt = do
        -> genCCall target result_regs args
 
     CmmBranch   id              -> genBranch id
-    CmmCondBranch arg true false -> do b1 <- genCondJump true arg
-                                       b2 <- genBranch false
-                                       return (b1 `appOL` b2)
+    CmmCondBranch arg true false _ -> do
+      b1 <- genCondJump true arg
+      b2 <- genBranch false
+      return (b1 `appOL` b2)
     CmmSwitch arg ids   -> do dflags <- getDynFlags
                               genSwitch dflags arg ids
     CmmCall { cml_target = arg } -> genJump arg
@@ -341,8 +342,8 @@ genSwitch dflags expr targets
 generateJumpTableForInstr :: DynFlags -> Instr
                           -> Maybe (NatCmmDecl CmmStatics Instr)
 generateJumpTableForInstr dflags (JMP_TBL _ ids label) =
-        let jumpTable = map (jumpTableEntry dflags) ids
-        in Just (CmmData ReadOnlyData (Statics label jumpTable))
+  let jumpTable = map (jumpTableEntry dflags) ids
+  in Just (CmmData (Section ReadOnlyData label) (Statics label jumpTable))
 generateJumpTableForInstr _ _ = Nothing
 
 
@@ -659,6 +660,7 @@ outOfLineMachOp_table mop
         MO_U_QuotRem {}  -> unsupported
         MO_U_QuotRem2 {} -> unsupported
         MO_Add2 {}       -> unsupported
+        MO_SubWordC {}   -> unsupported
         MO_AddIntC {}    -> unsupported
         MO_SubIntC {}    -> unsupported
         MO_U_Mul2 {}     -> unsupported

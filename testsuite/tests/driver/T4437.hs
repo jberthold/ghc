@@ -33,7 +33,9 @@ expectedGhcOnlyExtensions :: [String]
 expectedGhcOnlyExtensions = ["RelaxedLayout",
                              "AlternativeLayoutRule",
                              "AlternativeLayoutRuleTransitional",
-                             "StaticPointers"]
+                             "OverloadedLabels",
+                             "TemplateHaskellQuotes",
+                             "MonadFailDesugaring"]
 
 expectedCabalOnlyExtensions :: [String]
 expectedCabalOnlyExtensions = ["Generics",
@@ -47,4 +49,3 @@ expectedCabalOnlyExtensions = ["Generics",
                                "Safe",
                                "Unsafe",
                                "Trustworthy"]
-

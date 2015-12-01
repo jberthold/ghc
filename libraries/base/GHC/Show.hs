@@ -50,8 +50,8 @@ module GHC.Show
         where
 
 import GHC.Base
-import GHC.Num
 import GHC.List ((!!), foldr1, break)
+import GHC.Num
 
 -- | The @shows@ functions return a function that prepends the
 -- output 'String' to an existing 'String'.  This allows constant-time
@@ -193,6 +193,16 @@ showWord w# cs
                    showWord (w# `quotWord#` 10##) (C# c# : cs)
 
 deriving instance Show a => Show (Maybe a)
+
+instance Show TyCon where
+  showsPrec p (TyCon _ _ _ tc_name) = showsPrec p tc_name
+
+instance Show TrName where
+  showsPrec _ (TrNameS s) = showString (unpackCString# s)
+  showsPrec _ (TrNameD s) = showString s
+
+instance Show Module where
+  showsPrec _ (Module p m) = shows p . (':' :) . shows m
 
 --------------------------------------------------------------
 -- Show instances for the first few tuple

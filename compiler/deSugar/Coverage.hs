@@ -3,7 +3,7 @@
 (c) University of Glasgow, 2007
 -}
 
-{-# LANGUAGE NondecreasingIndentation #-}
+{-# LANGUAGE CPP, NondecreasingIndentation #-}
 
 module Coverage (addTicksToBinds, hpcInitCode) where
 
@@ -153,8 +153,8 @@ writeMixEntries dflags mod count entries filename
             mod_name = moduleNameString (moduleName mod)
 
             hpc_mod_dir
-              | modulePackageKey mod == mainPackageKey  = hpc_dir
-              | otherwise = hpc_dir ++ "/" ++ packageKeyString (modulePackageKey mod)
+              | moduleUnitId mod == mainUnitId  = hpc_dir
+              | otherwise = hpc_dir ++ "/" ++ unitIdString (moduleUnitId mod)
 
             tabStop = 8 -- <tab> counts as a normal char in GHC's location ranges.
 
@@ -461,10 +461,11 @@ addBinTickLHsExpr boxLabel (L pos e0)
 -- Decoarate an HsExpr with ticks
 
 addTickHsExpr :: HsExpr Id -> TM (HsExpr Id)
-addTickHsExpr e@(HsVar id)       = do freeVar id; return e
+addTickHsExpr e@(HsVar (L _ id)) = do freeVar id; return e
 addTickHsExpr (HsUnboundVar {})  = panic "addTickHsExpr.HsUnboundVar"
 addTickHsExpr e@(HsIPVar _)      = return e
 addTickHsExpr e@(HsOverLit _)    = return e
+addTickHsExpr e@(HsOverLabel _)  = return e
 addTickHsExpr e@(HsLit _)        = return e
 addTickHsExpr (HsLam matchgroup) = liftM HsLam (addTickMatchGroup True matchgroup)
 addTickHsExpr (HsLamCase ty mgs) = liftM (HsLamCase ty) (addTickMatchGroup True mgs)
@@ -508,14 +509,14 @@ addTickHsExpr (HsMultiIf ty alts)
   = do { let isOneOfMany = case alts of [_] -> False; _ -> True
        ; alts' <- mapM (liftL $ addTickGRHS isOneOfMany False) alts
        ; return $ HsMultiIf ty alts' }
-addTickHsExpr (HsLet binds e) =
+addTickHsExpr (HsLet (L l binds) e) =
         bindLocals (collectLocalBinders binds) $
-        liftM2 HsLet
-                (addTickHsLocalBinds binds) -- to think about: !patterns.
-                (addTickLHsExprLetBody e)
-addTickHsExpr (HsDo cxt stmts srcloc)
+          liftM2 (HsLet . L l)
+                  (addTickHsLocalBinds binds) -- to think about: !patterns.
+                  (addTickLHsExprLetBody e)
+addTickHsExpr (HsDo cxt (L l stmts) srcloc)
   = do { (stmts', _) <- addTickLStmts' forQual stmts (return ())
-       ; return (HsDo cxt stmts' srcloc) }
+       ; return (HsDo cxt (L l stmts') srcloc) }
   where
         forQual = case cxt of
                     ListComp -> Just $ BinBox QualBinBox
@@ -535,16 +536,14 @@ addTickHsExpr (ExplicitPArr ty es) =
 
 addTickHsExpr (HsStatic e) = HsStatic <$> addTickLHsExpr e
 
-addTickHsExpr (RecordCon id ty rec_binds) =
-        liftM3 RecordCon
-                (return id)
-                (return ty)
-                (addTickHsRecordBinds rec_binds)
-addTickHsExpr (RecordUpd e rec_binds cons tys1 tys2) =
-        liftM5 RecordUpd
-                (addTickLHsExpr e)
-                (addTickHsRecordBinds rec_binds)
-                (return cons) (return tys1) (return tys2)
+addTickHsExpr expr@(RecordCon { rcon_flds = rec_binds })
+  = do { rec_binds' <- addTickHsRecordBinds rec_binds
+       ; return (expr { rcon_flds = rec_binds' }) }
+
+addTickHsExpr expr@(RecordUpd { rupd_expr = e, rupd_flds = flds })
+  = do { e' <- addTickLHsExpr e
+       ; flds' <- mapM addTickHsRecField flds
+       ; return (expr { rupd_expr = e', rupd_flds = flds' }) }
 
 addTickHsExpr (ExprWithTySigOut e ty) =
         liftM2 ExprWithTySigOut
@@ -608,10 +607,10 @@ addTickTupArg (L l (Present e))  = do { e' <- addTickLHsExpr e
 addTickTupArg (L l (Missing ty)) = return (L l (Missing ty))
 
 addTickMatchGroup :: Bool{-is lambda-} -> MatchGroup Id (LHsExpr Id) -> TM (MatchGroup Id (LHsExpr Id))
-addTickMatchGroup is_lam mg@(MG { mg_alts = matches }) = do
+addTickMatchGroup is_lam mg@(MG { mg_alts = L l matches }) = do
   let isOneOfMany = matchesOneOfMany matches
   matches' <- mapM (liftL (addTickMatch isOneOfMany is_lam)) matches
-  return $ mg { mg_alts = matches' }
+  return $ mg { mg_alts = L l matches' }
 
 addTickMatch :: Bool -> Bool -> Match Id (LHsExpr Id) -> TM (Match Id (LHsExpr Id))
 addTickMatch isOneOfMany isLambda (Match mf pats opSig gRHSs) =
@@ -620,11 +619,11 @@ addTickMatch isOneOfMany isLambda (Match mf pats opSig gRHSs) =
     return $ Match mf pats opSig gRHSs'
 
 addTickGRHSs :: Bool -> Bool -> GRHSs Id (LHsExpr Id) -> TM (GRHSs Id (LHsExpr Id))
-addTickGRHSs isOneOfMany isLambda (GRHSs guarded local_binds) = do
+addTickGRHSs isOneOfMany isLambda (GRHSs guarded (L l local_binds)) = do
   bindLocals binders $ do
     local_binds' <- addTickHsLocalBinds local_binds
     guarded' <- mapM (liftL (addTickGRHS isOneOfMany isLambda)) guarded
-    return $ GRHSs guarded' local_binds'
+    return $ GRHSs guarded' (L l local_binds')
   where
     binders = collectLocalBinders local_binds
 
@@ -660,9 +659,10 @@ addTickLStmts' isGuard lstmts res
        ; return (lstmts', a) }
 
 addTickStmt :: (Maybe (Bool -> BoxLabel)) -> Stmt Id (LHsExpr Id) -> TM (Stmt Id (LHsExpr Id))
-addTickStmt _isGuard (LastStmt e ret) = do
-        liftM2 LastStmt
+addTickStmt _isGuard (LastStmt e noret ret) = do
+        liftM3 LastStmt
                 (addTickLHsExpr e)
+                (pure noret)
                 (addTickSyntaxExpr hpcSrcSpan ret)
 addTickStmt _isGuard (BindStmt pat e bind fail) = do
         liftM4 BindStmt
@@ -676,14 +676,17 @@ addTickStmt isGuard (BodyStmt e bind' guard' ty) = do
                 (addTickSyntaxExpr hpcSrcSpan bind')
                 (addTickSyntaxExpr hpcSrcSpan guard')
                 (return ty)
-addTickStmt _isGuard (LetStmt binds) = do
-        liftM LetStmt
+addTickStmt _isGuard (LetStmt (L l binds)) = do
+        liftM (LetStmt . L l)
                 (addTickHsLocalBinds binds)
 addTickStmt isGuard (ParStmt pairs mzipExpr bindExpr) = do
     liftM3 ParStmt
         (mapM (addTickStmtAndBinders isGuard) pairs)
         (addTickSyntaxExpr hpcSrcSpan mzipExpr)
         (addTickSyntaxExpr hpcSrcSpan bindExpr)
+addTickStmt isGuard (ApplicativeStmt args mb_join body_ty) = do
+    args' <- mapM (addTickApplicativeArg isGuard) args
+    return (ApplicativeStmt args' mb_join body_ty)
 
 addTickStmt isGuard stmt@(TransStmt { trS_stmts = stmts
                                     , trS_by = by, trS_using = using
@@ -709,6 +712,20 @@ addTickStmt isGuard stmt@(RecStmt {})
 addTick :: Maybe (Bool -> BoxLabel) -> LHsExpr Id -> TM (LHsExpr Id)
 addTick isGuard e | Just fn <- isGuard = addBinTickLHsExpr fn e
                   | otherwise          = addTickLHsExprRHS e
+
+addTickApplicativeArg
+  :: Maybe (Bool -> BoxLabel) -> (SyntaxExpr Id, ApplicativeArg Id Id)
+  -> TM (SyntaxExpr Id, ApplicativeArg Id Id)
+addTickApplicativeArg isGuard (op, arg) =
+  liftM2 (,) (addTickSyntaxExpr hpcSrcSpan op) (addTickArg arg)
+ where
+  addTickArg (ApplicativeArgOne pat expr) =
+    ApplicativeArgOne <$> addTickLPat pat <*> addTickLHsExpr expr
+  addTickArg (ApplicativeArgMany stmts ret pat) =
+    ApplicativeArgMany
+      <$> addTickLStmts isGuard stmts
+      <*> addTickSyntaxExpr hpcSrcSpan ret
+      <*> addTickLPat pat
 
 addTickStmtAndBinders :: Maybe (Bool -> BoxLabel) -> ParStmtBlock Id Id
                       -> TM (ParStmtBlock Id Id)
@@ -795,14 +812,14 @@ addTickHsCmd (HsCmdIf cnd e1 c2 c3) =
                 (addBinTickLHsExpr (BinBox CondBinBox) e1)
                 (addTickLHsCmd c2)
                 (addTickLHsCmd c3)
-addTickHsCmd (HsCmdLet binds c) =
+addTickHsCmd (HsCmdLet (L l binds) c) =
         bindLocals (collectLocalBinders binds) $
-        liftM2 HsCmdLet
-                (addTickHsLocalBinds binds) -- to think about: !patterns.
-                (addTickLHsCmd c)
-addTickHsCmd (HsCmdDo stmts srcloc)
+          liftM2 (HsCmdLet . L l)
+                   (addTickHsLocalBinds binds) -- to think about: !patterns.
+                   (addTickLHsCmd c)
+addTickHsCmd (HsCmdDo (L l stmts) srcloc)
   = do { (stmts', _) <- addTickLCmdStmts' stmts (return ())
-       ; return (HsCmdDo stmts' srcloc) }
+       ; return (HsCmdDo (L l stmts') srcloc) }
 
 addTickHsCmd (HsCmdArrApp   e1 e2 ty1 arr_ty lr) =
         liftM5 HsCmdArrApp
@@ -824,9 +841,9 @@ addTickHsCmd (HsCmdCast co cmd)
 --addTickHsCmd e  = pprPanic "addTickHsCmd" (ppr e)
 
 addTickCmdMatchGroup :: MatchGroup Id (LHsCmd Id) -> TM (MatchGroup Id (LHsCmd Id))
-addTickCmdMatchGroup mg@(MG { mg_alts = matches }) = do
+addTickCmdMatchGroup mg@(MG { mg_alts = L l matches }) = do
   matches' <- mapM (liftL addTickCmdMatch) matches
-  return $ mg { mg_alts = matches' }
+  return $ mg { mg_alts = L l matches' }
 
 addTickCmdMatch :: Match Id (LHsCmd Id) -> TM (Match Id (LHsCmd Id))
 addTickCmdMatch (Match mf pats opSig gRHSs) =
@@ -835,11 +852,11 @@ addTickCmdMatch (Match mf pats opSig gRHSs) =
     return $ Match mf pats opSig gRHSs'
 
 addTickCmdGRHSs :: GRHSs Id (LHsCmd Id) -> TM (GRHSs Id (LHsCmd Id))
-addTickCmdGRHSs (GRHSs guarded local_binds) = do
+addTickCmdGRHSs (GRHSs guarded (L l local_binds)) = do
   bindLocals binders $ do
     local_binds' <- addTickHsLocalBinds local_binds
     guarded' <- mapM (liftL addTickCmdGRHS) guarded
-    return $ GRHSs guarded' local_binds'
+    return $ GRHSs guarded' (L l local_binds')
   where
     binders = collectLocalBinders local_binds
 
@@ -872,9 +889,10 @@ addTickCmdStmt (BindStmt pat c bind fail) = do
                 (addTickLHsCmd c)
                 (return bind)
                 (return fail)
-addTickCmdStmt (LastStmt c ret) = do
-        liftM2 LastStmt
+addTickCmdStmt (LastStmt c noret ret) = do
+        liftM3 LastStmt
                 (addTickLHsCmd c)
+                (pure noret)
                 (addTickSyntaxExpr hpcSrcSpan ret)
 addTickCmdStmt (BodyStmt c bind' guard' ty) = do
         liftM4 BodyStmt
@@ -882,8 +900,8 @@ addTickCmdStmt (BodyStmt c bind' guard' ty) = do
                 (addTickSyntaxExpr hpcSrcSpan bind')
                 (addTickSyntaxExpr hpcSrcSpan guard')
                 (return ty)
-addTickCmdStmt (LetStmt binds) = do
-        liftM LetStmt
+addTickCmdStmt (LetStmt (L l binds)) = do
+        liftM (LetStmt . L l)
                 (addTickHsLocalBinds binds)
 addTickCmdStmt stmt@(RecStmt {})
   = do { stmts' <- addTickLCmdStmts (recS_stmts stmt)
@@ -892,18 +910,22 @@ addTickCmdStmt stmt@(RecStmt {})
        ; bind'  <- addTickSyntaxExpr hpcSrcSpan (recS_bind_fn stmt)
        ; return (stmt { recS_stmts = stmts', recS_ret_fn = ret'
                       , recS_mfix_fn = mfix', recS_bind_fn = bind' }) }
+addTickCmdStmt ApplicativeStmt{} =
+  panic "ToDo: addTickCmdStmt ApplicativeLastStmt"
 
 -- Others should never happen in a command context.
 addTickCmdStmt stmt  = pprPanic "addTickHsCmd" (ppr stmt)
 
 addTickHsRecordBinds :: HsRecordBinds Id -> TM (HsRecordBinds Id)
 addTickHsRecordBinds (HsRecFields fields dd)
-  = do  { fields' <- mapM process fields
+  = do  { fields' <- mapM addTickHsRecField fields
         ; return (HsRecFields fields' dd) }
-  where
-    process (L l (HsRecField ids expr doc))
+
+addTickHsRecField :: LHsRecField' id (LHsExpr Id) -> TM (LHsRecField' id (LHsExpr Id))
+addTickHsRecField (L l (HsRecField id expr pun))
         = do { expr' <- addTickLHsExpr expr
-             ; return (L l (HsRecField ids expr' doc)) }
+             ; return (L l (HsRecField id expr' pun)) }
+
 
 addTickArithSeqInfo :: ArithSeqInfo Id -> TM (ArithSeqInfo Id)
 addTickArithSeqInfo (From e1) =
@@ -958,7 +980,7 @@ coveragePasses dflags =
     ifa (gopt Opt_Hpc dflags)                HpcTicks $
     ifa (gopt Opt_SccProfilingOn dflags &&
          profAuto dflags /= NoProfAuto)      ProfNotes $
-    ifa (gopt Opt_Debug dflags)              SourceNotes []
+    ifa (debugLevel dflags > 0)              SourceNotes []
   where ifa f x xs | f         = x:xs
                    | otherwise = xs
 
@@ -993,11 +1015,11 @@ instance Functor TM where
     fmap = liftM
 
 instance Applicative TM where
-    pure = return
+    pure a = TM $ \ _env st -> (a,noFVs,st)
     (<*>) = ap
 
 instance Monad TM where
-  return a = TM $ \ _env st -> (a,noFVs,st)
+  return = pure
   (TM m) >>= k = TM $ \ env st ->
                                 case m env st of
                                   (r1,fv1,st1) ->
@@ -1264,9 +1286,9 @@ hpcInitCode this_mod (HpcInfo tickCount hashNo)
     module_name  = hcat (map (text.charToC) $
                          bytesFS (moduleNameFS (Module.moduleName this_mod)))
     package_name = hcat (map (text.charToC) $
-                         bytesFS (packageKeyFS  (modulePackageKey this_mod)))
+                         bytesFS (unitIdFS  (moduleUnitId this_mod)))
     full_name_str
-       | modulePackageKey this_mod == mainPackageKey
+       | moduleUnitId this_mod == mainUnitId
        = module_name
        | otherwise
        = package_name <> char '/' <> module_name

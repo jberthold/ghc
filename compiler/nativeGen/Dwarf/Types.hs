@@ -3,11 +3,15 @@ module Dwarf.Types
     DwarfInfo(..)
   , pprDwarfInfo
   , pprAbbrevDecls
+    -- * Dwarf address range table
+  , DwarfARange(..)
+  , pprDwarfARanges
     -- * Dwarf frame
   , DwarfFrame(..), DwarfFrameProc(..), DwarfFrameBlock(..)
   , pprDwarfFrame
     -- * Utilities
   , pprByte
+  , pprHalf
   , pprData4'
   , pprDwWord
   , pprWord
@@ -25,7 +29,9 @@ import Encoding
 import FastString
 import Outputable
 import Platform
+import Unique
 import Reg
+import SrcLoc
 
 import Dwarf.Constants
 
@@ -38,27 +44,38 @@ import Data.Char
 import CodeGen.Platform
 
 -- | Individual dwarf records. Each one will be encoded as an entry in
--- the .debug_info section.
+-- the @.debug_info@ section.
 data DwarfInfo
   = DwarfCompileUnit { dwChildren :: [DwarfInfo]
                      , dwName :: String
                      , dwProducer :: String
                      , dwCompDir :: String
+                     , dwLowLabel :: CLabel
+                     , dwHighLabel :: CLabel
                      , dwLineLabel :: LitString }
   | DwarfSubprogram { dwChildren :: [DwarfInfo]
                     , dwName :: String
-                    , dwLabel :: CLabel }
+                    , dwLabel :: CLabel
+                    , dwParent :: Maybe CLabel
+                      -- ^ label of DIE belonging to the parent tick
+                    }
   | DwarfBlock { dwChildren :: [DwarfInfo]
                , dwLabel :: CLabel
-               , dwMarker :: CLabel }
+               , dwMarker :: Maybe CLabel
+               }
+  | DwarfSrcNote { dwSrcSpan :: RealSrcSpan
+                 }
 
 -- | Abbreviation codes used for encoding above records in the
--- .debug_info section.
+-- @.debug_info@ section.
 data DwarfAbbrev
   = DwAbbrNull          -- ^ Pseudo, used for marking the end of lists
   | DwAbbrCompileUnit
   | DwAbbrSubprogram
+  | DwAbbrSubprogramWithParent
+  | DwAbbrBlockWithoutCode
   | DwAbbrBlock
+  | DwAbbrGhcSrcNote
   deriving (Eq, Enum)
 
 -- | Generate assembly for the given abbreviation code
@@ -66,63 +83,94 @@ pprAbbrev :: DwarfAbbrev -> SDoc
 pprAbbrev = pprLEBWord . fromIntegral . fromEnum
 
 -- | Abbreviation declaration. This explains the binary encoding we
--- use for representing @DwarfInfo@.
+-- use for representing 'DwarfInfo'. Be aware that this must be updated
+-- along with 'pprDwarfInfo'.
 pprAbbrevDecls :: Bool -> SDoc
 pprAbbrevDecls haveDebugLine =
   let mkAbbrev abbr tag chld flds =
         let fld (tag, form) = pprLEBWord tag $$ pprLEBWord form
         in pprAbbrev abbr $$ pprLEBWord tag $$ pprByte chld $$
            vcat (map fld flds) $$ pprByte 0 $$ pprByte 0
+      -- These are shared between DwAbbrSubprogram and
+      -- DwAbbrSubprogramWithParent
+      subprogramAttrs =
+           [ (dW_AT_name, dW_FORM_string)
+           , (dW_AT_MIPS_linkage_name, dW_FORM_string)
+           , (dW_AT_external, dW_FORM_flag)
+           , (dW_AT_low_pc, dW_FORM_addr)
+           , (dW_AT_high_pc, dW_FORM_addr)
+           , (dW_AT_frame_base, dW_FORM_block1)
+           ]
   in dwarfAbbrevSection $$
      ptext dwarfAbbrevLabel <> colon $$
      mkAbbrev DwAbbrCompileUnit dW_TAG_compile_unit dW_CHILDREN_yes
-       ([ (dW_AT_name, dW_FORM_string)
+       ([(dW_AT_name,     dW_FORM_string)
        , (dW_AT_producer, dW_FORM_string)
        , (dW_AT_language, dW_FORM_data4)
        , (dW_AT_comp_dir, dW_FORM_string)
-       , (dW_AT_use_UTF8, dW_FORM_flag)
+       , (dW_AT_use_UTF8, dW_FORM_flag_present)  -- not represented in body
+       , (dW_AT_low_pc,   dW_FORM_addr)
+       , (dW_AT_high_pc,  dW_FORM_addr)
        ] ++
        (if haveDebugLine
         then [ (dW_AT_stmt_list, dW_FORM_data4) ]
         else [])) $$
      mkAbbrev DwAbbrSubprogram dW_TAG_subprogram dW_CHILDREN_yes
+       subprogramAttrs $$
+     mkAbbrev DwAbbrSubprogramWithParent dW_TAG_subprogram dW_CHILDREN_yes
+       (subprogramAttrs ++ [(dW_AT_ghc_tick_parent, dW_FORM_ref_addr)]) $$
+     mkAbbrev DwAbbrBlockWithoutCode dW_TAG_lexical_block dW_CHILDREN_yes
        [ (dW_AT_name, dW_FORM_string)
-       , (dW_AT_MIPS_linkage_name, dW_FORM_string)
-       , (dW_AT_external, dW_FORM_flag)
-       , (dW_AT_low_pc, dW_FORM_addr)
-       , (dW_AT_high_pc, dW_FORM_addr)
-       , (dW_AT_frame_base, dW_FORM_block1)
        ] $$
      mkAbbrev DwAbbrBlock dW_TAG_lexical_block dW_CHILDREN_yes
        [ (dW_AT_name, dW_FORM_string)
        , (dW_AT_low_pc, dW_FORM_addr)
        , (dW_AT_high_pc, dW_FORM_addr)
        ] $$
+     mkAbbrev DwAbbrGhcSrcNote dW_TAG_ghc_src_note dW_CHILDREN_no
+       [ (dW_AT_ghc_span_file, dW_FORM_string)
+       , (dW_AT_ghc_span_start_line, dW_FORM_data4)
+       , (dW_AT_ghc_span_start_col, dW_FORM_data2)
+       , (dW_AT_ghc_span_end_line, dW_FORM_data4)
+       , (dW_AT_ghc_span_end_col, dW_FORM_data2)
+       ] $$
      pprByte 0
 
 -- | Generate assembly for DWARF data
 pprDwarfInfo :: Bool -> DwarfInfo -> SDoc
 pprDwarfInfo haveSrc d
-  = pprDwarfInfoOpen haveSrc d $$
-    vcat (map (pprDwarfInfo haveSrc) (dwChildren d)) $$
-    pprDwarfInfoClose
+  = case d of
+      DwarfCompileUnit {}  -> hasChildren
+      DwarfSubprogram {}   -> hasChildren
+      DwarfBlock {}        -> hasChildren
+      DwarfSrcNote {}      -> noChildren
+  where
+    hasChildren =
+        pprDwarfInfoOpen haveSrc d $$
+        vcat (map (pprDwarfInfo haveSrc) (dwChildren d)) $$
+        pprDwarfInfoClose
+    noChildren = pprDwarfInfoOpen haveSrc d
 
 -- | Prints assembler data corresponding to DWARF info records. Note
 -- that the binary format of this is paramterized in @abbrevDecls@ and
 -- has to be kept in synch.
 pprDwarfInfoOpen :: Bool -> DwarfInfo -> SDoc
-pprDwarfInfoOpen haveSrc (DwarfCompileUnit _ name producer compDir lineLbl) =
+pprDwarfInfoOpen haveSrc (DwarfCompileUnit _ name producer compDir lowLabel
+                                           highLabel lineLbl) =
   pprAbbrev DwAbbrCompileUnit
   $$ pprString name
   $$ pprString producer
   $$ pprData4 dW_LANG_Haskell
   $$ pprString compDir
-  $$ pprFlag True -- use UTF8
+  $$ pprWord (ppr lowLabel)
+  $$ pprWord (ppr highLabel)
   $$ if haveSrc
-     then sectionOffset lineLbl dwarfLineLabel
+     then sectionOffset (ptext lineLbl) (ptext dwarfLineLabel)
      else empty
-pprDwarfInfoOpen _ (DwarfSubprogram _ name label) = sdocWithDynFlags $ \df ->
-  pprAbbrev DwAbbrSubprogram
+pprDwarfInfoOpen _ (DwarfSubprogram _ name label
+                                    parent) = sdocWithDynFlags $ \df ->
+  ppr (mkAsmTempDieLabel label) <> colon
+  $$ pprAbbrev abbrev
   $$ pprString name
   $$ pprString (renderWithStyle df (ppr label) (mkCodeStyle CStyle))
   $$ pprFlag (externallyVisibleCLabel label)
@@ -130,15 +178,72 @@ pprDwarfInfoOpen _ (DwarfSubprogram _ name label) = sdocWithDynFlags $ \df ->
   $$ pprWord (ppr $ mkAsmTempEndLabel label)
   $$ pprByte 1
   $$ pprByte dW_OP_call_frame_cfa
-pprDwarfInfoOpen _ (DwarfBlock _ label marker) = sdocWithDynFlags $ \df ->
-  pprAbbrev DwAbbrBlock
+  $$ parentValue
+  where
+    abbrev = case parent of Nothing -> DwAbbrSubprogram
+                            Just _  -> DwAbbrSubprogramWithParent
+    parentValue = maybe empty pprParentDie parent
+    pprParentDie sym = sectionOffset (ppr sym) (ptext dwarfInfoLabel)
+pprDwarfInfoOpen _ (DwarfBlock _ label Nothing) = sdocWithDynFlags $ \df ->
+  ppr (mkAsmTempDieLabel label) <> colon
+  $$ pprAbbrev DwAbbrBlockWithoutCode
+  $$ pprString (renderWithStyle df (ppr label) (mkCodeStyle CStyle))
+pprDwarfInfoOpen _ (DwarfBlock _ label (Just marker)) = sdocWithDynFlags $ \df ->
+  ppr (mkAsmTempDieLabel label) <> colon
+  $$ pprAbbrev DwAbbrBlock
   $$ pprString (renderWithStyle df (ppr label) (mkCodeStyle CStyle))
   $$ pprWord (ppr marker)
   $$ pprWord (ppr $ mkAsmTempEndLabel marker)
+pprDwarfInfoOpen _ (DwarfSrcNote ss) =
+  pprAbbrev DwAbbrGhcSrcNote
+  $$ pprString' (ftext $ srcSpanFile ss)
+  $$ pprData4 (fromIntegral $ srcSpanStartLine ss)
+  $$ pprHalf (fromIntegral $ srcSpanStartCol ss)
+  $$ pprData4 (fromIntegral $ srcSpanEndLine ss)
+  $$ pprHalf (fromIntegral $ srcSpanEndCol ss)
 
 -- | Close a DWARF info record with children
 pprDwarfInfoClose :: SDoc
 pprDwarfInfoClose = pprAbbrev DwAbbrNull
+
+-- | A DWARF address range. This is used by the debugger to quickly locate
+-- which compilation unit a given address belongs to. This type assumes
+-- a non-segmented address-space.
+data DwarfARange
+  = DwarfARange
+    { dwArngStartLabel :: CLabel
+    , dwArngEndLabel   :: CLabel
+    }
+
+-- | Print assembler directives corresponding to a DWARF @.debug_aranges@
+-- address table entry.
+pprDwarfARanges :: [DwarfARange] -> Unique -> SDoc
+pprDwarfARanges arngs unitU = sdocWithPlatform $ \plat ->
+  let wordSize = platformWordSize plat
+      paddingSize = 4 :: Int
+      -- header is 12 bytes long.
+      -- entry is 8 bytes (32-bit platform) or 16 bytes (64-bit platform).
+      -- pad such that first entry begins at multiple of entry size.
+      pad n = vcat $ replicate n $ pprByte 0
+      initialLength = 8 + paddingSize + 2*2*wordSize
+  in pprDwWord (ppr initialLength)
+     $$ pprHalf 2
+     $$ sectionOffset (ppr $ mkAsmTempLabel $ unitU)
+                      (ptext dwarfInfoLabel)
+     $$ pprByte (fromIntegral wordSize)
+     $$ pprByte 0
+     $$ pad paddingSize
+     -- body
+     $$ vcat (map pprDwarfARange arngs)
+     -- terminus
+     $$ pprWord (char '0')
+     $$ pprWord (char '0')
+
+pprDwarfARange :: DwarfARange -> SDoc
+pprDwarfARange arng = pprWord (ppr $ dwArngStartLabel arng) $$ pprWord length
+  where
+    length = ppr (dwArngEndLabel arng)
+             <> char '-' <> ppr (dwArngStartLabel arng)
 
 -- | Information about unwind instructions for a procedure. This
 -- corresponds to a "Common Information Entry" (CIE) in DWARF.
@@ -168,7 +273,7 @@ data DwarfFrameBlock
     , dwFdeUnwind     :: UnwindTable
     }
 
--- | Header for the .debug_frame section. Here we emit the "Common
+-- | Header for the @.debug_frame@ section. Here we emit the "Common
 -- Information Entry" record that etablishes general call frame
 -- parameters and the default stack layout.
 pprDwarfFrame :: DwarfFrame -> SDoc
@@ -181,6 +286,13 @@ pprDwarfFrame DwarfFrame{dwCieLabel=cieLabel,dwCieInit=cieInit,dwCieProcs=procs}
         retReg      = dwarfReturnRegNo plat
         wordSize    = platformWordSize plat
         pprInit (g, uw) = pprSetUnwind plat g (Nothing, uw)
+
+        -- Preserve C stack pointer: This necessary to override that default
+        -- unwinding behavior of setting $sp = CFA.
+        preserveSp = case platformArch plat of
+          ArchX86    -> pprByte dW_CFA_same_value $$ pprLEBWord 4
+          ArchX86_64 -> pprByte dW_CFA_same_value $$ pprLEBWord 7
+          _          -> empty
     in vcat [ ppr cieLabel <> colon
             , pprData4' length -- Length of CIE
             , ppr cieStartLabel <> colon
@@ -200,8 +312,11 @@ pprDwarfFrame DwarfFrame{dwCieLabel=cieLabel,dwCieInit=cieInit,dwCieProcs=procs}
               pprByte (dW_CFA_offset+retReg)
             , pprByte 0
 
+              -- Preserve C stack pointer
+            , preserveSp
+
               -- Sp' = CFA
-              -- (we need to set this manually as our Sp register is
+              -- (we need to set this manually as our (STG) Sp register is
               -- often not the architecture's default stack register)
             , pprByte dW_CFA_val_offset
             , pprLEBWord (fromIntegral spReg)
@@ -255,7 +370,7 @@ pprFrameBlock oldUws (DwarfFrameBlock blockLbl hasInfo uws)
        vcat (map (uncurry $ pprSetUnwind plat) changed) $$
        vcat (map (pprUndefUnwind plat . fst) died)
 
--- [Note: Info Offset]
+-- Note [Info Offset]
 --
 -- GDB was pretty much written with C-like programs in mind, and as a
 -- result they assume that once you have a return address, it is a
@@ -277,7 +392,8 @@ pprFrameBlock oldUws (DwarfFrameBlock blockLbl hasInfo uws)
 
 -- | Get DWARF register ID for a given GlobalReg
 dwarfGlobalRegNo :: Platform -> GlobalReg -> Word8
-dwarfGlobalRegNo p = maybe 0 (dwarfRegNo p . RegReal) . globalRegMaybe p
+dwarfGlobalRegNo p UnwindReturnReg = dwarfReturnRegNo p
+dwarfGlobalRegNo p reg = maybe 0 (dwarfRegNo p . RegReal) $ globalRegMaybe p reg
 
 -- | Generate code for setting the unwind information for a register,
 -- optimized using its known old value in the table. Note that "Sp" is
@@ -320,25 +436,25 @@ pprSetUnwind plat g  (_, uw)
 pprUnwindExpr :: Bool -> UnwindExpr -> SDoc
 pprUnwindExpr spIsCFA expr
   = sdocWithPlatform $ \plat ->
-    let ppr (UwConst i)
+    let pprE (UwConst i)
           | i >= 0 && i < 32 = pprByte (dW_OP_lit0 + fromIntegral i)
           | otherwise        = pprByte dW_OP_consts $$ pprLEBInt i -- lazy...
-        ppr (UwReg Sp i) | spIsCFA
+        pprE (UwReg Sp i) | spIsCFA
                              = if i == 0
                                then pprByte dW_OP_call_frame_cfa
                                else ppr (UwPlus (UwReg Sp 0) (UwConst i))
-        ppr (UwReg g i)      = pprByte (dW_OP_breg0+dwarfGlobalRegNo plat g) $$
+        pprE (UwReg g i)      = pprByte (dW_OP_breg0+dwarfGlobalRegNo plat g) $$
                                pprLEBInt i
-        ppr (UwDeref u)      = ppr u $$ pprByte dW_OP_deref
-        ppr (UwPlus u1 u2)   = ppr u1 $$ ppr u2 $$ pprByte dW_OP_plus
-        ppr (UwMinus u1 u2)  = ppr u1 $$ ppr u2 $$ pprByte dW_OP_minus
-        ppr (UwTimes u1 u2)  = ppr u1 $$ ppr u2 $$ pprByte dW_OP_mul
-    in ptext (sLit "\t.byte 1f-.-1") $$
-       ppr expr $$
+        pprE (UwDeref u)      = pprE u $$ pprByte dW_OP_deref
+        pprE (UwPlus u1 u2)   = pprE u1 $$ pprE u2 $$ pprByte dW_OP_plus
+        pprE (UwMinus u1 u2)  = pprE u1 $$ pprE u2 $$ pprByte dW_OP_minus
+        pprE (UwTimes u1 u2)  = pprE u1 $$ pprE u2 $$ pprByte dW_OP_mul
+    in ptext (sLit "\t.uleb128 1f-.-1") $$ -- DW_FORM_block length
+       pprE expr $$
        ptext (sLit "1:")
 
 -- | Generate code for re-setting the unwind information for a
--- register to "undefined"
+-- register to @undefined@
 pprUndefUnwind :: Platform -> GlobalReg -> SDoc
 pprUndefUnwind _    Sp = panic "pprUndefUnwind Sp" -- should never happen
 pprUndefUnwind plat g  = pprByte dW_CFA_undefined $$
@@ -358,6 +474,10 @@ wordAlign = sdocWithPlatform $ \plat ->
 -- | Assembly for a single byte of constant DWARF data
 pprByte :: Word8 -> SDoc
 pprByte x = ptext (sLit "\t.byte ") <> ppr (fromIntegral x :: Word)
+
+-- | Assembly for a two-byte constant integer
+pprHalf :: Word16 -> SDoc
+pprHalf x = ptext (sLit "\t.hword ") <> ppr (fromIntegral x :: Word)
 
 -- | Assembly for a constant DWARF flag
 pprFlag :: Bool -> SDoc
@@ -435,9 +555,9 @@ escapeChar c
 -- us to just reference the target directly, and will figure out on
 -- their own that we actually need an offset. Finally, Windows has
 -- a special directive to refer to relative offsets. Fun.
-sectionOffset :: LitString -> LitString -> SDoc
+sectionOffset :: SDoc -> SDoc -> SDoc
 sectionOffset target section = sdocWithPlatform $ \plat ->
   case platformOS plat of
-    OSDarwin  -> pprDwWord (ptext target <> char '-' <> ptext section)
-    OSMinGW32 -> text "\t.secrel32 " <> ptext target
-    _other    -> pprDwWord (ptext target)
+    OSDarwin  -> pprDwWord (target <> char '-' <> section)
+    OSMinGW32 -> text "\t.secrel32 " <> target
+    _other    -> pprDwWord target

@@ -25,9 +25,6 @@ SRC_CC_WARNING_OPTS += -Wno-unknown-pragmas
 
 endif
 
-SRC_CC_OPTS     += -Wall
-SRC_HC_OPTS     += -Wall
-
 GhcStage1HcOpts += -fwarn-tabs
 GhcStage2HcOpts += -fwarn-tabs
 
@@ -36,6 +33,9 @@ utils/hpc_dist-install_EXTRA_HC_OPTS += -fwarn-tabs
 
 ######################################################################
 # Disable some warnings in packages we use
+
+# Libraries that have dubious RULES
+libraries/bytestring_dist-install_EXTRA_HC_OPTS += -fno-warn-inline-rule-shadowing
 
 # Cabal doesn't promise to be warning-free
 utils/ghc-cabal_dist_EXTRA_HC_OPTS += -w

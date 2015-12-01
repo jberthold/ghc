@@ -1,10 +1,9 @@
 -- (c) The University of Glasgow 2006
 
 {-# LANGUAGE CPP, ScopedTypeVariables #-}
--- For Functor SCC. ToDo: Remove me when 7.10 is released
-{-# OPTIONS_GHC -fno-warn-orphans #-}
+
 module Digraph(
-        Graph, graphFromVerticesAndAdjacency, graphFromEdgedVertices,
+        Graph, graphFromEdgedVertices,
 
         SCC(..), Node, flattenSCC, flattenSCCs,
         stronglyConnCompG,
@@ -51,7 +50,6 @@ import Control.Monad.ST
 import Data.Maybe
 import Data.Array
 import Data.List hiding (transpose)
-import Data.Ord
 import Data.Array.ST
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -96,26 +94,10 @@ type Node key payload = (payload, key, [key])
 emptyGraph :: Graph a
 emptyGraph = Graph (array (1, 0) []) (error "emptyGraph") (const Nothing)
 
-graphFromVerticesAndAdjacency
-        :: Ord key
-        => [(node, key)]
-        -> [(key, key)]  -- First component is source vertex key,
-                         -- second is target vertex key (thing depended on)
-                         -- Unlike the other interface I insist they correspond to
-                         -- actual vertices because the alternative hides bugs. I can't
-                         -- do the same thing for the other one for backcompat reasons.
-        -> Graph (node, key)
-graphFromVerticesAndAdjacency []       _     = emptyGraph
-graphFromVerticesAndAdjacency vertices edges = Graph graph vertex_node (key_vertex . key_extractor)
-  where key_extractor = snd
-        (bounds, vertex_node, key_vertex, _) = reduceNodesIntoVertices vertices key_extractor
-        key_vertex_pair (a, b) = (expectJust "graphFromVerticesAndAdjacency" $ key_vertex a,
-                                  expectJust "graphFromVerticesAndAdjacency" $ key_vertex b)
-        reduced_edges = map key_vertex_pair edges
-        graph = buildG bounds reduced_edges
-
 graphFromEdgedVertices
-        :: Ord key
+        :: Ord key                      -- We only use Ord for efficiency,
+                                        -- it doesn't effect the result, so
+                                        -- it can be safely used with Unique's.
         => [Node key payload]           -- The graph; its ok for the
                                         -- out-list to contain keys which arent
                                         -- a vertex key, they are ignored
@@ -124,34 +106,30 @@ graphFromEdgedVertices []             = emptyGraph
 graphFromEdgedVertices edged_vertices = Graph graph vertex_fn (key_vertex . key_extractor)
   where key_extractor (_, k, _) = k
         (bounds, vertex_fn, key_vertex, numbered_nodes) = reduceNodesIntoVertices edged_vertices key_extractor
-        graph = array bounds [(v, mapMaybe key_vertex ks) | (v, (_, _, ks)) <- numbered_nodes]
+        graph = array bounds [ (v, sort $ mapMaybe key_vertex ks)
+                             | (v, (_, _, ks)) <- numbered_nodes]
+                -- We normalize outgoing edges by sorting on node order, so
+                -- that the result doesn't depend on the order of the edges
+
 
 reduceNodesIntoVertices
         :: Ord key
         => [node]
         -> (node -> key)
-        -> (Bounds, Vertex -> node, key -> Maybe Vertex, [(Int, node)])
+        -> (Bounds, Vertex -> node, key -> Maybe Vertex, [(Vertex, node)])
 reduceNodesIntoVertices nodes key_extractor = (bounds, (!) vertex_map, key_vertex, numbered_nodes)
   where
     max_v           = length nodes - 1
     bounds          = (0, max_v) :: (Vertex, Vertex)
 
-    sorted_nodes    = sortBy (comparing key_extractor) nodes
-    numbered_nodes  = zipWith (,) [0..] sorted_nodes
-
-    key_map         = array bounds [(i, key_extractor node) | (i, node) <- numbered_nodes]
+    -- Keep the order intact to make the result depend on input order
+    -- instead of key order
+    numbered_nodes  = zip [0..] nodes
     vertex_map      = array bounds numbered_nodes
 
-    --key_vertex :: key -> Maybe Vertex
-    -- returns Nothing for non-interesting vertices
-    key_vertex k = find 0 max_v
-      where
-        find a b | a > b = Nothing
-                 | otherwise = let mid = (a + b) `div` 2
-                               in case compare k (key_map ! mid) of
-                                    LT -> find a (mid - 1)
-                                    EQ -> Just mid
-                                    GT -> find (mid + 1) b
+    key_map = Map.fromList
+      [ (key_extractor node, v) | (v, node) <- numbered_nodes ]
+    key_vertex k = Map.lookup k key_map
 
 {-
 ************************************************************************
@@ -349,14 +327,6 @@ graphEmpty g = lo > hi
 -}
 
 type IntGraph = G.Graph
-
--- Functor instance was added in 7.8, in containers 0.5.3.2 release
--- ToDo: Drop me when 7.10 is released.
-#if __GLASGOW_HASKELL__ < 708
-instance Functor SCC where
-    fmap f (AcyclicSCC v) = AcyclicSCC (f v)
-    fmap f (CyclicSCC vs) = CyclicSCC (fmap f vs)
-#endif
 
 {-
 ------------------------------------------------------------

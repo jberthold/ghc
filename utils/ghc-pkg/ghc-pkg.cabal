@@ -20,12 +20,12 @@ Executable ghc-pkg
 
     Build-Depends: base       >= 4   && < 5,
                    directory  >= 1   && < 1.3,
-                   process    >= 1   && < 1.3,
+                   process    >= 1   && < 1.5,
                    containers,
                    filepath,
                    Cabal,
                    binary,
-                   bin-package-db,
+                   ghc-boot,
                    bytestring
     if !os(windows)
         Build-Depends: unix,

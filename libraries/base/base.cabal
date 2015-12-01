@@ -1,5 +1,5 @@
 name:           base
-version:        4.8.2.0
+version:        4.9.0.0
 -- NOTE: Don't forget to update ./changelog.md
 license:        BSD3
 license-file:   LICENSE
@@ -93,7 +93,12 @@ Library
         UnliftedFFITypes
         Unsafe
 
-    build-depends: rts == 1.0.*, ghc-prim == 0.4.*
+    build-depends: rts == 1.0.*, ghc-prim == 0.5.*
+
+    -- sanity-check to ensure exactly one flag is set
+    if !((flag(integer-gmp) && !flag(integer-simple)) || (!flag(integer-gmp) && flag(integer-simple)))
+        build-depends: invalid-cabal-flag-settings<0
+
     if flag(integer-simple)
         build-depends: integer-simple >= 0.1.1 && < 0.2
 
@@ -113,8 +118,10 @@ Library
         Control.Exception
         Control.Exception.Base
         Control.Monad
+        Control.Monad.Fail
         Control.Monad.Fix
         Control.Monad.Instances
+        Control.Monad.IO.Class
         Control.Monad.ST
         Control.Monad.ST.Lazy
         Control.Monad.ST.Lazy.Safe
@@ -142,11 +149,13 @@ Library
         Data.Int
         Data.Ix
         Data.List
+        Data.List.NonEmpty
         Data.Maybe
         Data.Monoid
         Data.Ord
         Data.Proxy
         Data.Ratio
+        Data.Semigroup
         Data.STRef
         Data.STRef.Lazy
         Data.STRef.Strict
@@ -198,6 +207,8 @@ Library
         GHC.Environment
         GHC.Err
         GHC.Exception
+        GHC.ExecutionStack
+        GHC.ExecutionStack.Internal
         GHC.Exts
         GHC.Fingerprint
         GHC.Fingerprint.Type
@@ -229,6 +240,7 @@ Library
         GHC.IO.Handle.Text
         GHC.IO.Handle.Types
         GHC.IO.IOMode
+        GHC.IO.Unsafe
         GHC.IOArray
         GHC.IORef
         GHC.Int
@@ -237,6 +249,7 @@ Library
         GHC.Natural
         GHC.Num
         GHC.OldList
+        GHC.OverloadedLabels
         GHC.PArr
         GHC.Pack
         GHC.Profiling
@@ -248,9 +261,10 @@ Library
         GHC.StaticPtr
         GHC.STRef
         GHC.Show
-        GHC.SrcLoc
         GHC.Stable
         GHC.Stack
+        GHC.Stack.CCS
+        GHC.Stack.Types
         GHC.Stats
         GHC.Storable
         GHC.TopHandler
@@ -340,6 +354,6 @@ Library
             GHC.Event.TimerManager
             GHC.Event.Unique
 
-    -- We need to set the package key to base (without a version number)
+    -- We need to set the unit id to base (without a version number)
     -- as it's magic.
     ghc-options: -this-package-key base

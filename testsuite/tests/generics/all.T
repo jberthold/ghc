@@ -1,5 +1,3 @@
-setTestOpts(only_compiler_types(['ghc']))
-
 test('GenCanDoRep0',    normal, compile, [''])
 test('GenCanDoRep1',    normal, compile, [''])
 test('GenDerivOutput',  normal, compile, ['-dsuppress-uniques'])
@@ -42,3 +40,5 @@ test('T8468', normal, compile_fail, [''])
 test('T8479', normal, compile, [''])
 test('T9563', normal, compile, [''])
 test('T10030', normal, compile_and_run, [''])
+test('T10361a', normal, compile, [''])
+test('T10361b', normal, compile, [''])

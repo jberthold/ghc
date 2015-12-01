@@ -10,16 +10,20 @@
 module DataCon (
         -- * Main data types
         DataCon, DataConRep(..),
-        HsBang(..), HsSrcBang, HsImplBang,
+        SrcStrictness(..), SrcUnpackedness(..),
+        HsSrcBang(..), HsImplBang(..),
         StrictnessMark(..),
         ConTag,
+
+        -- ** Field labels
+        FieldLbl(..), FieldLabel, FieldLabelString,
 
         -- ** Type construction
         mkDataCon, fIRST_TAG,
         buildAlgTyCon,
 
         -- ** Type deconstruction
-        dataConRepType, dataConSig, dataConFullSig,
+        dataConRepType, dataConSig, dataConInstSig, dataConFullSig,
         dataConName, dataConIdentity, dataConTag, dataConTyCon,
         dataConOrigTyCon, dataConUserType,
         dataConUnivTyVars, dataConExTyVars, dataConAllTyVars,
@@ -31,7 +35,8 @@ module DataCon (
         dataConSrcBangs,
         dataConSourceArity, dataConRepArity, dataConRepRepArity,
         dataConIsInfix,
-        dataConWorkId, dataConWrapId, dataConWrapId_maybe, dataConImplicitIds,
+        dataConWorkId, dataConWrapId, dataConWrapId_maybe,
+        dataConImplicitTyThings,
         dataConRepStrictness, dataConImplBangs, dataConBoxer,
 
         splitDataProductType_maybe,
@@ -39,23 +44,26 @@ module DataCon (
         -- ** Predicates on DataCons
         isNullarySrcDataCon, isNullaryRepDataCon, isTupleDataCon, isUnboxedTupleCon,
         isVanillaDataCon, classDataCon, dataConCannotMatch,
-        isBanged, isMarkedStrict, eqHsBang,
+        isBanged, isMarkedStrict, eqHsBang, isSrcStrict, isSrcUnpacked,
 
         -- ** Promotion related functions
-        promoteKind, promoteDataCon, promoteDataCon_maybe
+        promoteDataCon, promoteDataCon_maybe,
+        promoteType, promoteKind,
+        isPromotableType, computeTyConPromotability,
     ) where
 
 #include "HsVersions.h"
 
 import {-# SOURCE #-} MkId( DataConBoxer )
 import Type
+import ForeignCall( CType )
 import TypeRep( Type(..) )  -- Used in promoteType
 import PrelNames( liftedTypeKindTyConKey )
-import ForeignCall( CType )
 import Coercion
 import Kind
 import Unify
 import TyCon
+import FieldLabel
 import Class
 import Name
 import Var
@@ -67,12 +75,14 @@ import BasicTypes
 import FastString
 import Module
 import VarEnv
+import NameSet
+import Binary
 
 import qualified Data.Data as Data
 import qualified Data.Typeable
-import Data.Maybe
 import Data.Char
 import Data.Word
+import Data.List( mapAccumL, find )
 
 {-
 Data constructor representation
@@ -345,14 +355,11 @@ data DataCon
                 -- The OrigResTy is T [a], but the dcRepTyCon might be :T123
 
         -- Now the strictness annotations and field labels of the constructor
-        dcSrcBangs :: [HsBang],
+        dcSrcBangs :: [HsSrcBang],
                 -- See Note [Bangs on data constructor arguments]
-                -- For DataCons defined in this module: 
-                --    the [HsSrcBang] as written by the programmer.
-                -- For DataCons imported from an interface file:
-                --    the [HsImplBang] determined when compiling the
-                --    defining module
-                -- 
+                --
+                -- The [HsSrcBang] as written by the programmer.
+                --
                 -- Matches 1-1 with dcOrigArgTys
                 -- Hence length = dataConSourceArity dataCon
 
@@ -395,8 +402,8 @@ data DataCon
                                 -- Used for Template Haskell and 'deriving' only
                                 -- The actual fixity is stored elsewhere
 
-        dcPromoted :: Maybe TyCon    -- The promoted TyCon if this DataCon is promotable
-                                     -- See Note [Promoted data constructors] in TyCon
+        dcPromoted :: Promoted TyCon    -- The promoted TyCon if this DataCon is promotable
+                                        -- See Note [Promoted data constructors] in TyCon
   }
   deriving Data.Typeable.Typeable
 
@@ -446,38 +453,43 @@ data DataConRep
 -- when we bring bits of unfoldings together.)
 
 -------------------------
--- HsBang describes the strictness/unpack status of one
--- of the original data constructor arguments (i.e. *not*
--- of the representation data constructor which may have
--- more arguments after the originals have been unpacked)
--- See Note [Bangs on data constructor arguments]
-data HsBang
-  = HsNoBang     -- Equivalent to (HsSrcBang Nothing False)
 
-  | HsSrcBang    -- What the user wrote in the source code
-       (Maybe SourceText) -- Note [Pragma source text] in BasicTypes
-       (Maybe Bool)       -- Just True    {-# UNPACK #-}
-                          -- Just False   {-# NOUNPACK #-}
-                          -- Nothing      no pragma
-       Bool               -- True <=> '!' specified
-       -- (HsSrcBang (Just True) False) makes no sense
-       -- We emit a warning (in checkValidDataCon) and treat it
-       -- just like (HsSrcBang Nothing False)
-
-  -- Definite implementation commitments, generated by the compiler
-  -- after consulting HsSrcBang (if any), flags, etc
-  | HsUnpack              -- Definite commitment: this field is strict and unboxed
-       (Maybe Coercion)   --    co :: arg-ty ~ product-ty
-
-  | HsStrict              -- Definite commitment: this field is strict but not unboxed
+-- | Bangs on data constructor arguments as the user wrote them in the
+-- source code.
+--
+-- (HsSrcBang _ SrcUnpack SrcLazy) and
+-- (HsSrcBang _ SrcUnpack NoSrcStrict) (without StrictData) makes no sense, we
+-- emit a warning (in checkValidDataCon) and treat it like
+-- (HsSrcBang _ NoSrcUnpack SrcLazy)
+data HsSrcBang =
+  HsSrcBang (Maybe SourceText) -- Note [Pragma source text] in BasicTypes
+            SrcUnpackedness
+            SrcStrictness
   deriving (Data.Data, Data.Typeable)
 
--- Two type-insecure, but useful, synonyms
-type HsSrcBang = HsBang   -- What the user wrote; hence always HsNoBang or HsSrcBang
+-- | Bangs of data constructor arguments as generated by the compiler
+-- after consulting HsSrcBang, flags, etc.
+data HsImplBang
+  = HsLazy  -- ^ Lazy field
+  | HsStrict  -- ^ Strict but not unpacked field
+  | HsUnpack (Maybe Coercion)
+    -- ^ Strict and unpacked field
+    -- co :: arg-ty ~ product-ty HsBang
+  deriving (Data.Data, Data.Typeable)
 
-type HsImplBang = HsBang   -- A HsBang implementation decision,
-                           -- as determined by the compiler
-                           -- Never HsSrcBang
+-- | What strictness annotation the user wrote
+data SrcStrictness = SrcLazy -- ^ Lazy, ie '~'
+                   | SrcStrict -- ^ Strict, ie '!'
+                   | NoSrcStrict -- ^ no strictness annotation
+     deriving (Eq, Data.Data, Data.Typeable)
+
+-- | What unpackedness the user requested
+data SrcUnpackedness = SrcUnpack -- ^ {-# UNPACK #-} specified
+                     | SrcNoUnpack -- ^ {-# NOUNPACK #-} specified
+                     | NoSrcUnpack -- ^ no unpack pragma
+     deriving (Eq, Data.Data, Data.Typeable)
+
+
 
 -------------------------
 -- StrictnessMark is internal only, used to indicate strictness
@@ -491,38 +503,40 @@ Consider
 
 When compiling the module, GHC will decide how to represent
 MkT, depending on the optimisation level, and settings of
-flags like -funbox-small-strict-fields.  
+flags like -funbox-small-strict-fields.
 
 Terminology:
   * HsSrcBang:  What the user wrote
-                Constructors: HsNoBang, HsUserBang
+                Constructors: HsSrcBang
 
   * HsImplBang: What GHC decided
-                Constructors: HsNoBang, HsStrict, HsUnpack
+                Constructors: HsLazy, HsStrict, HsUnpack
 
-* If T was defined in this module, MkT's dcSrcBangs field 
+* If T was defined in this module, MkT's dcSrcBangs field
   records the [HsSrcBang] of what the user wrote; in the example
-    [ HsSrcBang Nothing True
-    , HsSrcBang (Just True) True
-    , HsNoBang]
+    [ HsSrcBang _ NoSrcUnpack SrcStrict
+    , HsSrcBang _ SrcUnpack SrcStrict
+    , HsSrcBang _ NoSrcUnpack NoSrcStrictness]
 
-* However, if T was defined in an imported module, MkT's dcSrcBangs
-  field gives the [HsImplBang] recording the decisions of the 
-  defining module.  The importing module must follow those decisions,
-  regardless of the flag settings in the importing module.
+* However, if T was defined in an imported module, the importing module
+  must follow the decisions made in the original module, regardless of
+  the flag settings in the importing module.
+  Also see Note [Bangs on imported data constructors] in MkId
 
 * The dcr_bangs field of the dcRep field records the [HsImplBang]
   If T was defined in this module, Without -O the dcr_bangs might be
-    [HsStrict, HsStrict, HsNoBang]
+    [HsStrict, HsStrict, HsLazy]
   With -O it might be
-    [HsStrict, HsUnpack, HsNoBang]
+    [HsStrict, HsUnpack _, HsLazy]
   With -funbox-small-strict-fields it might be
-    [HsUnpack, HsUnpack, HsNoBang]
+    [HsUnpack, HsUnpack _, HsLazy]
+  With -XStrictData it might be
+    [HsStrict, HsUnpack _, HsStrict]
 
 Note [Data con representation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The dcRepType field contains the type of the representation of a contructor
-This may differ from the type of the contructor *Id* (built
+This may differ from the type of the constructor *Id* (built
 by MkId.mkDataConId) for two reasons:
         a) the constructor Id may be overloaded, but the dictionary isn't stored
            e.g.    data Eq a => T a = MkT a a
@@ -576,36 +590,74 @@ instance Data.Data DataCon where
     gunfold _ _  = error "gunfold"
     dataTypeOf _ = mkNoRepType "DataCon"
 
-instance Outputable HsBang where
-    ppr HsNoBang                = empty
-    ppr (HsSrcBang _ prag bang) = pp_unpk prag <+> ppWhen bang (char '!')
-    ppr (HsUnpack Nothing)      = ptext (sLit "Unpk")
-    ppr (HsUnpack (Just co))    = ptext (sLit "Unpk") <> parens (ppr co)
-    ppr HsStrict                = ptext (sLit "SrictNotUnpacked")
+instance Outputable HsSrcBang where
+    ppr (HsSrcBang _ prag mark) = ppr prag <+> ppr mark
 
-pp_unpk :: Maybe Bool -> SDoc
-pp_unpk Nothing      = empty
-pp_unpk (Just True)  = ptext (sLit "{-# UNPACK #-}")
-pp_unpk (Just False) = ptext (sLit "{-# NOUNPACK #-}")
+instance Outputable HsImplBang where
+    ppr HsLazy                  = ptext (sLit "Lazy")
+    ppr (HsUnpack Nothing)      = ptext (sLit "Unpacked")
+    ppr (HsUnpack (Just co))    = ptext (sLit "Unpacked") <> parens (ppr co)
+    ppr HsStrict                = ptext (sLit "StrictNotUnpacked")
+
+instance Outputable SrcStrictness where
+    ppr SrcLazy     = char '~'
+    ppr SrcStrict   = char '!'
+    ppr NoSrcStrict = empty
+
+instance Outputable SrcUnpackedness where
+    ppr SrcUnpack   = ptext (sLit "{-# UNPACK #-}")
+    ppr SrcNoUnpack = ptext (sLit "{-# NOUNPACK #-}")
+    ppr NoSrcUnpack = empty
 
 instance Outputable StrictnessMark where
-  ppr MarkedStrict     = ptext (sLit "!")
-  ppr NotMarkedStrict  = empty
+    ppr MarkedStrict    = ptext (sLit "!")
+    ppr NotMarkedStrict = empty
 
+instance Binary SrcStrictness where
+    put_ bh SrcLazy     = putByte bh 0
+    put_ bh SrcStrict   = putByte bh 1
+    put_ bh NoSrcStrict = putByte bh 2
 
-eqHsBang :: HsBang -> HsBang -> Bool
-eqHsBang HsNoBang             HsNoBang             = True
-eqHsBang HsStrict             HsStrict             = True
-eqHsBang (HsSrcBang _ u1 b1)  (HsSrcBang _ u2 b2)  = u1==u2 && b1==b2
-eqHsBang (HsUnpack Nothing)   (HsUnpack Nothing)   = True
-eqHsBang (HsUnpack (Just c1)) (HsUnpack (Just c2)) = eqType (coercionType c1) (coercionType c2)
-eqHsBang _ _ = False
+    get bh =
+      do h <- getByte bh
+         case h of
+           0 -> return SrcLazy
+           1 -> return SrcLazy
+           _ -> return NoSrcStrict
 
-isBanged :: HsBang -> Bool
-isBanged HsNoBang             = False
-isBanged (HsSrcBang _ _ bang) = bang
-isBanged (HsUnpack {})        = True
-isBanged (HsStrict {})        = True
+instance Binary SrcUnpackedness where
+    put_ bh SrcNoUnpack = putByte bh 0
+    put_ bh SrcUnpack   = putByte bh 1
+    put_ bh NoSrcUnpack = putByte bh 2
+
+    get bh =
+      do h <- getByte bh
+         case h of
+           0 -> return SrcNoUnpack
+           1 -> return SrcUnpack
+           _ -> return NoSrcUnpack
+
+-- | Compare strictness annotations
+eqHsBang :: HsImplBang -> HsImplBang -> Bool
+eqHsBang HsLazy               HsLazy              = True
+eqHsBang HsStrict             HsStrict            = True
+eqHsBang (HsUnpack Nothing)   (HsUnpack Nothing)  = True
+eqHsBang (HsUnpack (Just c1)) (HsUnpack (Just c2))
+  = eqType (coercionType c1) (coercionType c2)
+eqHsBang _ _                                       = False
+
+isBanged :: HsImplBang -> Bool
+isBanged (HsUnpack {}) = True
+isBanged (HsStrict {}) = True
+isBanged HsLazy        = False
+
+isSrcStrict :: SrcStrictness -> Bool
+isSrcStrict SrcStrict = True
+isSrcStrict _ = False
+
+isSrcUnpacked :: SrcUnpackedness -> Bool
+isSrcUnpacked SrcUnpack = True
+isSrcUnpacked _ = False
 
 isMarkedStrict :: StrictnessMark -> Bool
 isMarkedStrict NotMarkedStrict = False
@@ -621,26 +673,27 @@ isMarkedStrict _               = True   -- All others are strict
 
 -- | Build a new data constructor
 mkDataCon :: Name
-          -> Bool               -- ^ Is the constructor declared infix?
-          -> [HsBang]           -- ^ Strictness/unpack annotations, from user;
-                                --   or, for imported DataCons, from the interface file 
-          -> [FieldLabel]       -- ^ Field labels for the constructor, if it is a record,
-                                --   otherwise empty
-          -> [TyVar]            -- ^ Universally quantified type variables
-          -> [TyVar]            -- ^ Existentially quantified type variables
-          -> [(TyVar,Type)]     -- ^ GADT equalities
-          -> ThetaType          -- ^ Theta-type occuring before the arguments proper
-          -> [Type]             -- ^ Original argument types
-          -> Type               -- ^ Original result type
-          -> TyCon              -- ^ Representation type constructor
-          -> ThetaType          -- ^ The "stupid theta", context of the data declaration
-                                --   e.g. @data Eq a => T a ...@
-          -> Id                 -- ^ Worker Id
-          -> DataConRep         -- ^ Representation
+          -> Bool           -- ^ Is the constructor declared infix?
+          -> Promoted TyConRepName -- ^ Whether promoted, and if so the TyConRepName
+                                   --   for the promoted TyCon
+          -> [HsSrcBang]    -- ^ Strictness/unpack annotations, from user
+          -> [FieldLabel]   -- ^ Field labels for the constructor,
+                            -- if it is a record, otherwise empty
+          -> [TyVar]        -- ^ Universally quantified type variables
+          -> [TyVar]        -- ^ Existentially quantified type variables
+          -> [(TyVar,Type)] -- ^ GADT equalities
+          -> ThetaType      -- ^ Theta-type occuring before the arguments proper
+          -> [Type]         -- ^ Original argument types
+          -> Type           -- ^ Original result type
+          -> TyCon          -- ^ Representation type constructor
+          -> ThetaType      -- ^ The "stupid theta", context of the data
+                            -- declaration e.g. @data Eq a => T a ...@
+          -> Id             -- ^ Worker Id
+          -> DataConRep     -- ^ Representation
           -> DataCon
   -- Can get the tag from the TyCon
 
-mkDataCon name declared_infix
+mkDataCon name declared_infix prom_info
           arg_stricts   -- Must match orig_arg_tys 1-1
           fields
           univ_tvs ex_tvs
@@ -685,15 +738,12 @@ mkDataCon name declared_infix
              mkTyConApp rep_tycon (mkTyVarTys univ_tvs)
 
     mb_promoted   -- See Note [Promoted data constructors] in TyCon
-      | isJust (promotableTyCon_maybe rep_tycon)
-          -- The TyCon is promotable only if all its datacons
-          -- are, so the promoteType for prom_kind should succeed
-      = Just (mkPromotedDataCon con name (getUnique name) prom_kind roles)
-      | otherwise
-      = Nothing
-    prom_kind = promoteType (dataConUserType con)
-    roles = map (const Nominal)          (univ_tvs ++ ex_tvs) ++
-            map (const Representational) orig_arg_tys
+      = case prom_info of
+          NotPromoted     -> NotPromoted
+          Promoted rep_nm -> Promoted (mkPromotedDataCon con name rep_nm prom_kind prom_roles)
+    prom_kind  = promoteType (dataConUserType con)
+    prom_roles = map (const Nominal)          (univ_tvs ++ ex_tvs) ++
+                 map (const Representational) orig_arg_tys
 
 eqSpecPreds :: [(TyVar,Type)] -> ThetaType
 eqSpecPreds spec = [ mkEqPred (mkTyVarTy tv) ty | (tv,ty) <- spec ]
@@ -776,25 +826,29 @@ dataConWrapId dc = case dcRep dc of
 
 -- | Find all the 'Id's implicitly brought into scope by the data constructor. Currently,
 -- the union of the 'dataConWorkId' and the 'dataConWrapId'
-dataConImplicitIds :: DataCon -> [Id]
-dataConImplicitIds (MkData { dcWorkId = work, dcRep = rep})
-  = case rep of
-       NoDataConRep               -> [work]
-       DCR { dcr_wrap_id = wrap } -> [wrap,work]
+dataConImplicitTyThings :: DataCon -> [TyThing]
+dataConImplicitTyThings (MkData { dcWorkId = work, dcRep = rep })
+  = [AnId work] ++ wrap_ids
+  where
+    wrap_ids = case rep of
+                 NoDataConRep               -> []
+                 DCR { dcr_wrap_id = wrap } -> [AnId wrap]
 
 -- | The labels for the fields of this particular 'DataCon'
 dataConFieldLabels :: DataCon -> [FieldLabel]
 dataConFieldLabels = dcFields
 
 -- | Extract the type for any given labelled field of the 'DataCon'
-dataConFieldType :: DataCon -> FieldLabel -> Type
+dataConFieldType :: DataCon -> FieldLabelString -> Type
 dataConFieldType con label
-  = case lookup label (dcFields con `zip` dcOrigArgTys con) of
-      Just ty -> ty
+  = case find ((== label) . flLabel . fst) (dcFields con `zip` dcOrigArgTys con) of
+      Just (_, ty) -> ty
       Nothing -> pprPanic "dataConFieldType" (ppr con <+> ppr label)
 
--- | The strictness markings written by the porgrammer.
+-- | Strictness/unpack annotations, from user; or, for imported
+-- DataCons, from the interface file
 -- The list is in one-to-one correspondence with the arity of the 'DataCon'
+
 dataConSrcBangs :: DataCon -> [HsSrcBang]
 dataConSrcBangs = dcSrcBangs
 
@@ -834,7 +888,7 @@ dataConImplBangs :: DataCon -> [HsImplBang]
 -- source program argument to the data constructor
 dataConImplBangs dc
   = case dcRep dc of
-      NoDataConRep              -> replicate (dcSourceArity dc) HsNoBang
+      NoDataConRep              -> replicate (dcSourceArity dc) HsLazy
       DCR { dcr_bangs = bangs } -> bangs
 
 dataConBoxer :: DataCon -> Maybe DataConBoxer
@@ -856,6 +910,25 @@ dataConSig (MkData {dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs,
                     dcEqSpec = eq_spec, dcOtherTheta  = theta,
                     dcOrigArgTys = arg_tys, dcOrigResTy = res_ty})
   = (univ_tvs ++ ex_tvs, eqSpecPreds eq_spec ++ theta, arg_tys, res_ty)
+
+dataConInstSig
+  :: DataCon
+  -> [Type]    -- Instantiate the *universal* tyvars with these types
+  -> ([TyVar], ThetaType, [Type])  -- Return instantiated existentials
+                                   -- theta and arg tys
+-- ^ Instantantiate the universal tyvars of a data con,
+--   returning the instantiated existentials, constraints, and args
+dataConInstSig (MkData { dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs
+                       , dcEqSpec = eq_spec, dcOtherTheta  = theta
+                       , dcOrigArgTys = arg_tys })
+               univ_tys
+  = (ex_tvs'
+    , substTheta subst (eqSpecPreds eq_spec ++ theta)
+    , substTys   subst arg_tys)
+  where
+    univ_subst = zipTopTvSubst univ_tvs univ_tys
+    (subst, ex_tvs') = mapAccumL Type.substTyVarBndr univ_subst ex_tvs
+
 
 -- | The \"full signature\" of the 'DataCon' returns, in order:
 --
@@ -962,7 +1035,7 @@ dataConRepArgTys (MkData { dcRep = rep
 -- to its info table and used by the GHCi debugger and the heap profiler
 dataConIdentity :: DataCon -> [Word8]
 -- We want this string to be UTF-8, so we get the bytes directly from the FastStrings.
-dataConIdentity dc = bytesFS (packageKeyFS (modulePackageKey mod)) ++
+dataConIdentity dc = bytesFS (unitIdFS (moduleUnitId mod)) ++
                   fromIntegral (ord ':') : bytesFS (moduleNameFS (moduleName mod)) ++
                   fromIntegral (ord '.') : bytesFS (occNameFS (nameOccName name))
   where name = dataConName dc
@@ -990,16 +1063,11 @@ dataConCannotMatch :: [Type] -> DataCon -> Bool
 -- NB: look at *all* equality constraints, not only those
 --     in dataConEqSpec; see Trac #5168
 dataConCannotMatch tys con
-  | null theta        = False   -- Common
+  | null inst_theta   = False   -- Common
   | all isTyVarTy tys = False   -- Also common
-  | otherwise
-  = typesCantMatch [(Type.substTy subst ty1, Type.substTy subst ty2)
-                   | (ty1, ty2) <- concatMap predEqs theta ]
+  | otherwise         = typesCantMatch (concatMap predEqs inst_theta)
   where
-    dc_tvs  = dataConUnivTyVars con
-    theta   = dataConTheta con
-    subst   = ASSERT2( length dc_tvs == length tys, ppr con $$ ppr dc_tvs $$ ppr tys )
-              zipTopTvSubst dc_tvs tys
+    (_, inst_theta, _) = dataConInstSig con tys
 
     -- TODO: could gather equalities from superclasses too
     predEqs pred = case classifyPredType pred of
@@ -1009,59 +1077,111 @@ dataConCannotMatch tys con
 {-
 ************************************************************************
 *                                                                      *
-              Building an algebraic data type
+                 Promotion
+
+   These functions are here becuase
+   - isPromotableTyCon calls dataConFullSig
+   - mkDataCon calls promoteType
+   - It's nice to keep the promotion stuff together
 *                                                                      *
 ************************************************************************
 
-buildAlgTyCon is here because it is called from TysWiredIn, which in turn
-depends on DataCon, but not on BuildTyCl.
--}
+Note [The overall promotion story]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Here is the overall plan.
 
-buildAlgTyCon :: Name
-              -> [TyVar]               -- ^ Kind variables and type variables
-              -> [Role]
-              -> Maybe CType
-              -> ThetaType             -- ^ Stupid theta
-              -> AlgTyConRhs
-              -> RecFlag
-              -> Bool                  -- ^ True <=> this TyCon is promotable
-              -> Bool                  -- ^ True <=> was declared in GADT syntax
-              -> TyConParent
-              -> TyCon
+* Compared to a TyCon T, the promoted 'T has
+     same Name (and hence Unique)
+     same TyConRepName
+  In future the two will collapse into one anyhow.
 
-buildAlgTyCon tc_name ktvs roles cType stupid_theta rhs
-              is_rec is_promotable gadt_syn parent
-  = tc
-  where
-    kind = mkPiKinds ktvs liftedTypeKind
+* Compared to a DataCon K, the promoted 'K (a type constructor) has
+      same Name (and hence Unique)
+  But it has a fresh TyConRepName; after all, the DataCon doesn't have
+  a TyConRepName at all.  (See Note [Grand plan for Typeable] in TcTypeable
+  for TyConRepName.)
 
-    -- tc and mb_promoted_tc are mutually recursive
-    tc = mkAlgTyCon tc_name kind ktvs roles cType stupid_theta
-                    rhs parent is_rec gadt_syn
-                    mb_promoted_tc
+  Why does 'K have the same unique as K?  It's acceptable because we don't
+  mix types and terms, so we won't get them confused.  And it's helpful mainly
+  so that we know when to print 'K as a qualified name in error message. The
+  PrintUnqualified stuff depends on whether K is lexically in scope.. but 'K
+  never is!
 
-    mb_promoted_tc
-      | is_promotable = Just (mkPromotedTyCon tc (promoteKind kind))
-      | otherwise     = Nothing
+* It follows that the tick-mark (eg 'K) is not part of the Occ name of
+  either promoted data constructors or type constructors. Instead,
+  pretty-printing: the pretty-printer prints a tick in front of
+     - promoted DataCons (always)
+     - promoted TyCons (with -dppr-debug)
+  See TyCon.pprPromotionQuote
 
-{-
-************************************************************************
-*                                                                      *
-        Promoting of data types to the kind level
-*                                                                      *
-************************************************************************
+* For a promoted data constructor K, the pipeline goes like this:
+    User writes (in a type):      K or 'K
+    Parser produces OccName:      K{tc} or K{d}, respectively
+    Renamer makes Name:           M.K{d}_r62   (i.e. same unique as DataCon K)
+                                     and K{tc} has been turned into K{d}
+                                     provided it was unambiguous
+    Typechecker makes TyCon:      PromotedDataCon MK{d}_r62
 
-These two 'promoted..' functions are here because
- * They belong together
- * 'promoteDataCon' depends on DataCon stuff
+
+Note [Checking whether a group is promotable]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We only want to promote a TyCon if all its data constructors
+are promotable; it'd be very odd to promote some but not others.
+
+But the data constructors may mention this or other TyCons.
+
+So we treat the recursive uses as all OK (ie promotable) and
+do one pass to check that each TyCon is promotable.
+
+Currently type synonyms are not promotable, though that
+could change.
 -}
 
 promoteDataCon :: DataCon -> TyCon
-promoteDataCon (MkData { dcPromoted = Just tc }) = tc
+promoteDataCon (MkData { dcPromoted = Promoted tc }) = tc
 promoteDataCon dc = pprPanic "promoteDataCon" (ppr dc)
 
-promoteDataCon_maybe :: DataCon -> Maybe TyCon
+promoteDataCon_maybe :: DataCon -> Promoted TyCon
 promoteDataCon_maybe (MkData { dcPromoted = mb_tc }) = mb_tc
+
+computeTyConPromotability :: NameSet -> TyCon -> Bool
+computeTyConPromotability rec_tycons tc
+  =  isAlgTyCon tc    -- Only algebraic; not even synonyms
+                     -- (we could reconsider the latter)
+  && ok_kind (tyConKind tc)
+  && case algTyConRhs tc of
+       DataTyCon { data_cons = cs } -> all ok_con cs
+       TupleTyCon { data_con = c }  -> ok_con c
+       NewTyCon { data_con = c }    -> ok_con c
+       AbstractTyCon {}             -> False
+  where
+    ok_kind kind = all isLiftedTypeKind args && isLiftedTypeKind res
+            where  -- Checks for * -> ... -> * -> *
+              (args, res) = splitKindFunTys kind
+
+    -- See Note [Promoted data constructors] in TyCon
+    ok_con con = all (isLiftedTypeKind . tyVarKind) ex_tvs
+              && null eq_spec   -- No constraints
+              && null theta
+              && all (isPromotableType rec_tycons) orig_arg_tys
+       where
+         (_, ex_tvs, eq_spec, theta, orig_arg_tys, _) = dataConFullSig con
+
+
+isPromotableType :: NameSet -> Type -> Bool
+-- Must line up with promoteType
+-- But the function lives here because we must treat the
+-- *recursive* tycons as promotable
+isPromotableType rec_tcs con_arg_ty
+  = go con_arg_ty
+  where
+    go (TyConApp tc tys) =  tys `lengthIs` tyConArity tc
+                         && (tyConName tc `elemNameSet` rec_tcs
+                             || isPromotableTyCon tc)
+                         && all go tys
+    go (FunTy arg res)   = go arg && go res
+    go (TyVarTy {})      = True
+    go _                 = False
 
 {-
 Note [Promoting a Type to a Kind]
@@ -1092,7 +1212,7 @@ promoteType ty
     kvs = [ mkKindVar (tyVarName tv) superKind | tv <- tvs ]
     env = zipVarEnv tvs kvs
 
-    go (TyConApp tc tys) | Just prom_tc <- promotableTyCon_maybe tc
+    go (TyConApp tc tys) | Promoted prom_tc <- promotableTyCon_maybe tc
                          = mkTyConApp prom_tc (map go tys)
     go (FunTy arg res)   = mkArrowKind (go arg) (go res)
     go (TyVarTy tv)      | Just kv <- lookupVarEnv env tv
@@ -1144,3 +1264,41 @@ splitDataProductType_maybe ty
   = Just (tycon, ty_args, con, dataConInstArgTys con ty_args)
   | otherwise
   = Nothing
+
+{-
+************************************************************************
+*                                                                      *
+              Building an algebraic data type
+*                                                                      *
+************************************************************************
+
+buildAlgTyCon is here because it is called from TysWiredIn, which can
+depend on this module, but not on BuildTyCl.
+-}
+
+buildAlgTyCon :: Name
+              -> [TyVar]               -- ^ Kind variables and type variables
+              -> [Role]
+              -> Maybe CType
+              -> ThetaType             -- ^ Stupid theta
+              -> AlgTyConRhs
+              -> RecFlag
+              -> Bool                  -- ^ True <=> this TyCon is promotable
+              -> Bool                  -- ^ True <=> was declared in GADT syntax
+              -> AlgTyConFlav
+              -> TyCon
+
+buildAlgTyCon tc_name ktvs roles cType stupid_theta rhs
+              is_rec is_promotable gadt_syn parent
+  = tc
+  where
+    kind = mkPiKinds ktvs liftedTypeKind
+
+    -- tc and mb_promoted_tc are mutually recursive
+    tc = mkAlgTyCon tc_name kind ktvs roles cType stupid_theta
+                    rhs parent is_rec gadt_syn
+                    mb_promoted_tc
+
+    mb_promoted_tc
+      | is_promotable = Promoted (mkPromotedTyCon tc (promoteKind kind))
+      | otherwise     = NotPromoted

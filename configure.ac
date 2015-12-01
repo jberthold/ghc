@@ -101,6 +101,12 @@ AC_ARG_ENABLE(bootstrap-with-devel-snapshot,
         EnableBootstrapWithDevelSnaphost=NO
 )
 
+AC_ARG_ENABLE(tarballs-autodownload,
+[AC_HELP_STRING([--enable-tarballs-autodownload],
+                [Automatically download Windows distribution binaries if needed.])],
+        TarballsAutodownload=YES,
+        TarballsAutodownload=NO
+)
 if test "$WithGhc" != ""; then
   FPTOOLS_GHC_VERSION([GhcVersion], [GhcMajVersion], [GhcMinVersion], [GhcPatchLevel])dnl
 
@@ -115,20 +121,13 @@ if test "$WithGhc" != ""; then
   GhcMinVersion2=`echo "$GhcMinVersion" | sed 's/^\\(.\\)$/0\\1/'`
   GhcCanonVersion="$GhcMajVersion$GhcMinVersion2"
 
-  BOOTSTRAPPING_GHC_INFO_FIELD([OS_STAGE0],[target os])
   BOOTSTRAPPING_GHC_INFO_FIELD([CC_STAGE0],[C compiler command])
   dnl ToDo, once "ld command" is reliably available.
   dnl Then, we can remove the LD_STAGE0 hack in mk/build-package-date.mk
   dnl BOOTSTRAPPING_GHC_INFO_FIELD([LD_STAGE0],[ld command])
-  if test "x$OS_STAGE0" != "xOSDarwin"; then
-    BOOTSTRAPPING_GHC_INFO_FIELD([AR_STAGE0],[ar command])
-    BOOTSTRAPPING_GHC_INFO_FIELD([AR_OPTS_STAGE0],[ar flags])
-    BOOTSTRAPPING_GHC_INFO_FIELD([ArSupportsAtFile_STAGE0],[ar supports at file])
-  else
-    AR_STAGE0='$(AR)'
-    AR_OPTS_STAGE0='$(AR_OPTS)'
-    ArSupportsAtFile_STAGE0='$(ArSupportsAtFile)'
-  fi
+  BOOTSTRAPPING_GHC_INFO_FIELD([AR_STAGE0],[ar command])
+  BOOTSTRAPPING_GHC_INFO_FIELD([AR_OPTS_STAGE0],[ar flags])
+  BOOTSTRAPPING_GHC_INFO_FIELD([ArSupportsAtFile_STAGE0],[ar supports at file])
 fi
 
 dnl ** Must have GHC to build GHC
@@ -136,8 +135,8 @@ if test "$WithGhc" = ""
 then
     AC_MSG_ERROR([GHC is required.])
 fi
-FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[7.6],
-    [AC_MSG_ERROR([GHC version 7.6 or later is required to compile GHC.])])
+FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[7.8],
+    [AC_MSG_ERROR([GHC version 7.8 or later is required to compile GHC.])])
 
 if test `expr $GhcMinVersion % 2` = "1"
 then
@@ -161,9 +160,9 @@ FP_COMPARE_VERSIONS([$GhcVersion],[-gt],[7.7],
 AC_SUBST(CMM_SINK_BOOTSTRAP_IS_NEEDED)
 
 FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[7.9],
-                    SUPPORTS_PACKAGE_KEY=NO,
-                    SUPPORTS_PACKAGE_KEY=YES)
-AC_SUBST(SUPPORTS_PACKAGE_KEY)
+                    SUPPORTS_COMPONENT_ID=NO,
+                    SUPPORTS_COMPONENT_ID=YES)
+AC_SUBST(SUPPORTS_COMPONENT_ID)
 
 # GHC is passed to Cabal, so we need a native path
 if test "${WithGhc}" != ""
@@ -274,64 +273,96 @@ AC_SUBST(WithHc)
 FP_INTREE_GHC_PWD
 FP_FIND_ROOT
 
+fail() {
+    echo >&2
+    echo "$1" >&2
+    exit 1
+}
+
+
+if test "$HostOS" = "mingw32"
+then
+    # Find the mingw-w64 7z file to extract.
+    # NB. If you update the tarballs to a new version of gcc, don't
+    # forget to tweak the paths in driver/gcc/gcc.c.
+    if test "$HostArch" = "i386"
+    then
+        mingw_arch="i686"
+        tarball_dest_dir="mingw-w64/x86"
+        tarball_mingw_dir="mingw32"
+    else
+        mingw_arch="x86_64"
+        tarball_dest_dir="mingw-w64/x86_64"
+        tarball_mingw_dir="mingw64"
+    fi
+fi
+
+set_up_tarballs() {
+    AC_MSG_NOTICE([Checking for Windows toolchain tarballs...])
+    local action
+    if test "$TarballsAutodownload" = "NO"
+    then
+        action="verify"
+    else
+        action="download"
+    fi
+    mk/get-win32-tarballs.sh $action $HostArch > missing-win32-tarballs
+    case $? in
+        0)
+           rm missing-win32-tarballs
+           ;;
+        2)
+           echo
+           echo "Error:"
+           echo "Needed msys2 tarballs are missing. You have a few options to get them,"
+           echo
+           echo "  * run configure with the --enable-tarballs-autodownload option"
+           echo
+           echo "  * run mk/get-win32-tarballs.sh download ${HostArch}"
+           echo
+           echo "  * manually download the files listed in ./missing-win32-tarballs and place"
+           echo "    them in the ghc-tarballs directory."
+           echo
+           exit 1
+           ;;
+        *)
+           echo
+           echo "Error fetching msys2 tarballs; see errors above."
+           exit 1
+           ;;
+    esac
+
+    # Extract all the tarballs in one go
+    if ! test -d inplace/mingw
+    then
+        AC_MSG_NOTICE([Extracting Windows toolchain from archives (may take a while)...])
+        rm -rf inplace/mingw
+        local base_dir="../ghc-tarballs/${tarball_dest_dir}"
+        ( cd inplace &&
+        find "${base_dir}" -name "*.tar.xz" -exec tar xfJ {} \; &&
+        rm ".MTREE" &&
+        rm ".PKGINFO" &&
+        cd .. ) || fail "Error: Could not extract Windows toolchains."
+
+        mv "inplace/${tarball_mingw_dir}" inplace/mingw &&
+        touch inplace/mingw
+
+        # NB. Now since the GCC is hardcoded to use /mingw32 we need to
+        # make a wrapper around it to give it the proper paths
+        mv inplace/mingw/bin/gcc.exe inplace/mingw/bin/realgcc.exe
+        PATH=`pwd`/inplace/mingw/bin:$PATH
+        inplace/mingw/bin/realgcc.exe driver/gcc/gcc.c driver/utils/cwrapper.c driver/utils/getLocation.c -Idriver/utils -o inplace/mingw/bin/gcc.exe
+
+        AC_MSG_NOTICE([In-tree MingW-w64 tree created])
+    fi
+}
+
 if test "$HostOS" = "mingw32"
 then
     test -d inplace || mkdir inplace
 
-    if test "$HostArch" = "i386"
-    then
-        # NB. If you update the tarballs to a new version of gcc, don't
-        # forget to tweak the paths in driver/gcc/gcc.c.
-        if ! test -d inplace/mingw ||
-             test inplace/mingw -ot ghc-tarballs/mingw/binutils*.tar.lzma  ||
-             test inplace/mingw -ot ghc-tarballs/mingw/gcc-core*.tar.lzma  ||
-             test inplace/mingw -ot ghc-tarballs/mingw/gcc-c++*.tar.lzma   ||
-             test inplace/mingw -ot ghc-tarballs/mingw/libgcc*.tar.gz      ||
-             test inplace/mingw -ot ghc-tarballs/mingw/libgmp*.tar.gz      ||
-             test inplace/mingw -ot ghc-tarballs/mingw/libmpc*.tar.gz      ||
-             test inplace/mingw -ot ghc-tarballs/mingw/libmpfr*.tar.gz     ||
-             test inplace/mingw -ot ghc-tarballs/mingw/libstdc*.tar.lzma   ||
-             test inplace/mingw -ot ghc-tarballs/mingw/mingwrt*-dev.tar.gz ||
-             test inplace/mingw -ot ghc-tarballs/mingw/mingwrt*-dll.tar.gz ||
-             test inplace/mingw -ot ghc-tarballs/mingw/w32api*.tar.lzma
-        then
-            AC_MSG_NOTICE([Making in-tree mingw tree])
-            rm -rf inplace/mingw
-            mkdir inplace/mingw
-            (
-                cd inplace/mingw &&
-                tar --lzma -xf ../../ghc-tarballs/mingw/binutils*.tar.lzma  &&
-                tar --lzma -xf ../../ghc-tarballs/mingw/gcc-core*.tar.lzma  &&
-                tar --lzma -xf ../../ghc-tarballs/mingw/gcc-c++*.tar.lzma   &&
-                tar --lzma -xf ../../ghc-tarballs/mingw/libgcc*.tar.lzma    &&
-                tar --lzma -xf ../../ghc-tarballs/mingw/libgmp*.tar.lzma    &&
-                tar --lzma -xf ../../ghc-tarballs/mingw/libmpc*.tar.lzma    &&
-                tar --lzma -xf ../../ghc-tarballs/mingw/libmpfr*.tar.lzma   &&
-                tar --lzma -xf ../../ghc-tarballs/mingw/libstdc*.tar.lzma   &&
-                tar -z     -xf ../../ghc-tarballs/mingw/mingwrt*-dev.tar.gz &&
-                tar -z     -xf ../../ghc-tarballs/mingw/mingwrt*-dll.tar.gz &&
-                tar --lzma -xf ../../ghc-tarballs/mingw/w32api*.tar.lzma    &&
-                mv bin/gcc.exe bin/realgcc.exe
-            )
-            PATH=`pwd`/inplace/mingw/bin:$PATH inplace/mingw/bin/realgcc.exe driver/gcc/gcc.c driver/utils/cwrapper.c driver/utils/getLocation.c -Idriver/utils -o inplace/mingw/bin/gcc.exe
-            AC_MSG_NOTICE([In-tree mingw tree created])
-        fi
-    else
-        # NB. If you update the tarballs to a new version of gcc, don't
-        # forget to tweak the paths in driver/gcc/gcc.c.
-        if ! test -d inplace/mingw ||
-             test inplace/mingw -ot ghc-tarballs/mingw64/*.tar.bz2
-        then
-            AC_MSG_NOTICE([Making in-tree mingw tree])
-            rm -rf inplace/mingw
-            mkdir inplace/mingw
-            (
-                cd inplace/mingw &&
-                tar -jxf ../../ghc-tarballs/mingw64/*.tar.bz2
-            )
-            AC_MSG_NOTICE([In-tree mingw tree created])
-        fi
-    fi
+    # NB. Download and extract the MingW-w64 distribution if required
+    set_up_tarballs
 
     mingwbin="$hardtop/inplace/mingw/bin/"
     CC="${mingwbin}gcc.exe"
@@ -341,6 +372,7 @@ then
     OBJDUMP="${mingwbin}objdump.exe"
     fp_prog_ar="${mingwbin}ar.exe"
 
+    # NB. Download the perl binaries if required
     if ! test -d inplace/perl ||
          test inplace/perl -ot ghc-tarballs/perl/ghc-perl*.tar.gz
     then
@@ -446,6 +478,12 @@ FP_ARG_WITH_PATH_GNU_PROG([NM], [nm], [nm])
 NmCmd="$NM"
 AC_SUBST([NmCmd])
 
+dnl ** Which objdump to use?
+dnl --------------------------------------------------------------
+FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([OBJDUMP], [objdump], [objdump])
+ObjdumpCmd="$OBJDUMP"
+AC_SUBST([ObjdumpCmd])
+
 dnl ** Which ar to use?
 dnl --------------------------------------------------------------
 FP_ARG_WITH_PATH_GNU_PROG([AR], [ar], [ar])
@@ -475,8 +513,10 @@ esac
 # tools we are looking for. In the past, GHC supported a number of
 # versions of LLVM simultaneously, but that stopped working around
 # 3.5/3.6 release of LLVM.
-LlvmVersion=3.6
+LlvmVersion=3.7
 AC_SUBST([LlvmVersion])
+sUPPORTED_LLVM_VERSION=$(echo \($LlvmVersion\) | sed 's/\./,/')
+AC_DEFINE_UNQUOTED([sUPPORTED_LLVM_VERSION], ${sUPPORTED_LLVM_VERSION}, [The supported LLVM version number])
 
 dnl ** Which LLVM llc to use?
 dnl --------------------------------------------------------------
@@ -690,10 +730,20 @@ then
     HSCOLOUR=`cygpath -m ${HSCOLOUR}`
 fi
 
-dnl ** check for DocBook toolchain
-FP_CHECK_DOCBOOK_DTD
-FP_DOCBOOK_XSL
-FP_PROG_DBLATEX
+dnl ** check for Sphinx toolchain
+AC_PATH_PROG(SPHINXBUILD,sphinx-build)
+AC_CACHE_CHECK([for version of sphinx-build], fp_cv_sphinx_version,
+changequote(, )dnl
+[if test -n "$SPHINXBUILD"; then
+  fp_cv_sphinx_version=`"$SPHINXBUILD" --version 2>&1 | sed 's/Sphinx\( (sphinx-build)\)\? v\?\([0-9]\.[0-9]\.[0-9]\)/\2/' | head -n1`;
+fi;
+changequote([, ])dnl
+])
+FP_COMPARE_VERSIONS([$fp_cv_sphinx_version],-lt,1.0.0,
+    [AC_MSG_WARN([Sphinx version 1.0.0 or later is required to build documentation]); SPHINXBUILD=;])
+
+dnl ** check for xelatex
+AC_PATH_PROG(XELATEX,xelatex)
 
 dnl ** check for ghc-pkg command
 FP_PROG_GHC_PKG
@@ -867,6 +917,15 @@ AS_IF([test "$UseSystemLibFFI" = "YES"], [
  CFLAGS="$LIBFFI_CFLAGS $CFLAGS"
  LDFLAGS2="$LDFLAGS"
  LDFLAGS="$LIBFFI_LDFLAGS $LDFLAGS"
+ if test "$HostOS" = "openbsd";
+ then
+   # OpenBSD's libffi is not directly linked to the libpthread but
+   # still requires pthread functionality. This means that any client
+   # binary which links with libffi also needs to link with
+   # libpthread. If it does not, then linking fails with unresolved
+   # symbols.
+   LDFLAGS="$LDFLAGS -lpthread"
+ fi
  AC_CHECK_LIB(ffi, ffi_call,
   [AC_CHECK_HEADERS([ffi.h], [break], [])
    AC_DEFINE([HAVE_LIBFFI], [1], [Define to 1 if you have libffi.])],
@@ -953,40 +1012,78 @@ AC_COMPILE_IFELSE(
   ])
 
 
-dnl ** checking for PAPI
-AC_CHECK_LIB(papi, PAPI_library_init, HavePapiLib=YES, HavePapiLib=NO)
-AC_CHECK_HEADER([papi.h], [HavePapiHeader=YES], [HavePapiHeader=NO])
-AC_SUBST(HavePapiLib)
-AC_SUBST(HavePapiHeader)
-
 AC_CHECK_FUNCS(__mingw_vfprintf)
 
-if test "$HavePapiLib" = "YES" -a "$HavePapiHeader" = "YES"; then
-   HavePapi=YES
-else
-   HavePapi=NO
-fi
-AC_SUBST(HavePapi)
+dnl large address space support (see includes/rts/storage/MBlock.h)
+dnl
+dnl Darwin has vm_allocate/vm_protect
+dnl Linux has mmap(MAP_NORESERVE)/madv(MADV_DONTNEED)
+dnl FreeBSD, Solaris and maybe other have MAP_NORESERVE/MADV_FREE
+dnl (They also have MADV_DONTNEED, but it means something else!)
+dnl
+dnl Windows has VirtualAlloc MEM_RESERVE/MEM_COMMIT, however
+dnl it counts page-table space as committed memory, and so quickly
+dnl runs out of paging file when we have multiple processes reserving
+dnl 1TB of address space, we get the following error:
+dnl    VirtualAlloc MEM_RESERVE 1099512676352 bytes failed: The paging file is too small for this operation to complete.
+dnl
 
-if test "$HAVE_DOCBOOK_XSL" = "NO" ||
-   test "$XsltprocCmd" = ""
-then
-    BUILD_DOCBOOK_HTML=NO
-else
-    BUILD_DOCBOOK_HTML=YES
-fi
-AC_SUBST(BUILD_DOCBOOK_HTML)
+AC_ARG_ENABLE(large-address-space,
+    [AC_HELP_STRING([--enable-large-address-space],
+        [Use a single large address space on 64 bit systems (enabled by default on 64 bit platforms)])],
+    EnableLargeAddressSpace=$enableval,
+    EnableLargeAddressSpace=yes
+)
 
-if test "$DblatexCmd" = ""
-then
-    BUILD_DOCBOOK_PS=NO
-    BUILD_DOCBOOK_PDF=NO
-else
-    BUILD_DOCBOOK_PS=YES
-    BUILD_DOCBOOK_PDF=YES
+use_large_address_space=no
+if test "$ac_cv_sizeof_void_p" -eq 8 ; then
+    if test "x$EnableLargeAddressSpace" = "xyes" ; then
+        if test "$ghc_host_os" = "darwin" ; then
+            use_large_address_space=yes
+	elif test "$ghc_host_os" = "openbsd" ; then
+	    # as of OpenBSD 5.8 (2015), OpenBSD does not support mmap with MAP_NORESERVE.
+	    # The flag MAP_NORESERVE is supported for source compatibility reasons,
+	    # but is completely ignored by OS mmap
+            use_large_address_space=no
+        else
+            AC_CHECK_DECLS([MAP_NORESERVE, MADV_FREE, MADV_DONTNEED],[],[],
+                [
+                #include <unistd.h>
+                #include <sys/types.h>
+                #include <sys/mman.h>
+                #include <fcntl.h>
+            ])
+            if test "$ac_cv_have_decl_MAP_NORESERVE" = "yes" &&
+                test "$ac_cv_have_decl_MADV_FREE" = "yes" ||
+                test "$ac_cv_have_decl_MADV_DONTNEED" = "yes" ; then
+                    use_large_address_space=yes
+            fi
+        fi
+    fi
 fi
-AC_SUBST(BUILD_DOCBOOK_PS)
-AC_SUBST(BUILD_DOCBOOK_PDF)
+if test "$use_large_address_space" = "yes" ; then
+   AC_DEFINE([USE_LARGE_ADDRESS_SPACE], [1], [Enable single heap address space support])
+fi
+
+AC_CHECK_LIB(dw, dwfl_begin, [HaveLibdw=YES], [HaveLibdw=NO])
+AC_SUBST(HaveLibdw)
+
+if test -n "$SPHINXBUILD"; then
+    BUILD_MAN=YES
+    BUILD_SPHINX_HTML=YES
+    if test -n "$XELATEX"; then
+        BUILD_SPHINX_PDF=YES
+    else
+        BUILD_SPHINX_PDF=NO
+    fi
+else
+    BUILD_MAN=NO
+    BUILD_SPHINX_HTML=NO
+    BUILD_SPHINX_PDF=NO
+fi
+AC_SUBST(BUILD_MAN)
+AC_SUBST(BUILD_SPHINX_HTML)
+AC_SUBST(BUILD_SPHINX_PDF)
 
 ############### Parallel haskell Support, Eden group Marburg ##########
 dnl option --enable-parallel, default=yes for us!
@@ -1154,7 +1251,7 @@ if grep '	' compiler/ghc.cabal.in 2>&1 >/dev/null; then
    AC_MSG_ERROR([compiler/ghc.cabal.in contains tab characters; please remove them])
 fi
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal settings docs/users_guide/ug-book.xml docs/users_guide/ug-ent.xml docs/index.html libraries/prologue.txt distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
 AC_OUTPUT
 
 # We got caught by
@@ -1210,11 +1307,13 @@ echo ["\
    hs-cpp       : $HaskellCPPCmd
    hs-cpp-flags : $HaskellCPPArgs
    ld           : $LdCmd
+   nm           : $NmCmd
+   objdump      : $ObjdumpCmd
    Happy        : $HappyCmd ($HappyVersion)
    Alex         : $AlexCmd ($AlexVersion)
    Perl         : $PerlCmd
-   dblatex      : $DblatexCmd
-   xsltproc     : $XsltprocCmd
+   sphinx-build : $SPHINXBUILD
+   xelatex      : $XELATEX
 
    Using LLVM tools
       llc   : $LlcCmd
@@ -1231,9 +1330,8 @@ echo ["\
 fi
 
 echo ["\
-   Building DocBook HTML documentation : $BUILD_DOCBOOK_HTML
-   Building DocBook PS documentation   : $BUILD_DOCBOOK_PS
-   Building DocBook PDF documentation  : $BUILD_DOCBOOK_PDF"]
+   Tools to build Sphinx HTML documentation available: $BUILD_SPHINX_HTML
+   Tools to build Sphinx PDF documentation available: $BUILD_SPHINX_PDF"]
 
 echo ["----------------------------------------------------------------------
 "]

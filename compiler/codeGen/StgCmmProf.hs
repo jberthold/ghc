@@ -183,7 +183,7 @@ enterCostCentreFun ccs closure =
   ifProfiling $ do
     if isCurrentCCS ccs
        then do dflags <- getDynFlags
-               emitRtsCall rtsPackageKey (fsLit "enterFunCCS")
+               emitRtsCall rtsUnitId (fsLit "enterFunCCS")
                    [(CmmReg (CmmGlobal BaseReg), AddrHint),
                     (costCentreFrom dflags closure, AddrHint)] False
        else return () -- top-level function, nothing to do
@@ -285,7 +285,7 @@ emitSetCCC cc tick push
 pushCostCentre :: LocalReg -> CmmExpr -> CostCentre -> FCode ()
 pushCostCentre result ccs cc
   = emitRtsCallWithResult result AddrHint
-        rtsPackageKey
+        rtsUnitId
         (fsLit "pushCostCentre") [(ccs,AddrHint),
                                 (CmmLit (mkCCostCentre cc), AddrHint)]
         False
@@ -321,14 +321,15 @@ dynLdvInit dflags =     -- (era << LDV_SHIFT) | LDV_STATE_CREATE
 -- Initialise the LDV word of a new closure
 --
 ldvRecordCreate :: CmmExpr -> FCode ()
-ldvRecordCreate closure = do dflags <- getDynFlags
-                             emit $ mkStore (ldvWord dflags closure) (dynLdvInit dflags)
+ldvRecordCreate closure = do
+  dflags <- getDynFlags
+  emit $ mkStore (ldvWord dflags closure) (dynLdvInit dflags)
 
 --
--- Called when a closure is entered, marks the closure as having been "used".
--- The closure is not an 'inherently used' one.
--- The closure is not IND or IND_OLDGEN because neither is considered for LDV
--- profiling.
+-- | Called when a closure is entered, marks the closure as having
+-- been "used".  The closure is not an "inherently used" one.  The
+-- closure is not @IND@ or @IND_OLDGEN@ because neither is considered
+-- for LDV profiling.
 --
 ldvEnterClosure :: ClosureInfo -> CmmReg -> FCode ()
 ldvEnterClosure closure_info node_reg = do
@@ -356,7 +357,7 @@ ldvEnter cl_ptr = do
 
 loadEra :: DynFlags -> CmmExpr
 loadEra dflags = CmmMachOp (MO_UU_Conv (cIntWidth dflags) (wordWidth dflags))
-    [CmmLoad (mkLblExpr (mkCmmDataLabel rtsPackageKey (fsLit "era")))
+    [CmmLoad (mkLblExpr (mkCmmDataLabel rtsUnitId (fsLit "era")))
              (cInt dflags)]
 
 ldvWord :: DynFlags -> CmmExpr -> CmmExpr
