@@ -171,7 +171,8 @@ STATIC_INLINE StgInfoTable* getClosureInfo(StgClosure* node, StgInfoTable* info,
                                            nat *nonptrs, nat *vhs);
 #ifdef LIBRARY_CODE
 // remains local when code is stand-alone for the library
-STATIC_INLINE rtsBool isBlackhole(StgClosure* node);
+STATIC_INLINE rtsBool pmIsBlackhole(StgClosure* node);
+#define isBlackhole pmIsBlackhole
 #else
 // if compiling for the RTS: used in other files, declared in Parallel.h
 // rtsBool isBlackhole(StgClosure* node);
