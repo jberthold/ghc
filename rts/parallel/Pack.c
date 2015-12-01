@@ -46,6 +46,11 @@
 #include <string.h> // memset
 #endif
 
+#if __GLASGOW_HASKELL__ < 711
+// programming against internal types is great, isn't it? :-P
+#define StgArrBytes StgArrWords
+#endif
+
 #ifdef DEBUG
 #define DBG_HEADROOM 1
 #define END_OF_BUFFER_MARKER 0xdededeee
@@ -137,7 +142,7 @@ static void init(void) __attribute__((constructor));
 
 // init/destruct pack data structure
 #ifdef LIBRARY_CODE
-static PackState* initPacking(StgArrWords *mutArr);
+static PackState* initPacking(StgArrBytes *mutArr);
 #else
 static PackState* initRtsPacking(StgWord *buffer, nat size, StgTSO *tso);
 #endif
@@ -178,7 +183,7 @@ STATIC_INLINE rtsBool isBlackhole(StgClosure* node);
 #ifdef LIBRARY_CODE
 // interface function used in foreign primop: pack graph to given array, return
 // size in bytes (offset by P_ERRCODEMAX) or an error code
-int pmtryPackToBuffer(StgClosure* closure, StgArrWords* mutArr);
+int pmtryPackToBuffer(StgClosure* closure, StgArrBytes* mutArr);
 #else
 // in-RTS version: packToBuffer, declared in Parallel.h
 // int packToBuffer(StgClosure* closure,
@@ -213,12 +218,12 @@ static StgWord PackArray(PackState* p, StgClosure* array);
 #ifdef LIBRARY_CODE
 // interface unpacking from a Haskell array (using the Haskell Byte Array)
 // may return error code P_GARBLED
-StgClosure* pmUnpackGraphWrapper(StgArrWords* packBufferArray, Capability* cap);
+StgClosure* pmUnpackGraphWrapper(StgArrBytes* packBufferArray, Capability* cap);
 #else
 // in-RTS unpacking: unpacks from rtsPackBuffer and wipes it, aborts on failure
 // declared in Parallel.h
 // StgClosure* unpackGraph(rtsPackBuffer *packBuffer, Capability* cap);
-// StgClosure* unpackGraphWrapper(StgArrWords* packBufferArray, Capability* cap);
+// StgClosure* unpackGraphWrapper(StgArrBytes* packBufferArray, Capability* cap);
 #endif
 
 // internal function working on the raw data buffer
@@ -297,7 +302,7 @@ static void init(void) {
 #ifdef LIBRARY_CODE
 // A mutable array is passed as the buffer space. Note that its size comes in
 // bytes, while internally all is managed in units of StgWord.
-static PackState* initPacking(StgArrWords *mutArr) {
+static PackState* initPacking(StgArrBytes *mutArr) {
     PackState *ret;
 
     ret = (PackState*) stgMallocBytes(sizeof(PackState), "pack state");
@@ -562,7 +567,7 @@ getClosureInfo(StgClosure* node, StgInfoTable* info,
     case ARR_WORDS:
         *vhs = 1;
         *ptrs = 0;
-        *nonptrs = (((StgArrWords*) node)->bytes) / sizeof(StgWord);
+        *nonptrs = (((StgArrBytes*) node)->bytes) / sizeof(StgWord);
         break;
 
         /* For Arrays of pointers, we need to fill in all the pointers and
@@ -698,7 +703,7 @@ STATIC_INLINE void Pack(PackState* p, StgWord data) {
 // pmtryPackToBuffer: interface function called by the foreign primop.
 // Returns packed size (in bytes!) + P_ERRCODEMAX when successful, or
 // error codes upon failure
-int pmtryPackToBuffer(StgClosure* closure, StgArrWords* mutArr) {
+int pmtryPackToBuffer(StgClosure* closure, StgArrBytes* mutArr) {
     int errcode = P_SUCCESS; // error code returned by PackClosure
     PackState* p;
     nat size;
@@ -805,7 +810,7 @@ StgClosure* tryPackToMemory(StgClosure* graphroot,
                             StgTSO* tso, Capability* cap) {
     StgWord *buffer;
     StgWord packedSize, trySize;
-    StgArrWords* wordArray;
+    StgArrBytes* wordArray;
 
 #define ONEMEGABYTE 1048576
     trySize = ONEMEGABYTE; // start with 1MB buffer, increase if it fails
@@ -843,7 +848,7 @@ StgClosure* tryPackToMemory(StgClosure* graphroot,
     //   +---------+----------+------------------------+
     //   |ARR_WORDS| n_bytes  | data (array of words)  |
     //   +---------+----------+------------------------+
-    wordArray = (StgArrWords*) allocate(cap, 2 + packedSize / sizeof(StgWord));
+    wordArray = (StgArrBytes*) allocate(cap, 2 + packedSize / sizeof(StgWord));
     SET_HDR(wordArray, &stg_ARR_WORDS_info, CCS_SYSTEM);
     wordArray->bytes = packedSize;
     memcpy((void*) &(wordArray->payload), buffer, packedSize);
@@ -1470,7 +1475,7 @@ static StgWord PackPAP(PackState *p, StgPAP *pap) {
 // Packing Arrays.
 
 // An Array in the heap can contain StgWords or Pointers (to
-// closures), and is thus of type StgArrWords or StgMutArrPtrs.
+// closures), and is thus of type StgArrWords/Bytes or StgMutArrPtrs.
 //
 //     Array layout in heap/buffer is the following:
 //
@@ -1482,8 +1487,8 @@ static StgWord PackPAP(PackState *p, StgPAP *pap) {
 //
 // The array size is stored in bytes, but will always be word-aligned.
 //
-// Historically, this routine was also packing ArrWords, but they can
-// equally well be treated as "pointers-first" generic layout (with no
+// Historically, this routine was also packing StgArrWords/Bytes, but they
+// can equally well be treated as "pointers-first" generic layout (with no
 // pointers), and are packed simply by copying all words (as non-ptrs).
 //
 // MutArrPtrs (MUT_ARRAY_PTRS_* types) contain pointers to other
@@ -1518,7 +1523,7 @@ static StgWord PackArray(PackState *p, StgClosure *closure) {
     payloadsize = ((StgMutArrPtrs *)closure)->ptrs;
 
     // the function in ClosureMacros.h would include the header:
-    // arr_words_sizeW(stgCast(StgArrWords*,q));
+    // arr_words_sizeW(stgCast(StgArrBytes*,q));
     PACKETDEBUG(debugBelch("*>== %p (%s): packing array"
                            "(%d words) (size=%d)\n",
                            closure, info_type(closure), payloadsize,
@@ -1576,9 +1581,9 @@ static StgWord PackArray(PackState *p, StgClosure *closure) {
 #ifdef LIBRARY_CODE
 // unpacking from a Haskell array (using the Haskell Byte Array)
 // may return error code P_GARBLED
-StgClosure* pmUnpackGraphWrapper(StgArrWords* packBufferArray, Capability* cap)
+StgClosure* pmUnpackGraphWrapper(StgArrBytes* packBufferArray, Capability* cap)
 #else
-StgClosure* unpackGraphWrapper(StgArrWords* packBufferArray, Capability* cap)
+StgClosure* unpackGraphWrapper(StgArrBytes* packBufferArray, Capability* cap)
 #endif
 {
     nat size;
@@ -2570,7 +2575,7 @@ print:
         case ARR_WORDS:
             { // record size only (contains StgWords, not pointers)
                 char str[6];
-                sprintf(str, "%ld", (long) arr_words_words((StgArrWords*)p));
+                sprintf(str, "%ld", (long) arr_words_words((StgArrBytes*)p));
                 strcat(fp, str);
             }
             break;

@@ -99,7 +99,7 @@ StgClosure* tryPackToMemory(StgClosure* graphroot, StgTSO* tso,
 StgClosure* unpackGraph(rtsPackBuffer *packBuffer, Capability* cap);
 
 // respective deserialisation (global pack buffer used for unpacking)
-StgClosure* unpackGraphWrapper(StgArrWords *packBufferArray, Capability *cap);
+StgClosure* unpackGraphWrapper(StgArrBytes *packBufferArray, Capability *cap);
 
 // creating a blackhole from scratch. Defined in Pack.c (where it is
 // used), but mainly used by the primitive for channel creation.
