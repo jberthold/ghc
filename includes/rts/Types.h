@@ -38,12 +38,8 @@ typedef struct StgInfoTable_ StgInfoTable;
 typedef struct StgTSO_       StgTSO;
 
 /* 
-   Types specific to the parallel runtime system.
-*/
-
-/* 
-   Types specific to the PARALLEL_RTS runtime system.
-   but types are defined in the sequential base system as well
+   Types specific to the parallel runtime system,
+   but defined in the sequential base system as well.
 */
 
 // aliases

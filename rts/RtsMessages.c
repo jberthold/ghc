@@ -324,7 +324,7 @@ rtsDebugMsgFn(const char *s, va_list ap)
 void
 edenFatalInternalErrorFn(const char *s, va_list ap)
 {
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined (mingw32_HOST_OS)
   if (isGUIApp())
   {
      char title[BUFSIZE], message[BUFSIZE];
@@ -349,6 +349,14 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
     fprintf(stderr, "[PE %d]: internal error: ", thisPE);
   }
   vfprintf(stderr, s, ap);
+#if USE_LIBDW
+     fprintf(stderr, "\n");
+     fprintf(stderr, "Stack trace:");
+     LibdwSession *session = libdwInit();
+     Backtrace *bt = libdwGetBacktrace(session);
+     libdwPrintBacktrace(session, stderr, bt);
+     libdwFree(session);
+#endif
   fprintf(stderr, "\n");
   fprintf(stderr, "    (Eden compiler %s for %s)\n",
           ProjectVersion, xstr(HostPlatform_TYPE));
@@ -365,7 +373,7 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
 void
 parErrorMsgFn(const char *s, va_list ap)
 {
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined (mingw32_HOST_OS)
   if (isGUIApp())
   {
      char buf[BUFSIZE];
@@ -401,7 +409,7 @@ parSysErrorMsgFn(const char *s, va_list ap)
 {
   char *syserr;
 
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined (mingw32_HOST_OS)
   FormatMessage(
         FORMAT_MESSAGE_ALLOCATE_BUFFER |
         FORMAT_MESSAGE_FROM_SYSTEM |
@@ -443,7 +451,7 @@ parSysErrorMsgFn(const char *s, va_list ap)
         }
         vfprintf(stderr, s, ap);
         if (syserr) {
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined (mingw32_HOST_OS)
             // Win32 error messages have a terminating \n
             fprintf(stderr, ": %s", syserr);
 #else
@@ -454,7 +462,7 @@ parSysErrorMsgFn(const char *s, va_list ap)
         }
     }
 
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined (mingw32_HOST_OS)
     if (syserr) LocalFree(syserr);
 #endif
 }
@@ -462,7 +470,7 @@ parSysErrorMsgFn(const char *s, va_list ap)
 void
 parDebugMsgFn(const char *s, va_list ap)
 {
-#if defined(cygwin32_HOST_OS) || defined (mingw32_HOST_OS)
+#if defined (mingw32_HOST_OS)
   if (isGUIApp())
   {
      char buf[BUFSIZE];
