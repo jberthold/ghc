@@ -21,7 +21,7 @@ module TcType (
   --------------------------------
   -- Types
   TcType, TcSigmaType, TcRhoType, TcTauType, TcPredType, TcThetaType,
-  TcTyVar, TcTyVarSet, TcKind, TcCoVar,
+  TcTyVar, TcTyVarSet, TcDTyVarSet, TcKind, TcCoVar,
 
   -- TcLevel
   TcLevel(..), topTcLevel, pushTcLevel,
@@ -29,7 +29,7 @@ module TcType (
 
   --------------------------------
   -- MetaDetails
-  UserTypeCtxt(..), pprUserTypeCtxt, pprSigCtxt,
+  UserTypeCtxt(..), pprUserTypeCtxt, pprSigCtxt, isSigMaybe,
   TcTyVarDetails(..), pprTcTyVarDetails, vanillaSkolemTv, superSkolemTv,
   MetaDetails(Flexi, Indirect), MetaInfo(..),
   isImmutableTyVar, isSkolemTyVar, isMetaTyVar,  isMetaTyVarTy, isTyVarTy,
@@ -144,7 +144,15 @@ module TcType (
 
   tyVarsOfType, tyVarsOfTypes, closeOverKinds,
   tyVarsOfTypeList, tyVarsOfTypesList,
+  tyVarsOfTypeAcc, tyVarsOfTypesAcc,
+  tyVarsOfTypeDSet, tyVarsOfTypesDSet, closeOverKindsDSet,
   tcTyVarsOfType, tcTyVarsOfTypes,
+
+  --------------------------------
+  -- Transforming Types to TcTypes
+  toTcType,    -- :: Type -> TcType
+  toTcTyVar,   -- :: TyVar -> TcTyVar
+  toTcTypeBag, -- :: Bag EvVar -> Bag EvVar
 
   pprKind, pprParendKind, pprSigmaType,
   pprType, pprParendType, pprTypeApp, pprTyThingCategory,
@@ -179,6 +187,7 @@ import PrelNames
 import TysWiredIn
 import BasicTypes
 import Util
+import Bag
 import Maybes
 import ListSetOps
 import Outputable
@@ -244,6 +253,7 @@ type TcRhoType      = TcType  -- Note [TcRhoType]
 type TcTauType      = TcType
 type TcKind         = Kind
 type TcTyVarSet     = TyVarSet
+type TcDTyVarSet    = DTyVarSet
 
 {-
 Note [TcRhoType]
@@ -423,14 +433,14 @@ data UserTypeCtxt
 -- will become  type T = forall a. a->a
 --
 -- With gla-exts that's right, but for H98 we should complain.
+-}
 
 
-************************************************************************
+{- *********************************************************************
 *                                                                      *
                 Untoucable type variables
 *                                                                      *
-************************************************************************
--}
+********************************************************************* -}
 
 newtype TcLevel = TcLevel Int deriving( Eq, Ord )
   -- See Note [TcLevel and untouchable type variables] for what this Int is
@@ -590,16 +600,22 @@ pprSigCtxt :: UserTypeCtxt -> SDoc -> SDoc -> SDoc
 --              f :: <type>
 -- The <extra> is either empty or "the ambiguity check for"
 pprSigCtxt ctxt extra pp_ty
-  = sep [ ptext (sLit "In") <+> extra <+> pprUserTypeCtxt ctxt <> colon
-        , nest 2 (pp_sig ctxt) ]
-  where
-    pp_sig (FunSigCtxt n _) = pp_n_colon n
-    pp_sig (ConArgCtxt n)   = pp_n_colon n
-    pp_sig (ForSigCtxt n)   = pp_n_colon n
-    pp_sig (PatSynCtxt n)   = pp_n_colon n
-    pp_sig _                = pp_ty
+  | Just n <- isSigMaybe ctxt
+  = vcat [ ptext (sLit "In") <+> extra <+> ptext (sLit "the type signature:")
+         , nest 2 (pprPrefixOcc n <+> dcolon <+> pp_ty) ]
 
-    pp_n_colon n = pprPrefixOcc n <+> dcolon <+> pp_ty
+  | otherwise
+  = hang (ptext (sLit "In") <+> extra <+> pprUserTypeCtxt ctxt <> colon)
+       2 pp_ty
+
+  where
+
+isSigMaybe :: UserTypeCtxt -> Maybe Name
+isSigMaybe (FunSigCtxt n _) = Just n
+isSigMaybe (ConArgCtxt n)   = Just n
+isSigMaybe (ForSigCtxt n)   = Just n
+isSigMaybe (PatSynCtxt n)   = Just n
+isSigMaybe _                = Nothing
 
 {-
 ************************************************************************
@@ -1532,6 +1548,41 @@ isRigidEqPred tc_lvl (EqPred NomEq ty1 _)
   = True
 
 isRigidEqPred _ _ = False  -- Not an equality
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{Transformation of Types to TcTypes}
+*                                                                      *
+************************************************************************
+-}
+
+toTcType :: Type -> TcType
+toTcType ty = to_tc_type emptyVarSet ty
+   where
+    to_tc_type :: VarSet -> Type -> TcType
+    -- The constraint solver expects EvVars to have TcType, in which the
+    -- free type variables are TcTyVars. So we convert from Type to TcType here
+    -- A bit tiresome; but one day I expect the two types to be entirely separate
+    -- in which case we'll definitely need to do this
+    to_tc_type forall_tvs (TyVarTy tv)
+      | Just var <- lookupVarSet forall_tvs tv = TyVarTy var
+      | otherwise = TyVarTy (toTcTyVar tv)
+    to_tc_type  ftvs (FunTy t1 t2)     = FunTy (to_tc_type ftvs t1) (to_tc_type ftvs t2)
+    to_tc_type  ftvs (AppTy t1 t2)     = AppTy (to_tc_type ftvs t1) (to_tc_type ftvs t2)
+    to_tc_type  ftvs (TyConApp tc tys) = TyConApp tc (map (to_tc_type ftvs) tys)
+    to_tc_type  ftvs (ForAllTy tv ty)  = let tv' = toTcTyVar tv
+                                         in ForAllTy tv' (to_tc_type (ftvs `extendVarSet` tv') ty)
+    to_tc_type _ftvs (LitTy l)         = LitTy l
+
+toTcTyVar :: TyVar -> TcTyVar
+toTcTyVar tv
+  | isTcTyVar tv = setVarType tv (toTcType (tyVarKind tv))
+  | isId tv      = pprPanic "toTcTyVar: Id:" (ppr tv)
+  | otherwise    = mkTcTyVar (tyVarName tv) (toTcType (tyVarKind tv)) vanillaSkolemTv
+
+toTcTypeBag :: Bag EvVar -> Bag EvVar -- All TyVars are transformed to TcTyVars
+toTcTypeBag evvars = mapBag (\tv -> setTyVarKind tv (toTcType (tyVarKind tv))) evvars
 
 {-
 ************************************************************************

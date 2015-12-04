@@ -317,7 +317,7 @@ zonkTopDecls ev_binds binds export_ies sig_ns rules vects imp_specs fords
         ; warn_missing_sigs <- woptM Opt_WarnMissingSigs
         ; warn_only_exported <- woptM Opt_WarnMissingExportedSigs
         ; let export_occs  = maybe emptyBag
-                                   (listToBag . map (rdrNameOcc . ieName . unLoc) . unLoc)
+                                   (listToBag . concatMap (map rdrNameOcc . ieNames . unLoc) . unLoc)
                                    export_ies
               sig_warn
                 | warn_only_exported = topSigWarnIfExported export_occs sig_ns
@@ -730,8 +730,6 @@ zonkExpr env (RecordUpd { rupd_expr = expr, rupd_flds = rbinds
 zonkExpr env (ExprWithTySigOut e ty)
   = do { e' <- zonkLExpr env e
        ; return (ExprWithTySigOut e' ty) }
-
-zonkExpr _ (ExprWithTySig _ _ _) = panic "zonkExpr env:ExprWithTySig"
 
 zonkExpr env (ArithSeq expr wit info)
   = do new_expr <- zonkExpr env expr
@@ -1207,8 +1205,10 @@ zonkForeignExports :: ZonkEnv -> [LForeignDecl TcId] -> TcM [LForeignDecl Id]
 zonkForeignExports env ls = mapM (wrapLocM (zonkForeignExport env)) ls
 
 zonkForeignExport :: ZonkEnv -> ForeignDecl TcId -> TcM (ForeignDecl Id)
-zonkForeignExport env (ForeignExport i _hs_ty co spec) =
-   return (ForeignExport (fmap (zonkIdOcc env) i) undefined co spec)
+zonkForeignExport env (ForeignExport { fd_name = i, fd_co = co, fd_fe = spec })
+  = return (ForeignExport { fd_name = fmap (zonkIdOcc env) i
+                          , fd_sig_ty = undefined, fd_co = co
+                          , fd_fe = spec })
 zonkForeignExport _ for_imp
   = return for_imp     -- Foreign imports don't need zonking
 

@@ -546,7 +546,7 @@ void rts_evalLazyIO_ (/* inout */ Capability **cap,
 void
 rts_checkSchedStatus (char* site, Capability *cap)
 {
-    SchedulerStatus rc = cap->running_task->incall->stat;
+    SchedulerStatus rc = cap->running_task->incall->rstat;
     switch (rc) {
     case Success:
         return;
@@ -574,7 +574,7 @@ rts_checkSchedStatus (char* site, Capability *cap)
 SchedulerStatus
 rts_getSchedStatus (Capability *cap)
 {
-    return cap->running_task->incall->stat;
+    return cap->running_task->incall->rstat;
 }
 
 Capability *

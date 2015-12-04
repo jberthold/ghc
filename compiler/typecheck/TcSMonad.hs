@@ -705,6 +705,9 @@ A generalised substitution S is "inert" iff
   (IG2) if (b -f-> t) in S, and f >= f, then S(f,t) = t
         that is, each individual binding is "self-stable"
 
+By (IG1) we define S*(f,t) to be the result of exahaustively
+applying S(f,_) to t.
+
 ----------------------------------------------------------------
 Our main invariant:
    the inert CTyEqCans should be an inert generalised substitution
@@ -737,7 +740,8 @@ This is the main theorem!
            or (K2c) not (fw >= fs)
            or (K2d) a not in s
 
-      (K3) If (b -fs-> s) is in S with (fw >= fs), then
+      (K3) See Note [K3: completeness of solving]
+           If (b -fs-> s) is in S with (fw >= fs), then
         (K3a) If the role of fs is nominal: s /= a
         (K3b) If the role of fs is representational: EITHER
                 a not in s, OR
@@ -818,9 +822,9 @@ Key lemma to make it watertight.
 
 Also, consider roles more carefully. See Note [Flavours with roles].
 
-Completeness
-~~~~~~~~~~~~~
-K3: completeness.  (K3) is not necessary for the extended substitution
+Note [K3: completeness of solving]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+(K3) is not necessary for the extended substitution
 to be inert.  In fact K1 could be made stronger by saying
    ... then (not (fw >= fs) or not (fs >= fs))
 But it's not enough for S to be inert; we also want completeness.
@@ -1913,7 +1917,6 @@ lookupSolvedDict (IS { inert_solved_dicts = solved }) cls tys
       Just ev -> Just ev
       _       -> Nothing
 
-
 {- *********************************************************************
 *                                                                      *
                    Irreds
@@ -2681,20 +2684,8 @@ newFlattenSkolem Derived loc fam_ty
        ; return (ev, fmv) }
 
 newFsk, newFmv :: TcType -> TcS TcTyVar
-newFsk fam_ty
-  = wrapTcS $ do { uniq <- TcM.newUnique
-                 ; let name = TcM.mkTcTyVarName uniq (fsLit "fsk")
-                 ; return (mkTcTyVar name (typeKind fam_ty) (FlatSkol fam_ty)) }
-
-newFmv fam_ty
-  = wrapTcS $ do { uniq <- TcM.newUnique
-                 ; ref  <- TcM.newMutVar Flexi
-                 ; cur_lvl <- TcM.getTcLevel
-                 ; let details = MetaTv { mtv_info  = FlatMetaTv
-                                        , mtv_ref   = ref
-                                        , mtv_tclvl = fmvTcLevel cur_lvl }
-                       name = TcM.mkTcTyVarName uniq (fsLit "s")
-                 ; return (mkTcTyVar name (typeKind fam_ty) details) }
+newFsk fam_ty = wrapTcS (TcM.newFskTyVar fam_ty)
+newFmv fam_ty = wrapTcS (TcM.newFmvTyVar fam_ty)
 
 extendFlatCache :: TyCon -> [Type] -> (TcCoercion, TcType, CtFlavour) -> TcS ()
 extendFlatCache tc xi_args stuff
