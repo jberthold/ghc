@@ -77,7 +77,8 @@ endif
 
 # Build the "extra" packages (see ./packages). This enables more tests. See:
 # https://ghc.haskell.org/trac/ghc/wiki/Building/RunningTests/Running#AdditionalPackages
-#BUILD_EXTRA_PKGS=YES
+# YES is the default for the parallel version; set to NO to disable.
+#BUILD_EXTRA_PKGS=NO
 
 # Uncomment the following line to enable building DPH
 #BUILD_DPH=YES

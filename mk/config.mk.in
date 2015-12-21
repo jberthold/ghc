@@ -881,7 +881,8 @@ endif
 # Build and install DPH?
 BUILD_DPH = NO
 # Build and install the "extra" packages (see ./packages)?
-BUILD_EXTRA_PKGS = NO
+# PARALLEL_RTS configuration: build all extra packages
+BUILD_EXTRA_PKGS = YES
 
 ################################################################################
 #
