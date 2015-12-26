@@ -15,7 +15,7 @@
 -- @since 4.5.0.0
 -----------------------------------------------------------------------------
 
-{-# LANGUAGE MagicHash, NoImplicitPrelude #-}
+{-# LANGUAGE MagicHash, NoImplicitPrelude, ImplicitParams, RankNTypes #-}
 module GHC.Stack (
     -- * Call stacks
     currentCallStack,
@@ -23,13 +23,18 @@ module GHC.Stack (
     errorWithStackTrace,
 
     -- * Implicit parameter call stacks
-    SrcLoc(..), CallStack(..),
+    CallStack, emptyCallStack, freezeCallStack, getCallStack, popCallStack,
+    prettyCallStack, pushCallStack, withFrozenCallStack,
+
+    -- * Source locations
+    SrcLoc(..), prettySrcLoc,
 
     -- * Internals
     CostCentreStack,
     CostCentre,
     getCurrentCCS,
     getCCSOf,
+    clearCCS,
     ccsCC,
     ccsParent,
     ccLabel,
@@ -40,6 +45,7 @@ module GHC.Stack (
   ) where
 
 import GHC.Stack.CCS
+import GHC.Stack.Types
 import GHC.IO
 import GHC.Base
 import GHC.List
@@ -57,3 +63,28 @@ errorWithStackTrace x = unsafeDupablePerformIO $ do
    if null stack
       then throwIO (ErrorCall x)
       else throwIO (ErrorCallWithLocation x (renderStack stack))
+
+
+-- | Pop the most recent call-site off the 'CallStack'.
+--
+-- This function, like 'pushCallStack', has no effect on a frozen 'CallStack'.
+--
+-- @since 4.9.0.0
+popCallStack :: CallStack -> CallStack
+popCallStack stk = case stk of
+  EmptyCallStack       -> errorWithoutStackTrace "popCallStack: empty stack"
+  PushCallStack _ stk' -> stk'
+  FreezeCallStack _    -> stk
+
+
+-- | Perform some computation without adding new entries to the 'CallStack'.
+--
+-- @since 4.9.0.0
+withFrozenCallStack :: (?callStack :: CallStack)
+                    => ( (?callStack :: CallStack) => a )
+                    -> a
+withFrozenCallStack do_this =
+                   -- we pop the stack before freezing it to remove
+                   -- withFrozenCallStack's call-site
+  let ?callStack = freezeCallStack (popCallStack ?callStack)
+  in do_this

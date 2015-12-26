@@ -25,7 +25,7 @@ module HsUtils(
   mkHsWrap, mkLHsWrap, mkHsWrapCo, mkHsWrapCoR, mkLHsWrapCo,
   mkHsDictLet, mkHsLams,
   mkHsOpApp, mkHsDo, mkHsComp, mkHsWrapPat, mkHsWrapPatCo,
-  mkLHsPar, mkHsCmdCast,
+  mkLHsPar, mkHsCmdWrap, mkLHsCmdWrap, isLHsTypeExpr_maybe, isLHsTypeExpr,
 
   nlHsTyApp, nlHsTyApps, nlHsVar, nlHsLit, nlHsApp, nlHsApps, nlHsIntLit, nlHsVarApps,
   nlHsDo, nlHsOpApp, nlHsLam, nlHsPar, nlHsIf, nlHsCase, nlList,
@@ -51,9 +51,11 @@ module HsUtils(
   mkBigLHsVarTup, mkBigLHsTup, mkBigLHsVarPatTup, mkBigLHsPatTup,
 
   -- Types
-  mkHsAppTy, userHsTyVarBndrs,
+  mkHsAppTy, mkHsAppTys, userHsTyVarBndrs, userHsLTyVarBndrs,
   mkLHsSigType, mkLHsSigWcType, mkClassOpSigs,
   nlHsAppTy, nlHsTyVar, nlHsFunTy, nlHsTyConApp,
+  getAppsTyHead_maybe, hsTyGetAppHead_maybe, splitHsAppsTy,
+  getLHsInstDeclClass_maybe,
 
   -- Stmts
   mkTransformStmt, mkTransformByStmt, mkBodyStmt, mkBindStmt, mkLastStmt,
@@ -92,13 +94,12 @@ import HsTypes
 import HsLit
 import PlaceHolder
 
-import TcType( tcSplitForAllTys, tcSplitPhiTy )
 import TcEvidence
 import RdrName
 import Var
-import Type( isPredTy )
-import Kind( isKind )
-import TypeRep
+import TyCoRep
+import Type   ( filterOutInvisibleTypes )
+import TcType
 import DataCon
 import Name
 import NameSet
@@ -170,6 +171,9 @@ mkMatchGroupName origin matches = MG { mg_alts = mkLocatedList matches
 
 mkHsAppTy :: LHsType name -> LHsType name -> LHsType name
 mkHsAppTy t1 t2 = addCLoc t1 t2 (HsAppTy t1 t2)
+
+mkHsAppTys :: LHsType name -> [LHsType name] -> LHsType name
+mkHsAppTys = foldl mkHsAppTy
 
 mkHsApp :: LHsExpr name -> LHsExpr name -> LHsExpr name
 mkHsApp e1 e2 = addCLoc e1 e2 (HsApp e1 e2)
@@ -335,9 +339,14 @@ mkHsStringPrimLit fs
   = HsStringPrim (unpackFS fs) (fastStringToByteString fs)
 
 -------------
-userHsTyVarBndrs :: SrcSpan -> [name] -> [Located (HsTyVarBndr name)]
+userHsLTyVarBndrs :: SrcSpan -> [Located name] -> [LHsTyVarBndr name]
+-- Caller sets location
+userHsLTyVarBndrs loc bndrs = [ L loc (UserTyVar v) | v <- bndrs ]
+
+userHsTyVarBndrs :: SrcSpan -> [name] -> [LHsTyVarBndr name]
 -- Caller sets location
 userHsTyVarBndrs loc bndrs = [ L loc (UserTyVar (L loc v)) | v <- bndrs ]
+
 
 {-
 ************************************************************************
@@ -435,6 +444,21 @@ nlHsFunTy a b           = noLoc (HsFunTy a b)
 
 nlHsTyConApp :: name -> [LHsType name] -> LHsType name
 nlHsTyConApp tycon tys  = foldl nlHsAppTy (nlHsTyVar tycon) tys
+
+-- | Extract a type argument from an HsExpr, with the list of wildcards in
+-- the type
+isLHsTypeExpr_maybe :: LHsExpr name -> Maybe (LHsWcType name)
+isLHsTypeExpr_maybe (L _ (HsPar e))       = isLHsTypeExpr_maybe e
+isLHsTypeExpr_maybe (L _ (HsType ty))     = Just ty
+  -- the HsTypeOut case is ill-typed. We never need it here anyway.
+isLHsTypeExpr_maybe _                     = Nothing
+
+-- | Is an expression a visible type application?
+isLHsTypeExpr :: LHsExpr name -> Bool
+isLHsTypeExpr (L _ (HsPar e))     = isLHsTypeExpr e
+isLHsTypeExpr (L _ (HsType _))    = True
+isLHsTypeExpr (L _ (HsTypeOut _)) = True
+isLHsTypeExpr _                   = False
 
 {-
 Tuples.  All these functions are *pre-typechecker* because they lack
@@ -548,24 +572,27 @@ toLHsSigWcType ty
   = mkLHsSigWcType (go ty)
   where
     go :: Type -> LHsType RdrName
-    go ty@(ForAllTy {})
-      | (tvs, tau) <- tcSplitForAllTys ty
-      = noLoc (HsForAllTy { hst_bndrs = map go_tv tvs
-                          , hst_body = go tau })
-    go ty@(FunTy arg _)
+    go ty@(ForAllTy (Anon arg) _)
       | isPredTy arg
       , (theta, tau) <- tcSplitPhiTy ty
       = noLoc (HsQualTy { hst_ctxt = noLoc (map go theta)
                         , hst_body = go tau })
-    go (FunTy arg res)      = nlHsFunTy (go arg) (go res)
+    go (ForAllTy (Anon arg) res) = nlHsFunTy (go arg) (go res)
+    go ty@(ForAllTy {})
+      | (tvs, tau) <- tcSplitForAllTys ty
+      = noLoc (HsForAllTy { hst_bndrs = map go_tv tvs
+                          , hst_body = go tau })
     go (TyVarTy tv)         = nlHsTyVar (getRdrName tv)
     go (AppTy t1 t2)        = nlHsAppTy (go t1) (go t2)
     go (LitTy (NumTyLit n)) = noLoc $ HsTyLit (HsNumTy "" n)
     go (LitTy (StrTyLit s)) = noLoc $ HsTyLit (HsStrTy "" s)
     go (TyConApp tc args)   = nlHsTyConApp (getRdrName tc) (map go args')
        where
-         args' = filterOut isKind args
-         -- Source-language types have _implicit_ kind arguments,
+         args' = filterOutInvisibleTypes tc args
+    go (CastTy ty _)        = go ty
+    go (CoercionTy co)      = pprPanic "toLHsSigWcType" (ppr co)
+
+         -- Source-language types have _invisible_ kind arguments,
          -- so we must remove them here (Trac #8563)
 
     go_tv :: TyVar -> LHsTyVarBndr RdrName
@@ -597,9 +624,12 @@ mkHsWrapCoR co e = mkHsWrap (mkWpCastR co) e
 mkLHsWrapCo :: TcCoercionN -> LHsExpr id -> LHsExpr id
 mkLHsWrapCo co (L loc e) = L loc (mkHsWrapCo co e)
 
-mkHsCmdCast :: TcCoercion -> HsCmd id -> HsCmd id
-mkHsCmdCast co cmd | isTcReflCo co = cmd
-                   | otherwise     = HsCmdCast co cmd
+mkHsCmdWrap :: HsWrapper -> HsCmd id -> HsCmd id
+mkHsCmdWrap w cmd | isIdHsWrapper w = cmd
+                  | otherwise       = HsCmdWrap w cmd
+
+mkLHsCmdWrap :: HsWrapper -> LHsCmd id -> LHsCmd id
+mkLHsCmdWrap w (L loc c) = L loc (mkHsCmdWrap w c)
 
 mkHsWrapPat :: HsWrapper -> Pat id -> Type -> Pat id
 mkHsWrapPat co_fn p ty | isIdHsWrapper co_fn = p
@@ -737,7 +767,7 @@ collect_out_binds :: Bool -> [(RecFlag, LHsBinds id)] -> [id]
 collect_out_binds ps = foldr (collect_binds ps . snd) []
 
 collect_binds :: Bool -> LHsBindsLR idL idR -> [idL] -> [idL]
--- Collect Ids, or Ids + patter synonyms, depending on boolean flag
+-- Collect Ids, or Ids + pattern synonyms, depending on boolean flag
 collect_binds ps binds acc = foldrBag (collect_bind ps . unLoc) acc binds
 
 collect_bind :: Bool -> HsBindLR idL idR -> [idL] -> [idL]
@@ -953,14 +983,40 @@ hsConDeclsBinders cons = go id cons
           case r of
              -- remove only the first occurrence of any seen field in order to
              -- avoid circumventing detection of duplicate fields (#9156)
-             L loc (ConDecl { con_names = names, con_details = RecCon flds }) ->
-               (map (L loc . unLoc) names ++ ns, r' ++ fs)
+             L loc (ConDeclGADT { con_names = names
+                                , con_type = HsIB { hsib_body = res_ty}}) ->
+               case tau of
+                 L _ (HsFunTy
+                      (L _ (HsAppsTy
+                            [L _ (HsAppPrefix (L _ (HsRecTy flds)))])) _res_ty)
+                         -> record_gadt flds
+                 L _ (HsFunTy (L _ (HsRecTy flds)) _res_ty)
+                         -> record_gadt flds
+
+                 _other  -> (map (L loc . unLoc) names ++ ns, fs)
+                            where (ns, fs) = go remSeen rs
+               where
+                 (_tvs, _cxt, tau) = splitLHsSigmaTy res_ty
+                 record_gadt flds = (map (L loc . unLoc) names ++ ns, r' ++ fs)
+                   where r' = remSeen (concatMap (cd_fld_names . unLoc) flds)
+                         remSeen' = foldr (.) remSeen
+                                        [deleteBy ((==) `on`
+                                              unLoc . rdrNameFieldOcc . unLoc) v
+                                        | v <- r']
+                         (ns, fs) = go remSeen' rs
+
+             L loc (ConDeclH98 { con_name = name
+                               , con_details = RecCon flds }) ->
+               ([L loc (unLoc name)] ++ ns, r' ++ fs)
                   where r' = remSeen (concatMap (cd_fld_names . unLoc)
                                                 (unLoc flds))
-                        remSeen' = foldr (.) remSeen [deleteBy ((==) `on` rdrNameFieldOcc . unLoc) v | v <- r']
+                        remSeen'
+                          = foldr (.) remSeen
+                               [deleteBy ((==) `on`
+                                   unLoc . rdrNameFieldOcc . unLoc) v | v <- r']
                         (ns, fs) = go remSeen' rs
-             L loc (ConDecl { con_names = names }) ->
-                (map (L loc . unLoc) names ++ ns, fs)
+             L loc (ConDeclH98 { con_name = name }) ->
+                ([L loc (unLoc name)] ++ ns, fs)
                   where (ns, fs) = go remSeen rs
 
 {-
@@ -1062,3 +1118,61 @@ lPatImplicits = hs_lpat
                                                                      (unLoc fld)
                                                           pat_explicit = maybe True (i<) (rec_dotdot fs)]
     details (InfixCon p1 p2) = hs_lpat p1 `unionNameSet` hs_lpat p2
+
+{-
+************************************************************************
+*                                                                      *
+   Dealing with HsAppsTy
+*                                                                      *
+************************************************************************
+-}
+
+-- | Retrieves the head of an HsAppsTy, if this can be done unambiguously,
+-- without consulting fixities.
+getAppsTyHead_maybe :: [LHsAppType name] -> Maybe (LHsType name, [LHsType name])
+getAppsTyHead_maybe tys = case splitHsAppsTy tys of
+  ([app1:apps], []) ->  -- no symbols, some normal types
+    Just (mkHsAppTys app1 apps, [])
+  ([app1l:appsl, app1r:appsr], [L loc op]) ->  -- one operator
+    Just (L loc (HsTyVar (L loc op)), [mkHsAppTys app1l appsl, mkHsAppTys app1r appsr])
+  _ -> -- can't figure it out
+    Nothing
+
+-- | Splits a [HsAppType name] (the payload of an HsAppsTy) into regions of prefix
+-- types (normal types) and infix operators.
+-- If @splitHsAppsTy tys = (non_syms, syms)@, then @tys@ starts with the first
+-- element of @non_syms@ followed by the first element of @syms@ followed by
+-- the next element of @non_syms@, etc. It is guaranteed that the non_syms list
+-- has one more element than the syms list.
+splitHsAppsTy :: [LHsAppType name] -> ([[LHsType name]], [Located name])
+splitHsAppsTy = go [] [] []
+  where
+    go acc acc_non acc_sym [] = (reverse (reverse acc : acc_non), reverse acc_sym)
+    go acc acc_non acc_sym (L _ (HsAppPrefix ty) : rest)
+      = go (ty : acc) acc_non acc_sym rest
+    go acc acc_non acc_sym (L _ (HsAppInfix op) : rest)
+      = go [] (reverse acc : acc_non) (op : acc_sym) rest
+
+-- retrieve the name of the "head" of a nested type application
+-- somewhat like splitHsAppTys, but a little more thorough
+-- used to examine the result of a GADT-like datacon, so it doesn't handle
+-- *all* cases (like lists, tuples, (~), etc.)
+hsTyGetAppHead_maybe :: LHsType name -> Maybe (Located name, [LHsType name])
+hsTyGetAppHead_maybe = go []
+  where
+    go tys (L _ (HsTyVar ln))           = Just (ln, tys)
+    go tys (L _ (HsAppsTy apps))
+      | Just (head, args) <- getAppsTyHead_maybe apps
+                                         = go (args ++ tys) head
+    go tys (L _ (HsAppTy l r))           = go (r : tys) l
+    go tys (L _ (HsOpTy l (L loc n) r))  = Just (L loc n, l : r : tys)
+    go tys (L _ (HsParTy t))             = go tys t
+    go tys (L _ (HsKindSig t _))         = go tys t
+    go _   _                             = Nothing
+
+getLHsInstDeclClass_maybe :: LHsSigType name -> Maybe (Located name)
+-- Works on (HsSigType RdrName)
+getLHsInstDeclClass_maybe inst_ty
+  = do { let (_, tau) = splitLHsQualTy (hsSigType inst_ty)
+       ; (cls, _) <- hsTyGetAppHead_maybe tau
+       ; return cls }

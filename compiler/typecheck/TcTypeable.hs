@@ -189,15 +189,12 @@ mkTyConRepBinds (dflags, mod_expr, pkg_str, mod_str, tr_datacon, trn_datacon) ty
 
     tycon_str = add_tick (occNameString (getOccName tycon))
     add_tick s | isPromotedDataCon tycon = '\'' : s
-               | isPromotedTyCon   tycon = '\'' : s
                | otherwise               = s
 
     hashThis :: String
     hashThis = unwords [pkg_str, mod_str, tycon_str]
 
-    Fingerprint high low
-       | gopt Opt_SuppressUniques dflags = Fingerprint 0 0
-       | otherwise                       = fingerprintString hashThis
+    Fingerprint high low = fingerprintString hashThis
 
     word64 :: Word64 -> HsLit
     word64 | wORD_SIZE dflags == 4 = \n -> HsWord64Prim (show n) (toInteger n)
@@ -205,6 +202,4 @@ mkTyConRepBinds (dflags, mod_expr, pkg_str, mod_str, tr_datacon, trn_datacon) ty
 
 mkTypeableDataConBinds :: TypeableStuff -> DataCon -> LHsBinds Id
 mkTypeableDataConBinds stuff dc
-  = case promoteDataCon_maybe dc of
-      Promoted tc -> mkTyConRepBinds stuff tc
-      NotPromoted -> emptyBag
+  = mkTyConRepBinds stuff (promoteDataCon dc)

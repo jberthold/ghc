@@ -38,9 +38,10 @@ import Var
 import Bag
 import FastString
 import BooleanFormula (LBooleanFormula)
+import DynFlags
 
 import Data.Data hiding ( Fixity )
-import Data.List
+import Data.List hiding ( foldr )
 import Data.Ord
 import Data.Foldable ( Foldable(..) )
 #if __GLASGOW_HASKELL__ < 709
@@ -235,11 +236,13 @@ deriving instance (DataId idL, DataId idR)
         -- See Note [AbsBinds]
 
 data ABExport id
-  = ABE { abe_poly  :: id           -- ^ Any INLINE pragmas is attached to this Id
-        , abe_mono  :: id
-        , abe_wrap  :: HsWrapper    -- ^ See Note [AbsBinds wrappers]
-             -- Shape: (forall abs_tvs. abs_ev_vars => abe_mono) ~ abe_poly
-        , abe_prags :: TcSpecPrags  -- ^ SPECIALISE pragmas
+  = ABE { abe_poly      :: id    -- ^ Any INLINE pragmas is attached to this Id
+        , abe_mono      :: id
+        , abe_inst_wrap :: HsWrapper    -- ^ See Note [AbsBinds wrappers]
+             -- ^ Shape: abe_mono ~ abe_insted
+        , abe_wrap      :: HsWrapper    -- ^ See Note [AbsBinds wrappers]
+             -- Shape: (forall abs_tvs. abs_ev_vars => abe_insted) ~ abe_poly
+        , abe_prags     :: TcSpecPrags  -- ^ SPECIALISE pragmas
   } deriving (Data, Typeable)
 
 -- | - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnPattern',
@@ -263,7 +266,7 @@ Note [AbsBinds]
 ~~~~~~~~~~~~~~~
 The AbsBinds constructor is used in the output of the type checker, to record
 *typechecked* and *generalised* bindings.  Consider a module M, with this
-top-level binding
+top-level binding, where there is no type signature for M.reverse,
     M.reverse []     = []
     M.reverse (x:xs) = M.reverse xs ++ [x]
 
@@ -282,8 +285,8 @@ Notice that 'M.reverse' is polymorphic as expected, but there is a local
 definition for plain 'reverse' which is *monomorphic*.  The type variable
 'a' scopes over the entire letrec.
 
-That's after desugaring.  What about after type checking but before desugaring?
-That's where AbsBinds comes in.  It looks like this:
+That's after desugaring.  What about after type checking but before
+desugaring?  That's where AbsBinds comes in.  It looks like this:
 
    AbsBinds { abs_tvs     = [a]
             , abs_exports = [ABE { abe_poly = M.reverse :: forall a. [a] -> [a],
@@ -305,11 +308,11 @@ you were defining) appears in the abe_poly field of the
 abs_exports. The bindings in abs_binds are for fresh, local, Ids with
 a *monomorphic* Id.
 
-If there is a group of mutually recursive functions without type
-signatures, we get one AbsBinds with the monomorphic versions of the
-bindings in abs_binds, and one element of abe_exports for each
-variable bound in the mutually recursive group.  This is true even for
-pattern bindings.  Example:
+If there is a group of mutually recursive (see Note [Polymorphic
+recursion]) functions without type signatures, we get one AbsBinds
+with the monomorphic versions of the bindings in abs_binds, and one
+element of abe_exports for each variable bound in the mutually
+recursive group.  This is true even for pattern bindings.  Example:
         (f,g) = (\x -> x, f)
 After type checking we get
    AbsBinds { abs_tvs     = [a]
@@ -318,6 +321,44 @@ After type checking we get
                             , ABE { abe_poly = M.g :: forall a. a -> a
                                   , abe_mono = g :: a -> a }]
             , abs_binds = { (f,g) = (\x -> x, f) }
+
+Note [Polymorphic recursion]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+   Rec { f x = ...(g ef)...
+
+       ; g :: forall a. [a] -> [a]
+       ; g y = ...(f eg)...  }
+
+These bindings /are/ mutually recursive (f calls g, and g calls f).
+But we can use the type signature for g to break the recursion,
+like this:
+
+  1. Add g :: forall a. [a] -> [a] to the type environment
+
+  2. Typecheck the definition of f, all by itself,
+     including generalising it to find its most general
+     type, say f :: forall b. b -> b -> [b]
+
+  3. Extend the type environment with that type for f
+
+  4. Typecheck the definition of g, all by itself,
+     checking that it has the type claimed by its signature
+
+Steps 2 and 4 each generate a separate AbsBinds, so we end
+up with
+   Rec { AbsBinds { ...for f ... }
+       ; AbsBinds { ...for g ... } }
+
+This approach allows both f and to call each other
+polymorphically, even though only g has a signature.
+
+We get an AbsBinds that encompasses multiple source-program
+bindings only when
+ * Each binding in the group has at least one binder that
+   lacks a user type signature
+ * The group forms a strongly connected component
+
 
 Note [AbsBinds wrappers]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -335,6 +376,27 @@ The abe_wrap field deals with impedance-matching between
     (/\a b. case tup a b of { (f,g) -> f })
 and the thing we really want, which may have fewer type
 variables.  The action happens in TcBinds.mkExport.
+
+For abe_inst_wrap, consider this:
+  x = (*)
+The abe_mono type will be  forall a. Num a => a -> a -> a
+because no instantiation happens during typechecking. Before inferring
+a final type, we must instantiate this. See Note [Instantiate when inferring
+a type] in TcBinds. The abe_inst_wrap takes the uninstantiated abe_mono type
+to a proper instantiated type. In this case, the "abe_insted" is
+(b -> b -> b). Note that the value of "abe_insted" isn't important; it's
+just an intermediate form as we're going from abe_mono to abe_poly. See also
+the desugaring code in DsBinds.
+
+It's conceivable that we could combine the two wrappers, but note that there
+is a gap: neither wrapper tacks on the tvs and dicts from the outer AbsBinds.
+These bits are added manually in desugaring. (See DsBinds.dsHsBind.) A problem
+that would arise in combining them is that zonking becomes more challenging:
+we want to zonk the tvs and dicts in the AbsBinds, but then we end up re-zonking
+when we zonk the ABExport. And -- worse -- the combined wrapper would have
+the tvs and dicts in binding positions, so they would shadow the original
+tvs and dicts. This is all resolvable with some plumbing, but it seems simpler
+just to keep the two wrappers distinct.
 
 Note [Bind free vars]
 ~~~~~~~~~~~~~~~~~~~~~
@@ -444,12 +506,6 @@ plusHsValBinds (ValBindsOut ds1 sigs1) (ValBindsOut ds2 sigs2)
 plusHsValBinds _ _
   = panic "HsBinds.plusHsValBinds"
 
-getTypeSigNames :: HsValBinds a -> NameSet
--- Get the names that have a user type sig
-getTypeSigNames (ValBindsOut _ sigs)
-  = mkNameSet [unLoc n | L _ (TypeSig names _) <- sigs, n <- names]
-getTypeSigNames _
-  = panic "HsBinds.getTypeSigNames"
 
 {-
 What AbsBinds means
@@ -499,19 +555,28 @@ ppr_monobind (PatSynBind psb) = ppr psb
 ppr_monobind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dictvars
                        , abs_exports = exports, abs_binds = val_binds
                        , abs_ev_binds = ev_binds })
-  = hang (ptext (sLit "AbsBinds") <+> brackets (interpp'SP tyvars)
-                                  <+> brackets (interpp'SP dictvars))
-       2 $ braces $ vcat
-    [ ptext (sLit "Exports:") <+> brackets (sep (punctuate comma (map ppr exports)))
-    , ptext (sLit "Exported types:") <+> vcat [pprBndr LetBind (abe_poly ex) | ex <- exports]
-    , ptext (sLit "Binds:") <+> pprLHsBinds val_binds
-    , ifPprDebug (ptext (sLit "Evidence:") <+> ppr ev_binds) ]
+  = sdocWithDynFlags $ \ dflags ->
+    if gopt Opt_PrintTypechekerElaboration dflags then
+      -- Show extra information (bug number: #10662)
+      hang (ptext (sLit "AbsBinds") <+> brackets (interpp'SP tyvars)
+                                    <+> brackets (interpp'SP dictvars))
+         2 $ braces $ vcat
+      [ ptext (sLit "Exports:") <+>
+          brackets (sep (punctuate comma (map ppr exports)))
+      , ptext (sLit "Exported types:") <+>
+          vcat [pprBndr LetBind (abe_poly ex) | ex <- exports]
+      , ptext (sLit "Binds:") <+> pprLHsBinds val_binds
+      , ptext (sLit "Evidence:") <+> ppr ev_binds ]
+    else
+      pprLHsBinds val_binds
 
 instance (OutputableBndr id) => Outputable (ABExport id) where
-  ppr (ABE { abe_wrap = wrap, abe_poly = gbl, abe_mono = lcl, abe_prags = prags })
+  ppr (ABE { abe_wrap = wrap, abe_inst_wrap = inst_wrap
+           , abe_poly = gbl, abe_mono = lcl, abe_prags = prags })
     = vcat [ ppr gbl <+> ptext (sLit "<=") <+> ppr lcl
            , nest 2 (pprTcSpecPrags prags)
-           , nest 2 (ppr wrap)]
+           , nest 2 (ppr wrap)
+           , nest 2 (ppr inst_wrap)]
 
 instance (OutputableBndr idL, OutputableBndr idR) => Outputable (PatSynBind idL idR) where
   ppr (PSB{ psb_id = L _ psyn, psb_args = details, psb_def = pat, psb_dir = dir })
@@ -772,12 +837,6 @@ isFixityLSig :: LSig name -> Bool
 isFixityLSig (L _ (FixSig {})) = True
 isFixityLSig _                 = False
 
-isVanillaLSig :: LSig name -> Bool       -- User type signatures
--- A badly-named function, but it's part of the GHCi (used
--- by Haddock) so I don't want to change it gratuitously.
-isVanillaLSig (L _(TypeSig {})) = True
-isVanillaLSig _                 = False
-
 isTypeLSig :: LSig name -> Bool  -- Type signatures
 isTypeLSig (L _(TypeSig {}))    = True
 isTypeLSig (L _(ClassOpSig {})) = True
@@ -843,13 +902,8 @@ ppr_sig (SpecInstSig _ ty)
   = pragBrackets (ptext (sLit "SPECIALIZE instance") <+> ppr ty)
 ppr_sig (MinimalSig _ bf)         = pragBrackets (pprMinimalSig bf)
 ppr_sig (PatSynSig name sig_ty)
-  = pprPatSynSig (unLoc name) False -- TODO: is_bindir
-                 (pprHsForAllTvs qtvs)
-                 (pprHsContextMaybe (unLoc req))
-                 (pprHsContextMaybe (unLoc prov))
-                 (ppr ty)
-  where
-    (qtvs, req, prov, ty) = splitLHsPatSynTy (hsSigType sig_ty)
+  = ptext (sLit "pattern") <+> pprPrefixOcc (unLoc name) <+> dcolon
+                           <+> ppr sig_ty
 
 pprPatSynSig :: (OutputableBndr name)
              => name -> Bool -> SDoc -> Maybe SDoc -> Maybe SDoc -> SDoc -> SDoc

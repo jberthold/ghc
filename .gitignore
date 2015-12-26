@@ -75,6 +75,7 @@ _darcs/
 /ghc/stage1/
 /ghc/stage2/
 /ghc/stage3/
+/iserv/stage2*/
 
 # -----------------------------------------------------------------------------
 # specific generated files
@@ -101,6 +102,7 @@ _darcs/
 /docs/users_guide/build-html
 /docs/users_guide/build-pdf
 /docs/users_guide/.doctrees-*
+/docs/users_guide/.doctrees/
 /driver/ghci/ghc-pkg-inplace
 /driver/ghci/ghci-inplace
 /driver/ghci/ghci.res
@@ -127,6 +129,7 @@ _darcs/
 /libraries/frames.html
 /libraries/ghc-boot/GNUmakefile
 /libraries/ghc-boot/ghc.mk
+/libraries/ghci/ghc.mk
 /libraries/haddock-util.js
 /libraries/hslogo-16.png
 /libraries/index-frames.html
@@ -136,6 +139,7 @@ _darcs/
 /libraries/plus.gif
 /libraries/synopsis.png
 /libraries/stamp/
+/linter.log
 /mk/are-validating.mk
 /mk/build.mk
 /mk/config.h

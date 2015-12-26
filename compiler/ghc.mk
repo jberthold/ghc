@@ -102,8 +102,12 @@ endif
 	@echo 'cGhcWithSMP           = "$(GhcWithSMP)"'                     >> $@
 	@echo 'cGhcRTSWays           :: String'                             >> $@
 	@echo 'cGhcRTSWays           = "$(GhcRTSWays)"'                     >> $@
-	@echo 'cGhcRtsWithLibdw      :: String'                             >> $@
-	@echo 'cGhcRtsWithLibdw      = "$(GhcRtsWithLibdw)"'                >> $@
+	@echo 'cGhcRtsWithLibdw      :: Bool'                               >> $@
+ifeq "$(GhcRtsWithLibdw)" "YES"
+	@echo 'cGhcRtsWithLibdw      = True'                                >> $@
+else
+	@echo 'cGhcRtsWithLibdw      = False'                               >> $@
+endif
 	@echo 'cGhcEnableTablesNextToCode :: String'                        >> $@
 	@echo 'cGhcEnableTablesNextToCode = "$(GhcEnableTablesNextToCode)"' >> $@
 	@echo 'cLeadingUnderscore    :: String'                             >> $@
@@ -586,7 +590,6 @@ compiler_stage2_dll0_MODULES = \
 	PrimOp \
 	RdrName \
 	Rules \
-	Serialized \
 	SrcLoc \
 	StaticFlags \
 	StringBuffer \
@@ -596,7 +599,7 @@ compiler_stage2_dll0_MODULES = \
 	TrieMap \
 	TyCon \
 	Type \
-	TypeRep \
+	TyCoRep \
 	TysPrim \
 	TysWiredIn \
 	Unify \
@@ -615,49 +618,8 @@ ifeq "$(GhcWithInterpreter)" "YES"
 # These files are reacheable from DynFlags
 # only by GHCi-enabled code (see #9552)
 compiler_stage2_dll0_MODULES += \
-	Bitmap \
-	BlockId \
-	ByteCodeAsm \
-	ByteCodeInstr \
-	ByteCodeItbls \
-	CLabel \
-	Cmm \
-	CmmCallConv \
-	CmmExpr \
-	CmmInfo \
-	CmmMachOp \
-	CmmNode \
-	CmmSwitch \
-	CmmUtils \
-	CodeGen.Platform \
-	CodeGen.Platform.ARM \
-	CodeGen.Platform.ARM64 \
-	CodeGen.Platform.NoRegs \
-	CodeGen.Platform.PPC \
-	CodeGen.Platform.PPC_Darwin \
-	CodeGen.Platform.SPARC \
-	CodeGen.Platform.X86 \
-	CodeGen.Platform.X86_64 \
-	Hoopl \
-	Hoopl.Dataflow \
-	InteractiveEvalTypes \
-	MkGraph \
-	PprCmm \
-	PprCmmDecl \
-	PprCmmExpr \
-	Reg \
-	RegClass \
-	SMRep \
-	StgCmmArgRep \
-	StgCmmClosure \
-	StgCmmEnv \
-	StgCmmLayout \
-	StgCmmMonad \
-	StgCmmProf \
-	StgCmmTicky \
-	StgCmmUtils \
-	StgSyn \
-	Stream
+	ByteCodeTypes \
+	InteractiveEvalTypes
 endif
 
 compiler_stage2_dll0_HS_OBJS = \
@@ -752,11 +714,6 @@ ifeq "$(DYNAMIC_GHC_PROGRAMS)" "YES"
 compiler/utils/Util_HC_OPTS += -DDYNAMIC_GHC_PROGRAMS
 endif
 
-# LibFFI.hs #includes ffi.h
-ifneq "$(UseSystemLibFFI)" "YES"
-compiler/stage2/build/LibFFI.hs : $(libffi_HEADERS)
-endif
-
 # Note [munge-stage1-package-config]
 # Strip the date/patchlevel from the version of stage1.  See Note
 # [fiddle-stage1-version] above.
@@ -775,4 +732,3 @@ ghc/stage1/package-data.mk : compiler/stage1/inplace-pkg-config-munged
 endif
 
 endif
-

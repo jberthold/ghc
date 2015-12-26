@@ -242,8 +242,8 @@ static void machoInitSymbolsWithoutUnderscore( void );
 
 #if defined(OBJFORMAT_PEi386)
 // MingW-w64 is missing these from the implementation. So we have to look them up
-typedef DLL_DIRECTORY_COOKIE(*LPAddDLLDirectory)(PCWSTR NewDirectory);
-typedef WINBOOL(*LPRemoveDLLDirectory)(DLL_DIRECTORY_COOKIE Cookie);
+typedef DLL_DIRECTORY_COOKIE(WINAPI *LPAddDLLDirectory)(PCWSTR NewDirectory);
+typedef WINBOOL(WINAPI *LPRemoveDLLDirectory)(DLL_DIRECTORY_COOKIE Cookie);
 #endif
 
 static void freeProddableBlocks (ObjectCode *oc);
@@ -920,7 +920,6 @@ error:
 */
 pathchar* findSystemLibrary(pathchar* dll_name)
 {
-
     IF_DEBUG(linker, debugBelch("\nfindSystemLibrary: dll_name = `%" PATH_FMT "'\n", dll_name));
 
 #if defined(OBJFORMAT_PEi386)
@@ -941,7 +940,6 @@ pathchar* findSystemLibrary(pathchar* dll_name)
     }
 
     return result;
-
 #else
     (void)(dll_name); // Function not implemented for other platforms.
     return NULL;
@@ -1064,9 +1062,7 @@ HsBool removeLibrarySearchPath(HsPtr dll_path_index)
         else
         {
             warnMissingKBLibraryPaths();
-
             result = SetEnvironmentVariableW(L"PATH", (LPCWSTR)dll_path_index);
-
             free(dll_path_index);
         }
 
@@ -4482,7 +4478,7 @@ ocVerifyImage_ELF ( ObjectCode* oc )
              "\nSection header table: start %ld, n_entries %d, ent_size %d\n",
              (long)ehdr->e_shoff, shnum, ehdr->e_shentsize  ));
 
-   ASSERT (ehdr->e_shentsize == sizeof(Elf_Shdr));
+   ASSERT(ehdr->e_shentsize == sizeof(Elf_Shdr));
 
    shdr = (Elf_Shdr*) (ehdrC + ehdr->e_shoff);
 

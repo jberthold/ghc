@@ -26,6 +26,7 @@ module GHC.Stack.CCS (
     CostCentre,
     getCurrentCCS,
     getCCSOf,
+    clearCCS,
     ccsCC,
     ccsParent,
     ccLabel,
@@ -60,6 +61,9 @@ getCCSOf obj = IO $ \s ->
    case getCCSOf## obj s of
      (## s', addr ##) -> (## s', Ptr addr ##)
 
+clearCCS :: IO a -> IO a
+clearCCS (IO m) = IO $ \s -> clearCCS## m s
+
 ccsCC :: Ptr CostCentreStack -> IO (Ptr CostCentre)
 ccsCC p = (# peek CostCentreStack, cc) p
 
@@ -75,7 +79,7 @@ ccModule p = (# peek CostCentre, module) p
 ccSrcSpan :: Ptr CostCentre -> IO CString
 ccSrcSpan p = (# peek CostCentre, srcloc) p
 
--- | returns a '[String]' representing the current call stack.  This
+-- | Returns a @[String]@ representing the current call stack.  This
 -- can be useful for debugging.
 --
 -- The implementation uses the call-stack simulation maintined by the
@@ -85,7 +89,6 @@ ccSrcSpan p = (# peek CostCentre, srcloc) p
 -- uninformative.
 --
 -- @since 4.5.0.0
-
 currentCallStack :: IO [String]
 currentCallStack = ccsToStrings =<< getCurrentCCS ()
 

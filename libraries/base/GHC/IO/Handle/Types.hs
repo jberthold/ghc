@@ -122,10 +122,10 @@ data Handle__
     Handle__ {
       haDevice      :: !dev,
       haType        :: HandleType,           -- type (read/write/append etc.)
-      haByteBuffer  :: !(IORef (Buffer Word8)),
+      haByteBuffer  :: !(IORef (Buffer Word8)), -- See [note Buffering Implementation]
       haBufferMode  :: BufferMode,
       haLastDecode  :: !(IORef (dec_state, Buffer Word8)),
-      haCharBuffer  :: !(IORef (Buffer CharBufElem)), -- the current buffer
+      haCharBuffer  :: !(IORef (Buffer CharBufElem)), -- See [note Buffering Implementation]
       haBuffers     :: !(IORef (BufferList CharBufElem)),  -- spare buffers
       haEncoder     :: Maybe (TextEncoder enc_state),
       haDecoder     :: Maybe (TextDecoder dec_state),
@@ -185,10 +185,10 @@ checkHandleInvariants h_ = do
  cbuf <- readIORef (haCharBuffer h_)
  checkBuffer cbuf
  when (isWriteBuffer cbuf && not (isEmptyBuffer cbuf)) $
-   error ("checkHandleInvariants: char write buffer non-empty: " ++
+   errorWithoutStackTrace ("checkHandleInvariants: char write buffer non-empty: " ++
           summaryBuffer bbuf ++ ", " ++ summaryBuffer cbuf)
  when (isWriteBuffer bbuf /= isWriteBuffer cbuf) $
-   error ("checkHandleInvariants: buffer modes differ: " ++
+   errorWithoutStackTrace ("checkHandleInvariants: buffer modes differ: " ++
           summaryBuffer bbuf ++ ", " ++ summaryBuffer cbuf)
 
 #else

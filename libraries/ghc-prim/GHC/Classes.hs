@@ -4,12 +4,14 @@
               MultiParamTypeClasses, FunctionalDependencies #-}
 {-# LANGUAGE AllowAmbiguousTypes #-}
   -- ip :: IP x a => a  is strictly speaking ambiguous, but IP is magic
+{-# LANGUAGE UndecidableSuperClasses #-}
+  -- Because of the type-variable superclasses for tuples
 
-{-# OPTIONS_GHC -fno-warn-unused-imports #-}
--- -fno-warn-unused-imports needed for the GHC.Tuple import below. Sigh.
+{-# OPTIONS_GHC -Wno-unused-imports #-}
+-- -Wno-unused-imports needed for the GHC.Tuple import below. Sigh.
 
-{-# OPTIONS_GHC -fno-warn-unused-top-binds #-}
--- -fno-warn-unused-top-binds is there (I hope) to stop Haddock complaining
+{-# OPTIONS_GHC -Wno-unused-top-binds #-}
+-- -Wno-unused-top-binds is there (I hope) to stop Haddock complaining
 -- about the constraint tuples being defined but not used
 
 {-# OPTIONS_HADDOCK hide #-}
@@ -678,4 +680,3 @@ class (c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11, c12, c13, c14, c15, c16,
        c31, c32, c33, c34, c35, c36, c37, c38, c39, c40, c41, c42, c43, c44,
        c45, c46, c47, c48, c49, c50, c51, c52, c53, c54, c55, c56, c57, c58,
        c59, c60, c61, c62)
-

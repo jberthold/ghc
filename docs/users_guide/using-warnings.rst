@@ -11,26 +11,25 @@ GHC has a number of options that select which types of non-fatal error
 messages, otherwise known as warnings, can be generated during
 compilation. By default, you get a standard set of warnings which are
 generally likely to indicate bugs in your program. These are:
-``-fwarn-overlapping-patterns``, ``-fwarn-warnings-deprecations``,
-``-fwarn-deprecated-flags``, ``-fwarn-unrecognised-pragmas``,
-``-fwarn-missed-specialisations``, ``-fwarn-duplicate-constraints``,
-``-fwarn-duplicate-exports``, ``-fwarn-overflowed-literals``,
-``-fwarn-empty-enumerations``, ``-fwarn-missing-fields``,
-``-fwarn-missing-methods``, ``-fwarn-wrong-do-bind``,
-``-fwarn-unsupported-calling-conventions``,
-``-fwarn-dodgy-foreign-imports``, ``-fwarn-inline-rule-shadowing``,
-``-fwarn-unsupported-llvm-version``, ``-fwarn-context-quantification``,
-and ``-fwarn-tabs``. The following flags are simple ways to select
-standard “packages” of warnings:
+``-Woverlapping-patterns``, ``-Wwarnings-deprecations``,
+``-Wdeprecated-flags``, ``-Wunrecognised-pragmas``,
+``-Wmissed-specialisations``, ``-Wduplicate-constraints``,
+``-Wduplicate-exports``, ``-Woverflowed-literals``,
+``-Wempty-enumerations``, ``-Wmissing-fields``,
+``-Wmissing-methods``, ``-Wwrong-do-bind``,
+``-Wunsupported-calling-conventions``,
+``-Wdodgy-foreign-imports``, ``-Winline-rule-shadowing``,
+``-Wunsupported-llvm-version`` and ``-Wtabs``. The following flags are
+simple ways to select standard “packages” of warnings:
 
 ``-W``
     .. index::
        single: -W option
 
-    Provides the standard warnings plus ``-fwarn-unused-binds``,
-    ``-fwarn-unused-matches``, ``-fwarn-unused-imports``,
-    ``-fwarn-incomplete-patterns``, ``-fwarn-dodgy-exports``, and
-    ``-fwarn-dodgy-imports``.
+    Provides the standard warnings plus ``-Wunused-binds``,
+    ``-Wunused-matches``, ``-Wunused-imports``,
+    ``-Wincomplete-patterns``, ``-Wdodgy-exports``, and
+    ``-Wdodgy-imports``.
 
 ``-Wall``
     .. index::
@@ -38,12 +37,12 @@ standard “packages” of warnings:
 
     Turns on all warning options that indicate potentially suspicious
     code. The warnings that are *not* enabled by ``-Wall`` are
-    ``-fwarn-incomplete-uni-patterns``,
-    ``-fwarn-incomplete-record-updates``,
-    ``-fwarn-monomorphism-restriction``,
-    ``-fwarn-implicit-prelude``, ``-fwarn-missing-local-sigs``,
-    ``-fwarn-missing-exported-sigs``, ``-fwarn-missing-import-lists``
-    and ``-fwarn-identities``.
+    ``-Wincomplete-uni-patterns``,
+    ``-Wincomplete-record-updates``,
+    ``-Wmonomorphism-restriction``,
+    ``-Wimplicit-prelude``, ``-Wmissing-local-sigs``,
+    ``-Wmissing-exported-sigs``, ``-Wmissing-import-lists``
+    and ``-Widentities``.
 
 ``-Wcompat``
     .. index::
@@ -54,8 +53,8 @@ standard “packages” of warnings:
     eager to make their code future compatible to adapt to new features before
     they even generate warnings.
 
-    This currently enables ``-fwarn-missing-monadfail-instance`` and
-    ``-fwarn-semigroup``.
+    This currently enables ``-Wmissing-monadfail-instance``,
+    ``-Wsemigroup``, and ``-Wnoncanonical-monoid-instances``.
 
 ``-Wno-compat``
     .. index::
@@ -85,12 +84,14 @@ standard “packages” of warnings:
     default, but can be useful to negate a ``-Werror`` flag.
 
 The full set of warning options is described below. To turn off any
-warning, simply give the corresponding ``-fno-warn-...`` option on the
-command line.
+warning, simply give the corresponding ``-Wno-...`` option on the
+command line. For backwards compatibility with GHC versions prior to 8.0,
+all these warnings can still be controlled with ``-f(no-)warn-*`` instead
+of ``-W(no-)*``.
 
-``-fwarn-typed-holes``
+``-Wtyped-holes``
     .. index::
-       single: -fwarn-typed-holes
+       single: -Wtyped-holes
        single: warnings
 
     Determines whether the compiler reports typed holes warnings. Has no
@@ -99,9 +100,9 @@ command line.
 
     This warning is on by default.
 
-``-fwarn-type-errors``
+``-Wtype-errors``
     .. index::
-       single: -fwarn-type-errors
+       single: -Wtype-errors
        single: warnings
 
     Causes a warning to be reported when a type error is deferred until
@@ -131,11 +132,11 @@ command line.
     ``-fdefer-type-errors`` (which implies this option). See :ref:`typed-holes`
     and :ref:`defer-type-errors`.
 
-    Implied by ``-fdefer-type-errors``. See also ``-fwarn-typed-holes``.
+    Implied by ``-fdefer-type-errors``. See also ``-Wtyped-holes``.
 
-``-fwarn-partial-type-signatures``
+``-Wpartial-type-signatures``
     .. index::
-       single: -fwarn-partial-type-signatures
+       single: -Wpartial-type-signatures
        single: warnings
 
     Determines whether the compiler reports holes in partial type
@@ -156,9 +157,9 @@ command line.
 
     This option is on by default.
 
-``-fwarn-unrecognised-pragmas``
+``-Wunrecognised-pragmas``
     .. index::
-       single: -fwarn-unrecognised-pragmas
+       single: -Wunrecognised-pragmas
        single: warnings
        single: pragmas
 
@@ -169,10 +170,10 @@ command line.
 
     This option is on by default.
 
-``-fwarn-missed-specialisations``, ``-fwarn-all-missed-specialisations``
+``-Wmissed-specialisations``, ``-Wall-missed-specialisations``
     .. index::
-       single: -fwarn-missed-specialisations
-       single: -fwarn-all-missed-specialisations
+       single: -Wmissed-specialisations
+       single: -Wall-missed-specialisations
        single: warnings
        single: pragmas
 
@@ -187,9 +188,9 @@ command line.
 
     These options are both off by default.
 
-``-fwarn-warnings-deprecations``
+``-Wwarnings-deprecations``
     .. index::
-       single: -fwarn-warnings-deprecations
+       single: -Wwarnings-deprecations
        single: warnings
        single: deprecations
 
@@ -199,9 +200,9 @@ command line.
 
     This option is on by default.
 
-``-fwarn-amp``
+``-Wamp``
     .. index::
-       single: -fwarn-amp
+       single: -Wamp
        single: AMP
        single: Applicative-Monad Proposal
 
@@ -210,9 +211,9 @@ command line.
     Caused a warning to be emitted when a definition was in conflict with
     the AMP (Applicative-Monad proosal).
 
-``-fwarn-noncanonical-monad-instances``
+``-Wnoncanonical-monad-instances``
     .. index::
-       single: -fwarn-noncanonical-monad-instances
+       single: -Wnoncanonical-monad-instances
 
     Warn if noncanonical ``Applicative`` or ``Monad`` instances
     declarations are detected.
@@ -232,9 +233,31 @@ command line.
 
     This option is off by default.
 
-``-fwarn-missing-monadfail-instance``
+``-Wnoncanonical-monoid-instances``
     .. index::
-       single: -fwarn-missing-monadfail-instance
+       single: -Wnoncanonical-monoid-instances
+
+    Warn if noncanonical ``Semigroup`` or ``Monoid`` instances
+    declarations are detected.
+
+    When this warning is enabled, the following conditions are verified:
+
+    In ``Monoid`` instances declarations warn if any of the following
+    conditions does not hold:
+
+     * If ``mappend`` is defined it must be canonical
+       (i.e. ``mappend = (Data.Semigroup.<>)``).
+
+    Moreover, in 'Semigroup' instance declarations:
+
+     * Warn if ``(<>)`` is defined backwards (i.e. ``(<>) = mappend``).
+
+    This warning is off by default. However, it is part of the
+    ``-Wcompat`` option group.
+
+``-Wmissing-monadfail-instance``
+    .. index::
+       single: -Wmissing-monadfail-instance
        single: MFP
        single: MonadFail Proposal
 
@@ -246,9 +269,9 @@ command line.
     the `MonadFail Proposal (MFP)
     <https://prime.haskell.org/wiki/Libraries/Proposals/MonadFail>`__.
 
-``-fwarn-semigroup``
+``-Wsemigroup``
     .. index::
-       single: -fwarn-semigroup
+       single: -Wsemigroup
        single: semigroup
 
     Warn when definitions are in conflict with the future inclusion of
@@ -261,9 +284,9 @@ command line.
     Being part of the ``-Wcompat`` option group, this warning is off by
     default, but will be switched on in a future GHC release.
 
-``-fwarn-deprecated-flags``
+``-Wdeprecated-flags``
     .. index::
-       single: -fwarn-deprecated-flags
+       single: -Wdeprecated-flags
        single: deprecated-flags
 
     Causes a warning to be emitted when a deprecated command-line flag
@@ -271,18 +294,18 @@ command line.
 
     This option is on by default.
 
-``-fwarn-unsupported-calling-conventions``
+``-Wunsupported-calling-conventions``
     .. index::
-       single: -fwarn-unsupported-calling-conventions
+       single: -Wunsupported-calling-conventions
 
     Causes a warning to be emitted for foreign declarations that use
     unsupported calling conventions. In particular, if the ``stdcall``
     calling convention is used on an architecture other than i386 then
     it will be treated as ``ccall``.
 
-``-fwarn-dodgy-foreign-imports``
+``-Wdodgy-foreign-imports``
     .. index::
-       single: -fwarn-dodgy-foreign-imports
+       single: -Wdodgy-foreign-imports
 
     Causes a warning to be emitted for foreign imports of the following
     form:
@@ -304,9 +327,9 @@ command line.
     that is hard to debug because it results in a crash, hence this
     warning.
 
-``-fwarn-dodgy-exports``
+``-Wdodgy-exports``
     .. index::
-       single: -fwarn-dodgy-exports
+       single: -Wdodgy-exports
 
     Causes a warning to be emitted when a datatype ``T`` is exported
     with all constructors, i.e. ``T(..)``, but is it just a type
@@ -315,9 +338,9 @@ command line.
     Also causes a warning to be emitted when a module is re-exported,
     but that module exports nothing.
 
-``-fwarn-dodgy-imports``
+``-Wdodgy-imports``
     .. index::
-       single: -fwarn-dodgy-imports
+       single: -Wdodgy-imports
 
     Causes a warning to be emitted in the following cases:
 
@@ -327,29 +350,29 @@ command line.
     -  When an ``import`` statement hides an entity that is not
        exported.
 
-``-fwarn-overflowed-literals``
+``-Woverflowed-literals``
     .. index::
-       single: -fwarn-overflowed-literals
+       single: -Woverflowed-literals
 
     Causes a warning to be emitted if a literal will overflow, e.g.
     ``300 :: Word8``.
 
-``-fwarn-empty-enumerations``
+``-Wempty-enumerations``
     .. index::
-       single: -fwarn-empty-enumerations
+       single: -Wempty-enumerations
 
     Causes a warning to be emitted if an enumeration is empty, e.g.
     ``[5 .. 3]``.
 
-``-fwarn-lazy-unlifted-bindings``
+``-Wlazy-unlifted-bindings``
     .. index::
-       single: -fwarn-lazy-unlifted-bindings
+       single: -Wlazy-unlifted-bindings
 
     This flag is a no-op, and will be removed in GHC 7.10.
 
-``-fwarn-duplicate-constraints``
+``-Wduplicate-constraints``
     .. index::
-       single: -fwarn-duplicate-constraints
+       single: -Wduplicate-constraints
        single: duplicate constraints, warning
 
     Have the compiler warn about duplicate constraints in a type
@@ -362,11 +385,11 @@ command line.
     The warning will indicate the duplicated ``Eq a`` constraint.
 
     This option is now deprecated in favour of
-    ``-fwarn-redundant-constraints``.
+    ``-Wredundant-constraints``.
 
-``-fwarn-redundant-constraints``
+``-Wredundant-constraints``
     .. index::
-       single: -fwarn-redundant-constraints
+       single: -Wredundant-constraints
        single: redundant constraints, warning
 
     Have the compiler warn about redundant constraints in a type
@@ -396,7 +419,7 @@ command line.
     declaration.
 
     This option is on by default. As usual you can suppress it on a
-    per-module basis with ``-fno-warn-redundant-constraints``.
+    per-module basis with ``-Wno-redundant-constraints``.
     Occasionally you may specifically want a function to have a more
     constrained signature than necessary, perhaps to leave yourself
     wiggle-room for changing the implementation without changing the
@@ -413,9 +436,9 @@ command line.
     Here the call to ``(==)`` makes GHC think that the ``(Eq a)``
     constraint is needed, so no warning is issued.
 
-``-fwarn-duplicate-exports``
+``-Wduplicate-exports``
     .. index::
-       single: -fwarn-duplicate-exports
+       single: -Wduplicate-exports
        single: duplicate exports, warning
        single: export lists, duplicates
 
@@ -426,27 +449,27 @@ command line.
 
     This option is on by default.
 
-``-fwarn-hi-shadowing``
+``-Whi-shadowing``
     .. index::
-       single: -fwarn-hi-shadowing
+       single: -Whi-shadowing
        single: shadowing; interface files
 
     Causes the compiler to emit a warning when a module or interface
     file in the current directory is shadowing one with the same module
     name in a library or other directory.
 
-``-fwarn-identities``
+``-Widentities``
     .. index::
-       single: -fwarn-identities
+       single: -Widentities
 
     Causes the compiler to emit a warning when a Prelude numeric
     conversion converts a type T to the same type T; such calls are
     probably no-ops and can be omitted. The functions checked for are:
     ``toInteger``, ``toRational``, ``fromIntegral``, and ``realToFrac``.
 
-``-fwarn-implicit-prelude``
+``-Wimplicit-prelude``
     .. index::
-       single: -fwarn-implicit-prelude
+       single: -Wimplicit-prelude
        single: implicit prelude, warning
 
     Have the compiler warn if the Prelude is implicitly imported. This
@@ -464,17 +487,17 @@ command line.
 
     This warning is off by default.
 
-``-fwarn-incomplete-patterns``, ``-fwarn-incomplete-uni-patterns``
+``-Wincomplete-patterns``, ``-Wincomplete-uni-patterns``
     .. index::
-       single: -fwarn-incomplete-patterns
-       single: -fwarn-incomplete-uni-patterns
+       single: -Wincomplete-patterns
+       single: -Wincomplete-uni-patterns
        single: incomplete patterns, warning
        single: patterns, incomplete
 
-    The option ``-fwarn-incomplete-patterns`` warns about places where a
+    The option ``-Wincomplete-patterns`` warns about places where a
     pattern-match might fail at runtime. The function ``g`` below will
     fail when applied to non-empty lists, so the compiler will emit a
-    warning about this when ``-fwarn-incomplete-patterns`` is enabled.
+    warning about this when ``-Wincomplete-patterns`` is enabled.
 
     ::
 
@@ -485,7 +508,7 @@ command line.
     generally considered good practice to cover all the cases in your
     functions, and it is switched on by ``-W``.
 
-    The flag ``-fwarn-incomplete-uni-patterns`` is similar, except that
+    The flag ``-Wincomplete-uni-patterns`` is similar, except that
     it applies only to lambda-expressions and pattern bindings,
     constructs that only allow a single pattern:
 
@@ -494,15 +517,15 @@ command line.
         h = \[] -> 2
         Just k = f y
 
-``-fwarn-incomplete-record-updates``
+``-Wincomplete-record-updates``
     .. index::
-       single: -fwarn-incomplete-record-updates
+       single: -Wincomplete-record-updates
        single: incomplete record updates, warning
        single: record updates, incomplete
 
     The function ``f`` below will fail when applied to ``Bar``, so the
     compiler will emit a warning about this when
-    ``-fwarn-incomplete-record-updates`` is enabled.
+    ``-Wincomplete-record-updates`` is enabled.
 
     ::
 
@@ -515,9 +538,9 @@ command line.
     This option isn't enabled by default because it can be very noisy,
     and it often doesn't indicate a bug in the program.
 
-``-fwarn-missing-fields``
+``-Wmissing-fields``
     .. index::
-       single: -fwarn-missing-fields
+       single: -Wmissing-fields
        single: missing fields, warning
        single: fields, missing
 
@@ -527,9 +550,9 @@ command line.
     fields are initialised with bottoms), it is often an indication of a
     programmer error.
 
-``-fwarn-missing-import-lists``
+``-Wmissing-import-lists``
     .. index::
-       single: -fwarn-import-lists
+       single: -Wimport-lists
        single: missing import lists, warning
        single: import lists, missing
 
@@ -545,15 +568,15 @@ command line.
           import qualified Z
           p x = f x x
 
-    The ``-fwarn-import-lists`` flag will warn about the import of ``Y``
+    The ``-Wimport-lists`` flag will warn about the import of ``Y``
     but not ``X`` If module ``Y`` is later changed to export (say)
     ``f``, then the reference to ``f`` in ``M`` will become ambiguous.
     No warning is produced for the import of ``Z`` because extending
     ``Z``\'s exports would be unlikely to produce ambiguity in ``M``.
 
-``-fwarn-missing-methods``
+``-Wmissing-methods``
     .. index::
-       single: -fwarn-missing-methods
+       single: -Wmissing-methods
        single: missing methods, warning
        single: methods, missing
 
@@ -579,40 +602,51 @@ command line.
     methods will be required for instances of a particular class. See
     :ref:`minimal-pragma`.
 
-``-fwarn-missing-signatures``
+``-Wmissing-signatures``
     .. index::
-       single: -fwarn-missing-signatures
+       single: -Wmissing-signatures
        single: type signatures, missing
 
     If you would like GHC to check that every top-level function/value
-    has a type signature, use the ``-fwarn-missing-signatures`` option.
+    has a type signature, use the ``-Wmissing-signatures`` option.
     As part of the warning GHC also reports the inferred type. The
     option is off by default.
 
-``-fwarn-missing-exported-sigs``
+``-Wmissing-exported-sigs``
     .. index::
-       single: -fwarn-missing-exported-sigs
+       single: -Wmissing-exported-sigs
        single: type signatures, missing
 
     If you would like GHC to check that every exported top-level
     function/value has a type signature, but not check unexported
-    values, use the ``-fwarn-missing-exported-sigs`` option. This option
-    takes precedence over ``-fwarn-missing-signatures``. As part of the
+    values, use the ``-Wmissing-exported-sigs`` option. This option
+    takes precedence over ``-Wmissing-signatures``. As part of the
     warning GHC also reports the inferred type. The option is off by
     default.
 
-``-fwarn-missing-local-sigs``
+``-Wmissing-local-sigs``
     .. index::
-       single: -fwarn-missing-local-sigs
+       single: -Wmissing-local-sigs
        single: type signatures, missing
 
-    If you use the ``-fwarn-missing-local-sigs`` flag GHC will warn you
+    If you use the ``-Wmissing-local-sigs`` flag GHC will warn you
     about any polymorphic local bindings. As part of the warning GHC
     also reports the inferred type. The option is off by default.
 
-``-fwarn-name-shadowing``
+``-Wmissing-pat-syn-sigs``
+  .. index ::
+       single: -Wmissing-pat-syn-sigs
+       single: type signatures, missing, pattern synonyms
+
+  If you would like GHC to check that every pattern synonym has a type
+  signature, use the ``-Wmissing-pat-syn-sigs`` option. If this option is
+  used in conjunction with ``-Wmissing-exported-sigs`` then only
+  exported pattern synonyms must have a type signature. GHC also reports the
+  inferred type. This option is off by default.
+
+``-Wname-shadowing``
     .. index::
-       single: -fwarn-name-shadowing
+       single: -Wname-shadowing
        single: shadowing, warning
 
     This option causes a warning to be emitted whenever an inner-scope
@@ -629,9 +663,9 @@ command line.
 
         f x = do { _ignore <- this; _ignore <- that; return (the other) }
 
-``-fwarn-orphans``
+``-Worphans``
     .. index::
-       single: -fwarn-orphans
+       single: -Worphans
        single: orphan instances, warning
        single: orphan rules, warning
 
@@ -648,12 +682,12 @@ command line.
     or rules play a role, whether or not the module's interface would
     otherwise be of any use. See :ref:`orphan-modules` for details.
 
-    The flag ``-fwarn-orphans`` warns about user-written orphan rules or
+    The flag ``-Worphans`` warns about user-written orphan rules or
     instances.
 
-``-fwarn-overlapping-patterns``
+``-Woverlapping-patterns``
     .. index::
-       single: -fwarn-overlapping-patterns
+       single: -Woverlapping-patterns
        single: overlapping patterns, warning
        single: patterns, overlapping
 
@@ -671,16 +705,16 @@ command line.
     second pattern overlaps it. More often than not, redundant patterns
     is a programmer mistake/error, so this option is enabled by default.
 
-``-fwarn-tabs``
+``-Wtabs``
     .. index::
-       single: -fwarn-tabs
+       single: -Wtabs
        single: tabs, warning
 
     Have the compiler warn if there are tabs in your source file.
 
-``-fwarn-type-defaults``
+``-Wtype-defaults``
     .. index::
-       single: -fwarn-type-defaults
+       single: -Wtype-defaults
        single: defaulting mechanism, warning
 
     Have the compiler warn/inform you where in your source the Haskell
@@ -694,9 +728,9 @@ command line.
 
     This warning is off by default.
 
-``-fwarn-monomorphism-restriction``
+``-Wmonomorphism-restriction``
     .. index::
-       single: -fwarn-monomorphism-restriction
+       single: -Wmonomorphism-restriction
        single: monomorphism restriction, warning
 
     Have the compiler warn/inform you where in your source the Haskell
@@ -706,9 +740,9 @@ command line.
 
     This warning is off by default.
 
-``-fwarn-unticked-promoted-constructors``
+``-Wunticked-promoted-constructors``
     .. index::
-       single: -fwarn-unticked-promoted-constructors
+       single: -Wunticked-promoted-constructors
        single: promoted constructor, warning
 
     Warn if a promoted data constructor is used without a tick preceding
@@ -729,22 +763,22 @@ command line.
 
     This warning is is enabled by default in ``-Wall`` mode.
 
-``-fwarn-unused-binds``
+``-Wunused-binds``
     .. index::
-       single: -fwarn-unused-binds
+       single: -Wunused-binds
        single: unused binds, warning
        single: binds, unused
 
     Report any function definitions (and local bindings) which are
     unused. An alias for
 
-    -  ``-fwarn-unused-top-binds``
-    -  ``-fwarn-unused-local-binds``
-    -  ``-fwarn-unused-pattern-binds``
+    -  ``-Wunused-top-binds``
+    -  ``-Wunused-local-binds``
+    -  ``-Wunused-pattern-binds``
 
-``-fwarn-unused-top-binds``
+``-Wunused-top-binds``
     .. index::
-       single: -fwarn-unused-top-binds
+       single: -Wunused-top-binds
        single: unused binds, warning
        single: binds, unused
 
@@ -774,9 +808,9 @@ command line.
                                      -- right-hand side of another unused binding
         _w = True                    -- No warning: _w starts with an underscore
 
-``-fwarn-unused-local-binds``
+``-Wunused-local-binds``
     .. index::
-       single: -fwarn-unused-local-binds
+       single: -Wunused-local-binds
        single: unused binds, warning
        single: binds, unused
 
@@ -788,9 +822,9 @@ command line.
         f = let (p,q) = rhs1 in t p  -- Warning: q is unused
         g = h x                      -- No warning: g is unused, but is a top-level binding
 
-``-fwarn-unused-pattern-binds``
+``-Wunused-pattern-binds``
     .. index::
-       single: -fwarn-unused-pattern-binds
+       single: -Wunused-pattern-binds
        single: unused binds, warning
        single: binds, unused
 
@@ -810,9 +844,9 @@ command line.
     lone banged wild-card pattern is useful as an alternative (to
     ``seq``) way to force evaluation.
 
-``-fwarn-unused-imports``
+``-Wunused-imports``
     .. index::
-       single: -fwarn-unused-imports
+       single: -Wunused-imports
        single: unused imports, warning
        single: imports, unused
 
@@ -821,14 +855,15 @@ command line.
     import, because it is a useful idiom for importing instance
     declarations, which are anonymous in Haskell.
 
-``-fwarn-unused-matches``
+``-Wunused-matches``
     .. index::
-       single: -fwarn-unused-matches
+       single: -Wunused-matches
        single: unused matches, warning
        single: matches, unused
 
     Report all unused variables which arise from pattern matches,
-    including patterns consisting of a single variable. For instance
+    including patterns consisting of a single variable. This includes
+    unused type variables in type family instances. For instance
     ``f x y = []`` would report ``x`` and ``y`` as unused. The warning
     is suppressed if the variable name begins with an underscore, thus:
 
@@ -836,9 +871,9 @@ command line.
 
         f _x = True
 
-``-fwarn-unused-do-bind``
+``-Wunused-do-bind``
     .. index::
-       single: -fwarn-unused-do-bind
+       single: -Wunused-do-bind
        single: unused do binding, warning
        single: do binding, unused
 
@@ -861,30 +896,9 @@ command line.
 
         do { mapM_ popInt xs ; return 10 }
 
-``-fwarn-context-quantification``
+``-Wwrong-do-bind``
     .. index::
-       single: -fwarn-context-quantification
-       single: implicit context quantification, warning
-       single: context, implicit quantification
-
-    Report if a variable is quantified only due to its presence in a
-    context (see :ref:`universal-quantification`). For example,
-
-    ::
-
-        type T a = Monad m => a -> f a
-
-    It is recommended to write this polymorphic type as
-
-    ::
-
-        type T a = forall m. Monad m => a -> f a
-
-    instead.
-
-``-fwarn-wrong-do-bind``
-    .. index::
-       single: -fwarn-wrong-do-bind
+       single: -Wwrong-do-bind
        single: apparently erroneous do binding, warning
        single: do binding, apparently erroneous
 
@@ -909,9 +923,9 @@ command line.
 
         do { popInt 10 ; return 10 }
 
-``-fwarn-inline-rule-shadowing``
+``-Winline-rule-shadowing``
     .. index::
-       single: -fwarn-inline-rule-shadowing
+       single: -Winline-rule-shadowing
 
     Warn if a rewrite RULE might fail to fire because the function might
     be inlined before the rule has a chance to fire. See

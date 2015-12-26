@@ -1,6 +1,5 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE NoImplicitPrelude, MagicHash #-}
-{-# LANGUAGE PatternSynonyms #-}
 {-# LANGUAGE StandaloneDeriving #-}
 
 -----------------------------------------------------------------------------
@@ -39,7 +38,7 @@ module Control.Exception.Base (
         RecConError(..),
         RecSelError(..),
         RecUpdError(..),
-        ErrorCall(..), pattern ErrorCall,
+        ErrorCall(..),
         TypeError(..), -- #10284, custom error type for deferred type errors
 
         -- * Throwing exceptions
@@ -402,8 +401,8 @@ recSelError, recConError, irrefutPatError, runtimeError,
 
 recSelError              s = throw (RecSelError ("No match in record selector "
                                                  ++ unpackCStringUtf8# s))  -- No location info unfortunately
-runtimeError             s = error (unpackCStringUtf8# s)                   -- No location info unfortunately
-absentError              s = error ("Oops!  Entered absent arg " ++ unpackCStringUtf8# s)
+runtimeError             s = errorWithoutStackTrace (unpackCStringUtf8# s)                   -- No location info unfortunately
+absentError              s = errorWithoutStackTrace ("Oops!  Entered absent arg " ++ unpackCStringUtf8# s)
 
 nonExhaustiveGuardsError s = throw (PatternMatchFail (untangle s "Non-exhaustive guards in"))
 irrefutPatError          s = throw (PatternMatchFail (untangle s "Irrefutable pattern failed for pattern"))

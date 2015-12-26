@@ -62,3 +62,15 @@ test('T10294a',
       clean_cmd('$MAKE -s --no-print-directory -C annotation-plugin clean.T10294a')],
      run_command,
      ['$MAKE -s --no-print-directory T10294a'])
+
+test('frontend01',
+     [extra_clean(['FrontendPlugin.hi', 'FrontendPlugin.o',
+                   'frontend01', 'frontend01.o', 'frontend01.hi']),
+      unless(have_dynamic(), expect_broken(10301))],
+     run_command, ['$MAKE -s --no-print-directory frontend01'])
+
+test('T11244',
+     [pre_cmd('$MAKE -s --no-print-directory -C rule-defining-plugin package.T11244'),
+      clean_cmd('$MAKE -s --no-print-directory -C rule-defining-plugin clean.T11244')],
+     run_command,
+     ['$MAKE -s --no-print-directory T11244'])

@@ -50,7 +50,7 @@ test('tcrun031', normal, compile_and_run, [''])
 test('tcrun032', normal, compile_and_run, [''])
 test('tcrun033', normal, compile_and_run, [''])
 test('tcrun034', normal, compile_and_run, [''])
-test('tcrun035', normal, compile_fail, [''])
+test('tcrun035', normal, compile_and_run, [''])
 test('tcrun036', normal, compile_and_run, [''])
 test('tcrun037', normal, compile_and_run, [''])
 
@@ -78,6 +78,8 @@ test('testeq2', normal, compile_and_run, [''])
 test('T1624', normal, compile_and_run, [''])
 test('IPRun', normal, compile_and_run, [''])
 test('IPLocation', normal, compile_and_run, [''])
+test('T10845', normal, compile_and_run, [''])
+test('T10846', normal, compile_and_run, [''])
 
 # Support files for T1735 are in directory T1735_Help/
 test('T1735', normal, multimod_compile_and_run, ['T1735',''])
@@ -109,3 +111,5 @@ test('T9497c-run', [exit_code(1)], compile_and_run, ['-fdefer-type-errors -fno-w
 test('T9858c', normal, compile_and_run, [''])
 test('T9858d', normal, compile_and_run, [''])
 test('T10284', exit_code(1), compile_and_run, [''])
+test('T11049', exit_code(1), compile_and_run, [''])
+test('T11230', normal, compile_and_run, [''])

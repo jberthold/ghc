@@ -17,7 +17,6 @@
 module HsPat (
         Pat(..), InPat, OutPat, LPat,
 
-        HsConDetails(..),
         HsConPatDetails, hsConPatArgs,
         HsRecFields(..), HsRecField'(..), LHsRecField',
         HsRecField, LHsRecField,
@@ -153,10 +152,11 @@ data Pat id
                                         --   Use (conLikeResTy pat_con pat_arg_tys) to get
                                         --   the type of the pattern
 
-        pat_tvs   :: [TyVar],           -- Existentially bound type variables (tyvars only)
+        pat_tvs   :: [TyVar],           -- Existentially bound type variables
         pat_dicts :: [EvVar],           -- Ditto *coercion variables* and *dictionaries*
                                         -- One reason for putting coercion variable here, I think,
                                         --      is to ensure their kinds are zonked
+
         pat_binds :: TcEvBinds,         -- Bindings involving those dictionaries
         pat_args  :: HsConPatDetails id,
         pat_wrap  :: HsWrapper          -- Extra wrapper to pass to the matcher
@@ -221,14 +221,6 @@ data Pat id
   deriving (Typeable)
 deriving instance (DataId id) => Data (Pat id)
 
--- HsConDetails is use for patterns/expressions *and* for data type declarations
-
-data HsConDetails arg rec
-  = PrefixCon [arg]             -- C p1 p2 p3
-  | RecCon    rec               -- C { x = p1, y = p2 }
-  | InfixCon  arg arg           -- p1 `C` p2
-  deriving (Data, Typeable)
-
 type HsConPatDetails id = HsConDetails (LPat id) (HsRecFields id (LPat id))
 
 hsConPatArgs :: HsConPatDetails id -> [LPat id]
@@ -236,10 +228,8 @@ hsConPatArgs (PrefixCon ps)   = ps
 hsConPatArgs (RecCon fs)      = map (hsRecFieldArg . unLoc) (rec_flds fs)
 hsConPatArgs (InfixCon p1 p2) = [p1,p2]
 
-{-
-However HsRecFields is used only for patterns and expressions
-(not data type declarations)
--}
+-- HsRecFields is used only for patterns and expressions (not data type
+-- declarations)
 
 data HsRecFields id arg         -- A bunch of record fields
                                 --      { x = 3, y = True }

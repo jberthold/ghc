@@ -58,9 +58,6 @@ dnl  #define SIZEOF_CHAR 0
 dnl recently.
 AC_PREREQ([2.60])
 
-dnl make extensions visible to allow feature-tests to detect them lateron
-AC_USE_SYSTEM_EXTENSIONS
-
 # -------------------------------------------------------------------------
 # Prepare to generate the following header files
 #
@@ -461,6 +458,9 @@ export CC
 # applies to the stage0 compiler.
 MAYBE_OVERRIDE_STAGE0([gcc],[CC_STAGE0])
 MAYBE_OVERRIDE_STAGE0([ar],[AR_STAGE0])
+
+dnl make extensions visible to allow feature-tests to detect them lateron
+AC_USE_SYSTEM_EXTENSIONS
 
 dnl ** figure out how to invoke the C preprocessor (i.e. `gcc -E`)
 AC_PROG_CPP
@@ -1252,6 +1252,11 @@ AC_SUBST(LIBRARY_ghc_VERSION)
 
 if grep '	' compiler/ghc.cabal.in 2>&1 >/dev/null; then
    AC_MSG_ERROR([compiler/ghc.cabal.in contains tab characters; please remove them])
+fi
+
+# Create the configuration for the Shake-based build system if it is present
+if test -e shake-build/cfg/system.config.in; then
+    AC_CONFIG_FILES([shake-build/cfg/system.config])
 fi
 
 AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])

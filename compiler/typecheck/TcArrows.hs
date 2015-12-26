@@ -5,7 +5,7 @@
 Typecheck arrow notation
 -}
 
-{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE RankNTypes, TupleSections #-}
 
 module TcArrows ( tcProc ) where
 
@@ -25,7 +25,6 @@ import TcEvidence
 import Id( mkLocalId )
 import Inst
 import Name
-import Coercion ( Role(..) )
 import TysWiredIn
 import VarSet
 import TysPrim
@@ -89,7 +88,8 @@ tcProc pat cmd exp_ty
         ; let cmd_env = CmdEnv { cmd_arr = arr_ty }
         ; (pat', cmd') <- tcPat ProcExpr pat arg_ty $
                           tcCmdTop cmd_env cmd (unitTy, res_ty)
-        ; let res_co = mkTcTransCo co (mkTcAppCo co1 (mkTcNomReflCo res_ty))
+        ; let res_co = mkTcTransCo co
+                         (mkTcAppCo co1 (mkTcNomReflCo res_ty))
         ; return (pat', cmd', res_co) }
 
 {-
@@ -160,14 +160,14 @@ tc_cmd env (HsCmdIf Nothing pred b1 b2) res_ty    -- Ordinary 'if'
     }
 
 tc_cmd env (HsCmdIf (Just fun) pred b1 b2) res_ty -- Rebindable syntax for if
-  = do  { pred_ty <- newFlexiTyVarTy openTypeKind
+  = do  { pred_ty <- newOpenFlexiTyVarTy
         -- For arrows, need ifThenElse :: forall r. T -> r -> r -> r
         -- because we're going to apply it to the environment, not
         -- the return value.
         ; (_, [r_tv]) <- tcInstSkolTyVars [alphaTyVar]
         ; let r_ty = mkTyVarTy r_tv
         ; let if_ty = mkFunTys [pred_ty, r_ty, r_ty] r_ty
-        ; checkTc (not (r_tv `elemVarSet` tyVarsOfType pred_ty))
+        ; checkTc (not (r_tv `elemVarSet` tyCoVarsOfType pred_ty))
                   (ptext (sLit "Predicate type of `ifThenElse' depends on result type"))
         ; fun'  <- tcSyntaxOp IfOrigin fun if_ty
         ; pred' <- tcMonoExpr pred pred_ty
@@ -194,7 +194,7 @@ tc_cmd env (HsCmdIf (Just fun) pred b1 b2) res_ty -- Rebindable syntax for if
 
 tc_cmd env cmd@(HsCmdArrApp fun arg _ ho_app lr) (_, res_ty)
   = addErrCtxt (cmdCtxt cmd)    $
-    do  { arg_ty <- newFlexiTyVarTy openTypeKind
+    do  { arg_ty <- newOpenFlexiTyVarTy
         ; let fun_ty = mkCmdArrTy env arg_ty res_ty
         ; fun' <- select_arrow_scope (tcMonoExpr fun fun_ty)
 
@@ -221,7 +221,7 @@ tc_cmd env cmd@(HsCmdArrApp fun arg _ ho_app lr) (_, res_ty)
 
 tc_cmd env cmd@(HsCmdApp fun arg) (cmd_stk, res_ty)
   = addErrCtxt (cmdCtxt cmd)    $
-    do  { arg_ty <- newFlexiTyVarTy openTypeKind
+    do  { arg_ty <- newOpenFlexiTyVarTy
         ; fun'   <- tcCmd env fun (mkPairTy arg_ty cmd_stk, res_ty)
         ; arg'   <- tcMonoExpr arg arg_ty
         ; return (HsCmdApp fun' arg') }
@@ -250,7 +250,7 @@ tc_cmd env
               arg_tys = map hsLPatType pats'
               cmd' = HsCmdLam (MG { mg_alts = L l [match'], mg_arg_tys = arg_tys
                                   , mg_res_ty = res_ty, mg_origin = origin })
-        ; return (mkHsCmdCast co cmd') }
+        ; return (mkHsCmdWrap (mkWpCastN co) cmd') }
   where
     n_pats     = length pats
     match_ctxt = (LambdaExpr :: HsMatchContext Name)    -- Maybe KappaExpr?
@@ -270,9 +270,9 @@ tc_cmd env
 --              Do notation
 
 tc_cmd env (HsCmdDo (L l stmts) _) (cmd_stk, res_ty)
-  = do  { co <- unifyType unitTy cmd_stk  -- Expecting empty argument stack
+  = do  { co <- unifyType noThing unitTy cmd_stk  -- Expecting empty argument stack
         ; stmts' <- tcStmts ArrowExpr (tcArrDoStmt env) stmts res_ty
-        ; return (mkHsCmdCast co (HsCmdDo (L l stmts') res_ty)) }
+        ; return (mkHsCmdWrap (mkWpCastN co) (HsCmdDo (L l stmts') res_ty)) }
 
 
 -----------------------------------------------------------------
@@ -292,7 +292,8 @@ tc_cmd env (HsCmdDo (L l stmts) _) (cmd_stk, res_ty)
 tc_cmd env cmd@(HsCmdArrForm expr fixity cmd_args) (cmd_stk, res_ty)
   = addErrCtxt (cmdCtxt cmd)    $
     do  { (cmd_args', cmd_tys) <- mapAndUnzipM tc_cmd_arg cmd_args
-        ; let e_ty = mkForAllTy alphaTyVar $   -- We use alphaTyVar for 'w'
+                              -- We use alphaTyVar for 'w'
+        ; let e_ty = mkNamedForAllTy alphaTyVar Invisible $
                      mkFunTys cmd_tys $
                      mkCmdArrTy env (mkPairTy alphaTy cmd_stk) res_ty
         ; expr' <- tcPolyExpr expr e_ty
@@ -408,7 +409,7 @@ mkPairTy :: Type -> Type -> Type
 mkPairTy t1 t2 = mkTyConApp pairTyCon [t1,t2]
 
 arrowTyConKind :: Kind          --  *->*->*
-arrowTyConKind = mkArrowKinds [liftedTypeKind, liftedTypeKind] liftedTypeKind
+arrowTyConKind = mkFunTys [liftedTypeKind, liftedTypeKind] liftedTypeKind
 
 {-
 ************************************************************************

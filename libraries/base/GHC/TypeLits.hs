@@ -146,13 +146,13 @@ instance Read SomeSymbol where
   readsPrec p xs = [ (someSymbolVal a, ys) | (a,ys) <- readsPrec p xs ]
 
 type family EqNat (a :: Nat) (b :: Nat) where
-  EqNat a a = 'True
-  EqNat a b = 'False
+  EqNat _a _a = 'True
+  EqNat _a _b = 'False
 type instance a == b = EqNat a b
 
 type family EqSymbol (a :: Symbol) (b :: Symbol) where
-  EqSymbol a a = 'True
-  EqSymbol a b = 'False
+  EqSymbol _a _a = 'True
+  EqSymbol _a _b = 'False
 type instance a == b = EqSymbol a b
 
 --------------------------------------------------------------------------------
@@ -284,5 +284,3 @@ withSNat f x y = magicDict (WrapN f) x y
 withSSymbol :: (KnownSymbol a => Proxy a -> b)
             -> SSymbol a      -> Proxy a -> b
 withSSymbol f x y = magicDict (WrapS f) x y
-
-

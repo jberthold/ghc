@@ -516,14 +516,11 @@ cpeRhsE env (Var f `App` _{-type-} `App` arg)
   | f `hasKey` lazyIdKey          -- Replace (lazy a) by a
   = cpeRhsE env arg               -- See Note [lazyId magic] in MkId
 
+cpeRhsE env (Var f `App` _levity `App` _type `App` arg)
     -- See Note [runRW magic] in MkId
   | f `hasKey` runRWKey           -- Replace (runRW# f) by (f realWorld#),
   = case arg of                   -- beta reducing if possible
-      Lam s body -> cpeRhsE env (substExpr (text "runRW#") subst body)
-        where subst = extendIdSubst emptySubst s (Var realWorldPrimId)
-                      -- XXX I think we can use emptySubst here
-                      -- because realWorldPrimId is a global variable
-                      -- and so cannot be bound by a lambda in body
+      Lam s body -> cpeRhsE (extendCorePrepEnv env s realWorldPrimId) body
       _          -> cpeRhsE env (arg `App` Var realWorldPrimId)
 
 cpeRhsE env expr@(App {}) = cpeApp env expr
@@ -680,11 +677,11 @@ cpeApp env expr
 
     collect_args (App fun arg@(Type arg_ty)) depth
       = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun depth
-           ; return (App fun' arg, hd, applyTy fun_ty arg_ty, floats, ss) }
+           ; return (App fun' arg, hd, piResultTy fun_ty arg_ty, floats, ss) }
 
-    collect_args (App fun arg@(Coercion arg_co)) depth
+    collect_args (App fun arg@(Coercion {})) depth
       = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun depth
-           ; return (App fun' arg, hd, applyCo fun_ty arg_co, floats, ss) }
+           ; return (App fun' arg, hd, funResultTy fun_ty, floats, ss) }
 
     collect_args (App fun arg) depth
       = do { (fun',hd,fun_ty,floats,ss) <- collect_args fun (depth+1)
@@ -847,15 +844,17 @@ of the scope of a `seq`, or dropped the `seq` altogether.
 
 cpe_ExprIsTrivial :: CoreExpr -> Bool
 -- Version that doesn't consider an scc annotation to be trivial.
-cpe_ExprIsTrivial (Var _)        = True
-cpe_ExprIsTrivial (Type _)       = True
-cpe_ExprIsTrivial (Coercion _)   = True
-cpe_ExprIsTrivial (Lit _)        = True
-cpe_ExprIsTrivial (App e arg)    = isTypeArg arg && cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Tick t e)     = not (tickishIsCode t) && cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Cast e _)     = cpe_ExprIsTrivial e
-cpe_ExprIsTrivial (Lam b body) | isTyVar b = cpe_ExprIsTrivial body
-cpe_ExprIsTrivial _              = False
+cpe_ExprIsTrivial (Var _)         = True
+cpe_ExprIsTrivial (Type _)        = True
+cpe_ExprIsTrivial (Coercion _)    = True
+cpe_ExprIsTrivial (Lit _)         = True
+cpe_ExprIsTrivial (App e arg)     = not (isRuntimeArg arg) && cpe_ExprIsTrivial e
+cpe_ExprIsTrivial (Lam b e)       = not (isRuntimeVar b) && cpe_ExprIsTrivial e
+cpe_ExprIsTrivial (Tick t e)      = not (tickishIsCode t) && cpe_ExprIsTrivial e
+cpe_ExprIsTrivial (Cast e _)      = cpe_ExprIsTrivial e
+cpe_ExprIsTrivial (Case e _ _ []) = cpe_ExprIsTrivial e
+                                    -- See Note [Empty case is trivial] in CoreUtils
+cpe_ExprIsTrivial _               = False
 
 {-
 -- -----------------------------------------------------------------------------
@@ -1125,7 +1124,7 @@ canFloatFromNoCaf platform (Floats ok_to_spec fs) rhs
     -- any non-static things or it would *already* be Caffy
     rhs_ok = rhsIsStatic platform (\_ -> False)
                          (\i -> pprPanic "rhsIsStatic" (integer i))
-                         -- Integer literals should not show up 
+                         -- Integer literals should not show up
 
 wantFloatNested :: RecFlag -> Bool -> Floats -> CpeRhs -> Bool
 wantFloatNested is_rec strict_or_unlifted floats rhs
@@ -1158,12 +1157,12 @@ allLazyNested is_rec (Floats IfUnboxedOk _) = isNonRec is_rec
 --                      The environment
 -- ---------------------------------------------------------------------------
 
-data CorePrepEnv = CPE {
-                       cpe_dynFlags    :: DynFlags,
-                       cpe_env         :: (IdEnv Id), -- Clone local Ids
-                       cpe_mkIntegerId :: Id,
-                       cpe_integerSDataCon :: Maybe DataCon
-                   }
+data CorePrepEnv
+  = CPE { cpe_dynFlags        :: DynFlags
+        , cpe_env             :: IdEnv Id   -- Clone local Ids
+        , cpe_mkIntegerId     :: Id
+        , cpe_integerSDataCon :: Maybe DataCon
+    }
 
 lookupMkIntegerName :: DynFlags -> HscEnv -> IO Id
 lookupMkIntegerName dflags hsc_env
@@ -1256,7 +1255,7 @@ newVar :: Type -> UniqSM Id
 newVar ty
  = seqType ty `seq` do
      uniq <- getUniqueM
-     return (mkSysLocal (fsLit "sat") uniq ty)
+     return (mkSysLocalOrCoVar (fsLit "sat") uniq ty)
 
 
 ------------------------------------------------------------------------------

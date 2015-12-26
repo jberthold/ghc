@@ -66,6 +66,8 @@ import Util
 import DynFlags
 import Exception
 
+import LlvmCodeGen.Base (llvmVersionStr, supportedLlvmVersion)
+
 import Data.IORef
 import Control.Monad
 import System.Exit
@@ -187,6 +189,8 @@ initSysTools mbMinusB
            platformConstantsFile = top_dir </> "platformConstants"
            installed :: FilePath -> FilePath
            installed file = top_dir </> file
+           libexec :: FilePath -> FilePath
+           libexec file = top_dir </> "bin" </> file
 
        settingsStr <- readFile settingsFile
        platformConstantsStr <- readFile platformConstantsFile
@@ -265,10 +269,10 @@ initSysTools mbMinusB
 
              -- For all systems, unlit, split, mangle are GHC utilities
              -- architecture-specific stuff is done when building Config.hs
-           unlit_path = installed cGHC_UNLIT_PGM
+           unlit_path = libexec cGHC_UNLIT_PGM
 
              -- split is a Perl script
-           split_script  = installed cGHC_SPLIT_PGM
+           split_script  = libexec cGHC_SPLIT_PGM
 
        windres_path <- getSetting "windres command"
        libtool_path <- getSetting "libtool command"
@@ -304,6 +308,8 @@ initSysTools mbMinusB
        -- We just assume on command line
        lc_prog <- getSetting "LLVM llc command"
        lo_prog <- getSetting "LLVM opt command"
+
+       let iserv_prog = libexec "ghc-iserv"
 
        let platform = Platform {
                           platformArch = targetArch,
@@ -344,6 +350,7 @@ initSysTools mbMinusB
                     sPgm_libtool = libtool_path,
                     sPgm_lo  = (lo_prog,[]),
                     sPgm_lc  = (lc_prog,[]),
+                    sPgm_i   = iserv_prog,
                     sOpt_L       = [],
                     sOpt_P       = [],
                     sOpt_F       = [],
@@ -353,6 +360,7 @@ initSysTools mbMinusB
                     sOpt_windres = [],
                     sOpt_lo      = [],
                     sOpt_lc      = [],
+                    sOpt_i       = [],
                     sPlatformConstants = platformConstants
              }
 
@@ -647,7 +655,8 @@ figureLlvmVersion dflags = do
                 errorMsg dflags $ vcat
                     [ text "Warning:", nest 9 $
                           text "Couldn't figure out LLVM version!" $$
-                          text "Make sure you have installed LLVM"]
+                          text ("Make sure you have installed LLVM " ++
+                                llvmVersionStr supportedLlvmVersion) ]
                 return Nothing)
   return ver
 
@@ -1545,7 +1554,7 @@ linkDynLib dflags0 o_files dep_packages
          | ( osElfTarget (platformOS (targetPlatform dflags)) ||
              osMachOTarget (platformOS (targetPlatform dflags)) ) &&
            dynLibLoader dflags == SystemDependent &&
-           not (gopt Opt_Static dflags)
+           WayDyn `elem` ways dflags
             = ["-L" ++ l, "-Wl,-rpath", "-Wl," ++ l]
          | otherwise = ["-L" ++ l]
 

@@ -18,7 +18,8 @@ module CoAxiom (
        coAxiomName, coAxiomArity, coAxiomBranches,
        coAxiomTyCon, isImplicitCoAxiom, coAxiomNumPats,
        coAxiomNthBranch, coAxiomSingleBranch_maybe, coAxiomRole,
-       coAxiomSingleBranch, coAxBranchTyVars, coAxBranchRoles,
+       coAxiomSingleBranch, coAxBranchTyVars, coAxBranchCoVars,
+       coAxBranchRoles,
        coAxBranchLHS, coAxBranchRHS, coAxBranchSpan, coAxBranchIncomps,
        placeHolderIncomps,
 
@@ -28,7 +29,7 @@ module CoAxiom (
        BuiltInSynFamily(..), trivialBuiltInFamily
        ) where
 
-import {-# SOURCE #-} TypeRep ( Type )
+import {-# SOURCE #-} TyCoRep ( Type )
 import {-# SOURCE #-} TyCon ( TyCon )
 import Outputable
 import FastString
@@ -64,9 +65,9 @@ type family F a where
 
 This will give rise to this axiom:
 
-axF :: {                                           F [Int] ~ Bool
-       ; forall (a :: *).                          F [a]   ~ Double
-       ; forall (k :: BOX) (a :: k -> *) (b :: k). F (a b) ~ Char
+axF :: {                                         F [Int] ~ Bool
+       ; forall (a :: *).                        F [a]   ~ Double
+       ; forall (k :: *) (a :: k -> *) (b :: k). F (a b) ~ Char
        }
 
 The axiom is used with the AxiomInstCo constructor of Coercion. If we wish
@@ -205,11 +206,12 @@ of the branches.
 -- See Note [GHC Formalism] in coreSyn/CoreLint.hs
 data CoAxiom br
   = CoAxiom                   -- Type equality axiom.
-    { co_ax_unique   :: Unique        -- unique identifier
-    , co_ax_name     :: Name          -- name for pretty-printing
-    , co_ax_role     :: Role          -- role of the axiom's equality
-    , co_ax_tc       :: TyCon         -- the head of the LHS patterns
-    , co_ax_branches :: Branches br   -- the branches that form this axiom
+    { co_ax_unique   :: Unique        -- Unique identifier
+    , co_ax_name     :: Name          -- Name for pretty-printing
+    , co_ax_role     :: Role          -- Role of the axiom's equality
+    , co_ax_tc       :: TyCon         -- The head of the LHS patterns
+                                      -- e.g.  the newtype or family tycon
+    , co_ax_branches :: Branches br   -- The branches that form this axiom
     , co_ax_implicit :: Bool          -- True <=> the axiom is "implicit"
                                       -- See Note [Implicit axioms]
          -- INVARIANT: co_ax_implicit == True implies length co_ax_branches == 1.
@@ -222,8 +224,13 @@ data CoAxBranch
                                     -- See Note [CoAxiom locations]
     , cab_tvs      :: [TyVar]       -- Bound type variables; not necessarily fresh
                                     -- See Note [CoAxBranch type variables]
+    , cab_cvs      :: [CoVar]       -- Bound coercion variables
+                                    -- Always empty, for now.
+                                    -- See Note [Constraints in patterns]
+                                    -- in TcTyClsDecls
     , cab_roles    :: [Role]        -- See Note [CoAxBranch roles]
     , cab_lhs      :: [Type]        -- Type patterns to match against
+                                    -- See Note [CoAxiom saturation]
     , cab_rhs      :: Type          -- Right-hand side of the equality
     , cab_incomps  :: [CoAxBranch]  -- The previous incompatible branches
                                     -- See Note [Storing compatibility]
@@ -247,7 +254,9 @@ coAxiomNthBranch (CoAxiom { co_ax_branches = bs }) index
 
 coAxiomArity :: CoAxiom br -> BranchIndex -> Arity
 coAxiomArity ax index
-  = length $ cab_tvs $ coAxiomNthBranch ax index
+  = length tvs + length cvs
+  where
+    CoAxBranch { cab_tvs = tvs, cab_cvs = cvs } = coAxiomNthBranch ax index
 
 coAxiomName :: CoAxiom br -> Name
 coAxiomName = co_ax_name
@@ -275,6 +284,9 @@ coAxiomTyCon = co_ax_tc
 coAxBranchTyVars :: CoAxBranch -> [TyVar]
 coAxBranchTyVars = cab_tvs
 
+coAxBranchCoVars :: CoAxBranch -> [CoVar]
+coAxBranchCoVars = cab_cvs
+
 coAxBranchLHS :: CoAxBranch -> [Type]
 coAxBranchLHS = cab_lhs
 
@@ -297,7 +309,10 @@ coAxBranchIncomps = cab_incomps
 placeHolderIncomps :: [CoAxBranch]
 placeHolderIncomps = panic "placeHolderIncomps"
 
-{-
+{- Note [CoAxiom saturation]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* When co
+
 Note [CoAxBranch type variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In the case of a CoAxBranch of an associated type-family instance,
@@ -395,6 +410,13 @@ instance Typeable br => Data.Data (CoAxiom br) where
     gunfold _ _  = error "gunfold"
     dataTypeOf _ = mkNoRepType "CoAxiom"
 
+instance Outputable CoAxBranch where
+  ppr (CoAxBranch { cab_loc = loc
+                  , cab_lhs = lhs
+                  , cab_rhs = rhs }) =
+    text "CoAxBranch" <+> parens (ppr loc) <> colon <+> ppr lhs <+>
+    text "=>" <+> ppr rhs
+
 {-
 ************************************************************************
 *                                                                      *
@@ -408,7 +430,7 @@ Roles are defined here to avoid circular dependencies.
 -- See Note [Roles] in Coercion
 -- defined here to avoid cyclic dependency with Coercion
 data Role = Nominal | Representational | Phantom
-  deriving (Eq, Data.Data, Data.Typeable)
+  deriving (Eq, Ord, Data.Data, Data.Typeable)
 
 -- These names are slurped into the parser code. Changing these strings
 -- will change the **surface syntax** that GHC accepts! If you want to
@@ -457,10 +479,9 @@ type Eqn = Pair Type
 -- | For now, we work only with nominal equality.
 data CoAxiomRule = CoAxiomRule
   { coaxrName      :: FastString
-  , coaxrTypeArity :: Int       -- number of type argumentInts
   , coaxrAsmpRoles :: [Role]    -- roles of parameter equations
   , coaxrRole      :: Role      -- role of resulting equation
-  , coaxrProves    :: [Type] -> [Eqn] -> Maybe Eqn
+  , coaxrProves    :: [Eqn] -> Maybe Eqn
         -- ^ coaxrProves returns @Nothing@ when it doesn't like
         -- the supplied arguments.  When this happens in a coercion
         -- that means that the coercion is ill-formed, and Core Lint

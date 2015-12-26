@@ -442,8 +442,9 @@ usage_text[] = {
 "",
 #endif /* DEBUG */
 #if defined(THREADED_RTS) && !defined(NOSMP)
-"  -N[<n>]   Use <n> processors (default: 1, -N alone determines",
-"            the number of processors to use automatically)",
+"  -N[<n>]    Use <n> processors (default: 1, -N alone determines",
+"             the number of processors to use automatically)",
+"  -maxN[<n>] Use up to <n> processors automatically",
 "  -qg[<n>]  Use parallel GC only for generations >= <n>",
 "            (default: 0, -qg alone turns off parallel GC)",
 "  -qb[<n>]  Use load-balancing in the parallel GC only for generations >= <n>",
@@ -917,14 +918,46 @@ error = rtsTrue;
                   break;
 
               case 'm':
-                  OPTION_UNSAFE;
-                  RtsFlags.GcFlags.pcFreeHeap = atof(rts_argv[arg]+2);
+                /* Case for maxN feature request ticket #10728, it's a little
+                   odd being so far from the N case. */
+#if !defined(NOSMP)
+                if (strncmp("maxN", &rts_argv[arg][1], 4) == 0) {
+                  OPTION_SAFE;
+                  THREADED_BUILD_ONLY(
+                    int nNodes;
+                    int proc = (int)getNumberOfProcessors();
+                    OPTION_SAFE;
 
-                  if (RtsFlags.GcFlags.pcFreeHeap < 0 ||
-                      RtsFlags.GcFlags.pcFreeHeap > 100)
+                    nNodes = strtol(rts_argv[arg]+5, (char **) NULL, 10);
+                    if (nNodes > proc) { nNodes = proc; }
+
+                    if (nNodes <= 0) {
+                      errorBelch("bad value for -maxN");
+                      error = rtsTrue;
+                    }
+#if defined(PROFILING)
+                    RtsFlags.ParFlags.nNodes = 1;
+#else
+                    RtsFlags.ParFlags.nNodes = (nat)nNodes;
+#endif
+                  ) break;
+                } else {
+#endif
+                    OPTION_UNSAFE;
+                    RtsFlags.GcFlags.pcFreeHeap = atof(rts_argv[arg]+2);
+
+                    /* -m was allowing bad flags to go unreported */
+                    if (RtsFlags.GcFlags.pcFreeHeap == 0.0 &&
+                           rts_argv[arg][2] != '0')
                       bad_option( rts_argv[arg] );
-                  break;
 
+                    if (RtsFlags.GcFlags.pcFreeHeap < 0 ||
+                        RtsFlags.GcFlags.pcFreeHeap > 100)
+                        bad_option( rts_argv[arg] );
+                    break;
+#if !defined(NOSMP)
+                }
+#endif
               case 'G':
                   OPTION_UNSAFE;
                   RtsFlags.GcFlags.generations =
@@ -1115,13 +1148,15 @@ error = rtsTrue;
                 } else {
                     int nNodes;
                     OPTION_SAFE; /* but see extra checks below... */
+
                     nNodes = strtol(rts_argv[arg]+2, (char **) NULL, 10);
+
                     if (nNodes <= 0) {
                       errorBelch("bad value for -N");
                       error = rtsTrue;
                     }
                     if (rtsOptsEnabled == RtsOptsSafeOnly &&
-                        nNodes > (int)getNumberOfProcessors()) {
+                      nNodes > (int)getNumberOfProcessors()) {
                       errorRtsOptsDisabled("Using large values for -N is not allowed by default. %s");
                       stg_exit(EXIT_FAILURE);
                     }

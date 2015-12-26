@@ -1,4 +1,7 @@
 {-# LANGUAGE NoImplicitPrelude #-}
+{-# OPTIONS_HADDOCK hide #-}
+-- we hide this module from haddock to enforce GHC.Stack as the main
+-- access point.
 
 -----------------------------------------------------------------------------
 -- |
@@ -11,14 +14,16 @@
 -- Portability :  non-portable (GHC Extensions)
 --
 -- type definitions for call-stacks via implicit parameters.
--- Use GHC.Exts from the base package instead of importing this
+-- Use "GHC.Stack" from the base package instead of importing this
 -- module directly.
 --
 -----------------------------------------------------------------------------
 
 module GHC.Stack.Types (
     -- * Implicit parameter call stacks
-    SrcLoc(..), CallStack(..),
+    CallStack(..), emptyCallStack, freezeCallStack, getCallStack, pushCallStack,
+    -- * Source locations
+    SrcLoc(..)
   ) where
 
 {-
@@ -44,23 +49,33 @@ import GHC.Integer ()
 -- Explicit call-stacks built via ImplicitParams
 ----------------------------------------------------------------------
 
--- | @CallStack@s are an alternate method of obtaining the call stack at a given
--- point in the program.
+-- | Implicit @CallStack@s are an alternate method of obtaining the call stack
+-- at a given point in the program.
 --
--- When an implicit-parameter of type @CallStack@ occurs in a program, GHC will
--- solve it with the current location. If another @CallStack@ implicit-parameter
--- is in-scope (e.g. as a function argument), the new location will be appended
--- to the one in-scope, creating an explicit call-stack. For example,
+-- GHC has two built-in rules for solving implicit-parameters of type
+-- @CallStack@.
+--
+-- 1. If the @CallStack@ occurs in a function call, it appends the
+--    source location of the call to the @CallStack@ in the environment.
+-- 2. @CallStack@s that cannot be solved normally (i.e. unbound
+--    occurrences) are defaulted to the empty @CallStack@.
+--
+-- Otherwise implicit @CallStack@s behave just like ordinary implicit
+-- parameters. For example:
 --
 -- @
--- myerror :: (?loc :: CallStack) => String -> a
--- myerror msg = error (msg ++ "\n" ++ showCallStack ?loc)
+-- myerror :: (?callStack :: CallStack) => String -> a
+-- myerror msg = error (msg ++ "\n" ++ prettyCallStack ?callStack)
+-- @
+--
+-- Will produce the following when evaluated,
+--
 -- @
 -- ghci> myerror "die"
 -- *** Exception: die
--- CallStack:
---   ?loc, called at MyError.hs:7:51 in main:MyError
+-- CallStack (from ImplicitParams):
 --   myerror, called at <interactive>:2:1 in interactive:Ghci1
+-- @
 --
 -- @CallStack@s do not interact with the RTS and do not require compilation with
 -- @-prof@. On the other hand, as they are built up explicitly using
@@ -71,13 +86,76 @@ import GHC.Integer ()
 -- function that was called, the 'SrcLoc' is the call-site. The list is
 -- ordered with the most recently called function at the head.
 --
--- @since 4.9.0.0
-data CallStack = CallStack { getCallStack :: [([Char], SrcLoc)] }
+-- @since 4.8.1.0
+data CallStack
+  = EmptyCallStack
+  | PushCallStack ([Char], SrcLoc) CallStack
+  | FreezeCallStack CallStack
+    -- ^ Freeze the stack at the given @CallStack@, preventing any further
+    -- call-sites from being pushed onto it.
+
   -- See Note [Overview of implicit CallStacks]
+
+-- | Extract a list of call-sites from the 'CallStack'.
+--
+-- The list is ordered by most recent call.
+--
+-- @since 4.8.1.0
+getCallStack :: CallStack -> [([Char], SrcLoc)]
+getCallStack stk = case stk of
+  EmptyCallStack        -> []
+  PushCallStack cs stk' -> cs : getCallStack stk'
+  FreezeCallStack stk'  -> getCallStack stk'
+
+
+-- Note [Definition of CallStack]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Implicit CallStacks are defined very early in base because they are
+-- used by error and undefined. At this point in the dependency graph,
+-- we do not have enough functionality to (conveniently) write a nice
+-- pretty-printer for CallStack. The sensible place to define the
+-- pretty-printer would be GHC.Stack, which is the main access point,
+-- but unfortunately GHC.Stack imports GHC.Exception, which *needs*
+-- the pretty-printer. So the CallStack type and functions are split
+-- between three modules:
+--
+-- 1. GHC.Stack.Types: defines the type and *simple* functions
+-- 2. GHC.Exception: defines the pretty-printer
+-- 3. GHC.Stack: exports everything and acts as the main access point
+
+
+-- | Push a call-site onto the stack.
+--
+-- This function has no effect on a frozen 'CallStack'.
+--
+-- @since 4.9.0.0
+pushCallStack :: ([Char], SrcLoc) -> CallStack -> CallStack
+pushCallStack cs stk = case stk of
+  FreezeCallStack _ -> stk
+  _                 -> PushCallStack cs stk
+{-# INLINE pushCallStack #-}
+
+
+-- | The empty 'CallStack'.
+--
+-- @since 4.9.0.0
+emptyCallStack :: CallStack
+emptyCallStack = EmptyCallStack
+{-# INLINE emptyCallStack #-}
+
+-- | Freeze a call-stack, preventing any further call-sites from being appended.
+--
+-- prop> pushCallStack callSite (freezeCallStack callStack) = freezeCallStack callStack
+--
+-- @since 4.9.0.0
+freezeCallStack :: CallStack -> CallStack
+freezeCallStack stk = FreezeCallStack stk
+{-# INLINE freezeCallStack #-}
+
 
 -- | A single location in the source code.
 --
--- @since 4.9.0.0
+-- @since 4.8.1.0
 data SrcLoc = SrcLoc
   { srcLocPackage   :: [Char]
   , srcLocModule    :: [Char]

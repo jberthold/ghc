@@ -4,7 +4,7 @@
 \section[RnEnv]{Environment manipulation for the renamer monad}
 -}
 
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, MultiWayIf #-}
 
 module RnEnv (
         newTopSrcBinder,
@@ -21,7 +21,7 @@ module RnEnv (
         HsSigCtxt(..), lookupLocalTcNames, lookupSigOccRn,
         lookupSigCtxtOccRn,
 
-        lookupFixityRn, lookupTyFixityRn,
+        lookupFixityRn, lookupFieldFixityRn, lookupTyFixityRn,
         lookupInstDeclBndr, lookupRecFieldOcc, lookupFamInstName,
         lookupConstructorFields,
         lookupSyntaxName, lookupSyntaxNames, lookupIfThenElse,
@@ -37,7 +37,8 @@ module RnEnv (
         extendTyVarEnvFVRn,
 
         checkDupRdrNames, checkShadowedRdrNames,
-        checkDupNames, checkDupAndShadowedNames, checkTupSize,
+        checkDupNames, checkDupAndShadowedNames, dupNamesErr,
+        checkTupSize,
         addFvRn, mapFvRn, mapMaybeFvRn, mapFvRnCPS,
         warnUnusedMatches,
         warnUnusedTopBinds, warnUnusedLocalBinds,
@@ -57,6 +58,7 @@ import HscTypes
 import TcEnv
 import TcRnMonad
 import RdrHsSyn         ( setRdrNameSpace )
+import TysWiredIn       ( starKindTyConName, unicodeStarKindTyConName )
 import Name
 import NameSet
 import NameEnv
@@ -81,6 +83,7 @@ import Data.List
 import Data.Function    ( on )
 import ListSetOps       ( minusList )
 import Constants        ( mAX_TUPLE_SIZE )
+import qualified GHC.LanguageExtensions as LangExt
 
 {-
 *********************************************************
@@ -300,7 +303,7 @@ lookupTopBndrRn_maybe rdr_name
            -- See Note [Type and class operator definitions]
           let occ = rdrNameOcc rdr_name
         ; when (isTcOcc occ && isSymOcc occ)
-               (do { op_ok <- xoptM Opt_TypeOperators
+               (do { op_ok <- xoptM LangExt.TypeOperators
                    ; unless op_ok (addErr (opDeclErr rdr_name)) })
 
         ; env <- getGlobalRdrEnv
@@ -710,10 +713,13 @@ lookupOccRn rdr_name
 lookupKindOccRn :: RdrName -> RnM Name
 -- Looking up a name occurring in a kind
 lookupKindOccRn rdr_name
-  = do { mb_name <- lookupOccRn_maybe rdr_name
-       ; case mb_name of
-           Just name -> return name
-           Nothing   -> reportUnboundName rdr_name  }
+  = do { typeintype <- xoptM LangExt.TypeInType
+       ; if | typeintype           -> lookupTypeOccRn rdr_name
+      -- With -XNoTypeInType, treat any usage of * in kinds as in scope
+      -- this is a dirty hack, but then again so was the old * kind.
+            | is_star rdr_name     -> return starKindTyConName
+            | is_uni_star rdr_name -> return unicodeStarKindTyConName
+            | otherwise            -> lookupOccRn rdr_name }
 
 -- lookupPromotedOccRn looks up an optionally promoted RdrName.
 lookupTypeOccRn :: RdrName -> RnM Name
@@ -722,16 +728,17 @@ lookupTypeOccRn rdr_name
   = do { mb_name <- lookupOccRn_maybe rdr_name
        ; case mb_name of {
              Just name -> return name ;
-             Nothing   -> lookup_demoted rdr_name } }
+             Nothing   -> do { dflags <- getDynFlags
+                             ; lookup_demoted rdr_name dflags } } }
 
-lookup_demoted :: RdrName -> RnM Name
-lookup_demoted rdr_name
+lookup_demoted :: RdrName -> DynFlags -> RnM Name
+lookup_demoted rdr_name dflags
   | Just demoted_rdr <- demoteRdrName rdr_name
     -- Maybe it's the name of a *data* constructor
-  = do { data_kinds <- xoptM Opt_DataKinds
+  = do { data_kinds <- xoptM LangExt.DataKinds
        ; mb_demoted_name <- lookupOccRn_maybe demoted_rdr
        ; case mb_demoted_name of
-           Nothing -> reportUnboundName rdr_name
+           Nothing -> unboundNameX WL_Any rdr_name star_info
            Just demoted_name
              | data_kinds ->
              do { whenWOptM Opt_WarnUntickedPromotedConstructors $
@@ -751,6 +758,20 @@ lookup_demoted rdr_name
            , quotes (char '\'' <> ppr name)
            , text "instead of"
            , quotes (ppr name) <> dot ]
+
+    star_info
+      | is_star rdr_name || is_uni_star rdr_name
+      = if xopt LangExt.TypeInType dflags
+        then text "NB: With TypeInType, you must import" <+>
+             ppr rdr_name <+> text "from Data.Kind"
+        else empty
+
+      | otherwise
+      = empty
+
+is_star, is_uni_star :: RdrName -> Bool
+is_star     = (fsLit "*" ==) . occNameFS . rdrNameOcc
+is_uni_star = (fsLit "★" ==) . occNameFS . rdrNameOcc
 
 {-
 Note [Demotion]
@@ -891,8 +912,10 @@ lookupGlobalOccRn_overloaded overload_ok rdr_name
                 []    -> return Nothing
                 [gre] | isRecFldGRE gre
                          -> do { addUsedGRE True gre
-                               ; let fld_occ :: FieldOcc Name
-                                     fld_occ = FieldOcc rdr_name (gre_name gre)
+                               ; let
+                                   fld_occ :: FieldOcc Name
+                                   fld_occ
+                                     = FieldOcc (noLoc rdr_name) (gre_name gre)
                                ; return (Just (Right [fld_occ])) }
                       | otherwise
                          -> do { addUsedGRE True gre
@@ -900,7 +923,10 @@ lookupGlobalOccRn_overloaded overload_ok rdr_name
                 gres  | all isRecFldGRE gres && overload_ok
                             -- Don't record usage for ambiguous selectors
                             -- until we know which is meant
-                         -> return (Just (Right (map (FieldOcc rdr_name . gre_name) gres)))
+                         -> return
+                             (Just (Right
+                                     (map (FieldOcc (noLoc rdr_name) . gre_name)
+                                           gres)))
                 gres     -> do { addNameClashErrRn rdr_name gres
                                ; return (Just (Left (gre_name (head gres)))) } }
 
@@ -1043,10 +1069,10 @@ warnIfDeprecated gre@(GRE { gre_name = name, gre_imp = iss })
 
 lookupImpDeprec :: ModIface -> GlobalRdrElt -> Maybe WarningTxt
 lookupImpDeprec iface gre
-  = mi_warn_fn iface (gre_name gre) `mplus`  -- Bleat if the thing,
+  = mi_warn_fn iface (greOccName gre) `mplus`  -- Bleat if the thing,
     case gre_par gre of                      -- or its parent, is warn'd
-       ParentIs  p              -> mi_warn_fn iface p
-       FldParent { par_is = p } -> mi_warn_fn iface p
+       ParentIs  p              -> mi_warn_fn iface (nameOccName p)
+       FldParent { par_is = p } -> mi_warn_fn iface (nameOccName p)
        NoParent                 -> Nothing
        PatternSynonym           -> Nothing
 
@@ -1259,7 +1285,7 @@ lookupBindGroupOcc ctxt what rdr_name
 
 
 ---------------
-lookupLocalTcNames :: HsSigCtxt -> SDoc -> RdrName -> RnM [Name]
+lookupLocalTcNames :: HsSigCtxt -> SDoc -> RdrName -> RnM [(RdrName, Name)]
 -- GHC extension: look up both the tycon and data con or variable.
 -- Used for top-level fixity signatures and deprecations.
 -- Complain if neither is in scope.
@@ -1270,7 +1296,8 @@ lookupLocalTcNames ctxt what rdr_name
        ; when (null names) $ addErr (head errs) -- Bleat about one only
        ; return names }
   where
-    lookup = lookupBindGroupOcc ctxt what
+    lookup rdr = do { name <- lookupBindGroupOcc ctxt what rdr
+                    ; return (fmap ((,) rdr) name) }
 
 dataTcOccs :: RdrName -> [RdrName]
 -- Return both the given name and the same name promoted to the TcClsName
@@ -1373,7 +1400,10 @@ lookupFixity is a bit strange.
 -}
 
 lookupFixityRn :: Name -> RnM Fixity
-lookupFixityRn name
+lookupFixityRn name = lookupFixityRn' name (nameOccName name)
+
+lookupFixityRn' :: Name -> OccName -> RnM Fixity
+lookupFixityRn' name occ
   | isUnboundName name
   = return (Fixity minPrecedence InfixL)
     -- Minimise errors from ubound names; eg
@@ -1412,14 +1442,52 @@ lookupFixityRn name
       -- and that's what we want.
       = do { iface <- loadInterfaceForName doc name
            ; traceRn (text "lookupFixityRn: looking up name in iface cache and found:" <+>
-                      vcat [ppr name, ppr $ mi_fix_fn iface (nameOccName name)])
-           ; return (mi_fix_fn iface (nameOccName name)) }
+                      vcat [ppr name, ppr $ mi_fix_fn iface occ])
+           ; return (mi_fix_fn iface occ) }
 
     doc = ptext (sLit "Checking fixity for") <+> ppr name
 
 ---------------
 lookupTyFixityRn :: Located Name -> RnM Fixity
 lookupTyFixityRn (L _ n) = lookupFixityRn n
+
+-- | Look up the fixity of a (possibly ambiguous) occurrence of a record field
+-- selector.  We use 'lookupFixityRn'' so that we can specifiy the 'OccName' as
+-- the field label, which might be different to the 'OccName' of the selector
+-- 'Name' if @DuplicateRecordFields@ is in use (Trac #1173). If there are
+-- multiple possible selectors with different fixities, generate an error.
+lookupFieldFixityRn :: AmbiguousFieldOcc Name -> RnM Fixity
+lookupFieldFixityRn (Unambiguous (L _ rdr) n)
+  = lookupFixityRn' n (rdrNameOcc rdr)
+lookupFieldFixityRn (Ambiguous   (L _ rdr) _) = get_ambiguous_fixity rdr
+  where
+    get_ambiguous_fixity :: RdrName -> RnM Fixity
+    get_ambiguous_fixity rdr_name = do
+      traceRn $ text "get_ambiguous_fixity" <+> ppr rdr_name
+      rdr_env <- getGlobalRdrEnv
+      let elts =  lookupGRE_RdrName rdr_name rdr_env
+
+      fixities <- groupBy ((==) `on` snd) . zip elts
+                  <$> mapM lookup_gre_fixity elts
+
+      case fixities of
+        -- There should always be at least one fixity.
+        -- Something's very wrong if there are no fixity candidates, so panic
+        [] -> panic "get_ambiguous_fixity: no candidates for a given RdrName"
+        [ (_, fix):_ ] -> return fix
+        ambigs -> addErr (ambiguous_fixity_err rdr_name ambigs)
+                  >> return (Fixity minPrecedence InfixL)
+
+    lookup_gre_fixity gre = lookupFixityRn' (gre_name gre) (greOccName gre)
+
+    ambiguous_fixity_err rn ambigs
+      = vcat [ text "Ambiguous fixity for record field" <+> quotes (ppr rn)
+             , hang (text "Conflicts: ") 2 . vcat .
+               map format_ambig $ concat ambigs ]
+
+    format_ambig (elt, fix) = hang (ppr fix)
+                                 2 (pprNameProvenance elt)
+
 
 {-
 ************************************************************************
@@ -1467,7 +1535,7 @@ lookupIfThenElse :: RnM (Maybe (SyntaxExpr Name), FreeVars)
 -- case we desugar directly rather than calling an existing function
 -- Hence the (Maybe (SyntaxExpr Name)) return type
 lookupIfThenElse
-  = do { rebindable_on <- xoptM Opt_RebindableSyntax
+  = do { rebindable_on <- xoptM LangExt.RebindableSyntax
        ; if not rebindable_on
          then return (Nothing, emptyFVs)
          else do { ite <- lookupOccRn (mkVarUnqual (fsLit "ifThenElse"))
@@ -1476,7 +1544,7 @@ lookupIfThenElse
 lookupSyntaxName :: Name                                -- The standard name
                  -> RnM (SyntaxExpr Name, FreeVars)     -- Possibly a non-standard name
 lookupSyntaxName std_name
-  = do { rebindable_on <- xoptM Opt_RebindableSyntax
+  = do { rebindable_on <- xoptM LangExt.RebindableSyntax
        ; if not rebindable_on then
            return (HsVar (noLoc std_name), emptyFVs)
          else
@@ -1487,7 +1555,7 @@ lookupSyntaxName std_name
 lookupSyntaxNames :: [Name]                          -- Standard names
                   -> RnM ([HsExpr Name], FreeVars)   -- See comments with HsExpr.ReboundNames
 lookupSyntaxNames std_names
-  = do { rebindable_on <- xoptM Opt_RebindableSyntax
+  = do { rebindable_on <- xoptM LangExt.RebindableSyntax
        ; if not rebindable_on then
              return (map (HsVar . noLoc) std_names, emptyFVs)
         else
@@ -1631,7 +1699,8 @@ checkShadowedOccs (global_env,local_env) get_loc_occ ns
         -- punning or wild-cards are on (cf Trac #2723)
     is_shadowed_gre gre | isRecFldGRE gre
         = do { dflags <- getDynFlags
-             ; return $ not (xopt Opt_RecordPuns dflags || xopt Opt_RecordWildCards dflags) }
+             ; return $ not (xopt LangExt.RecordPuns dflags
+                             || xopt LangExt.RecordWildCards dflags) }
     is_shadowed_gre _other = return True
 
 {-
@@ -2123,6 +2192,8 @@ checkTupSize tup_size
 ************************************************************************
 -}
 
+-- AZ:TODO: Change these all to be Name instead of RdrName.
+--          Merge TcType.UserTypeContext in to it.
 data HsDocContext
   = TypeSigCtx SDoc
   | PatCtx
@@ -2135,7 +2206,7 @@ data HsDocContext
   | TySynCtx (Located RdrName)
   | TyFamilyCtx (Located RdrName)
   | FamPatCtx (Located RdrName)    -- The patterns of a type/data family instance
-  | ConDeclCtx [Located RdrName]
+  | ConDeclCtx [Located Name]
   | ClassDeclCtx (Located RdrName)
   | ExprWithTySigCtx
   | TypBrCtx

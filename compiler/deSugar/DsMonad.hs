@@ -72,6 +72,7 @@ import FastString
 import Maybes
 import Var (EvVar)
 import GHC.Fingerprint
+import qualified GHC.LanguageExtensions as LangExt
 
 import Data.IORef
 import Control.Monad
@@ -208,7 +209,7 @@ initDs hsc_env mod rdr_env type_env fam_inst_env thing_inside
              else thing_inside
            }
 
-    checkLoadDAP = do { paEnabled <- xoptM Opt_ParallelArrays
+    checkLoadDAP = do { paEnabled <- xoptM LangExt.ParallelArrays
                       ; return $ paEnabled &&
                                  mod /= gHC_PARR' &&
                                  moduleName mod /= dATA_ARRAY_PARALLEL_NAME
@@ -310,7 +311,7 @@ it easier to read debugging output.
 
 -- Make a new Id with the same print name, but different type, and new unique
 newUniqueId :: Id -> Type -> DsM Id
-newUniqueId id = mkSysLocalM (occNameFS (nameOccName (idName id)))
+newUniqueId id = mkSysLocalOrCoVarM (occNameFS (nameOccName (idName id)))
 
 duplicateLocalDs :: Id -> DsM Id
 duplicateLocalDs old_local
@@ -322,8 +323,8 @@ newPredVarDs pred
  = newSysLocalDs pred
 
 newSysLocalDs, newFailLocalDs :: Type -> DsM Id
-newSysLocalDs  = mkSysLocalM (fsLit "ds")
-newFailLocalDs = mkSysLocalM (fsLit "fail")
+newSysLocalDs  = mkSysLocalOrCoVarM (fsLit "ds")
+newFailLocalDs = mkSysLocalOrCoVarM (fsLit "fail")
 
 newSysLocalsDs :: [Type] -> DsM [Id]
 newSysLocalsDs tys = mapM newSysLocalDs tys

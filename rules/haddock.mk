@@ -10,11 +10,13 @@
 #
 # -----------------------------------------------------------------------------
 
+ifneq "$(BINDIST)" "YES"
 HADDOCK_VER := $(shell grep "^version:" utils/haddock/haddock.cabal | sed "s/version: *//")
 HADDOCK_MAJOR_VER := $(shell echo $(HADDOCK_VER) | sed 's/\([0-9]\{1,\}\)\.\([0-9]\{1,\}\)\.\([0-9]\{1,\}\)/\1/')
 HADDOCK_MINOR_VER := $(shell echo $(HADDOCK_VER) | sed 's/\([0-9]\{1,\}\)\.\([0-9]\{1,\}\)\.\([0-9]\{1,\}\)/\2/')
 HADDOCK_PATCH_VER := $(shell echo $(HADDOCK_VER) | sed 's/\([0-9]\{1,\}\)\.\([0-9]\{1,\}\)\.\([0-9]\{1,\}\)/\3/')
 HADDOCK_VERSION_STRING := $(shell echo $$(($(HADDOCK_MAJOR_VER) * 1000 + $(HADDOCK_MINOR_VER) * 10 + $(HADDOCK_PATCH_VER))))
+endif
 
 define haddock  # args: $1 = dir,  $2 = distdir
 $(call trace, haddock($1,$2))
@@ -62,13 +64,14 @@ endif
 	  --hoogle \
 	  --title="$$($1_PACKAGE)-$$($1_$2_VERSION)$$(if $$(strip $$($1_$2_SYNOPSIS)),: $$(strip $$($1_$2_SYNOPSIS)),)" \
 	  --prologue="$1/$2/haddock-prologue.txt" \
-    --optghc="-D__HADDOCK_VERSION__=$$(HADDOCK_VERSION_STRING)" \
+	  --optghc="-D__HADDOCK_VERSION__=$$(HADDOCK_VERSION_STRING)" \
 	  $$(foreach mod,$$($1_$2_HIDDEN_MODULES),--hide=$$(mod)) \
 	  $$(foreach pkg,$$($1_$2_DEPS),$$(if $$($$(pkg)_HADDOCK_FILE),--read-interface=../$$(pkg)$$(comma)../$$(pkg)/src/%{MODULE/./-}.html\#%{NAME}$$(comma)$$($$(pkg)_HADDOCK_FILE))) \
 	  $$(foreach opt,$$($1_$2_$$(HADDOCK_WAY)_ALL_HC_OPTS),--optghc=$$(opt)) \
 	  $$($1_$2_HADDOCK_FLAGS) $$($1_$2_HADDOCK_OPTS) \
 	  $$($1_$2_HS_SRCS) \
 	  $$($1_$2_EXTRA_HADDOCK_SRCS) \
+	  $$(EXTRA_HADDOCK_OPTS) \
 	  +RTS -t"$1/$2/haddock.t" --machine-readable
 
 # --no-tmp-comp-dir above is important: it saves a few minutes in a

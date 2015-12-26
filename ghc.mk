@@ -457,6 +457,7 @@ PACKAGES_STAGE1 += terminfo
 endif
 endif
 PACKAGES_STAGE1 += haskeline
+PACKAGES_STAGE1 += ghci
 
 # See Note [No stage2 packages when CrossCompiling or Stage1Only].
 # See Note [Stage1Only vs stage=1] in mk/config.mk.in.
@@ -522,6 +523,9 @@ utils/ghc-pkg/dist-install/package-data.mk: $(fixed_pkg_prev)
 utils/hsc2hs/dist-install/package-data.mk: $(fixed_pkg_prev)
 utils/compare_sizes/dist-install/package-data.mk: $(fixed_pkg_prev)
 utils/runghc/dist-install/package-data.mk: $(fixed_pkg_prev)
+iserv/stage2/package-data.mk: $(fixed_pkg_prev)
+iserv/stage2_p/package-data.mk: $(fixed_pkg_prev)
+iserv/stage2_dyn/package-data.mk: $(fixed_pkg_prev)
 
 # the GHC package doesn't live in libraries/, so we add its dependency manually:
 compiler/stage2/package-data.mk: $(fixed_pkg_prev)
@@ -665,6 +669,9 @@ BUILD_DIRS += utils/mkUserGuidePart
 BUILD_DIRS += docs/users_guide
 BUILD_DIRS += utils/count_lines
 BUILD_DIRS += utils/compare_sizes
+ifeq "$(Windows_Host)" "NO"
+BUILD_DIRS += iserv
+endif
 
 # ----------------------------------------------
 # Actually include the sub-ghc.mk's
@@ -719,6 +726,12 @@ include $(patsubst %, %/ghc.mk, $(BUILD_DIRS))
 # the value of things like $(libraries/base_dist-install_v_LIB).
 .PHONY: stage1_libs
 stage1_libs : $(ALL_STAGE1_LIBS)
+
+# We need this extra dependency when building our own libffi, because
+# GHCi.FFI.hs #includes ffi.h
+ifneq "$(UseSystemLibFFI)" "YES"
+libraries/ghci/dist-install/build/GHCi/FFI.hs : $(libffi_HEADERS)
+endif
 
 # ----------------------------------------------
 # Per-package compiler flags
@@ -838,7 +851,7 @@ TAGS: TAGS_compiler
 # Installation
 
 install: install_libs install_packages install_libexecs \
-         install_bins install_topdirs
+         install_bins install_libexec_scripts
 ifeq "$(HADDOCK_DOCS)" "YES"
 install: install_docs
 endif
@@ -875,34 +888,35 @@ install_bins: $(INSTALL_BINS) $(INSTALL_SCRIPTS)
 	for i in $(INSTALL_BINS); do \
 		$(INSTALL_PROGRAM) $(INSTALL_BIN_OPTS) $$i "$(DESTDIR)$(bindir)" ;  \
 	done
+ifneq "$(INSTALL_SCRIPTS)" ""
 	for i in $(INSTALL_SCRIPTS); do \
 		$(INSTALL_SCRIPT) $(INSTALL_OPTS) $$i "$(DESTDIR)$(bindir)" ;  \
 	done
+endif
 
 install_libs: $(INSTALL_LIBS)
 	$(call installLibsTo, $(INSTALL_LIBS), "$(DESTDIR)$(ghclibdir)")
 
 install_libexecs:  $(INSTALL_LIBEXECS)
-ifeq "$(INSTALL_LIBEXECS)" ""
-	@:
-else
+ifneq "$(INSTALL_LIBEXECS)" ""
 	$(INSTALL_DIR) "$(DESTDIR)$(ghclibexecdir)/bin"
 	for i in $(INSTALL_LIBEXECS); do \
 		$(INSTALL_PROGRAM) $(INSTALL_BIN_OPTS) $$i "$(DESTDIR)$(ghclibexecdir)/bin"; \
 	done
 # We rename ghc-stage2, so that the right program name is used in error
 # messages etc.
+ifeq "$(Windows_Host)" "NO"
 	"$(MV)" "$(DESTDIR)$(ghclibexecdir)/bin/ghc-stage$(INSTALL_GHC_STAGE)" "$(DESTDIR)$(ghclibexecdir)/bin/ghc"
 endif
+endif
 
-install_topdirs: $(INSTALL_TOPDIR_BINS) $(INSTALL_TOPDIR_SCRIPTS)
-	$(INSTALL_DIR) "$(DESTDIR)$(topdir)"
-	for i in $(INSTALL_TOPDIR_BINS); do \
-		$(INSTALL_PROGRAM) $(INSTALL_BIN_OPTS) $$i "$(DESTDIR)$(topdir)"; \
+install_libexec_scripts: $(INSTALL_LIBEXEC_SCRIPTS)
+ifneq "$(INSTALL_LIBEXEC_SCRIPTS)" ""
+	$(INSTALL_DIR) "$(DESTDIR)$(ghclibexecdir)/bin"
+	for i in $(INSTALL_LIBEXEC_SCRIPTS); do \
+		$(INSTALL_SCRIPT) $(INSTALL_OPTS) $$i "$(DESTDIR)$(ghclibexecdir)/bin"; \
 	done
-	for i in $(INSTALL_TOPDIR_SCRIPTS); do \
-		$(INSTALL_SCRIPT) $(INSTALL_OPTS) $$i "$(DESTDIR)$(topdir)"; \
-	done
+endif
 
 install_docs: $(INSTALL_DOCS)
 	$(INSTALL_DIR) "$(DESTDIR)$(docdir)"
@@ -922,7 +936,7 @@ ifneq "$(INSTALL_LIBRARY_DOCS)" ""
 	$(INSTALL_SCRIPT) $(INSTALL_OPTS) libraries/gen_contents_index "$(DESTDIR)$(docdir)/html/libraries/"
 endif
 ifneq "$(INSTALL_HTML_DOC_DIRS)" ""
-	# We need to filter out the directories so install doesn't choke on them
+# We need to filter out the directories so install doesn't choke on them
 	for i in $(INSTALL_HTML_DOC_DIRS); do \
 		$(INSTALL_DIR) "$(DESTDIR)$(docdir)/html/`basename $$i`"; \
 		for f in $$i/*; do \
@@ -1018,8 +1032,6 @@ $(eval $(call bindist-list,.,\
     $(libffi_HEADERS) \
     $(INSTALL_LIBEXECS) \
     $(INSTALL_LIBEXEC_SCRIPTS) \
-    $(INSTALL_TOPDIR_BINS) \
-    $(INSTALL_TOPDIR_SCRIPTS) \
     $(INSTALL_BINS) \
     $(INSTALL_SCRIPTS) \
     $(INSTALL_MANPAGES) \
@@ -1027,7 +1039,7 @@ $(eval $(call bindist-list,.,\
     $(INSTALL_LIBRARY_DOCS) \
     $(addsuffix /*,$(INSTALL_HTML_DOC_DIRS)) \
     docs/index.html \
-    compiler/stage2/doc \
+    $(wildcard compiler/stage2/doc) \
     $(wildcard libraries/*/dist-install/doc/) \
     $(wildcard libraries/*/*/dist-install/doc/) \
     $(filter-out settings,$(INSTALL_LIBS)) \
@@ -1052,7 +1064,7 @@ BIN_DIST_MK = $(BIN_DIST_PREP_DIR)/bindist.mk
 unix-binary-dist-prep:
 	$(call removeTrees,bindistprep/)
 	"$(MKDIRHIER)" $(BIN_DIST_PREP_DIR)
-	set -e; for i in packages LICENSE compiler ghc rts libraries utils docs libffi includes driver mk rules Makefile aclocal.m4 config.sub config.guess install-sh settings.in ghc.mk inplace distrib/configure.ac distrib/README distrib/INSTALL; do ln -s ../../$$i $(BIN_DIST_PREP_DIR)/; done
+	set -e; for i in packages LICENSE compiler ghc iserv rts libraries utils docs libffi includes driver mk rules Makefile aclocal.m4 config.sub config.guess install-sh settings.in ghc.mk inplace distrib/configure.ac distrib/README distrib/INSTALL; do ln -s ../../$$i $(BIN_DIST_PREP_DIR)/; done
 	echo "HADDOCK_DOCS       = $(HADDOCK_DOCS)"       >> $(BIN_DIST_MK)
 	echo "BUILD_SPHINX_HTML  = $(BUILD_SPHINX_HTML)"  >> $(BIN_DIST_MK)
 	echo "BUILD_SPHINX_PDF   = $(BUILD_SPHINX_PDF)"   >> $(BIN_DIST_MK)
@@ -1143,7 +1155,7 @@ SRC_DIST_TESTSUITE_TARBALL        = $(SRC_DIST_ROOT)/$(SRC_DIST_TESTSUITE_NAME).
 # Files to include in source distributions
 #
 SRC_DIST_GHC_DIRS = mk rules docs distrib bindisttest libffi includes \
-    utils docs rts compiler ghc driver libraries libffi-tarballs
+    utils docs rts compiler ghc driver libraries libffi-tarballs iserv
 SRC_DIST_GHC_FILES += \
     configure.ac config.guess config.sub configure \
     aclocal.m4 README.md ANNOUNCE HACKING.md INSTALL.md LICENSE Makefile \
@@ -1505,4 +1517,3 @@ phase_0_builds: $(utils/deriveConstants_dist_depfile_c_asm)
 
 .PHONY: phase_1_builds
 phase_1_builds: $(PACKAGE_DATA_MKS)
-

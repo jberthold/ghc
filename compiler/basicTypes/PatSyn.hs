@@ -25,7 +25,7 @@ module PatSyn (
 #include "HsVersions.h"
 
 import Type
-import TcType( mkSigmaTy )
+import TcType( mkSpecSigmaTy )
 import Name
 import Outputable
 import Unique
@@ -80,14 +80,16 @@ data PatSyn
              -- Matcher function.
              -- If Bool is True then prov_theta and arg_tys are empty
              -- and type is
-             --   forall (r :: ?) univ_tvs. req_theta
+             --   forall (v :: Levity) (r :: TYPE v) univ_tvs.
+             --                          req_theta
              --                       => res_ty
              --                       -> (forall ex_tvs. Void# -> r)
              --                       -> (Void# -> r)
              --                       -> r
              --
              -- Otherwise type is
-             --   forall (r :: ?) univ_tvs. req_theta
+             --   forall (v :: Levity) (r :: TYPE v) univ_tvs.
+             --                          req_theta
              --                       => res_ty
              --                       -> (forall ex_tvs. prov_theta => arg_tys -> r)
              --                       -> (Void# -> r)
@@ -157,8 +159,8 @@ so pattern P has type
 
 with the following typeclass constraints:
 
-        provides: (Show (Maybe t), Ord b)
         requires: (Eq t, Num t)
+        provides: (Show (Maybe t), Ord b)
 
 In this case, the fields of MkPatSyn will be set as follows:
 
@@ -326,8 +328,8 @@ patSynType :: PatSyn -> Type
 patSynType (MkPatSyn { psUnivTyVars = univ_tvs, psReqTheta = req_theta
                      , psExTyVars   = ex_tvs,   psProvTheta = prov_theta
                      , psArgs = orig_args, psOrigResTy = orig_res_ty })
-  = mkSigmaTy univ_tvs req_theta $
-    mkSigmaTy ex_tvs prov_theta $
+  = mkSpecSigmaTy univ_tvs req_theta $  -- use mkSpecSigmaTy because it
+    mkSpecSigmaTy ex_tvs prov_theta $   -- prints better
     mkFunTys orig_args orig_res_ty
 
 -- | Should the 'PatSyn' be presented infix?

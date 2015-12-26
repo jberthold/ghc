@@ -53,6 +53,12 @@ module GHC.Exts
         -- @since 4.7.0.0
         Data.Coerce.coerce, Data.Coerce.Coercible,
 
+        -- * Equality
+        type (~~),
+
+        -- * Levity polymorphism
+        GHC.Prim.TYPE, Levity(..),
+
         -- * Transform comprehensions
         Down(..), groupWith, sortWith, the,
 
@@ -72,8 +78,9 @@ module GHC.Exts
         IsList(..)
        ) where
 
-import GHC.Prim hiding (coerce, Constraint)
-import GHC.Base hiding (coerce) -- implicitly comes from GHC.Prim
+import GHC.Prim hiding ( coerce, TYPE )
+import qualified GHC.Prim
+import GHC.Base hiding ( coerce )
 import GHC.Word
 import GHC.Int
 import GHC.Ptr
@@ -96,8 +103,8 @@ maxTupleSize = 62
 the :: Eq a => [a] -> a
 the (x:xs)
   | all (x ==) xs = x
-  | otherwise     = error "GHC.Exts.the: non-identical elements"
-the []            = error "GHC.Exts.the: empty list"
+  | otherwise     = errorWithoutStackTrace "GHC.Exts.the: non-identical elements"
+the []            = errorWithoutStackTrace "GHC.Exts.the: empty list"
 
 -- | The 'sortWith' function sorts a list of elements using the
 -- user supplied function to project something out of each element

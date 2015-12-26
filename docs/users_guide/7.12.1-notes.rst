@@ -12,7 +12,42 @@ Highlights
 
 The highlights, since the 7.10 branch, are:
 
--  TODO FIXME
+- TODO FIXME
+
+- nokinds
+
+- Record pattern synonyms
+
+- ``-XDeriveAnyClass``
+
+- More reliable DWARF debugging information
+
+- Injective type classes
+
+- Applicative ``do`` notation
+
+- Support for wildcards in data and type family instances
+
+- ``Strict`` and ``StrictData`` extensions, allowing modules to be compiled with
+   strict-by-default bindings.
+
+- ``DuplicateRecordFields``, allowing multiple datatypes to declare the same
+  record field names provided they are used unambiguously
+
+- Support for implicit parameters providing light-weight callstacks and source locations
+
+- User-defined error messages for type errors
+
+- A rewritten (and greatly improved) pattern exhaustiveness checker
+
+- ``-maxN(x)`` added to compliment ``-N``
+
+- GHC can run the interpreter in a separate process (see
+  :ref:`external-interpreter`), and the interpreter can now run profiled
+  code.
+
+- The reworked users guide you are now reading
+
 
 Full details
 ------------
@@ -23,37 +58,36 @@ Language
 -  TODO FIXME.
 
 -  The parser now supports Haddock comments on GADT data constructors.
-   For example,
+   For example ::
 
-   ::
+        data Expr a where
+            -- | Just a normal sum
+            Sum :: Int -> Int -> Expr Int
 
-                             data Expr a where
-                               -- | Just a normal sum
-                               Sum :: Int -> Int -> Expr Int
+-  Implicit parameters of the new ``base`` type ``GHC.Stack.CallStack``
+   are treated specially in function calls, the solver automatically
+   appends the source location of the call to the ``CallStack`` in
+   the environment. For example ::
 
--  Implicit parameters of the new ghc-prim type ``GHC.Types.CallStack``
-   are treated specially, and automatically solved for the current
-   source location. For example
+        myerror :: (?callStack :: CallStack) => String -> a
+        myerror msg = error (msg ++ "\n" ++ prettyCallStack ?callStack)
 
-   ::
+        ghci> myerror "die"
+        *** Exception: die
+        CallStack (from ImplicitParams):
+          myerror, called at <interactive>:2:1 in interactive:Ghci1
 
-                             f = print (?stk :: CallStack)
+   prints the call-site of ``myerror``. The name of the implicit
+   parameter does not matter, but within ``base`` we call it
+   ``?callStack``.
 
-   will print the singleton stack containing the occurrence of ``?stk``.
-   If there is another ``CallStack`` implicit in-scope, the new location
-   will be appended to the existing stack, e.g.
+   See :ref:`lib-base` for a description of the ``CallStack`` type.
 
-   ::
-
-                             f :: (?stk :: CallStack) => IO ()
-                             f = print (?stk :: CallStack)
-
-   will print the occurrence of ``?stk`` and the call-site of ``f``. The
-   name of the implicit parameter does not matter.
-
-   See the release notes for ghc-prim for a description of the
-   ``CallStack`` type.
-
+-  GHC now supports visible type application, allowing
+   programmers to easily specify how type parameters should be
+   instantiated when calling a function. See
+   :ref:`visible-type-application` for the details.
+   
 -  To conform to the common case, the default role assigned to
    parameters of datatypes declared in ``hs-boot`` files is
    ``representational``. However, if the constructor(s) for the datatype
@@ -78,6 +112,9 @@ Language
    arguments with certain unlifted types. See :ref:`generic-programming` for
    more details.
 
+-  GHC generics can now provide strictness information for fields in a data
+   constructor via the ``Selector`` type class.
+
 -  The ``-XDeriveAnyClass`` extension now fills in associated type family
    default instances when deriving a class that contains them.
 
@@ -87,12 +124,12 @@ Language
       pattern P :: a -> b -> (a, b)
       pattern P{x,y} = (x,y)
 
-   will allow `P` to be used like a record data constructor and also defines
-   selector functions `x :: (a, b) -> a` and `y :: (a, b) -> b`.
+   will allow ``P`` to be used like a record data constructor and also defines
+   selector functions ``x :: (a, b) -> a`` and ``y :: (a, b) -> b``.
 
 -  Pattern synonyms can now be bundled with type constructors. For a pattern
-   synonym `P` and a type constructor `T`, `P` can be bundled with `T` so that
-   when `T` is imported `P` is also imported. With this change
+   synonym ``P`` and a type constructor ``T``, ``P`` can be bundled with ``T``
+   so that when ``T`` is imported ``P`` is also imported. With this change
    a library author can provide either real data constructors or pattern
    synonyms in an opaque manner. See :ref:`pattern-synonyms` for details. ::
 
@@ -109,10 +146,40 @@ Language
       -- P is imported
       import Foo (T(..))
 
+-  Whenever a data instance is exported, the corresponding data family
+   is exported, too. This allows one to write ::
+
+     -- Foo.hs
+     module Foo where
+
+     data family T a
+
+     -- Bar.hs
+     module Bar where
+
+     import Foo
+
+     data instance T Int = MkT
+
+     -- Baz.hs
+     module Baz where
+
+     import Bar (T(MkT))
+
+   In previous versions of GHC, this required a workaround via an
+   explicit export list in ``Bar``.
+
 
 
 Compiler
 ~~~~~~~~
+
+-  Warnings can now be controlled with ``-W(no-)...`` flags in addition to
+   the old ``-f(no-)warn...`` ones. This was done as the first part of a
+   rewrite of the warning system to provide better control over warnings,
+   better warning messages, and more common syntax compared to other
+   compilers. The old ``-f``-based warning flags will remain functional for
+   the forseeable future.
 
 -  Added the option ``-dth-dec-file``. This dumps out a .th.hs file of
    all Template Haskell declarations in a corresponding .hs file. The
@@ -138,14 +205,14 @@ Compiler
    Enabling ``-fworker-wrapper`` while strictness analysis is disabled (by
    ``-fno-strictness``) has no effect.
 
--  Added the options ``-fwarn-missed-specialisations`` and
-   ``-fwarn-all-missed-specialisations``. When enabled, the simplifier will
+-  Added the options ``-Wmissed-specialisations`` and
+   ``-Wall-missed-specialisations``. When enabled, the simplifier will
    produce a warning when a overloaded imported function cannot be
    specialised (typically due to a missing ``INLINEABLE`` pragma). This
    is intended to alert users to cases where they apply ``INLINEABLE`` but
    may not get the speed-up they expect.
 
--  Added the option ``-fwarn-noncanonical-monad-instances`` which helps
+-  Added the option ``-Wnoncanonical-monad-instances`` which helps
    detect noncanonical ``Applicative``/``Monad`` instance definitions.
    See flag description in :ref:`options-sanity` for more details.
 
@@ -158,23 +225,32 @@ Compiler
    allows library authors eager to make their code future compatible to adapt
    to new features before they even generate warnings.
 
--  Added the ``-fwarn-missing-monadfail-instance`` flag. When enabled, this
+-  Added the ``-Wmissing-monadfail-instance`` flag. When enabled, this
    will issue a warning if a failable pattern is used in a context that does
    not have a ``MonadFail`` constraint. This flag represents phase 1 of the
    `MonadFail Proposal (MFP)
    <https://prime.haskell.org/wiki/Libraries/Proposals/MonadFail>`__.
 
--  Added the ``-fwarn-semigroup`` flag. When enabled, this
+-  Added the ``-Wsemigroup`` flag. When enabled, this
    will issue a warning if a type is an instance of ``Monoid`` but not
    ``Semigroup``, and when a custom definition ``(<>)`` is made. Fixing these
    warnings makes sure the definition of ``Semigroup`` as a superclass of
    ``Monoid`` does not break any code.
 
+-  Added the ``-Wmissing-pat-syn-sigs`` flag. When enabled, this will issue
+   a warning when a pattern synonym definition doesn't have a type signature.
+   It is turned off by default but enabled by ``-Wall``.
+
+-  Changed the ``-fwarn-unused-matches`` flag to report unused type variables
+   in data and type families in addition to its previous behaviour.
+   To avoid warnings, unused type variables should be prefixed or replaced with
+   underscores.
+
 GHCi
 ~~~~
 
 -  ``Main`` with an explicit module header but without ``main`` is now
-   an error (#7765).
+   an error (:ghc-ticket:`7765`).
 
 -  The ``:back`` and ``:forward`` commands now take an optional count
    allowing the user to move forward or backward in history several
@@ -182,11 +258,16 @@ GHCi
 
 -  Added commands ``:load!`` and ``:reload!``, effectively setting
    "-fdefer-type-errors" before loading a module and unsetting it after
-   loading if it has not been set before (#8353).
+   loading if it has not been set before (:ghc-ticket:`8353`).
 
--  ``ghci -e`` now behaves like ``ghc -e`` (#9360).
+-  ``ghci -e`` now behaves like ``ghc -e`` (:ghc-ticket:`9360`).
 
--  Added support for top-level function declarations (#7253).
+-  Added support for top-level function declarations (:ghc-ticket:`7253`).
+
+-  The new commands ``:all-types``, ``:loc-at``, ``:type-at``, and
+   ``:uses`` designed for editor-integration
+   (such as Emacs' ``haskell-mode``) originally premiered by ``ghci-ng``
+   have been integrated into GHCi (:ghc-ticket:`10874`).
 
 Template Haskell
 ~~~~~~~~~~~~~~~~
@@ -210,6 +291,11 @@ Template Haskell
    have also been introduced, serving the same functions as their
    pattern and expression counterparts.
 
+- ``Template Haskell`` has now explicit support for representing GADTs.  Until
+  now GADTs were encoded using ``NormalC``, ``RecC`` (record syntax) and
+  ``ForallC`` constructors.  Two new constructors - ``GadtC`` and ``RecGadtC`` -
+  are now supported during quoting, splicing and reification.
+
 -  Primitive chars (e.g., ``[| 'a'# |]``) and primitive strings (e.g.,
    ``[| "abc"# |]``) can now be quoted with Template Haskell. The
    ``Lit`` data type also has a new constructor, ``CharPrimL``, for
@@ -228,11 +314,33 @@ Template Haskell
 -  The ``Lift`` class is now derivable via the ``-XDeriveLift`` extension. See
    :ref:`deriving-lift` for more information.
 
+-  The ``FamilyD`` data constructor and ``FamFlavour`` data type have
+   been removed. Data families are now represented by ``DataFamilyD`` and
+   open type families are now represented by ``OpenTypeFamilyD`` instead
+   of ``FamilyD``. Common elements of ``OpenTypeFamilyD`` and
+   ``ClosedTypeFamilyD`` have been moved to ``TypeFamilyHead``.
+
+-  The representation of ``data``, ``newtype``, ``data instance``, and
+   ``newtype instance`` declarations has been changed to allow for
+   multi-parameter type classes in the ``deriving`` clause. In particular,
+   ``dataD`` and ``newtypeD`` now take a ``CxtQ`` instead of a ``[Name]``
+   for the list of derived classes.
+
+-  ``isExtEnabled`` can now be used to determine whether a language extension
+   is enabled in the ``Q`` monad. Similarly, ``extsEnabled`` can be used to list
+   all enabled language extensions.
+
+-  One can now reify the strictness information of a constructors' fields using
+   Template Haskell's ``reifyConStrictness`` function, which takes into account
+   whether flags such as `-XStrictData` or `-funbox-strict-fields` are enabled.
 
 Runtime system
 ~~~~~~~~~~~~~~
 
 -  Support for performance monitoring with PAPI has been dropped.
+
+-  ``-maxN(x)`` flag added to compliment ``-N``, it will choose to use at most
+   (x) capabilities, limited by the number of processors as ``-N`` is.
 
 Build system
 ~~~~~~~~~~~~
@@ -244,6 +352,32 @@ Package system
 
 -  TODO FIXME.
 
+hsc2hs
+~~~~~~
+
+-  ``hsc2hs`` now supports the ``#alignment`` macro, which can be used to
+    calculate the alignment of a struct in bytes. Previously, ``#alignment``
+    had to be implemented manually via a ``#let`` directive, e.g., ::
+
+      #let alignment t = "%lu", (unsigned long)offsetof(struct {char x__; t (y__); }, y__)
+
+    As a result, if you have the above directive in your code, it will now emit
+    a warning when compiled with GHC 8.0. ::
+
+      Module.hsc:24:0: warning: "hsc_alignment" redefined [enabled by default]
+      In file included from dist/build/Module_hsc_make.c:1:0:
+      /path/to/ghc/lib/template-hsc.h:88:0: note: this is the location of the previous definition
+       #define hsc_alignment(t...) \
+       ^
+
+    To make your code free of warnings on GHC 8.0 and still support earlier
+    versions, surround the directive with a pragma checking for the right GHC
+    version. ::
+
+      #if __GLASGOW_HASKELL__ < 800
+      #let alignment t = "%lu", (unsigned long)offsetof(struct {char x__; t (y__); }, y__)
+      #endif
+
 Libraries
 ---------
 
@@ -252,18 +386,23 @@ array
 
 -  Version number XXXXX (was 0.5.0.0)
 
+
+.. _lib-base:
+
 base
 ~~~~
 
+See ``changelog.md`` in the ``base`` package for full release notes.
+
 -  Version number 4.9.0.0 (was 4.7.0.0)
 
--  A new module ``GHC.SrcLoc`` was added, exporting a new type
-   ``SrcLoc``. A ``SrcLoc`` contains package, module, and file names, as
-   well as start and end positions.
-
--  A new type ``CallStack`` was added for use with the new implicit
-   callstack parameters. A ``CallStack`` is a ``[(String, SrcLoc)]``,
+-  ``GHC.Stack`` exports two new types ``SrcLoc`` and ``CallStack``. A
+   ``SrcLoc`` contains package, module, and file names, as well as start
+   and end positions. A ``CallStack`` is essentially a ``[(String, SrcLoc)]``,
    sorted by most-recent call.
+
+-  ``error`` and ``undefined`` will now report a partial stack-trace
+   using the new ``CallStack`` feature (and the ``-prof`` stack if available).
 
 -  A new function, ``interruptible``, was added to ``GHC.IO`` allowing
    an ``IO`` action to be run such that it can be interrupted by an
@@ -284,8 +423,35 @@ base
   ``Applicative``. If this causes performance regressions, try to make the
   implementation of ``(*>)`` match that of ``(>>)``.
 
+- Add ``URec``, ``UAddr``, ``UChar``, ``UDouble``, ``UFloat``, ``UInt``, and ``UWord`` to
+  ``GHC.Generics`` as part of making GHC generics capable of handling unlifted
+  types (:ghc-ticket:`10868`)
+
+- Expand ``Floating`` class to include operations that allow for better
+  precision: ``log1p``, ``expm1``, ``log1pexp`` and ``log1mexp``. These are not
+  available from ``Prelude``, but the full class is exported from ``Numeric``.
+
+- Add ``Data.List.NonEmpty`` and ``Data.Semigroup`` (to become
+  super-class of ``Monoid`` in the future). These modules were
+  provided by the ``semigroups`` package previously. (:ghc-ticket:`10365`)
+
+- The constraints of various functions in ``Control.Monad`` have been
+  generalized from ``Monad`` to ``Applicative`` including ``filterM``,
+  ``zipWithM`` and ``replicateM_`` (see :ghc-ticket:`10168`).
+
 - Add ``GHC.TypeLits.TypeError`` and ``ErrorMessage`` to allow users
   to define custom compile-time error messages.
+
+- The ``Generic`` instance for ``Proxy`` is now poly-kinded (see :ghc-ticket:`10775`)
+
+- The ``IsString`` instance for ``[Char]`` has been modified to eliminate
+  ambiguity arising from overloaded strings and functions like ``(++)``.
+
+- Move ``Const`` from ``Control.Applicative`` to its own module in
+  ``Data.Functor.Const``. (see :ghc-ticket:`11135`)
+
+- Enable ``PolyKinds`` in the ``Data.Functor.Const`` module to give ``Const``
+  the kind ``* -> k -> *`` (see :ghc-ticket:`10039`).
 
 binary
 ~~~~~~
@@ -332,23 +498,28 @@ ghc
    strictness annotations as the user wrote them, whether from an
    imported module or not.
 
--  Moved `startsVarSym`, `startsVarId`, `startsConSym`, `startsConId`,
-   `startsVarSymASCII`, and `isVarSymChar` from `Lexeme` to the `GHC.Lemexe`
-   module of the `ghc-boot` library.
+-  Moved ``startsVarSym``, ``startsVarId``, ``startsConSym``, ``startsConId``,
+   ``startsVarSymASCII``, and ``isVarSymChar`` from ``Lexeme`` to the
+   ``GHC.Lemexe`` module of the ``ghc-boot`` library.
+
+-  Add ``isImport``, ``isDecl``, and ``isStmt`` functions.
 
 ghc-boot
 ~~~~~~~~
 
 -  This is an internal package. Use with caution.
 
--  This package was renamed from `bin-package-db` to reflect its new purpose
+-  This package was renamed from ``bin-package-db`` to reflect its new purpose
    of containing intra-GHC functionality that needs to be shared across
    multiple GHC boot libraries.
 
--  Added `GHC.Lexeme`, which contains functions for determining if a
+-  Added ``GHC.Lexeme``, which contains functions for determining if a
    character can be the first letter of a variable or data constructor in
-   Haskell, as defined by GHC. (These functions were moved from `Lexeme`
-   in `ghc`.)
+   Haskell, as defined by GHC. (These functions were moved from ``Lexeme``
+   in ``ghc``.)
+
+-  Added ``GHC.LanguageExtensions`` which contains a type listing all
+   supported language extensions.
 
 ghc-prim
 ~~~~~~~~

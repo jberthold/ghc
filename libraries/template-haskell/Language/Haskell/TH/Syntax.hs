@@ -23,7 +23,11 @@
 --
 -----------------------------------------------------------------------------
 
-module Language.Haskell.TH.Syntax where
+module Language.Haskell.TH.Syntax
+    ( module Language.Haskell.TH.Syntax
+      -- * Language extensions
+    , module Language.Haskell.TH.LanguageExtensions
+    ) where
 
 import Data.Data hiding (Fixity(..))
 #if __GLASGOW_HASKELL__ < 709
@@ -39,6 +43,7 @@ import Data.Word
 import Data.Ratio
 import GHC.Generics     ( Generic )
 import GHC.Lexeme       ( startsVarSym, startsVarId )
+import Language.Haskell.TH.LanguageExtensions
 
 #ifdef HAS_NATURAL
 import Numeric.Natural
@@ -71,9 +76,10 @@ class (Applicative m, Monad m) => Quasi m where
        -- Returns list of matching instance Decs
        --    (with empty sub-Decs)
        -- Works for classes and type functions
-  qReifyRoles       :: Name -> m [Role]
-  qReifyAnnotations :: Data a => AnnLookup -> m [a]
-  qReifyModule      :: Module -> m ModuleInfo
+  qReifyRoles         :: Name -> m [Role]
+  qReifyAnnotations   :: Data a => AnnLookup -> m [a]
+  qReifyModule        :: Module -> m ModuleInfo
+  qReifyConStrictness :: Name -> m [DecidedStrictness]
 
   qLocation :: m Loc
 
@@ -89,6 +95,9 @@ class (Applicative m, Monad m) => Quasi m where
   qGetQ :: Typeable a => m (Maybe a)
 
   qPutQ :: Typeable a => a -> m ()
+
+  qIsExtEnabled :: Extension -> m Bool
+  qExtsEnabled :: m [Extension]
 
 -----------------------------------------------------
 --      The IO instance of Quasi
@@ -109,20 +118,23 @@ instance Quasi IO where
   qReport True  msg = hPutStrLn stderr ("Template Haskell error: " ++ msg)
   qReport False msg = hPutStrLn stderr ("Template Haskell error: " ++ msg)
 
-  qLookupName _ _     = badIO "lookupName"
-  qReify _            = badIO "reify"
-  qReifyFixity _      = badIO "reifyFixity"
-  qReifyInstances _ _ = badIO "reifyInstances"
-  qReifyRoles _       = badIO "reifyRoles"
-  qReifyAnnotations _ = badIO "reifyAnnotations"
-  qReifyModule _      = badIO "reifyModule"
-  qLocation           = badIO "currentLocation"
-  qRecover _ _        = badIO "recover" -- Maybe we could fix this?
-  qAddDependentFile _ = badIO "addDependentFile"
-  qAddTopDecls _      = badIO "addTopDecls"
-  qAddModFinalizer _  = badIO "addModFinalizer"
-  qGetQ               = badIO "getQ"
-  qPutQ _             = badIO "putQ"
+  qLookupName _ _       = badIO "lookupName"
+  qReify _              = badIO "reify"
+  qReifyFixity _        = badIO "reifyFixity"
+  qReifyInstances _ _   = badIO "reifyInstances"
+  qReifyRoles _         = badIO "reifyRoles"
+  qReifyAnnotations _   = badIO "reifyAnnotations"
+  qReifyModule _        = badIO "reifyModule"
+  qReifyConStrictness _ = badIO "reifyConStrictness"
+  qLocation             = badIO "currentLocation"
+  qRecover _ _          = badIO "recover" -- Maybe we could fix this?
+  qAddDependentFile _   = badIO "addDependentFile"
+  qAddTopDecls _        = badIO "addTopDecls"
+  qAddModFinalizer _    = badIO "addModFinalizer"
+  qGetQ                 = badIO "getQ"
+  qPutQ _               = badIO "putQ"
+  qIsExtEnabled _       = badIO "isExtEnabled"
+  qExtsEnabled          = badIO "extsEnabled"
 
   qRunIO m = m
 
@@ -381,6 +393,21 @@ reifyAnnotations an = Q (qReifyAnnotations an)
 reifyModule :: Module -> Q ModuleInfo
 reifyModule m = Q (qReifyModule m)
 
+-- | @reifyConStrictness nm@ looks up the strictness information for the fields
+-- of the constructor with the name @nm@. Note that the strictness information
+-- that 'reifyConStrictness' returns may not correspond to what is written in
+-- the source code. For example, in the following data declaration:
+--
+-- @
+-- data Pair a = Pair a a
+-- @
+--
+-- 'reifyConStrictness' would return @['DecidedLazy', DecidedLazy]@ under most
+-- circumstances, but it would return @['DecidedStrict', DecidedStrict]@ if the
+-- @-XStrictData@ language extension was enabled.
+reifyConStrictness :: Name -> Q [DecidedStrictness]
+reifyConStrictness n = Q (qReifyConStrictness n)
+
 -- | Is the list of instances returned by 'reifyInstances' nonempty?
 isInstance :: Name -> [Type] -> Q Bool
 isInstance nm tys = do { decs <- reifyInstances nm tys
@@ -424,32 +451,43 @@ addTopDecls ds = Q (qAddTopDecls ds)
 addModFinalizer :: Q () -> Q ()
 addModFinalizer act = Q (qAddModFinalizer (unQ act))
 
--- | Get state from the Q monad.
+-- | Get state from the 'Q' monad.
 getQ :: Typeable a => Q (Maybe a)
 getQ = Q qGetQ
 
--- | Replace the state in the Q monad.
+-- | Replace the state in the 'Q' monad.
 putQ :: Typeable a => a -> Q ()
 putQ x = Q (qPutQ x)
 
+-- | Determine whether the given language extension is enabled in the 'Q' monad.
+isExtEnabled :: Extension -> Q Bool
+isExtEnabled ext = Q (qIsExtEnabled ext)
+
+-- | List all enabled language extensions.
+extsEnabled :: Q [Extension]
+extsEnabled = Q qExtsEnabled
+
 instance Quasi Q where
-  qNewName          = newName
-  qReport           = report
-  qRecover          = recover
-  qReify            = reify
-  qReifyFixity      = reifyFixity
-  qReifyInstances   = reifyInstances
-  qReifyRoles       = reifyRoles
-  qReifyAnnotations = reifyAnnotations
-  qReifyModule      = reifyModule
-  qLookupName       = lookupName
-  qLocation         = location
-  qRunIO            = runIO
-  qAddDependentFile = addDependentFile
-  qAddTopDecls      = addTopDecls
-  qAddModFinalizer  = addModFinalizer
-  qGetQ             = getQ
-  qPutQ             = putQ
+  qNewName            = newName
+  qReport             = report
+  qRecover            = recover
+  qReify              = reify
+  qReifyFixity        = reifyFixity
+  qReifyInstances     = reifyInstances
+  qReifyRoles         = reifyRoles
+  qReifyAnnotations   = reifyAnnotations
+  qReifyModule        = reifyModule
+  qReifyConStrictness = reifyConStrictness
+  qLookupName         = lookupName
+  qLocation           = location
+  qRunIO              = runIO
+  qAddDependentFile   = addDependentFile
+  qAddTopDecls        = addTopDecls
+  qAddModFinalizer    = addModFinalizer
+  qGetQ               = getQ
+  qPutQ               = putQ
+  qIsExtEnabled       = isExtEnabled
+  qExtsEnabled        = extsEnabled
 
 
 ----------------------------------------------------
@@ -908,7 +946,7 @@ nameBase (Name occ _) = occString occ
 --
 -- ==== __Examples__
 --
--- >>> nameModule ''Data.Either.Either"
+-- >>> nameModule ''Data.Either.Either
 -- Just "Data.Either"
 -- >>> nameModule (mkName "foo")
 -- Nothing
@@ -923,7 +961,7 @@ nameModule _                      = Nothing
 --
 -- ==== __Examples__
 --
--- >>> namePackage ''Data.Either.Either"
+-- >>> namePackage ''Data.Either.Either
 -- Just "base"
 -- >>> namePackage (mkName "foo")
 -- Nothing
@@ -1343,10 +1381,10 @@ data Lit = CharL Char
 
 -- | Pattern in Haskell given in @{}@
 data Pat
-  = LitP Lit                      -- ^ @{ 5 or 'c' }@
+  = LitP Lit                      -- ^ @{ 5 or \'c\' }@
   | VarP Name                     -- ^ @{ x }@
   | TupP [Pat]                    -- ^ @{ (p1,p2) }@
-  | UnboxedTupP [Pat]             -- ^ @{ (# p1,p2 #) }@
+  | UnboxedTupP [Pat]             -- ^ @{ (\# p1,p2 \#) }@
   | ConP Name [Pat]               -- ^ @data T1 = C1 t1 t2; {C1 p1 p1} = e@
   | InfixP Pat Name Pat           -- ^ @foo ({x :+ y}) = e@
   | UInfixP Pat Name Pat          -- ^ @foo ({x :+ y}) = e@
@@ -1376,7 +1414,7 @@ data Clause = Clause [Pat] Body [Dec]
 data Exp
   = VarE Name                          -- ^ @{ x }@
   | ConE Name                          -- ^ @data T1 = C1 t1 t2; p = {C1} e1 e2  @
-  | LitE Lit                           -- ^ @{ 5 or 'c'}@
+  | LitE Lit                           -- ^ @{ 5 or \'c\'}@
   | AppE Exp Exp                       -- ^ @{ f x }@
 
   | InfixE (Maybe Exp) Exp (Maybe Exp) -- ^ @{x + y} or {(x+)} or {(+ x)} or {(+)}@
@@ -1393,10 +1431,10 @@ data Exp
   | ParensE Exp                        -- ^ @{ (e) }@
                                        --
                                        -- See "Language.Haskell.TH.Syntax#infix"
-  | LamE [Pat] Exp                     -- ^ @{ \ p1 p2 -> e }@
-  | LamCaseE [Match]                   -- ^ @{ \case m1; m2 }@
+  | LamE [Pat] Exp                     -- ^ @{ \\ p1 p2 -> e }@
+  | LamCaseE [Match]                   -- ^ @{ \\case m1; m2 }@
   | TupE [Exp]                         -- ^ @{ (e1,e2) }  @
-  | UnboxedTupE [Exp]                  -- ^ @{ (# e1,e2 #) }  @
+  | UnboxedTupE [Exp]                  -- ^ @{ (\# e1,e2 \#) }  @
   | CondE Exp Exp Exp                  -- ^ @{ if e1 then e2 else e3 }@
   | MultiIfE [(Guard, Exp)]            -- ^ @{ if | g1 -> e1 | g2 -> e2 }@
   | LetE [Dec] Exp                     -- ^ @{ let x=e1;   y=e2 in e3 }@
@@ -1453,11 +1491,14 @@ data Dec
   = FunD Name [Clause]            -- ^ @{ f p1 p2 = b where decs }@
   | ValD Pat Body [Dec]           -- ^ @{ p = b where decs }@
   | DataD Cxt Name [TyVarBndr]
-         [Con] [Name]             -- ^ @{ data Cxt x => T x = A x | B (T x)
+          (Maybe Kind)            -- Kind signature (allowed only for GADTs)
+          [Con] Cxt
+                                  -- ^ @{ data Cxt x => T x = A x | B (T x)
                                   --       deriving (Z,W)}@
   | NewtypeD Cxt Name [TyVarBndr]
-         Con [Name]               -- ^ @{ newtype Cxt x => T x = A (B x)
-                                  --       deriving (Z,W)}@
+             (Maybe Kind)         -- Kind signature
+             Con Cxt              -- ^ @{ newtype Cxt x => T x = A (B x)
+                                  --       deriving (Z,W Q)}@
   | TySynD Name [TyVarBndr] Type  -- ^ @{ type T x = (x,x) }@
   | ClassD Cxt Name [TyVarBndr]
          [FunDep] [Dec]           -- ^ @{ class Eq a => Ord a where ds }@
@@ -1470,7 +1511,7 @@ data Dec
   | InfixD Fixity Name            -- ^ @{ infix 3 foo }@
 
   -- | pragmas
-  | PragmaD Pragma                -- ^ @{ {\-# INLINE [1] foo #-\} }@
+  | PragmaD Pragma                -- ^ @{ {\-\# INLINE [1] foo \#-\} }@
 
   -- | data families (may also appear in [Dec] of 'ClassD' and 'InstanceD')
   | DataFamilyD Name [TyVarBndr]
@@ -1478,29 +1519,35 @@ data Dec
          -- ^ @{ data family T a b c :: * }@
 
   | DataInstD Cxt Name [Type]
-         [Con] [Name]             -- ^ @{ data instance Cxt x => T [x] = A x
-                                  --                                | B (T x)
-                                  --       deriving (Z,W)}@
+             (Maybe Kind)         -- Kind signature
+             [Con] Cxt            -- ^ @{ data instance Cxt x => T [x]
+                                  --       = A x | B (T x) deriving (Z,W)}@
+
   | NewtypeInstD Cxt Name [Type]
-         Con [Name]               -- ^ @{ newtype instance Cxt x => T [x] = A (B x)
-                                  --       deriving (Z,W)}@
+                 (Maybe Kind)     -- Kind signature
+                 Con Cxt          -- ^ @{ newtype instance Cxt x => T [x]
+                                  --        = A (B x) deriving (Z,W)}@
   | TySynInstD Name TySynEqn      -- ^ @{ type instance ... }@
 
   -- | open type families (may also appear in [Dec] of 'ClassD' and 'InstanceD')
-  | OpenTypeFamilyD Name
-         [TyVarBndr] FamilyResultSig
-         (Maybe InjectivityAnn)
+  | OpenTypeFamilyD TypeFamilyHead
          -- ^ @{ type family T a b c = (r :: *) | r -> a b }@
 
-  | ClosedTypeFamilyD Name
-      [TyVarBndr] FamilyResultSig
-      (Maybe InjectivityAnn)
-      [TySynEqn]
+  | ClosedTypeFamilyD TypeFamilyHead [TySynEqn]
        -- ^ @{ type family F a b = (r :: *) | r -> a where ... }@
 
   | RoleAnnotD Name [Role]        -- ^ @{ type role T nominal representational }@
   | StandaloneDerivD Cxt Type     -- ^ @{ deriving instance Ord a => Ord (Foo a) }@
   | DefaultSigD Name Type         -- ^ @{ default size :: Data a => a -> Int }@
+  deriving( Show, Eq, Ord, Data, Typeable, Generic )
+
+-- | Common elements of 'OpenTypeFamilyD' and 'ClosedTypeFamilyD'.
+-- By analogy with with "head" for type classes and type class instances as
+-- defined in /Type classes: an exploration of the design space/, the
+-- @TypeFamilyHead@ is defined to be the elements of the declaration between
+-- @type family@ and @where@.
+data TypeFamilyHead =
+  TypeFamilyHead Name [TyVarBndr] FamilyResultSig (Maybe InjectivityAnn)
   deriving( Show, Eq, Ord, Data, Typeable, Generic )
 
 -- | One equation of a type family instance or closed type family. The
@@ -1564,17 +1611,68 @@ type Cxt = [Pred]                 -- ^ @(Eq a, Ord b)@
 -- be tuples of other constraints.
 type Pred = Type
 
-data Strict = IsStrict | NotStrict | Unpacked
-         deriving( Show, Eq, Ord, Data, Typeable, Generic )
+data SourceUnpackedness
+  = NoSourceUnpackedness -- ^ @C a@
+  | SourceNoUnpack       -- ^ @C { {\-\# NOUNPACK \#-\} } a@
+  | SourceUnpack         -- ^ @C { {\-\# UNPACK \#-\} } a@
+        deriving (Show, Eq, Ord, Data, Typeable, Generic)
 
-data Con = NormalC Name [StrictType]          -- ^ @C Int a@
-         | RecC Name [VarStrictType]          -- ^ @C { v :: Int, w :: a }@
-         | InfixC StrictType Name StrictType  -- ^ @Int :+ a@
-         | ForallC [TyVarBndr] Cxt Con        -- ^ @forall a. Eq a => C [a]@
-         deriving( Show, Eq, Ord, Data, Typeable, Generic )
+data SourceStrictness = NoSourceStrictness    -- ^ @C a@
+                      | SourceLazy            -- ^ @C {~}a@
+                      | SourceStrict          -- ^ @C {!}a@
+        deriving (Show, Eq, Ord, Data, Typeable, Generic)
 
-type StrictType = (Strict, Type)
-type VarStrictType = (Name, Strict, Type)
+-- | Unlike 'SourceStrictness' and 'SourceUnpackedness', 'DecidedStrictness'
+-- refers to the strictness that the compiler chooses for a data constructor
+-- field, which may be different from what is written in source code. See
+-- 'reifyConStrictness' for more information.
+data DecidedStrictness = DecidedLazy
+                       | DecidedStrict
+                       | DecidedUnpack
+        deriving (Show, Eq, Ord, Data, Typeable, Generic)
+
+data Con = NormalC Name [BangType]       -- ^ @C Int a@
+         | RecC Name [VarBangType]       -- ^ @C { v :: Int, w :: a }@
+         | InfixC BangType Name BangType -- ^ @Int :+ a@
+         | ForallC [TyVarBndr] Cxt Con   -- ^ @forall a. Eq a => C [a]@
+         | GadtC [Name] [BangType]
+                 Name                    -- See Note [GADT return type]
+                 [Type]                  -- Indices of the type constructor
+                                         -- ^ @C :: a -> b -> T b Int@
+         | RecGadtC [Name] [VarBangType]
+                    Name                 -- See Note [GADT return type]
+                    [Type]               -- Indices of the type constructor
+                                         -- ^ @C :: { v :: Int } -> T b Int@
+        deriving (Show, Eq, Ord, Data, Typeable, Generic)
+
+-- Note [GADT return type]
+-- ~~~~~~~~~~~~~~~~~~~~~~~
+--
+-- The name of the return type stored by a GADT constructor does not necessarily
+-- match the name of the data type:
+--
+-- type S = T
+--
+-- data T a where
+--     MkT :: S Int
+
+data Bang = Bang SourceUnpackedness SourceStrictness
+         -- ^ @C { {\-\# UNPACK \#-\} !}a@
+        deriving (Show, Eq, Ord, Data, Typeable, Generic)
+
+type BangType    = (Bang, Type)
+type VarBangType = (Name, Bang, Type)
+
+-- | As of @template-haskell-2.11.0.0@, 'Strict' has been replaced by 'Bang'.
+type Strict      = Bang
+
+-- | As of @template-haskell-2.11.0.0@, 'StrictType' has been replaced by
+-- 'BangType'.
+type StrictType    = BangType
+
+-- | As of @template-haskell-2.11.0.0@, 'VarStrictType' has been replaced by
+-- 'VarBangType'.
+type VarStrictType = VarBangType
 
 data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> -> \<type\>@
           | AppT Type Type                -- ^ @T a b@
@@ -1590,7 +1688,7 @@ data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> -> \<t
 
           -- See Note [Representing concrete syntax in types]
           | TupleT Int                    -- ^ @(,), (,,), etc.@
-          | UnboxedTupleT Int             -- ^ @(#,#), (#,,#), etc.@
+          | UnboxedTupleT Int             -- ^ @(\#,\#), (\#,,\#), etc.@
           | ArrowT                        -- ^ @->@
           | EqualityT                     -- ^ @~@
           | ListT                         -- ^ @[]@
@@ -1600,7 +1698,7 @@ data Type = ForallT [TyVarBndr] Cxt Type  -- ^ @forall \<vars\>. \<ctxt\> -> \<t
           | StarT                         -- ^ @*@
           | ConstraintT                   -- ^ @Constraint@
           | LitT TyLit                    -- ^ @0,1,2, etc.@
-          | WildCardT (Maybe Name)        -- ^ @_, _a, etc.@
+          | WildCardT                     -- ^ @_,
       deriving( Show, Eq, Ord, Data, Typeable, Generic )
 
 data TyVarBndr = PlainTV  Name            -- ^ @a@

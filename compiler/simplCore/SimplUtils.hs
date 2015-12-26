@@ -37,7 +37,6 @@ module SimplUtils (
 
 import SimplEnv
 import CoreMonad        ( SimplifierMode(..), Tick(..) )
-import MkCore           ( sortQuantVars )
 import DynFlags
 import CoreSyn
 import qualified CoreSubst
@@ -52,7 +51,7 @@ import Var
 import Demand
 import SimplMonad
 import Type     hiding( substTy )
-import Coercion hiding( substCo, substTy )
+import Coercion hiding( substCo )
 import DataCon          ( dataConWorkId )
 import VarEnv
 import VarSet
@@ -248,11 +247,11 @@ instance Outputable ArgSpec where
 
 addValArgTo :: ArgInfo -> OutExpr -> ArgInfo
 addValArgTo ai arg = ai { ai_args = ValArg arg : ai_args ai
-                        , ai_type = funResultTy (ai_type ai) }
+                        , ai_type = applyTypeToArg (ai_type ai) arg }
 
 addTyArgTo :: ArgInfo -> OutType -> ArgInfo
 addTyArgTo ai arg_ty = ai { ai_args = arg_spec : ai_args ai
-                          , ai_type = applyTy poly_fun_ty arg_ty }
+                          , ai_type = piResultTy poly_fun_ty arg_ty }
   where
     poly_fun_ty = ai_type ai
     arg_spec    = TyArg { as_arg_ty = arg_ty, as_hole_ty = poly_fun_ty }
@@ -634,20 +633,23 @@ interestingArg env e = go env 0 e
            Just (DoneEx e)             -> go (zapSubstEnv env)             n e
            Just (ContEx tvs cvs ids e) -> go (setSubstEnv env tvs cvs ids) n e
 
-    go _   _ (Lit {})              = ValueArg
-    go _   _ (Type _)              = TrivArg
-    go _   _ (Coercion _)          = TrivArg
-    go env n (App fn (Type _))     = go env n fn
-    go env n (App fn (Coercion _)) = go env n fn
-    go env n (App fn _)            = go env (n+1) fn
-    go env n (Tick _ a)            = go env n a
-    go env n (Cast e _)            = go env n e
+    go _   _ (Lit {})          = ValueArg
+    go _   _ (Type _)          = TrivArg
+    go _   _ (Coercion _)      = TrivArg
+    go env n (App fn (Type _)) = go env n fn
+    go env n (App fn _)        = go env (n+1) fn
+    go env n (Tick _ a)        = go env n a
+    go env n (Cast e _)        = go env n e
     go env n (Lam v e)
-       | isTyVar v                 = go env n     e
-       | n>0                       = go env (n-1) e
-       | otherwise                 = ValueArg
-    go env n (Let _ e)             = case go env n e of { ValueArg -> ValueArg; _ -> NonTrivArg }
-    go _ _ (Case {})               = NonTrivArg
+       | isTyVar v             = go env n e
+       | n>0                   = NonTrivArg     -- (\x.b) e   is NonTriv
+       | otherwise             = ValueArg
+    go _ _ (Case {})           = NonTrivArg
+    go env n (Let b e)         = case go env' n e of
+                                   ValueArg -> ValueArg
+                                   _        -> NonTrivArg
+                               where
+                                 env' = env `addNewInScopeIds` bindersOf b
 
     go_var n v
        | isConLikeId v     = ValueArg   -- Experimenting with 'conlike' rather that
@@ -1572,7 +1574,7 @@ abstractFloats main_tvs body_env body
         rhs' = CoreSubst.substExpr (text "abstract_floats2") subst rhs
 
         -- tvs_here: see Note [Which type variables to abstract over]
-        tvs_here = varSetElemsKvsFirst         $
+        tvs_here = varSetElemsWellScoped       $
                    intersectVarSet main_tv_set $
                    closeOverKinds              $
                    exprSomeFreeVars isTyVar rhs'
@@ -1598,14 +1600,14 @@ abstractFloats main_tvs body_env body
                 -- If you ever want to be more selective, remember this bizarre case too:
                 --      x::a = x
                 -- Here, we must abstract 'x' over 'a'.
-         tvs_here = sortQuantVars main_tvs
+         tvs_here = toposortTyVars main_tvs
 
     mk_poly tvs_here var
       = do { uniq <- getUniqueM
            ; let  poly_name = setNameUnique (idName var) uniq           -- Keep same name
-                  poly_ty   = mkForAllTys tvs_here (idType var) -- But new type of course
+                  poly_ty   = mkInvForAllTys tvs_here (idType var) -- But new type of course
                   poly_id   = transferPolyIdInfo var tvs_here $ -- Note [transferPolyIdInfo] in Id.hs
-                              mkLocalId poly_name poly_ty
+                              mkLocalIdOrCoVar poly_name poly_ty
            ; return (poly_id, mkTyApps (Var poly_id) (mkTyVarTys tvs_here)) }
                 -- In the olden days, it was crucial to copy the occInfo of the original var,
                 -- because we were looking at occurrence-analysed but as yet unsimplified code!
@@ -1817,7 +1819,7 @@ mkCase1 _dflags scrut case_bndr _ alts@((_,_,rhs1) : _)      -- Identity case
   = do { tick (CaseIdentity case_bndr)
        ; return (mkTicks ticks $ re_cast scrut rhs1) }
   where
-    ticks = concatMap (stripTicksT tickishFloatable . thirdOf3) (tail alts)
+    ticks = concatMap (stripTicksT tickishFloatable . thdOf3) (tail alts)
     identity_alt (con, args, rhs) = check_eq rhs con args
 
     check_eq (Cast rhs co) con        args

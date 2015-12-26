@@ -750,6 +750,7 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/ghc-api/T7478/T7478
 /tests/ghc-api/T8628
 /tests/ghc-api/T8639_api
+/tests/ghc-api/T9015
 /tests/ghc-api/T9595
 /tests/ghc-api/apirecomp001/myghc
 /tests/ghc-api/dynCompileExpr/dynCompileExpr
@@ -1236,11 +1237,13 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/plugins/T10420
 /tests/plugins/annotation-plugin/pkg.T10294/
 /tests/plugins/annotation-plugin/pkg.T10294a/
+/tests/plugins/frontend01
 /tests/plugins/plugins01
 /tests/plugins/plugins05
 /tests/plugins/plugins06
 /tests/plugins/plugins07
 /tests/plugins/rule-defining-plugin/pkg.T10420/
+/tests/plugins/rule-defining-plugin/pkg.T11244/
 /tests/plugins/rule-defining-plugin/pkg.plugins07/
 /tests/plugins/simple-plugin/dist/
 /tests/plugins/simple-plugin/install/
@@ -1386,6 +1389,7 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/rts/T8242
 /tests/rts/T9045
 /tests/rts/T9078
+/tests/rts/T10728
 /tests/rts/atomicinc
 /tests/rts/bug1010
 /tests/rts/derefnull
@@ -1549,6 +1553,7 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /tests/typecheck/should_run/T9497c-run
 /tests/typecheck/should_run/T9858c
 /tests/typecheck/should_run/T9858d
+/tests/typecheck/should_run/T10845
 /tests/typecheck/should_run/TcCoercible
 /tests/typecheck/should_run/TcNullaryTC
 /tests/typecheck/should_run/TcTypeNatSimpleRun
@@ -1608,3 +1613,4 @@ mk/ghcconfig*_test___spaces_ghc*.exe.mk
 /timeout/calibrate.out
 /timeout/dist/
 /timeout/install-inplace/
+/tests/typecheck/should_run/T11049

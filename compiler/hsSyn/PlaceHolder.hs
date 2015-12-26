@@ -15,9 +15,9 @@ import RdrName
 import Var
 import Coercion
 import {-# SOURCE #-} ConLike (ConLike)
-import TcEvidence (HsWrapper)
 import FieldLabel
 import SrcLoc (Located)
+import TcEvidence ( HsWrapper )
 
 import Data.Data hiding ( Fixity )
 import BasicTypes       (Fixity)
@@ -37,15 +37,15 @@ data PlaceHolder = PlaceHolder
 
 -- | Types that are not defined until after type checking
 type family PostTc it ty :: * -- Note [Pass sensitive types]
-type instance PostTc Id      ty = ty
-type instance PostTc Name    ty = PlaceHolder
-type instance PostTc RdrName ty = PlaceHolder
+type instance PostTc Id       ty = ty
+type instance PostTc Name    _ty = PlaceHolder
+type instance PostTc RdrName _ty = PlaceHolder
 
 -- | Types that are not defined until after renaming
 type family PostRn id ty :: * -- Note [Pass sensitive types]
-type instance PostRn Id      ty = ty
-type instance PostRn Name    ty = ty
-type instance PostRn RdrName ty = PlaceHolder
+type instance PostRn Id       ty = ty
+type instance PostRn Name     ty = ty
+type instance PostRn RdrName _ty = PlaceHolder
 
 placeHolderKind :: PlaceHolder
 placeHolderKind = PlaceHolder
@@ -64,6 +64,9 @@ placeHolderNames = PlaceHolder
 
 placeHolderNamesTc :: NameSet
 placeHolderNamesTc = emptyNameSet
+
+placeHolderHsWrapper :: PlaceHolder
+placeHolderHsWrapper = PlaceHolder
 
 {-
 

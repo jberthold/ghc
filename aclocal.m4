@@ -196,6 +196,9 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         sparc)
             test -z "[$]2" || eval "[$]2=ArchSPARC"
             ;;
+        sparc64)
+            test -z "[$]2" || eval "[$]2=ArchSPARC64"
+            ;;
         arm)
             GET_ARM_ISA()
             test -z "[$]2" || eval "[$]2=\"ArchARM {armISA = \$ARM_ISA, armISAExt = \$ARM_ISA_EXT, armABI = \$ARM_ABI}\""
@@ -212,7 +215,7 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         mipsel)
             test -z "[$]2" || eval "[$]2=ArchMipsel"
             ;;
-        hppa|hppa1_1|ia64|m68k|rs6000|s390|s390x|sparc64|vax)
+        hppa|hppa1_1|ia64|m68k|rs6000|s390|s390x|sh4|vax)
             test -z "[$]2" || eval "[$]2=ArchUnknown"
             ;;
         *)
@@ -467,7 +470,7 @@ AC_DEFUN([FP_SETTINGS],
         SettingsPerlCommand='$topdir/../perl/perl.exe'
         SettingsDllWrapCommand="\$topdir/../${mingw_bin_prefix}dllwrap.exe"
         SettingsWindresCommand="\$topdir/../${mingw_bin_prefix}windres.exe"
-        SettingsTouchCommand='$topdir/touchy.exe'
+        SettingsTouchCommand='$topdir/bin/touchy.exe'
     else
         SettingsCCompilerCommand="$WhatGccIsCalled"
         SettingsHaskellCPPCommand="$HaskellCPPCmd"
@@ -1825,6 +1828,9 @@ case "$1" in
   s390*)
     $2="s390"
     ;;
+  sh4)
+    $2="sh4"
+    ;;
   sparc64*)
     $2="sparc64"
     ;;
@@ -1969,15 +1975,17 @@ AC_DEFUN([XCODE_VERSION],[
 AC_DEFUN([FIND_LLVM_PROG],[
     # Test for program with version name.
     FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL_NOTARGET([$1], [$2], [$3-$4])
-    if test "$$1" = ""; then
+    if test -z "$$1"; then
         # Test for program without version name.
         FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL_NOTARGET([$1], [$2], [$3])
-        AC_MSG_CHECKING([$$1 is version $4])
-        if test `$$1 --version | grep -c "version $4"` -gt 0 ; then
-            AC_MSG_RESULT(yes)
-        else
-            AC_MSG_RESULT(no)
-            $1=""
+        if test -n "$$1"; then
+            AC_MSG_CHECKING([$$1 is version $4])
+            if test `$$1 --version | grep -c "version $4"` -gt 0 ; then
+                AC_MSG_RESULT(yes)
+            else
+                AC_MSG_RESULT(no)
+                $1=""
+            fi
         fi
     fi
 ])

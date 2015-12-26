@@ -36,6 +36,8 @@ module TcEnv(
         getScopedTyVarBinds, getInLocalScope,
         wrongThingErr, pprBinders,
 
+        tcAddDataFamConPlaceholders, tcAddPatSynPlaceholders,
+        getPatSynBinds, getTypeSigNames,
         tcExtendRecEnv,         -- For knot-tying
 
         -- Instances
@@ -48,7 +50,7 @@ module TcEnv(
         tcGetDefaultTys,
 
         -- Global type variables
-        tcGetGlobalTyVars,
+        tcGetGlobalTyCoVars,
 
         -- Template Haskell stuff
         checkWellStaged, tcMetaTy, thLevel,
@@ -82,9 +84,9 @@ import PatSyn  ( PatSyn )
 import ConLike
 import TyCon
 import CoAxiom
-import TypeRep
 import Class
 import Name
+import NameSet
 import NameEnv
 import VarEnv
 import HscTypes
@@ -95,9 +97,12 @@ import Module
 import Outputable
 import Encoding
 import FastString
+import Bag
 import ListSetOps
 import Util
 import Maybes( MaybeErr(..) )
+import qualified GHC.LanguageExtensions as LangExt
+
 import Data.IORef
 import Data.List
 
@@ -211,7 +216,7 @@ tcLookupLocatedTyCon :: Located Name -> TcM TyCon
 tcLookupLocatedTyCon = addLocM tcLookupTyCon
 
 -- Find the instance that exactly matches a type class application.  The class arguments must be precisely
--- the same as in the instance declaration (modulo renaming).
+-- the same as in the instance declaration (modulo renaming & casts).
 --
 tcLookupInstance :: Class -> [Type] -> TcM ClsInst
 tcLookupInstance cls tys
@@ -225,10 +230,8 @@ tcLookupInstance cls tys
   where
     errNotExact = ptext (sLit "Not an exact match (i.e., some variables get instantiated)")
 
-    uniqueTyVars tys = all isTyVarTy tys && hasNoDups (map extractTyVar tys)
-      where
-        extractTyVar (TyVarTy tv) = tv
-        extractTyVar _            = panic "TcEnv.tcLookupInstance: extractTyVar"
+    uniqueTyVars tys = all isTyVarTy tys
+                    && hasNoDups (map (getTyVar "tcLookupInstance") tys)
 
 tcGetInstEnvs :: TcM InstEnvs
 -- Gets both the external-package inst-env
@@ -359,7 +362,6 @@ tcLookupLocalIds ns
                 _ -> pprPanic "tcLookupLocalIds" (ppr name)
 
 getInLocalScope :: TcM (Name -> Bool)
-  -- Ids only
 getInLocalScope = do { lcl_env <- getLclTypeEnv
                      ; return (`elemNameEnv` lcl_env) }
 
@@ -373,8 +375,8 @@ tcExtendKindEnv2 things thing_inside
     upd_env env = env { tcl_env = extendNameEnvList (tcl_env env) things }
 
 tcExtendKindEnv :: [(Name, TcKind)] -> TcM r -> TcM r
-tcExtendKindEnv name_kind_prs
-  = tcExtendKindEnv2 [(n, AThing k) | (n,k) <- name_kind_prs]
+tcExtendKindEnv nks
+  = tcExtendKindEnv2 $ mapSnd AThing nks
 
 -----------------------
 -- Scoped type and kind variables
@@ -384,6 +386,8 @@ tcExtendTyVarEnv tvs thing_inside
 
 tcExtendTyVarEnv2 :: [(Name,TcTyVar)] -> TcM r -> TcM r
 tcExtendTyVarEnv2 binds thing_inside
+  -- this should be used only for explicitly mentioned scoped variables.
+  -- thus, no coercion variables
   = do { tc_extend_local_env NotTopLevel
                     [(name, ATyVar name tv) | (name, tv) <- binds] $
          do { env <- getLclEnv
@@ -397,7 +401,8 @@ tcExtendTyVarEnv2 binds thing_inside
     -- OccName that the programmer originally used for them
     add :: TidyEnv -> (Name, TcTyVar) -> TidyEnv
     add (env,subst) (name, tyvar)
-        = case tidyOccName env (nameOccName name) of
+        = ASSERT( isTyVar tyvar )
+          case tidyOccName env (nameOccName name) of
             (env', occ') ->  (env', extendVarEnv subst tyvar tyvar')
                 where
                   tyvar' = setTyVarName tyvar name'
@@ -414,8 +419,8 @@ isClosedLetBndr :: Id -> TopLevelFlag
 -- looking at its type, which is slightly more liberal, and a whole
 -- lot easier to implement, than looking at its free variables
 isClosedLetBndr id
-  | isEmptyVarSet (tyVarsOfType (idType id)) = TopLevel
-  | otherwise                                = NotTopLevel
+  | isEmptyVarSet (tyCoVarsOfType (idType id)) = TopLevel
+  | otherwise                                  = NotTopLevel
 
 tcExtendLetEnv :: TopLevelFlag -> [TcId] -> TcM a -> TcM a
 -- Used for both top-level value bindings and and nested let/where-bindings
@@ -465,7 +470,7 @@ tc_extend_local_env top_lvl extra_env thing_inside
 --          (see Kind.defaultKind, done in zonkQuantifiedTyVar)
 --      (b) There are no via-Indirect occurrences of the bound variables
 --          in the types, because instantiation does not look through such things
---      (c) The call to tyVarsOfTypes is ok without looking through refs
+--      (c) The call to tyCoVarsOfTypes is ok without looking through refs
 
 -- The second argument of type TyVarSet is a set of type variables
 -- that are bound together with extra_env and should not be regarded
@@ -507,12 +512,12 @@ tcExtendLocalTypeEnv lcl_env@(TcLclEnv { tcl_env = lcl_type_env }) tc_ty_things
           TopLevel    -> ASSERT2( isEmptyVarSet id_tvs, ppr id $$ ppr (idType id) )
                          tvs
           NotTopLevel -> tvs `unionVarSet` id_tvs
-        where id_tvs = tyVarsOfType (idType id)
+        where id_tvs = tyCoVarsOfType (idType id)
 
     get_tvs (_, ATyVar _ tv) tvs          -- See Note [Global TyVars]
-      = tvs `unionVarSet` tyVarsOfType (tyVarKind tv) `extendVarSet` tv
+      = tvs `unionVarSet` tyCoVarsOfType (tyVarKind tv) `extendVarSet` tv
 
-    get_tvs (_, AThing k) tvs = tvs `unionVarSet` tyVarsOfType k
+    get_tvs (_, AThing k) tvs = tvs `unionVarSet` tyCoVarsOfType k
 
     get_tvs (_, AGlobal {})       tvs = tvs
     get_tvs (_, APromotionErr {}) tvs = tvs
@@ -537,7 +542,104 @@ tcExtendIdBndrs bndrs thing_inside
                    thing_inside }
 
 
-{-
+{- *********************************************************************
+*                                                                      *
+             Adding placeholders
+*                                                                      *
+********************************************************************* -}
+
+tcAddDataFamConPlaceholders :: [LInstDecl Name] -> TcM a -> TcM a
+-- See Note [AFamDataCon: not promoting data family constructors]
+tcAddDataFamConPlaceholders inst_decls thing_inside
+  = tcExtendKindEnv2 [ (con, APromotionErr FamDataConPE)
+                     | lid <- inst_decls, con <- get_cons lid ]
+      thing_inside
+      -- Note [AFamDataCon: not promoting data family constructors]
+  where
+    -- get_cons extracts the *constructor* bindings of the declaration
+    get_cons :: LInstDecl Name -> [Name]
+    get_cons (L _ (TyFamInstD {}))                     = []
+    get_cons (L _ (DataFamInstD { dfid_inst = fid }))  = get_fi_cons fid
+    get_cons (L _ (ClsInstD { cid_inst = ClsInstDecl { cid_datafam_insts = fids } }))
+      = concatMap (get_fi_cons . unLoc) fids
+
+    get_fi_cons :: DataFamInstDecl Name -> [Name]
+    get_fi_cons (DataFamInstDecl { dfid_defn = HsDataDefn { dd_cons = cons } })
+      = map unLoc $ concatMap (getConNames . unLoc) cons
+
+
+tcAddPatSynPlaceholders :: [PatSynBind Name Name] -> TcM a -> TcM a
+-- See Note [Don't promote pattern synonyms]
+tcAddPatSynPlaceholders pat_syns thing_inside
+  = tcExtendKindEnv2 [ (name, APromotionErr PatSynPE)
+                     | PSB{ psb_id = L _ name } <- pat_syns ]
+       thing_inside
+
+getPatSynBinds :: [(RecFlag, LHsBinds Name)] -> [PatSynBind Name Name]
+getPatSynBinds binds
+  = [ psb | (_, lbinds) <- binds
+          , L _ (PatSynBind psb) <- bagToList lbinds ]
+
+
+getTypeSigNames :: [LSig Name] -> NameSet
+-- Get the names that have a user type sig
+getTypeSigNames sigs
+  = foldr get_type_sig emptyNameSet sigs
+  where
+    get_type_sig :: LSig Name -> NameSet -> NameSet
+    get_type_sig sig ns =
+      case sig of
+        L _ (TypeSig names _) -> extendNameSetList ns (map unLoc names)
+        L _ (PatSynSig name _) -> extendNameSet ns (unLoc name)
+        _ -> ns
+
+
+{- Note [AFamDataCon: not promoting data family constructors]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+  data family T a
+  data instance T Int = MkT
+  data Proxy (a :: k)
+  data S = MkS (Proxy 'MkT)
+
+Is it ok to use the promoted data family instance constructor 'MkT' in
+the data declaration for S?  No, we don't allow this. It *might* make
+sense, but at least it would mean that we'd have to interleave
+typechecking instances and data types, whereas at present we do data
+types *then* instances.
+
+So to check for this we put in the TcLclEnv a binding for all the family
+constructors, bound to AFamDataCon, so that if we trip over 'MkT' when
+type checking 'S' we'll produce a decent error message.
+
+Note [Don't promote pattern synonyms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We never promote pattern synonyms.
+
+Consider this (Trac #11265):
+  pattern A = True
+  instance Eq A
+We want a civilised error message from the occurrence of 'A'
+in the instance, yet 'A' really has not yet been type checked.
+
+Similarly (Trac #9161)
+  {-# LANGUAGE PatternSynonyms, DataKinds #-}
+  pattern A = ()
+  b :: A
+  b = undefined
+Here, the type signature for b mentions A.  But A is a pattern
+synonym, which is typechecked as part of a group of bindings (for very
+good reasons; a view pattern in the RHS may mention a value binding).
+It is entirely reasonable to reject this, but to do so we need A to be
+in the kind environment when kind-checking the signature for B.
+
+Hence tcAddPatSynPlaceholers adds a binding
+    A -> APromotionErr PatSynPE
+to the environment. Then TcHsType.tcTyVar will find A in the kind
+environment, and will give a 'wrongThingErr' as a result.  But the
+lookup of A won't fail.
+
+
 ************************************************************************
 *                                                                      *
 \subsection{Rules}
@@ -626,8 +728,8 @@ tcGetDefaultTys :: TcM ([Type], -- Default types
                          Bool)) -- True <=> Use extended defaulting rules
 tcGetDefaultTys
   = do  { dflags <- getDynFlags
-        ; let ovl_strings = xopt Opt_OverloadedStrings dflags
-              extended_defaults = xopt Opt_ExtendedDefaultRules dflags
+        ; let ovl_strings = xopt LangExt.OverloadedStrings dflags
+              extended_defaults = xopt LangExt.ExtendedDefaultRules dflags
                                         -- See also Trac #1974
               flags = (ovl_strings, extended_defaults)
 
@@ -708,15 +810,15 @@ data InstBindings a
       , ib_pragmas :: [LSig a]      -- User pragmas recorded for generating
                                     -- specialised instances
 
-      , ib_extensions :: [ExtensionFlag] -- Any extra extensions that should
-                                         -- be enabled when type-checking this
-                                         -- instance; needed for
-                                         -- GeneralizedNewtypeDeriving
+      , ib_extensions :: [LangExt.Extension] -- Any extra extensions that should
+                                             -- be enabled when type-checking
+                                             -- this instance; needed for
+                                             -- GeneralizedNewtypeDeriving
 
       , ib_derived :: Bool
            -- True <=> This code was generated by GHC from a deriving clause
            --          or standalone deriving declaration
-           -- Used only to improve error messages
+           --          Used only to improve error messages
       }
 
 instance OutputableBndr a => Outputable (InstInfo a) where
@@ -862,7 +964,7 @@ notFound name
                 vcat[ptext (sLit "GHC internal error:") <+> quotes (ppr name) <+>
                      ptext (sLit "is not in scope during type checking, but it passed the renamer"),
                      ptext (sLit "tcl_env of environment:") <+> ppr (tcl_env lcl_env)]
-                       -- Take case: printing the whole gbl env can
+                       -- Take care: printing the whole gbl env can
                        -- cause an infinite loop, in the case where we
                        -- are in the middle of a recursive TyCon/Class group;
                        -- so let's just not print it!  Getting a loop here is

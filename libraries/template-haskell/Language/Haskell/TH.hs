@@ -26,6 +26,9 @@ module Language.Haskell.TH(
         ParentName,
         Arity,
         Unlifted,
+        -- *** Language extension lookup
+        Extension(..),
+        extsEnabled, isExtEnabled,
         -- *** Name lookup
         lookupTypeName,  -- :: String -> Q (Maybe Name)
         lookupValueName, -- :: String -> Q (Maybe Name)
@@ -38,6 +41,8 @@ module Language.Haskell.TH(
         reifyRoles,
         -- *** Annotation lookup
         reifyAnnotations, AnnLookup(..),
+        -- *** Constructor strictness lookup
+        reifyConStrictness,
 
         -- * Typed expressions
         TExp, unType,
@@ -63,9 +68,10 @@ module Language.Haskell.TH(
 
     -- ** Declarations
         Dec(..), Con(..), Clause(..),
-        Strict(..), Foreign(..), Callconv(..), Safety(..), Pragma(..),
+        SourceUnpackedness(..), SourceStrictness(..), DecidedStrictness(..),
+        Bang(..), Strict, Foreign(..), Callconv(..), Safety(..), Pragma(..),
         Inline(..), RuleMatch(..), Phases(..), RuleBndr(..), AnnTarget(..),
-        FunDep(..), FamFlavour(..), TySynEqn(..),
+        FunDep(..), FamFlavour(..), TySynEqn(..), TypeFamilyHead(..),
         Fixity(..), FixityDirection(..), defaultFixity, maxPrecedence,
     -- ** Expressions
         Exp(..), Match(..), Body(..), Guard(..), Stmt(..), Range(..), Lit(..),
@@ -77,9 +83,10 @@ module Language.Haskell.TH(
 
     -- * Library functions
     -- ** Abbreviations
-        InfoQ, ExpQ, DecQ, DecsQ, ConQ, TypeQ, TyLitQ, CxtQ, PredQ, MatchQ, ClauseQ,
-        BodyQ, GuardQ, StmtQ, RangeQ, StrictTypeQ, VarStrictTypeQ, PatQ, FieldPatQ,
-        RuleBndrQ, TySynEqnQ,
+        InfoQ, ExpQ, DecQ, DecsQ, ConQ, TypeQ, TyLitQ, CxtQ, PredQ, MatchQ,
+        ClauseQ, BodyQ, GuardQ, StmtQ, RangeQ, SourceStrictnessQ,
+        SourceUnpackednessQ, BangTypeQ, VarBangTypeQ, StrictTypeQ,
+        VarStrictTypeQ, PatQ, FieldPatQ, RuleBndrQ, TySynEqnQ,
 
     -- ** Constructors lifted to 'Q'
     -- *** Literals
@@ -116,9 +123,13 @@ module Language.Haskell.TH(
     -- **** Type literals
     numTyLit, strTyLit,
     -- **** Strictness
-    isStrict, notStrict, strictType, varStrictType,
+    noSourceUnpackedness, sourceNoUnpack, sourceUnpack,
+    noSourceStrictness, sourceLazy, sourceStrict,
+    bang, bangType, varBangType, strictType, varStrictType,
     -- **** Class Contexts
-    cxt, classP, equalP, normalC, recC, infixC, forallC,
+    cxt, classP, equalP,
+    -- **** Constructors
+    normalC, recC, infixC, forallC, gadtC, recGadtC,
 
     -- *** Kinds
     varK, conK, tupleK, arrowK, listK, appK, starK, constraintK,

@@ -43,6 +43,10 @@ import Util
 import FastString
 import FastStringEnv
 import ListSetOps
+import Id
+import Type
+import PatSyn
+import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
 import Data.Either      ( partitionEithers, isRight, rights )
@@ -195,7 +199,7 @@ rnImportDecl this_mod
   = setSrcSpan loc $ do
 
     when (isJust mb_pkg) $ do
-        pkg_imports <- xoptM Opt_PackageImports
+        pkg_imports <- xoptM LangExt.PackageImports
         when (not pkg_imports) $ addErr packageImportErr
 
     -- If there's an error in loadInterface, (e.g. interface
@@ -475,7 +479,7 @@ extendGlobalRdrEnvRn avails new_fixities
 
         ; rdr_env2 <- foldlM add_gre rdr_env1 new_gres
 
-        ; let fix_env' = foldl extend_fix_env fix_env new_names
+        ; let fix_env' = foldl extend_fix_env fix_env new_gres
               gbl_env' = gbl_env { tcg_rdr_env = rdr_env2, tcg_fix_env = fix_env' }
 
         ; traceRn (text "extendGlobalRdrEnvRn 2" <+> (pprGlobalRdrEnv True rdr_env2))
@@ -485,13 +489,14 @@ extendGlobalRdrEnvRn avails new_fixities
     new_occs  = map nameOccName new_names
 
     -- If there is a fixity decl for the gre, add it to the fixity env
-    extend_fix_env fix_env name
+    extend_fix_env fix_env gre
       | Just (L _ fi) <- lookupFsEnv new_fixities (occNameFS occ)
       = extendNameEnv fix_env name (FixItem occ fi)
       | otherwise
       = fix_env
       where
-        occ  = nameOccName name
+        name = gre_name gre
+        occ  = greOccName gre
 
     new_gres :: [GlobalRdrElt]  -- New LocalDef GREs, derived from avails
     new_gres = concatMap localGREsFromAvail avails
@@ -539,7 +544,7 @@ getLocalNonValBinders fixity_env
                 hs_instds = inst_decls,
                 hs_fords  = foreign_decls })
   = do  { -- Process all type/class decls *except* family instances
-        ; overload_ok <- xoptM Opt_DuplicateRecordFields
+        ; overload_ok <- xoptM LangExt.DuplicateRecordFields
         ; (tc_avails, tc_fldss) <- fmap unzip $ mapM (new_tc overload_ok)
                                                      (tyClGroupConcat tycl_decls)
         ; traceRn (text "getLocalNonValBinders 1" <+> ppr tc_avails)
@@ -562,8 +567,8 @@ getLocalNonValBinders fixity_env
         ; val_avails <- mapM new_simple val_bndrs
 
         ; let avails    = concat nti_availss ++ val_avails
-              new_bndrs = availsToNameSet avails `unionNameSet`
-                          availsToNameSet tc_avails
+              new_bndrs = availsToNameSetWithSelectors avails `unionNameSet`
+                          availsToNameSetWithSelectors tc_avails
               flds      = concat nti_fldss ++ concat tc_fldss
         ; traceRn (text "getLocalNonValBinders 2" <+> ppr avails)
         ; (tcg_env, tcl_env) <- extendGlobalRdrEnvRn avails fixity_env
@@ -610,11 +615,24 @@ getLocalNonValBinders fixity_env
     mk_fld_env :: HsDataDefn RdrName -> [Name] -> [FieldLabel] -> [(Name, [FieldLabel])]
     mk_fld_env d names flds = concatMap find_con_flds (dd_cons d)
       where
-        find_con_flds (L _ (ConDecl { con_names   = rdrs
-                                    , con_details = RecCon cdflds }))
+        find_con_flds (L _ (ConDeclH98 { con_name    = L _ rdr
+                                       , con_details = RecCon cdflds }))
+            = [( find_con_name rdr
+               , concatMap find_con_decl_flds (unLoc cdflds) )]
+        find_con_flds (L _ (ConDeclGADT
+                              { con_names = rdrs
+                              , con_type = (HsIB { hsib_body = res_ty})}))
             = map (\ (L _ rdr) -> ( find_con_name rdr
-                                  , concatMap find_con_decl_flds (unLoc cdflds)))
+                                  , concatMap find_con_decl_flds cdflds))
                   rdrs
+            where
+              (_tvs, _cxt, tau) = splitLHsSigmaTy res_ty
+              cdflds = case tau of
+                 L _ (HsFunTy
+                      (L _ (HsAppsTy
+                        [L _ (HsAppPrefix (L _ (HsRecTy flds)))])) _) -> flds
+                 L _ (HsFunTy (L _ (HsRecTy flds)) _) -> flds
+                 _                                    -> []
         find_con_flds _ = []
 
         find_con_name rdr
@@ -622,7 +640,7 @@ getLocalNonValBinders fixity_env
               find (\ n -> nameOccName n == rdrNameOcc rdr) names
         find_con_decl_flds (L _ x)
           = map find_con_decl_fld (cd_fld_names x)
-        find_con_decl_fld  (L _ (FieldOcc rdr _))
+        find_con_decl_fld  (L _ (FieldOcc (L _ rdr) _))
           = expectJust "getLocalNonValBinders/find_con_decl_fld" $
               find (\ fl -> flLabel fl == lbl) flds
           where lbl = occNameFS (rdrNameOcc rdr)
@@ -664,7 +682,7 @@ getLocalNonValBinders fixity_env
 
 newRecordSelector :: Bool -> [Name] -> LFieldOcc RdrName -> RnM FieldLabel
 newRecordSelector _ [] _ = error "newRecordSelector: datatype has no constructors!"
-newRecordSelector overload_ok (dc:_) (L loc (FieldOcc fld _)) =
+newRecordSelector overload_ok (dc:_) (L loc (FieldOcc (L _ fld) _)) =
   do { sel_name <- newTopSrcBinder $ L loc $ mkRdrUnqual sel_occ
      ; return $ fl { flSelector = sel_name } }
   where
@@ -1200,14 +1218,25 @@ exports_from_avail :: Maybe (Located [LIE RdrName])
                    -> RnM (Maybe [LIE Name], [AvailInfo])
 
 exports_from_avail Nothing rdr_env _imports _this_mod
- = -- The same as (module M) where M is the current module name,
-   -- so that's how we handle it.
-   let
-       avails = [ availFromGRE gre
-                | gre <- globalRdrEnvElts rdr_env
-                , isLocalGRE gre ]
-   in
-    return (Nothing, avails)
+   -- The same as (module M) where M is the current module name,
+   -- so that's how we handle it, except we also export the data family
+   -- when a data instance is exported.
+  = let avails = [ fix_faminst $ availFromGRE gre
+                 | gre <- globalRdrEnvElts rdr_env
+                 , isLocalGRE gre ]
+    in return (Nothing, avails)
+  where
+    -- #11164: when we define a data instance
+    -- but not data family, re-export the family
+    -- Even though we don't check whether this is actually a data family
+    -- only data families can locally define subordinate things (`ns` here)
+    -- without locally defining (and instead importing) the parent (`n`)
+    fix_faminst (AvailTC n ns flds)
+      | not (n `elem` ns)
+      = AvailTC n (n:ns) flds
+
+    fix_faminst avail = avail
+
 
 exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
   = do (ie_names, _, exports) <- foldlM do_litem emptyExportAccum rdr_items
@@ -1450,7 +1479,8 @@ reportUnusedNames :: Maybe (Located [LIE RdrName])  -- Export list
 reportUnusedNames _export_decls gbl_env
   = do  { traceRn ((text "RUN") <+> (ppr (tcg_dus gbl_env)))
         ; warnUnusedImportDecls gbl_env
-        ; warnUnusedTopBinds unused_locals }
+        ; warnUnusedTopBinds unused_locals
+        ; warnMissingSigs gbl_env }
   where
     used_names :: NameSet
     used_names = findUses (tcg_dus gbl_env) emptyNameSet
@@ -1524,6 +1554,81 @@ warnUnusedImportDecls gbl_env
 
        ; whenGOptM Opt_D_dump_minimal_imports $
          printMinimalImports usage }
+
+-- | Warn the user about top level binders that lack type signatures.
+warnMissingSigs :: TcGblEnv -> RnM ()
+warnMissingSigs gbl_env
+  = do { let exports = availsToNameSet (tcg_exports gbl_env)
+             sig_ns = tcg_sigs gbl_env
+             binds = tcg_binds gbl_env
+             ps    = tcg_patsyns gbl_env
+
+         -- Warn about missing signatures
+         -- Do this only when we we have a type to offer
+       ; warn_missing_sigs  <- woptM Opt_WarnMissingSigs
+       ; warn_only_exported <- woptM Opt_WarnMissingExportedSigs
+       ; warn_pat_syns      <- woptM Opt_WarnMissingPatSynSigs
+
+       ; let sig_warn
+               | warn_only_exported = topSigWarnIfExported exports sig_ns
+               | warn_missing_sigs || warn_pat_syns = topSigWarn sig_ns
+               | otherwise          = noSigWarn
+
+
+       ; let binders = (if warn_pat_syns then ps_binders else [])
+                        ++ (if warn_missing_sigs || warn_only_exported
+                              then fun_binders else [])
+
+             fun_binders = [(idType b, idName b)| b
+                              <- collectHsBindsBinders binds]
+             ps_binders  = [(patSynType p, patSynName p) | p <- ps]
+
+       ; sig_warn binders }
+
+type SigWarn = [(Type, Name)] -> RnM ()
+     -- Missing-signature warning
+
+noSigWarn :: SigWarn
+noSigWarn _ = return ()
+
+topSigWarnIfExported :: NameSet -> NameSet -> SigWarn
+topSigWarnIfExported exported sig_ns ids
+  = mapM_ (topSigWarnIdIfExported exported sig_ns) ids
+
+topSigWarnIdIfExported :: NameSet -> NameSet -> (Type, Name) -> RnM ()
+topSigWarnIdIfExported exported sig_ns (ty, name)
+  | name `elemNameSet` exported
+  = topSigWarnId sig_ns (ty, name)
+  | otherwise
+  = return ()
+
+topSigWarn :: NameSet -> SigWarn
+topSigWarn sig_ns ids = mapM_ (topSigWarnId sig_ns) ids
+
+topSigWarnId :: NameSet -> (Type, Name) -> RnM ()
+-- The NameSet is the Ids that *lack* a signature
+-- We have to do it this way round because there are
+-- lots of top-level bindings that are generated by GHC
+-- and that don't have signatures
+topSigWarnId sig_ns (ty, name)
+  | name `elemNameSet` sig_ns      = warnMissingSig msg (ty, name)
+  | otherwise                      = return ()
+  where
+    msg = ptext (sLit "Top-level binding with no type signature:")
+
+warnMissingSig :: SDoc -> (Type, Name) -> RnM ()
+warnMissingSig msg (ty, name) = do
+    tymsg <- getMsg ty
+    addWarnAt (getSrcSpan name) (mk_msg tymsg)
+  where
+    mk_msg endmsg = sep [ msg, nest 2 $ pprPrefixName name <+> endmsg ]
+
+    getMsg :: Type -> RnM SDoc
+    getMsg ty = do
+       { env <- tcInitTidyEnv
+       ; let (_, tidy_ty) = tidyOpenType env ty
+       ; return (dcolon <+> ppr tidy_ty)
+       }
 
 {-
 Note [The ImportMap]

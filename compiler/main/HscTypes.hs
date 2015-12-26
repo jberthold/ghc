@@ -14,6 +14,9 @@ module HscTypes (
         Target(..), TargetId(..), pprTarget, pprTargetId,
         ModuleGraph, emptyMG,
         HscStatus(..),
+#ifdef GHCI
+        IServ(..),
+#endif
 
         -- * Hsc monad
         Hsc(..), runHsc, runInteractiveHsc,
@@ -75,7 +78,7 @@ module HscTypes (
         -- * TyThings and type environments
         TyThing(..),  tyThingAvailInfo,
         tyThingTyCon, tyThingDataCon,
-        tyThingId, tyThingCoAxiom, tyThingParent_maybe, tyThingsTyVars,
+        tyThingId, tyThingCoAxiom, tyThingParent_maybe, tyThingsTyCoVars,
         implicitTyThings, implicitTyConThings, implicitClassThings,
         isImplicitTyThing,
 
@@ -109,6 +112,7 @@ module HscTypes (
 
         -- * Breakpoints
         ModBreaks (..), BreakIndex, emptyModBreaks,
+        CCostCentre,
 
         -- * Vectorisation information
         VectInfo(..), IfaceVectInfo(..), noVectInfo, plusVectInfo,
@@ -130,8 +134,10 @@ module HscTypes (
 #include "HsVersions.h"
 
 #ifdef GHCI
-import ByteCodeAsm      ( CompiledByteCode )
+import ByteCodeTypes        ( CompiledByteCode )
 import InteractiveEvalTypes ( Resume )
+import GHCi.Message         ( Pipe )
+import GHCi.RemoteTypes
 #endif
 
 import HsSyn
@@ -159,7 +165,9 @@ import CoAxiom
 import ConLike
 import DataCon
 import PatSyn
-import PrelNames        ( gHC_PRIM, ioTyConName, printName, mkInteractiveModule )
+import PrelNames        ( gHC_PRIM, ioTyConName, printName, mkInteractiveModule
+                        , eqTyConName )
+import TysWiredIn
 import Packages hiding  ( Version(..) )
 import DynFlags
 import DriverPhases     ( Phase, HscSource(..), isHsBootOrSig, hscSourceString )
@@ -182,16 +190,18 @@ import Binary
 import ErrUtils
 import Platform
 import Util
-import Serialized       ( Serialized )
+import GHC.Serialized   ( Serialized )
 
+import Foreign
 import Control.Monad    ( guard, liftM, when, ap )
+import Control.Concurrent
 import Data.Array       ( Array, array )
 import Data.IORef
 import Data.Time
-import Data.Word
 import Data.Typeable    ( Typeable )
 import Exception
 import System.FilePath
+import System.Process   ( ProcessHandle )
 
 -- -----------------------------------------------------------------------------
 -- Compilation state
@@ -331,7 +341,7 @@ handleFlagWarnings dflags warns
 ************************************************************************
 -}
 
--- | Hscenv is like 'Session', except that some of the fields are immutable.
+-- | HscEnv is like 'Session', except that some of the fields are immutable.
 -- An HscEnv is used to compile a single module from plain Haskell source
 -- code (after preprocessing) to either C, assembly or C--.  Things like
 -- the module graph don't change during a single compilation.
@@ -392,11 +402,26 @@ data HscEnv
                 -- ^ Used for one-shot compilation only, to initialise
                 -- the 'IfGblEnv'. See 'TcRnTypes.tcg_type_env_var' for
                 -- 'TcRunTypes.TcGblEnv'
+
+#ifdef GHCI
+        , hsc_iserv :: MVar (Maybe IServ)
+                -- ^ interactive server process.  Created the first
+                -- time it is needed.
+#endif
  }
 
 instance ContainsDynFlags HscEnv where
     extractDynFlags env = hsc_dflags env
     replaceDynFlags env dflags = env {hsc_dflags = dflags}
+
+#ifdef GHCI
+data IServ = IServ
+  { iservPipe :: Pipe
+  , iservProcess :: ProcessHandle
+  , iservLookupSymbolCache :: IORef (UniqFM (Ptr ()))
+  , iservPendingFrees :: [HValueRef]
+  }
+#endif
 
 -- | Retrieve the ExternalPackageState cache.
 hscEPS :: HscEnv -> IO ExternalPackageState
@@ -807,8 +832,10 @@ data ModIface
                 -- Cached environments for easy lookup
                 -- These are computed (lazily) from other fields
                 -- and are not put into the interface file
-        mi_warn_fn   :: Name -> Maybe WarningTxt,        -- ^ Cached lookup for 'mi_warns'
-        mi_fix_fn    :: OccName -> Fixity,               -- ^ Cached lookup for 'mi_fixities'
+        mi_warn_fn   :: OccName -> Maybe WarningTxt,
+                -- ^ Cached lookup for 'mi_warns'
+        mi_fix_fn    :: OccName -> Fixity,
+                -- ^ Cached lookup for 'mi_fixities'
         mi_hash_fn   :: OccName -> Maybe (OccName, Fingerprint),
                 -- ^ Cached lookup for 'mi_decls'.
                 -- The @Nothing@ in 'mi_hash_fn' means that the thing
@@ -1494,10 +1521,10 @@ icExtendGblRdrEnv env tythings
                              _            -> False
     is_sub_bndr _ = False
 
-substInteractiveContext :: InteractiveContext -> TvSubst -> InteractiveContext
+substInteractiveContext :: InteractiveContext -> TCvSubst -> InteractiveContext
 substInteractiveContext ictxt@InteractiveContext{ ic_tythings = tts } subst
-  | isEmptyTvSubst subst = ictxt
-  | otherwise            = ictxt { ic_tythings = map subst_ty tts }
+  | isEmptyTCvSubst subst = ictxt
+  | otherwise             = ictxt { ic_tythings = map subst_ty tts }
   where
     subst_ty (AnId id) = AnId $ id `setIdType` substTy subst (idType id)
     subst_ty tt        = tt
@@ -1560,26 +1587,25 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
                                              (mkQualPackage dflags)
   where
   qual_name mod occ
-        | [] <- unqual_gres
-        , moduleUnitId mod `elem` [primUnitId, baseUnitId, thUnitId]
-        , not (isDerivedOccName occ)
-        = NameUnqual   -- For names from ubiquitous packages that come with GHC, if
-                       -- there are no entities called unqualified 'occ', then
-                       -- print unqualified.  Doing so does not cause ambiguity,
-                       -- and it reduces the amount of qualification in error
-                       -- messages.  We can't do this for all packages, because we
-                       -- might get errors like "Can't unify T with T".  But the
-                       -- ubiquitous packages don't contain any such gratuitous
-                       -- name clashes.
-                       --
-                       -- A motivating example is 'Constraint'. It's often not in
-                       -- scope, but printing GHC.Prim.Constraint seems overkill.
-
         | [gre] <- unqual_gres
         , right_name gre
         = NameUnqual   -- If there's a unique entity that's in scope
                        -- unqualified with 'occ' AND that entity is
                        -- the right one, then we can use the unqualified name
+
+        | [] <- unqual_gres
+        , any is_name forceUnqualNames
+        , not (isDerivedOccName occ)
+        = NameUnqual   -- Don't qualify names that come from modules
+                       -- that come with GHC, often appear in error messages,
+                       -- but aren't typically in scope. Doing this does not
+                       -- cause ambiguity, and it reduces the amount of
+                       -- qualification in error messages thus improving
+                       -- readability.
+                       --
+                       -- A motivating example is 'Constraint'. It's often not
+                       -- in scope, but printing GHC.Prim.Constraint seems
+                       -- overkill.
 
         | [gre] <- qual_gres
         = NameQual (greQualModName gre)
@@ -1593,6 +1619,15 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
         = NameNotInScope1   -- Can happen if 'f' is bound twice in the module
                             -- Eg  f = True; g = 0; f = False
       where
+        is_name :: Name -> Bool
+        is_name name = nameModule name == mod && nameOccName name == occ
+
+        forceUnqualNames :: [Name]
+        forceUnqualNames =
+          map tyConName [ constraintKindTyCon, heqTyCon, coercibleTyCon
+                        , starKindTyCon, unicodeStarKindTyCon, ipTyCon ]
+          ++ [ eqTyConName ]
+
         right_name gre = nameModule_maybe (gre_name gre) == Just mod
 
         unqual_gres = lookupGRE_RdrName (mkRdrUnqual occ) env
@@ -1779,19 +1814,19 @@ tyThingParent_maybe (AnId id)     = case idDetails id of
                                       _other                      -> Nothing
 tyThingParent_maybe _other = Nothing
 
-tyThingsTyVars :: [TyThing] -> TyVarSet
-tyThingsTyVars tts =
+tyThingsTyCoVars :: [TyThing] -> TyCoVarSet
+tyThingsTyCoVars tts =
     unionVarSets $ map ttToVarSet tts
     where
-        ttToVarSet (AnId id)     = tyVarsOfType $ idType id
+        ttToVarSet (AnId id)     = tyCoVarsOfType $ idType id
         ttToVarSet (AConLike cl) = case cl of
-            RealDataCon dc  -> tyVarsOfType $ dataConRepType dc
+            RealDataCon dc  -> tyCoVarsOfType $ dataConRepType dc
             PatSynCon{}     -> emptyVarSet
         ttToVarSet (ATyCon tc)
           = case tyConClass_maybe tc of
               Just cls -> (mkVarSet . fst . classTvsFds) cls
-              Nothing  -> tyVarsOfType $ tyConKind tc
-        ttToVarSet _             = emptyVarSet
+              Nothing  -> tyCoVarsOfType $ tyConKind tc
+        ttToVarSet (ACoAxiom _)  = emptyVarSet
 
 -- | The Names that a TyThing should bring into scope.  Used to build
 -- the GlobalRdrEnv for the InteractiveContext.
@@ -2008,12 +2043,12 @@ instance Binary Warnings where
                       return (WarnSome aa)
 
 -- | Constructs the cache for the 'mi_warn_fn' field of a 'ModIface'
-mkIfaceWarnCache :: Warnings -> Name -> Maybe WarningTxt
+mkIfaceWarnCache :: Warnings -> OccName -> Maybe WarningTxt
 mkIfaceWarnCache NoWarnings  = \_ -> Nothing
 mkIfaceWarnCache (WarnAll t) = \_ -> Just t
-mkIfaceWarnCache (WarnSome pairs) = lookupOccEnv (mkOccEnv pairs) . nameOccName
+mkIfaceWarnCache (WarnSome pairs) = lookupOccEnv (mkOccEnv pairs)
 
-emptyIfaceWarnCache :: Name -> Maybe WarningTxt
+emptyIfaceWarnCache :: OccName -> Maybe WarningTxt
 emptyIfaceWarnCache _ = Nothing
 
 plusWarns :: Warnings -> Warnings -> Warnings
@@ -2837,6 +2872,9 @@ byteCodeOfObject other       = pprPanic "byteCodeOfObject" (ppr other)
 -- | Breakpoint index
 type BreakIndex = Int
 
+-- | C CostCentre type
+data CCostCentre
+
 -- | All the information about the breakpoints for a given module
 data ModBreaks
    = ModBreaks
@@ -2849,6 +2887,10 @@ data ModBreaks
         -- ^ An array giving the names of the free variables at each breakpoint.
    , modBreaks_decls :: !(Array BreakIndex [String])
         -- ^ An array giving the names of the declarations enclosing each breakpoint.
+#ifdef GHCI
+   , modBreaks_ccs :: !(Array BreakIndex (RemotePtr {- CCostCentre -}))
+        -- ^ Array pointing to cost centre for each breakpoint
+#endif
    }
 
 -- | Construct an empty ModBreaks
@@ -2859,4 +2901,7 @@ emptyModBreaks = ModBreaks
    , modBreaks_locs  = array (0,-1) []
    , modBreaks_vars  = array (0,-1) []
    , modBreaks_decls = array (0,-1) []
+#ifdef GHCI
+   , modBreaks_ccs = array (0,-1) []
+#endif
    }

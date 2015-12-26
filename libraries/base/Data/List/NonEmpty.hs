@@ -231,7 +231,7 @@ sort = lift List.sort
 -- Raises an error if given an empty list.
 fromList :: [a] -> NonEmpty a
 fromList (a:as) = a :| as
-fromList [] = error "NonEmpty.fromList: empty list"
+fromList [] = errorWithoutStackTrace "NonEmpty.fromList: empty list"
 
 -- | Convert a stream to a normal list efficiently.
 toList :: NonEmpty a -> [a]
@@ -313,7 +313,7 @@ iterate f a = a :| List.iterate f (f a)
 
 -- | @'cycle' xs@ returns the infinite repetition of @xs@:
 --
--- > cycle [1,2,3] = 1 :| [2,3,1,2,3,...]
+-- > cycle (1 :| [2,3]) = 1 :| [2,3,1,2,3,...]
 cycle :: NonEmpty a -> NonEmpty a
 cycle = fromList . List.cycle . toList
 
@@ -440,7 +440,7 @@ isPrefixOf (y:ys) (x :| xs) = (y == x) && List.isPrefixOf ys xs
 (!!) ~(x :| xs) n
   | n == 0 = x
   | n > 0  = xs List.!! (n - 1)
-  | otherwise = error "NonEmpty.!! negative argument"
+  | otherwise = errorWithoutStackTrace "NonEmpty.!! negative argument"
 
 -- | The 'zip' function takes two streams and returns a stream of
 -- corresponding pairs.

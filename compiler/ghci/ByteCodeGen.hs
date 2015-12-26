@@ -9,11 +9,13 @@ module ByteCodeGen ( UnlinkedBCO, byteCodeGen, coreExprToBCOs ) where
 #include "HsVersions.h"
 
 import ByteCodeInstr
-import ByteCodeItbls
 import ByteCodeAsm
-import ByteCodeLink
-import LibFFI
+import ByteCodeTypes
 
+import GHCi
+import GHCi.FFI
+import GHCi.RemoteTypes
+import BasicTypes
 import DynFlags
 import Outputable
 import Platform
@@ -45,7 +47,6 @@ import OrdList
 
 import Data.List
 import Foreign
-import Foreign.C
 
 #if __GLASGOW_HASKELL__ < 709
 import Control.Applicative (Applicative(..))
@@ -57,9 +58,9 @@ import UniqSupply
 import BreakArray
 import Data.Maybe
 import Module
+import Control.Arrow ( second )
 
-import qualified Data.ByteString        as BS
-import qualified Data.ByteString.Unsafe as BS
+import Data.Array
 import Data.Map (Map)
 import qualified Data.Map as Map
 import qualified FiniteMap as Map
@@ -68,41 +69,43 @@ import Data.Ord
 -- -----------------------------------------------------------------------------
 -- Generating byte code for a complete module
 
-byteCodeGen :: DynFlags
+byteCodeGen :: HscEnv
             -> Module
             -> CoreProgram
             -> [TyCon]
             -> ModBreaks
             -> IO CompiledByteCode
-byteCodeGen dflags this_mod binds tycs modBreaks
-   = do showPass dflags "ByteCodeGen"
+byteCodeGen hsc_env this_mod binds tycs modBreaks
+   = do let dflags = hsc_dflags hsc_env
+        showPass dflags "ByteCodeGen"
 
-        let flatBinds = [ (bndr, freeVars rhs)
+        let flatBinds = [ (bndr, simpleFreeVars rhs)
                         | (bndr, rhs) <- flattenBinds binds]
 
         us <- mkSplitUniqSupply 'y'
-        (BcM_State _dflags _us _this_mod _final_ctr mallocd _, proto_bcos)
-           <- runBc dflags us this_mod modBreaks (mapM schemeTopBind flatBinds)
+        (BcM_State _hsc_env _us _this_mod _final_ctr ffis _, proto_bcos)
+           <- runBc hsc_env us this_mod modBreaks (mapM schemeTopBind flatBinds)
 
-        when (notNull mallocd)
+        when (notNull ffis)
              (panic "ByteCodeGen.byteCodeGen: missing final emitBc?")
 
         dumpIfSet_dyn dflags Opt_D_dump_BCOs
            "Proto-BCOs" (vcat (intersperse (char ' ') (map ppr proto_bcos)))
 
-        assembleBCOs dflags proto_bcos tycs
+        assembleBCOs hsc_env proto_bcos tycs
 
 -- -----------------------------------------------------------------------------
 -- Generating byte code for an expression
 
 -- Returns: (the root BCO for this expression,
 --           a list of auxilary BCOs resulting from compiling closures)
-coreExprToBCOs :: DynFlags
+coreExprToBCOs :: HscEnv
                -> Module
                -> CoreExpr
                -> IO UnlinkedBCO
-coreExprToBCOs dflags this_mod expr
- = do showPass dflags "ByteCodeGen"
+coreExprToBCOs hsc_env this_mod expr
+ = do let dflags = hsc_dflags hsc_env
+      showPass dflags "ByteCodeGen"
 
       -- create a totally bogus name for the top-level BCO; this
       -- should be harmless, since it's never used for anything
@@ -113,8 +116,8 @@ coreExprToBCOs dflags this_mod expr
       -- let bindings for ticked expressions
       us <- mkSplitUniqSupply 'y'
       (BcM_State _dflags _us _this_mod _final_ctr mallocd _ , proto_bco)
-         <- runBc dflags us this_mod emptyModBreaks $
-              schemeTopBind (invented_id, freeVars expr)
+         <- runBc hsc_env us this_mod emptyModBreaks $
+              schemeTopBind (invented_id, simpleFreeVars expr)
 
       when (notNull mallocd)
            (panic "ByteCodeGen.coreExprToBCOs: missing final emitBc?")
@@ -123,6 +126,31 @@ coreExprToBCOs dflags this_mod expr
 
       assembleBCO dflags proto_bco
 
+
+-- The regular freeVars function gives more information than is useful to
+-- us here. simpleFreeVars does the impedence matching.
+simpleFreeVars :: CoreExpr -> AnnExpr Id DVarSet
+simpleFreeVars = go . freeVars
+  where
+    go :: AnnExpr Id FVAnn -> AnnExpr Id DVarSet
+    go (ann, e) = (freeVarsOfAnn ann, go' e)
+
+    go' :: AnnExpr' Id FVAnn -> AnnExpr' Id DVarSet
+    go' (AnnVar id)                  = AnnVar id
+    go' (AnnLit lit)                 = AnnLit lit
+    go' (AnnLam bndr body)           = AnnLam bndr (go body)
+    go' (AnnApp fun arg)             = AnnApp (go fun) (go arg)
+    go' (AnnCase scrut bndr ty alts) = AnnCase (go scrut) bndr ty (map go_alt alts)
+    go' (AnnLet bind body)           = AnnLet (go_bind bind) (go body)
+    go' (AnnCast expr (ann, co))     = AnnCast (go expr) (freeVarsOfAnn ann, co)
+    go' (AnnTick tick body)          = AnnTick tick (go body)
+    go' (AnnType ty)                 = AnnType ty
+    go' (AnnCoercion co)             = AnnCoercion co
+
+    go_alt (con, args, expr) = (con, args, go expr)
+
+    go_bind (AnnNonRec bndr rhs) = AnnNonRec bndr (go rhs)
+    go_bind (AnnRec pairs)       = AnnRec (map (second go) pairs)
 
 -- -----------------------------------------------------------------------------
 -- Compilation schema for the bytecode generator
@@ -157,9 +185,9 @@ mkProtoBCO
    -> Word16
    -> [StgWord]
    -> Bool      -- True <=> is a return point, rather than a function
-   -> [BcPtr]
+   -> [FFIInfo]
    -> ProtoBCO name
-mkProtoBCO dflags nm instrs_ordlist origin arity bitmap_size bitmap is_ret mallocd_blocks
+mkProtoBCO dflags nm instrs_ordlist origin arity bitmap_size bitmap is_ret ffis
    = ProtoBCO {
         protoBCOName = nm,
         protoBCOInstrs = maybe_with_stack_check,
@@ -167,7 +195,7 @@ mkProtoBCO dflags nm instrs_ordlist origin arity bitmap_size bitmap is_ret mallo
         protoBCOBitmapSize = bitmap_size,
         protoBCOArity = arity,
         protoBCOExpr = origin,
-        protoBCOPtrs = mallocd_blocks
+        protoBCOFFIs = ffis
       }
      where
         -- Overestimate the stack usage (in words) of this BCO,
@@ -307,7 +335,8 @@ schemeER_wrk :: Word -> BCEnv -> AnnExpr' Id DVarSet -> BcM BCInstrList
 schemeER_wrk d p rhs
   | AnnTick (Breakpoint tick_no fvs) (_annot, newRhs) <- rhs
   = do  code <- schemeE (fromIntegral d) 0 p newRhs
-        arr <- getBreakArray
+        flag_arr <- getBreakArray
+        cc_arr <- getCCArray
         this_mod <- getCurrentModule
         let idOffSets = getVarOffSets d p fvs
         let breakInfo = BreakInfo
@@ -316,9 +345,12 @@ schemeER_wrk d p rhs
                         , breakInfo_vars = idOffSets
                         , breakInfo_resty = exprType (deAnnotate' newRhs)
                         }
-        let breakInstr = case arr of
+        dflags <- getDynFlags
+        let cc | interpreterProfiled dflags = cc_arr ! tick_no
+               | otherwise = toRemotePtr nullPtr
+        let breakInstr = case flag_arr of
                          BA arr# ->
-                             BRK_FUN arr# (fromIntegral tick_no) breakInfo
+                             BRK_FUN arr# (fromIntegral tick_no) breakInfo cc
         return $ breakInstr `consOL` code
    | otherwise = schemeE (fromIntegral d) 0 p rhs
 
@@ -755,12 +787,20 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
   = do
      dflags <- getDynFlags
      let
+        profiling
+          | gopt Opt_ExternalInterpreter dflags = gopt Opt_SccProfilingOn dflags
+          | otherwise = rtsIsProfiled
+
         -- Top of stack is the return itbl, as usual.
         -- underneath it is the pointer to the alt_code BCO.
         -- When an alt is entered, it assumes the returned value is
         -- on top of the itbl.
         ret_frame_sizeW :: Word
         ret_frame_sizeW = 2
+
+        -- The extra frame we push to save/restor the CCCS when profiling
+        save_ccs_sizeW | profiling = 2
+                       | otherwise = 0
 
         -- An unlifted value gets an extra info table pushed on top
         -- when it is returned.
@@ -877,8 +917,9 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
                        0{-no arity-} bitmap_size bitmap True{-is alts-}
 --     trace ("case: bndr = " ++ showSDocDebug (ppr bndr) ++ "\ndepth = " ++ show d ++ "\nenv = \n" ++ showSDocDebug (ppBCEnv p) ++
 --            "\n      bitmap = " ++ show bitmap) $ do
-     scrut_code <- schemeE (d + ret_frame_sizeW)
-                           (d + ret_frame_sizeW)
+
+     scrut_code <- schemeE (d + ret_frame_sizeW + save_ccs_sizeW)
+                           (d + ret_frame_sizeW + save_ccs_sizeW)
                            p scrut
      alt_bco' <- emitBc alt_bco
      let push_alts
@@ -1015,27 +1056,23 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
             void marshall_code ( StgWord* ptr_to_top_of_stack )
          -}
          -- resolve static address
-         get_target_info = do
+         maybe_static_target =
              case target of
-                 DynamicTarget
-                    -> return (False, panic "ByteCodeGen.generateCCall(dyn)")
-
+                 DynamicTarget -> Nothing
                  StaticTarget _ _ _ False ->
-                     panic "generateCCall: unexpected FFI value import"
-                 StaticTarget _ target _ True
-                    -> do res <- ioToBc (lookupStaticPtr stdcall_adj_target)
-                          return (True, res)
+                   panic "generateCCall: unexpected FFI value import"
+                 StaticTarget _ target _ True ->
+                   Just (MachLabel target mb_size IsFunction)
                    where
-                      stdcall_adj_target
+                      mb_size
                           | OSMinGW32 <- platformOS (targetPlatform dflags)
                           , StdCallConv <- cconv
-                          = let size = fromIntegral a_reps_sizeW * wORD_SIZE dflags in
-                            mkFastString (unpackFS target ++ '@':show size)
+                          = Just (fromIntegral a_reps_sizeW * wORD_SIZE dflags)
                           | otherwise
-                          = target
+                          = Nothing
 
-     (is_static, static_target_addr) <- get_target_info
      let
+         is_static = isJust maybe_static_target
 
          -- Get the arg reps, zapping the leading Addr# in the dynamic case
          a_reps --  | trace (showSDoc (ppr a_reps_pushed_RAW)) False = error "???"
@@ -1046,8 +1083,8 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
 
          -- push the Addr#
          (push_Addr, d_after_Addr)
-            | is_static
-            = (toOL [PUSH_UBX (Right static_target_addr) addr_sizeW],
+            | Just machlabel <- maybe_static_target
+            = (toOL [PUSH_UBX machlabel addr_sizeW],
                d_after_args + fromIntegral addr_sizeW)
             | otherwise -- is already on the stack
             = (nilOL, d_after_args)
@@ -1059,7 +1096,7 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
          r_lit     = mkDummyLiteral r_rep
          push_r    = (if   returns_void
                       then nilOL
-                      else unitOL (PUSH_UBX (Left r_lit) r_sizeW))
+                      else unitOL (PUSH_UBX r_lit r_sizeW))
 
          -- generate the marshalling code we're going to call
 
@@ -1069,16 +1106,25 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
          -- is.  See comment in Interpreter.c with the CCALL instruction.
          stk_offset   = trunc16 $ d_after_r - s
 
+         conv = case cconv of
+           CCallConv -> FFICCall
+           StdCallConv -> FFIStdCall
+           _ -> panic "ByteCodeGen: unexpected calling convention"
+
      -- the only difference in libffi mode is that we prepare a cif
      -- describing the call type by calling libffi, and we attach the
      -- address of this to the CCALL instruction.
-     token <- ioToBc $ prepForeignCall dflags cconv a_reps r_rep
-     let addr_of_marshaller = castPtrToFunPtr token
 
-     recordItblMallocBc (ItblPtr (castFunPtrToPtr addr_of_marshaller))
+
+     let ffires = primRepToFFIType dflags r_rep
+         ffiargs = map (primRepToFFIType dflags) a_reps
+     hsc_env <- getHscEnv
+     token <- ioToBc $ iservCmd hsc_env (PrepFFI conv ffiargs ffires)
+     recordFFIBc token
+
      let
          -- do the call
-         do_call      = unitOL (CCALL stk_offset (castFunPtrToPtr addr_of_marshaller)
+         do_call      = unitOL (CCALL stk_offset token
                                  (fromIntegral (fromEnum (playInterruptible safety))))
          -- slide and return
          wrapup       = mkSLIDE r_sizeW (d_after_r - fromIntegral r_sizeW - s)
@@ -1088,6 +1134,24 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
          push_args `appOL`
          push_Addr `appOL` push_r `appOL` do_call `appOL` wrapup
          )
+
+primRepToFFIType :: DynFlags -> PrimRep -> FFIType
+primRepToFFIType dflags r
+  = case r of
+     VoidRep     -> FFIVoid
+     IntRep      -> signed_word
+     WordRep     -> unsigned_word
+     Int64Rep    -> FFISInt64
+     Word64Rep   -> FFIUInt64
+     AddrRep     -> FFIPointer
+     FloatRep    -> FFIFloat
+     DoubleRep   -> FFIDouble
+     _           -> panic "primRepToFFIType"
+  where
+    (signed_word, unsigned_word)
+       | wORD_SIZE dflags == 4  = (FFISInt32, FFIUInt32)
+       | wORD_SIZE dflags == 8  = (FFISInt64, FFIUInt64)
+       | otherwise              = panic "primTyDescChar"
 
 -- Make a dummy literal, to be used as a placeholder for FFI return
 -- values on the stack.
@@ -1213,7 +1277,7 @@ implement_tagToId d s p arg names
            steps = map (mkStep label_exit) infos
 
        return (push_arg
-               `appOL` unitOL (PUSH_UBX (Left MachNullAddr) 1)
+               `appOL` unitOL (PUSH_UBX MachNullAddr 1)
                    -- Push bogus word (see Note [Implementing tagToEnum#])
                `appOL` concatOL steps
                `appOL` toOL [ LABEL label_fail, CASEFAIL,
@@ -1292,7 +1356,7 @@ pushAtom _ _ (AnnLit lit) = do
      dflags <- getDynFlags
      let code rep
              = let size_host_words = fromIntegral (argRepSizeW dflags rep)
-               in  return (unitOL (PUSH_UBX (Left lit) size_host_words),
+               in  return (unitOL (PUSH_UBX lit size_host_words),
                            size_host_words)
 
      case lit of
@@ -1305,41 +1369,15 @@ pushAtom _ _ (AnnLit lit) = do
         MachDouble _  -> code D
         MachChar _    -> code N
         MachNullAddr  -> code N
-        MachStr s     -> pushStr s
+        MachStr _     -> code N
         -- No LitInteger's should be left by the time this is called.
         -- CorePrep should have converted them all to a real core
         -- representation.
         LitInteger {} -> panic "pushAtom: LitInteger"
-     where
-        pushStr s
-           = let getMallocvilleAddr
-                    =
-                            -- we could grab the Ptr from the ForeignPtr,
-                            -- but then we have no way to control its lifetime.
-                            -- In reality it'll probably stay alive long enoungh
-                            -- by virtue of the global FastString table, but
-                            -- to be on the safe side we copy the string into
-                            -- a malloc'd area of memory.
-                                do let n = BS.length s
-                                   ptr <- ioToBc (mallocBytes (n+1))
-                                   recordMallocBc ptr
-                                   ioToBc (
-                                      BS.unsafeUseAsCString s $ \p -> do
-                                         memcpy ptr p (fromIntegral n)
-                                         pokeByteOff ptr n (fromIntegral (ord '\0') :: Word8)
-                                         return ptr
-                                      )
-             in do
-                addr <- getMallocvilleAddr
-                -- Get the addr on the stack, untaggedly
-                return (unitOL (PUSH_UBX (Right addr) 1), 1)
 
 pushAtom _ _ expr
    = pprPanic "ByteCodeGen.pushAtom"
               (pprCoreExpr (deAnnotate (undefined, expr)))
-
-foreign import ccall unsafe "memcpy"
- memcpy :: Ptr a -> Ptr b -> CSize -> IO ()
 
 
 -- -----------------------------------------------------------------------------
@@ -1600,17 +1638,15 @@ typeArgRep = toArgRep . typePrimRep
 -- -----------------------------------------------------------------------------
 -- The bytecode generator's monad
 
-type BcPtr = Either ItblPtr (Ptr ())
-
 data BcM_State
    = BcM_State
-        { bcm_dflags :: DynFlags
-        , uniqSupply :: UniqSupply       -- for generating fresh variable names
-        , thisModule :: Module           -- current module (for breakpoints)
-        , nextlabel :: Word16            -- for generating local labels
-        , malloced  :: [BcPtr]           -- thunks malloced for current BCO
+        { bcm_hsc_env :: HscEnv
+        , uniqSupply  :: UniqSupply      -- for generating fresh variable names
+        , thisModule  :: Module          -- current module (for breakpoints)
+        , nextlabel   :: Word16          -- for generating local labels
+        , ffis        :: [FFIInfo]       -- ffi info blocks, to free later
                                          -- Should be free()d when it is GCd
-        , breakArray :: BreakArray       -- array of breakpoint flags
+        , modBreaks :: ModBreaks         -- info about breakpoints
         }
 
 newtype BcM r = BcM (BcM_State -> IO (BcM_State, r))
@@ -1620,12 +1656,10 @@ ioToBc io = BcM $ \st -> do
   x <- io
   return (st, x)
 
-runBc :: DynFlags -> UniqSupply -> Module -> ModBreaks -> BcM r
+runBc :: HscEnv -> UniqSupply -> Module -> ModBreaks -> BcM r
       -> IO (BcM_State, r)
-runBc dflags us this_mod modBreaks (BcM m)
-   = m (BcM_State dflags us this_mod 0 [] breakArray)
-   where
-   breakArray = modBreaks_flags modBreaks
+runBc hsc_env us this_mod modBreaks (BcM m)
+   = m (BcM_State hsc_env us this_mod 0 [] modBreaks)
 
 thenBc :: BcM a -> (a -> BcM b) -> BcM b
 thenBc (BcM expr) cont = BcM $ \st0 -> do
@@ -1657,19 +1691,18 @@ instance Monad BcM where
   return = pure
 
 instance HasDynFlags BcM where
-    getDynFlags = BcM $ \st -> return (st, bcm_dflags st)
+    getDynFlags = BcM $ \st -> return (st, hsc_dflags (bcm_hsc_env st))
 
-emitBc :: ([BcPtr] -> ProtoBCO Name) -> BcM (ProtoBCO Name)
+getHscEnv :: BcM HscEnv
+getHscEnv = BcM $ \st -> return (st, bcm_hsc_env st)
+
+emitBc :: ([FFIInfo] -> ProtoBCO Name) -> BcM (ProtoBCO Name)
 emitBc bco
-  = BcM $ \st -> return (st{malloced=[]}, bco (malloced st))
+  = BcM $ \st -> return (st{ffis=[]}, bco (ffis st))
 
-recordMallocBc :: Ptr a -> BcM ()
-recordMallocBc a
-  = BcM $ \st -> return (st{malloced = Right (castPtr a) : malloced st}, ())
-
-recordItblMallocBc :: ItblPtr -> BcM ()
-recordItblMallocBc a
-  = BcM $ \st -> return (st{malloced = Left a : malloced st}, ())
+recordFFIBc :: RemotePtr -> BcM ()
+recordFFIBc a
+  = BcM $ \st -> return (st{ffis = FFIInfo a : ffis st}, ())
 
 getLabelBc :: BcM Word16
 getLabelBc
@@ -1684,7 +1717,10 @@ getLabelsBc n
                  in return (st{nextlabel = ctr+n}, [ctr .. ctr+n-1])
 
 getBreakArray :: BcM BreakArray
-getBreakArray = BcM $ \st -> return (st, breakArray st)
+getBreakArray = BcM $ \st -> return (st, modBreaks_flags (modBreaks st))
+
+getCCArray :: BcM (Array BreakIndex RemotePtr {- CCostCentre -})
+getCCArray = BcM $ \st -> return (st, modBreaks_ccs (modBreaks st))
 
 newUnique :: BcM Unique
 newUnique = BcM $

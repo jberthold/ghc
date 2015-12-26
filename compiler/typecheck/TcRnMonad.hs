@@ -51,6 +51,8 @@ import Util
 import Annotations
 import BasicTypes( TopLevelFlag )
 
+import qualified GHC.LanguageExtensions as LangExt
+
 import Control.Exception
 import Data.IORef
 import Control.Monad
@@ -99,6 +101,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
         th_topnames_var      <- newIORef emptyNameSet ;
         th_modfinalizers_var <- newIORef [] ;
         th_state_var         <- newIORef Map.empty ;
+        th_remote_state_var  <- newIORef Nothing ;
 #endif /* GHCI */
         let {
              dflags = hsc_dflags hsc_env ;
@@ -114,6 +117,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 tcg_th_topnames      = th_topnames_var,
                 tcg_th_modfinalizers = th_modfinalizers_var,
                 tcg_th_state         = th_state_var,
+                tcg_th_remote_state  = th_remote_state_var,
 #endif /* GHCI */
 
                 tcg_mod            = mod,
@@ -302,7 +306,7 @@ setEnvs (gbl_env, lcl_env) = updEnv (\ env -> env { env_gbl = gbl_env, env_lcl =
 
 -- Command-line flags
 
-xoptM :: ExtensionFlag -> TcRnIf gbl lcl Bool
+xoptM :: LangExt.Extension -> TcRnIf gbl lcl Bool
 xoptM flag = do { dflags <- getDynFlags; return (xopt flag dflags) }
 
 doptM :: DumpFlag -> TcRnIf gbl lcl Bool
@@ -314,7 +318,7 @@ goptM flag = do { dflags <- getDynFlags; return (gopt flag dflags) }
 woptM :: WarningFlag -> TcRnIf gbl lcl Bool
 woptM flag = do { dflags <- getDynFlags; return (wopt flag dflags) }
 
-setXOptM :: ExtensionFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
+setXOptM :: LangExt.Extension -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
 setXOptM flag = updEnv (\ env@(Env { env_top = top }) ->
                           env { env_top = top { hsc_dflags = xopt_set (hsc_dflags top) flag}} )
 
@@ -339,7 +343,7 @@ whenWOptM :: WarningFlag -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
 whenWOptM flag thing_inside = do b <- woptM flag
                                  when b thing_inside
 
-whenXOptM :: ExtensionFlag -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
+whenXOptM :: LangExt.Extension -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
 whenXOptM flag thing_inside = do b <- xoptM flag
                                  when b thing_inside
 
@@ -452,7 +456,7 @@ newName occ
        ; loc  <- getSrcSpanM
        ; return (mkInternalName uniq occ loc) }
 
-newSysName :: OccName -> TcM Name
+newSysName :: OccName -> TcRnIf gbl lcl Name
 newSysName occ
   = do { uniq <- newUnique
        ; return (mkSystemName uniq occ) }
@@ -460,12 +464,12 @@ newSysName occ
 newSysLocalId :: FastString -> TcType -> TcRnIf gbl lcl TcId
 newSysLocalId fs ty
   = do  { u <- newUnique
-        ; return (mkSysLocal fs u ty) }
+        ; return (mkSysLocalOrCoVar fs u ty) }
 
 newSysLocalIds :: FastString -> [TcType] -> TcRnIf gbl lcl [TcId]
 newSysLocalIds fs tys
   = do  { us <- newUniqueSupply
-        ; return (zipWith (mkSysLocal fs) (uniqsFromSupply us) tys) }
+        ; return (zipWith (mkSysLocalOrCoVar fs) (uniqsFromSupply us) tys) }
 
 instance MonadUnique (IOEnv (Env gbl lcl)) where
         getUniqueM = newUnique
@@ -686,7 +690,7 @@ getErrsVar = do { env <- getLclEnv; return (tcl_errs env) }
 setErrsVar :: TcRef Messages -> TcRn a -> TcRn a
 setErrsVar v = updLclEnv (\ env -> env { tcl_errs =  v })
 
-addErr :: MsgDoc -> TcRn ()    -- Ignores the context stack
+addErr :: MsgDoc -> TcRn ()
 addErr msg = do { loc <- getSrcSpanM; addErrAt loc msg }
 
 failWith :: MsgDoc -> TcRn a
@@ -968,14 +972,26 @@ getErrCtxt = do { env <- getLclEnv; return (tcl_ctxt env) }
 setErrCtxt :: [ErrCtxt] -> TcM a -> TcM a
 setErrCtxt ctxt = updLclEnv (\ env -> env { tcl_ctxt = ctxt })
 
+-- | Add a fixed message to the error context. This message should not
+-- do any tidying.
 addErrCtxt :: MsgDoc -> TcM a -> TcM a
 addErrCtxt msg = addErrCtxtM (\env -> return (env, msg))
 
+-- | Add a message to the error context. This message may do tidying.
 addErrCtxtM :: (TidyEnv -> TcM (TidyEnv, MsgDoc)) -> TcM a -> TcM a
 addErrCtxtM ctxt = updCtxt (\ ctxts -> (False, ctxt) : ctxts)
 
+-- | Add a fixed landmark message to the error context. A landmark
+-- message is always sure to be reported, even if there is a lot of
+-- context. It also doesn't count toward the maximum number of contexts
+-- reported.
 addLandmarkErrCtxt :: MsgDoc -> TcM a -> TcM a
-addLandmarkErrCtxt msg = updCtxt (\ctxts -> (True, \env -> return (env,msg)) : ctxts)
+addLandmarkErrCtxt msg = addLandmarkErrCtxtM (\env -> return (env, msg))
+
+-- | Variant of 'addLandmarkErrCtxt' that allows for monadic operations
+-- and tidying.
+addLandmarkErrCtxtM :: (TidyEnv -> TcM (TidyEnv, MsgDoc)) -> TcM a -> TcM a
+addLandmarkErrCtxtM ctxt = updCtxt (\ctxts -> (True, ctxt) : ctxts)
 
 -- Helper function for the above
 updCtxt :: ([ErrCtxt] -> [ErrCtxt]) -> TcM a -> TcM a
@@ -985,12 +1001,13 @@ updCtxt upd = updLclEnv (\ env@(TcLclEnv { tcl_ctxt = ctxt }) ->
 popErrCtxt :: TcM a -> TcM a
 popErrCtxt = updCtxt (\ msgs -> case msgs of { [] -> []; (_ : ms) -> ms })
 
-getCtLocM :: CtOrigin -> TcM CtLoc
-getCtLocM origin
+getCtLocM :: CtOrigin -> Maybe TypeOrKind -> TcM CtLoc
+getCtLocM origin t_or_k
   = do { env <- getLclEnv
        ; return (CtLoc { ctl_origin = origin
-                       , ctl_env = env
-                       , ctl_depth = initialSubGoalDepth }) }
+                       , ctl_env    = env
+                       , ctl_t_or_k = t_or_k
+                       , ctl_depth  = initialSubGoalDepth }) }
 
 setCtLocM :: CtLoc -> TcM a -> TcM a
 -- Set the SrcSpan and error context from the CtLoc
@@ -1047,15 +1064,30 @@ checkTc :: Bool -> MsgDoc -> TcM ()         -- Check that the boolean is true
 checkTc True  _   = return ()
 checkTc False err = failWithTc err
 
+checkTcM :: Bool -> (TidyEnv, MsgDoc) -> TcM ()
+checkTcM True  _   = return ()
+checkTcM False err = failWithTcM err
+
 failIfTc :: Bool -> MsgDoc -> TcM ()         -- Check that the boolean is false
 failIfTc False _   = return ()
 failIfTc True  err = failWithTc err
+
+failIfTcM :: Bool -> (TidyEnv, MsgDoc) -> TcM ()
+   -- Check that the boolean is false
+failIfTcM False _   = return ()
+failIfTcM True  err = failWithTcM err
+
 
 --         Warnings have no 'M' variant, nor failure
 
 warnTc :: Bool -> MsgDoc -> TcM ()
 warnTc warn_if_true warn_msg
   | warn_if_true = addWarnTc warn_msg
+  | otherwise    = return ()
+
+warnTcM :: Bool -> (TidyEnv, MsgDoc) -> TcM ()
+warnTcM warn_if_true warn_msg
+  | warn_if_true = addWarnTcM warn_msg
   | otherwise    = return ()
 
 addWarnTc :: MsgDoc -> TcM ()
@@ -1091,6 +1123,15 @@ tcInitTidyEnv :: TcM TidyEnv
 tcInitTidyEnv
   = do  { lcl_env <- getLclEnv
         ; return (tcl_tidy lcl_env) }
+
+-- | Get a 'TidyEnv' that includes mappings for all vars free in the given
+-- type. Useful when tidying open types.
+tcInitOpenTidyEnv :: TyCoVarSet -> TcM TidyEnv
+tcInitOpenTidyEnv tvs
+  = do { env1 <- tcInitTidyEnv
+       ; let env2 = tidyFreeTyCoVars env1 tvs
+       ; return env2 }
+
 
 {-
 -----------------------------------
@@ -1144,12 +1185,14 @@ debugTc thing
 newTcEvBinds :: TcM EvBindsVar
 newTcEvBinds = do { ref <- newTcRef emptyEvBindMap
                   ; uniq <- newUnique
+                  ; traceTc "newTcEvBinds" (text "unique =" <+> ppr uniq)
                   ; return (EvBindsVar ref uniq) }
 
 addTcEvBind :: EvBindsVar -> EvBind -> TcM ()
 -- Add a binding to the TcEvBinds by side effect
-addTcEvBind (EvBindsVar ev_ref _) ev_bind
-  = do { traceTc "addTcEvBind" $ ppr ev_bind
+addTcEvBind (EvBindsVar ev_ref u) ev_bind
+  = do { traceTc "addTcEvBind" $ ppr u $$
+                                 ppr ev_bind
        ; bnds <- readTcRef ev_ref
        ; writeTcRef ev_ref (extendEvBinds bnds ev_bind) }
 
@@ -1157,6 +1200,10 @@ getTcEvBinds :: EvBindsVar -> TcM (Bag EvBind)
 getTcEvBinds (EvBindsVar ev_ref _)
   = do { bnds <- readTcRef ev_ref
        ; return (evBindMapBinds bnds) }
+
+getTcEvBindsMap :: EvBindsVar -> TcM EvBindMap
+getTcEvBindsMap (EvBindsVar ev_ref _)
+  = readTcRef ev_ref
 
 chooseUniqueOccTc :: (OccSet -> OccName) -> TcM OccName
 chooseUniqueOccTc fn =
@@ -1205,6 +1252,10 @@ emitInsoluble ct
          updTcRef lie_var (`addInsols` unitBag ct) ;
          v <- readTcRef lie_var ;
          traceTc "emitInsoluble" (ppr v) }
+
+-- | Throw out any constraints emitted by the thing_inside
+discardConstraints :: TcM a -> TcM a
+discardConstraints thing_inside = fst <$> captureConstraints thing_inside
 
 captureConstraints :: TcM a -> TcM (a, WantedConstraints)
 -- (captureConstraints m) runs m, and returns the type constraints it generates
@@ -1271,7 +1322,7 @@ traceTcConstraints msg
 
 emitWildCardHoleConstraints :: [(Name, TcTyVar)] -> TcM ()
 emitWildCardHoleConstraints wcs
-  = do { ctLoc <- getCtLocM HoleOrigin
+  = do { ctLoc <- getCtLocM HoleOrigin Nothing
        ; forM_ wcs $ \(name, tv) -> do {
        ; let real_span = case nameSrcSpan name of
                            RealSrcSpan span  -> span
@@ -1280,7 +1331,8 @@ emitWildCardHoleConstraints wcs
                -- Wildcards are defined locally, and so have RealSrcSpans
              ctLoc' = setCtLocSpan ctLoc real_span
              ty     = mkTyVarTy tv
-             can    = CHoleCan { cc_ev   = CtDerived { ctev_pred = ty, ctev_loc = ctLoc' }
+             can    = CHoleCan { cc_ev   = CtDerived { ctev_pred = ty
+                                                     , ctev_loc  = ctLoc' }
                                , cc_occ  = occName name
                                , cc_hole = TypeHole }
        ; emitInsoluble can } }

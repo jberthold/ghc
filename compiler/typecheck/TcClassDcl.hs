@@ -26,7 +26,7 @@ import TcBinds
 import TcUnify
 import TcHsType
 import TcMType
-import Type     ( getClassPredTys_maybe )
+import Type     ( getClassPredTys_maybe, varSetElemsWellScoped )
 import TcType
 import TcRnMonad
 import BuildTyCl( TcMethInfo )
@@ -45,7 +45,6 @@ import VarSet
 import Outputable
 import SrcLoc
 import TyCon
-import TypeRep
 import Maybes
 import BasicTypes
 import Bag
@@ -209,7 +208,8 @@ tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
             -- Base the local_dm_name on the selector name, because
             -- type errors from tcInstanceMethodBody come from here
 
-       ; spec_prags <- tcSpecPrags global_dm_id prags
+       ; spec_prags <- discardConstraints $
+                       tcSpecPrags global_dm_id prags
        ; warnTc (not (null spec_prags))
                 (ptext (sLit "Ignoring SPECIALISE pragmas on default method")
                  <+> quotes (ppr sel_name))
@@ -247,13 +247,14 @@ tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
                   tcPolyCheck NonRecursive no_prag_fn local_dm_sig
                               (L bind_loc lm_bind)
 
-        ; let export = ABE { abe_poly  = global_dm_id
+        ; let export = ABE { abe_poly      = global_dm_id
                            -- We have created a complete type signature in
                            -- instTcTySig, hence it is safe to call
                            -- completeSigPolyId
-                           , abe_mono  = completeIdSigPolyId local_dm_sig
-                           , abe_wrap  = idHsWrapper
-                           , abe_prags = IsDefaultMethod }
+                           , abe_mono      = completeIdSigPolyId local_dm_sig
+                           , abe_wrap      = idHsWrapper
+                           , abe_inst_wrap = idHsWrapper
+                           , abe_prags     = IsDefaultMethod }
               full_bind = AbsBinds { abs_tvs      = tyvars
                                    , abs_ev_vars  = [this_dict]
                                    , abs_exports  = [export]
@@ -436,7 +437,7 @@ warningMinimalDefIncomplete mindef
 tcATDefault :: Bool -- If a warning should be emitted when a default instance
                     -- definition is not provided by the user
             -> SrcSpan
-            -> TvSubst
+            -> TCvSubst
             -> NameSet
             -> ClassATItem
             -> TcM [FamInst]
@@ -456,10 +457,12 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
   = do { let (subst', pat_tys') = mapAccumL subst_tv inst_subst
                                             (tyConTyVars fam_tc)
              rhs'     = substTy subst' rhs_ty
-             tv_set'  = tyVarsOfTypes pat_tys'
-             tvs'     = varSetElemsKvsFirst tv_set'
+             tcv_set' = tyCoVarsOfTypes pat_tys'
+             (tv_set', cv_set') = partitionVarSet isTyVar tcv_set'
+             tvs'     = varSetElemsWellScoped tv_set'
+             cvs'     = varSetElemsWellScoped cv_set'
        ; rep_tc_name <- newFamInstTyConName (L loc (tyConName fam_tc)) pat_tys'
-       ; let axiom = mkSingleCoAxiom Nominal rep_tc_name tvs'
+       ; let axiom = mkSingleCoAxiom Nominal rep_tc_name tvs' cvs'
                                      fam_tc pat_tys' rhs'
            -- NB: no validity check. We check validity of default instances
            -- in the class definition. Because type instance arguments cannot
@@ -468,7 +471,7 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
 
        ; traceTc "mk_deflt_at_instance" (vcat [ ppr fam_tc, ppr rhs_ty
                                               , pprCoAxiom axiom ])
-       ; fam_inst <- ASSERT( tyVarsOfType rhs' `subVarSet` tv_set' )
+       ; fam_inst <- ASSERT( tyCoVarsOfType rhs' `subVarSet` tv_set' )
                      newFamInst SynFamilyInst axiom
        ; return [fam_inst] }
 
@@ -481,7 +484,7 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
       | Just ty <- lookupVarEnv (getTvSubstEnv subst) tc_tv
       = (subst, ty)
       | otherwise
-      = (extendTvSubst subst tc_tv ty', ty')
+      = (extendTCvSubst subst tc_tv ty', ty')
       where
         ty' = mkTyVarTy (updateTyVarKind (substTy subst) tc_tv)
 
@@ -489,7 +492,7 @@ warnMissingAT :: Name -> TcM ()
 warnMissingAT name
   = do { warn <- woptM Opt_WarnMissingMethods
        ; traceTc "warn" (ppr name <+> ppr warn)
-       ; warnTc warn  -- Warn only if -fwarn-missing-methods
+       ; warnTc warn  -- Warn only if -Wmissing-methods
                 (ptext (sLit "No explicit") <+> text "associated type"
                     <+> ptext (sLit "or default declaration for     ")
                     <+> quotes (ppr name)) }

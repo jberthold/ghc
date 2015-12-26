@@ -75,7 +75,7 @@ module Outputable (
 
         -- * Error handling and debugging utilities
         pprPanic, pprSorry, assertPprPanic, pprPgmError,
-        pprTrace, warnPprTrace, pprSTrace,
+        pprTrace, pprTraceIt, warnPprTrace, pprSTrace,
         trace, pgmError, panic, sorry, assertPanic,
         pprDebugAndThen,
     ) where
@@ -94,6 +94,7 @@ import Util
 import Platform
 import Pretty           ( Doc, Mode(..) )
 import Panic
+import GHC.Serialized
 
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as BS
@@ -103,6 +104,7 @@ import Data.Int
 import qualified Data.IntMap as IM
 import Data.Set (Set)
 import qualified Data.Set as Set
+import Data.String
 import Data.Word
 import System.IO        ( Handle )
 import System.FilePath
@@ -113,7 +115,6 @@ import GHC.Fingerprint
 import GHC.Show         ( showMultiLineString )
 #if __GLASGOW_HASKELL__ > 710
 import GHC.Stack
-import GHC.Exception
 #endif
 
 {-
@@ -256,6 +257,12 @@ mkUserStyle unqual depth
    | opt_PprStyle_Debug = PprDebug
    | otherwise          = PprUser unqual depth
 
+instance Outputable PprStyle where
+  ppr (PprUser {})  = text "user-style"
+  ppr (PprCode {})  = text "code-style"
+  ppr (PprDump {})  = text "dump-style"
+  ppr (PprDebug {}) = text "debug-style"
+
 {-
 Orthogonal to the above printing styles are (possibly) some
 command-line flags that affect printing (often carried with the
@@ -280,6 +287,9 @@ data SDocContext = SDC
     -- ^ The most recently used colour.  This allows nesting colours.
   , sdocDynFlags   :: !DynFlags
   }
+
+instance IsString SDoc where
+  fromString = text
 
 initSDocContext :: DynFlags -> PprStyle -> SDocContext
 initSDocContext dflags sty = SDC
@@ -698,6 +708,11 @@ instance Outputable Bool where
     ppr True  = ptext (sLit "True")
     ppr False = ptext (sLit "False")
 
+instance Outputable Ordering where
+    ppr LT = text "LT"
+    ppr EQ = text "EQ"
+    ppr GT = text "GT"
+
 instance Outputable Int32 where
    ppr n = integer $ fromIntegral n
 
@@ -796,6 +811,9 @@ instance Outputable Fingerprint where
 instance Outputable a => Outputable (SCC a) where
    ppr (AcyclicSCC v) = text "NONREC" $$ (nest 3 (ppr v))
    ppr (CyclicSCC vs) = text "REC" $$ (nest 3 (vcat (map ppr vs)))
+
+instance Outputable Serialized where
+    ppr (Serialized the_type bytes) = int (length bytes) <+> ptext (sLit "of type") <+> text (show the_type)
 
 {-
 ************************************************************************
@@ -1052,12 +1070,16 @@ pprTrace str doc x
    | opt_NoDebugOutput = x
    | otherwise         = pprDebugAndThen unsafeGlobalDynFlags trace (text str) doc x
 
+-- | @pprTraceIt desc x@ is equivalent to @pprTrace desc (ppr x) x@
+pprTraceIt :: Outputable a => String -> a -> a
+pprTraceIt desc x = pprTrace desc (ppr x) x
+
 
 -- | If debug output is on, show some 'SDoc' on the screen along
 -- with a call stack when available.
 #if __GLASGOW_HASKELL__ > 710
-pprSTrace :: (?location :: CallStack) => SDoc -> a -> a
-pprSTrace = pprTrace (showCallStack ?location)
+pprSTrace :: (?callStack :: CallStack) => SDoc -> a -> a
+pprSTrace = pprTrace (prettyCallStack ?callStack)
 #else
 pprSTrace :: SDoc -> a -> a
 pprSTrace = pprTrace "no callstack info"

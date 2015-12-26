@@ -35,7 +35,7 @@ module RdrHsSyn (
         mkExport,
         mkExtName,           -- RdrName -> CLabelString
         mkGadtDecl,          -- [Located RdrName] -> LHsType RdrName -> ConDecl RdrName
-        mkSimpleConDecl,
+        mkConDeclH98,
         mkATDefault,
 
         -- Bunch of functions in the parser monad for
@@ -52,7 +52,7 @@ module RdrHsSyn (
         checkDoAndIfThenElse,
         checkRecordSyntax,
         parseErrorSDoc,
-        splitTilde,
+        splitTilde, splitTildeApps,
 
         -- Help with processing exports
         ImpExpSubSpec(..),
@@ -77,9 +77,10 @@ import Lexer
 import Type             ( TyThing(..) )
 import TysWiredIn       ( cTupleTyConName, tupleTyCon, tupleDataCon,
                           nilDataConName, nilDataConKey,
-                          listTyConName, listTyConKey )
+                          listTyConName, listTyConKey,
+                          starKindTyConName, unicodeStarKindTyConName )
 import ForeignCall
-import PrelNames        ( forall_tv_RDR, allNameStrings )
+import PrelNames        ( forall_tv_RDR, eqTyCon_RDR, allNameStrings )
 import DynFlags
 import SrcLoc
 import Unique           ( hasKey )
@@ -91,6 +92,8 @@ import Maybes
 import Util
 import ApiAnnotation
 import Data.List
+import qualified GHC.LanguageExtensions as LangExt
+import MonadUtils
 
 #if __GLASGOW_HASKELL__ < 709
 import Control.Applicative ((<$>))
@@ -443,9 +446,10 @@ splitCon :: LHsType RdrName
 splitCon ty
  = split ty []
  where
-   split (L _ (HsAppTy t u)) ts      = split t (u : ts)
-   split (L l (HsTyVar (L _ tc))) ts = do data_con <- tyConToDataCon l tc
-                                          return (data_con, mk_rest ts)
+   -- This is used somewhere where HsAppsTy is not used
+   split (L _ (HsAppTy t u)) ts       = split t (u : ts)
+   split (L l (HsTyVar (L _ tc)))  ts = do data_con <- tyConToDataCon l tc
+                                           return (data_con, mk_rest ts)
    split (L l (HsTupleTy HsBoxedOrConstraintTuple ts)) []
       = return (L l (getRdrName (tupleDataCon Boxed (length ts))), PrefixCon ts)
    split (L l _) _ = parseErrorSDoc l (text "Cannot parse data constructor in a data/newtype declaration:" <+> ppr ty)
@@ -462,17 +466,18 @@ recordPatSynErr loc pat =
 mkPatSynMatchGroup :: Located RdrName
                    -> Located (OrdList (LHsDecl RdrName))
                    -> P (MatchGroup RdrName (LHsExpr RdrName))
-mkPatSynMatchGroup (L _ patsyn_name) (L _ decls) =
+mkPatSynMatchGroup (L loc patsyn_name) (L _ decls) =
     do { matches <- mapM fromDecl (fromOL decls)
+       ; when (length matches /= 1) (wrongNumberErr loc)
        ; return $ mkMatchGroup FromSource matches }
   where
-    fromDecl (L loc decl@(ValD (PatBind pat@(L _ (ConPatIn (L _ name) details)) rhs _ _ _))) =
+    fromDecl (L loc decl@(ValD (PatBind pat@(L _ (ConPatIn ln@(L _ name) details)) rhs _ _ _))) =
         do { unless (name == patsyn_name) $
                wrongNameBindingErr loc decl
            ; match <- case details of
-               PrefixCon pats -> return $ Match NonFunBindMatch pats Nothing rhs
+               PrefixCon pats -> return $ Match (FunBindMatch ln False) pats Nothing rhs
                InfixCon pat1 pat2 ->
-                         return $ Match NonFunBindMatch [pat1, pat2] Nothing rhs
+                         return $ Match (FunBindMatch ln True) [pat1, pat2] Nothing rhs
                RecCon{} -> recordPatSynErr loc pat
            ; return $ L loc match }
     fromDecl (L loc decl) = extraDeclErr loc decl
@@ -487,58 +492,30 @@ mkPatSynMatchGroup (L _ patsyn_name) (L _ decls) =
         text "pattern synonym 'where' clause must bind the pattern synonym's name" <+>
         quotes (ppr patsyn_name) $$ ppr decl
 
-mkSimpleConDecl :: Located RdrName -> Maybe [LHsTyVarBndr RdrName]
+    wrongNumberErr loc =
+      parseErrorSDoc loc $
+      text "pattern synonym 'where' clause cannot be empty" $$
+      text "In the pattern synonym declaration for: " <+> ppr (patsyn_name)
+
+mkConDeclH98 :: Located RdrName -> Maybe [LHsTyVarBndr RdrName]
                 -> LHsContext RdrName -> HsConDeclDetails RdrName
                 -> ConDecl RdrName
 
-mkSimpleConDecl name mb_forall cxt details
-  = ConDecl { con_names    = [name]
-            , con_explicit = explicit
-            , con_qvars    = qvars
-            , con_cxt      = cxt
-            , con_details  = details
-            , con_res      = ResTyH98
-            , con_doc      = Nothing }
-  where
-    (explicit, qvars) = case mb_forall of
-                          Nothing  -> (False, mkHsQTvs [])
-                          Just tvs -> (True,  mkHsQTvs tvs)
+mkConDeclH98 name mb_forall cxt details
+  = ConDeclH98 { con_name     = name
+               , con_qvars    = fmap mkHsQTvs mb_forall
+               , con_cxt      = Just cxt
+                             -- AZ:TODO: when can cxt be Nothing?
+                             --          remembering that () is a valid context.
+               , con_details  = details
+               , con_doc      = Nothing }
 
 mkGadtDecl :: [Located RdrName]
-           -> LHsType RdrName     -- Always a HsForAllTy
-           -> ([AddAnn], ConDecl RdrName)
-mkGadtDecl names ty = ([], mkGadtDecl' names ty)
-
-mkGadtDecl' :: [Located RdrName]
-            -> LHsType RdrName
-            -> ConDecl RdrName
--- We allow C,D :: ty
--- and expand it as if it had been
---    C :: ty; D :: ty
--- (Just like type signatures in general.)
-
-mkGadtDecl' names lbody_ty@(L loc body_ty)
-  = mk_gadt_con names
-  where
-    (tvs, cxt, tau) = splitLHsSigmaTy lbody_ty
-    (details, res_ty)           -- See Note [Sorting out the result type]
-      = case tau of
-          L _ (HsFunTy (L l (HsRecTy flds)) res_ty)
-                  -> (RecCon (L l flds), res_ty)
-          _other  -> (PrefixCon [], tau)
-
-    explicit = case body_ty of
-                 HsForAllTy {} -> True
-                 _             -> False
-
-    mk_gadt_con names
-       = ConDecl { con_names    = names
-                 , con_explicit = explicit
-                 , con_qvars    = mkHsQTvs tvs
-                 , con_cxt      = cxt
-                 , con_details  = details
-                 , con_res      = ResTyGADT loc res_ty
-                 , con_doc      = Nothing }
+           -> LHsSigType RdrName     -- Always a HsForAllTy
+           -> ConDecl RdrName
+mkGadtDecl names ty = ConDeclGADT { con_names = names
+                                  , con_type  = ty
+                                  , con_doc   = Nothing }
 
 tyConToDataCon :: SrcSpan -> RdrName -> P (Located RdrName)
 tyConToDataCon loc tc
@@ -638,20 +615,20 @@ really doesn't matter!
 -}
 
 -- | Note [Sorting out the result type]
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- In a GADT declaration which is not a record, we put the whole constr
--- type into the ResTyGADT for now; the renamer will unravel it once it
--- has sorted out operator fixities. Consider for example
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- In a GADT declaration which is not a record, we put the whole constr type
+-- into the res_ty for a ConDeclGADT for now; the renamer will unravel it once
+-- it has sorted out operator fixities. Consider for example
 --      C :: a :*: b -> a :*: b -> a :+: b
 -- Initially this type will parse as
 --       a :*: (b -> (a :*: (b -> (a :+: b))))
-
+--
 -- so it's hard to split up the arguments until we've done the precedence
--- resolution (in the renamer) On the other hand, for a record
+-- resolution (in the renamer). On the other hand, for a record
 --         { x,y :: Int } -> a :*: b
 -- there is no doubt.  AND we need to sort records out so that
 -- we can bring x,y into scope.  So:
---    * For PrefixCon we keep all the args in the ResTyGADT
+--    * For PrefixCon we keep all the args in the res_ty
 --    * For RecCon we do not
 
 checkTyVarsP :: SDoc -> SDoc -> Located RdrName -> [LHsType RdrName] -> P (LHsQTyVars RdrName)
@@ -663,6 +640,7 @@ eitherToP :: Either (SrcSpan, SDoc) a -> P a
 -- Adapts the Either monad to the P monad
 eitherToP (Left (loc, doc)) = parseErrorSDoc loc doc
 eitherToP (Right thing)     = return thing
+
 checkTyVars :: SDoc -> SDoc -> Located RdrName -> [LHsType RdrName]
             -> Either (SrcSpan, SDoc) (LHsQTyVars RdrName)
 -- Check whether the given list of type parameters are all type variables
@@ -674,8 +652,12 @@ checkTyVars pp_what equals_or_where tc tparms
        ; return (mkHsQTvs tvs) }
   where
 
+    chk (L _ (HsParTy ty)) = chk ty
+    chk (L _ (HsAppsTy [L _ (HsAppPrefix ty)])) = chk ty
+
         -- Check that the name space is correct!
-    chk (L l (HsKindSig (L lv (HsTyVar (L _ tv))) k))
+    chk (L l (HsKindSig
+              (L _ (HsAppsTy [L _ (HsAppPrefix (L lv (HsTyVar (L _ tv))))])) k))
         | isRdrTyVar tv    = return (L l (KindedTyVar (L lv tv) k))
     chk (L l (HsTyVar (L ltv tv)))
         | isRdrTyVar tv    = return (L l (UserTyVar (L ltv tv)))
@@ -728,10 +710,18 @@ checkTyClHdr is_cls ty
 
     go l (HsTyVar (L _ tc)) acc ann
       | isRdrTc tc               = return (L l tc, acc, ann)
-    go _ (HsOpTy t1 (_, ltc@(L _ tc)) t2) acc ann
+    go _ (HsOpTy t1 ltc@(L _ tc) t2) acc ann
       | isRdrTc tc               = return (ltc, t1:t2:acc, ann)
     go l (HsParTy ty)    acc ann = goL ty acc (ann ++ mkParensApiAnn l)
     go _ (HsAppTy t1 t2) acc ann = goL t1 (t2:acc) ann
+    go _ (HsAppsTy ts)   acc ann
+      | Just (head, args) <- getAppsTyHead_maybe ts = goL head (args ++ acc) ann
+
+    go _ (HsAppsTy [L _ (HsAppInfix (L loc star))]) [] ann
+      | occNameFS (rdrNameOcc star) == fsLit "*"
+      = return (L loc (nameRdrName starKindTyConName), [], ann)
+      | occNameFS (rdrNameOcc star) == fsLit "★"
+      = return (L loc (nameRdrName unicodeStarKindTyConName), [], ann)
 
     go l (HsTupleTy HsBoxedOrConstraintTuple ts) [] ann
       = return (L l (nameRdrName tup_name), ts, ann)
@@ -750,6 +740,10 @@ checkContext (L l orig_t)
  where
   check anns (L lp (HsTupleTy _ ts))   -- (Eq a, Ord b) shows up as a tuple type
     = return (anns ++ mkParensApiAnn lp,L l ts)                -- Ditto ()
+
+    -- don't let HsAppsTy get in the way
+  check anns (L _ (HsAppsTy [L _ (HsAppPrefix ty)]))
+    = check anns ty
 
   check anns (L lp1 (HsParTy ty))-- to be sure HsParTy doesn't get into the way
        = check anns' ty
@@ -828,7 +822,7 @@ checkAPat msg loc e0 = do
    -- n+k patterns
    OpApp (L nloc (HsVar (L _ n))) (L _ (HsVar (L _ plus))) _
          (L lloc (HsOverLit lit@(OverLit {ol_val = HsIntegral {}})))
-                      | xopt Opt_NPlusKPatterns dynflags && (plus == plus_RDR)
+                      | xopt LangExt.NPlusKPatterns dynflags && (plus == plus_RDR)
                       -> return (mkNPlusKPat (L nloc n) (L lloc lit))
 
    OpApp l op _fix r  -> do l <- checkLPat msg l
@@ -982,7 +976,7 @@ checkDoAndIfThenElse :: LHsExpr RdrName
 checkDoAndIfThenElse guardExpr semiThen thenExpr semiElse elseExpr
  | semiThen || semiElse
     = do pState <- getPState
-         unless (xopt Opt_DoAndIfThenElse (dflags pState)) $ do
+         unless (xopt LangExt.DoAndIfThenElse (dflags pState)) $ do
              parseErrorSDoc (combineLocs guardExpr elseExpr)
                             (text "Unexpected semi-colons in conditional:"
                           $$ nest 4 expr
@@ -1061,7 +1055,7 @@ isFunLhs e = go e [] []
    go _ _ _ = return Nothing
 
 
--- | Transform btype with strict_mark's into HsEqTy's
+-- | Transform btype_no_ops with strict_mark's into HsEqTy's
 -- (((~a) ~b) c) ~d ==> ((~a) ~ (b c)) ~ d
 splitTilde :: LHsType RdrName -> LHsType RdrName
 splitTilde t = go t
@@ -1076,6 +1070,30 @@ splitTilde t = go t
 
         go t = t
 
+-- | Transform tyapps with strict_marks into uses of twiddle
+-- [~a, ~b, c, ~d] ==> (~a) ~ b c ~ d
+splitTildeApps :: [LHsAppType RdrName] -> P [LHsAppType RdrName]
+splitTildeApps []         = return []
+splitTildeApps (t : rest) = do
+  rest' <- concatMapM go rest
+  return (t : rest')
+  where go (L l (HsAppPrefix
+            (L loc (HsBangTy
+                    (HsSrcBang Nothing NoSrcUnpack SrcLazy)
+                    ty))))
+          = addAnnotation l AnnTilde l >>
+            return
+              [L tilde_loc (HsAppInfix (L tilde_loc eqTyCon_RDR)),
+               L l (HsAppPrefix ty)]
+               -- NOTE: no annotation is attached to an HsAppPrefix, so the
+               --       surrounding SrcSpan is not critical
+          where
+            tilde_loc = srcSpanFirstCharacter loc
+
+        go t = return [t]
+
+
+
 ---------------------------------------------------------------------------
 -- Check for monad comprehensions
 --
@@ -1085,7 +1103,7 @@ splitTilde t = go t
 checkMonadComp :: P (HsStmtContext Name)
 checkMonadComp = do
     pState <- getPState
-    return $ if xopt Opt_MonadComprehensions (dflags pState)
+    return $ if xopt LangExt.MonadComprehensions (dflags pState)
                 then MonadComp
                 else ListComp
 
@@ -1403,7 +1421,7 @@ checkImportSpec ie@(L _ specs) =
 mkImpExpSubSpec :: [Located (Maybe RdrName)] -> P ([AddAnn], ImpExpSubSpec)
 mkImpExpSubSpec [] = return ([], ImpExpList [])
 mkImpExpSubSpec [L l Nothing] =
-  return ([\s -> addAnnotation l AnnDotdot s], ImpExpAll)
+  return ([\s -> addAnnotation s AnnDotdot l], ImpExpAll)
 mkImpExpSubSpec xs =
   if (any (isNothing . unLoc) xs)
     then return $ ([], ImpExpAllWith xs)

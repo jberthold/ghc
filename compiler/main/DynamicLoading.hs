@@ -5,6 +5,7 @@ module DynamicLoading (
 #ifdef GHCI
         -- * Loading plugins
         loadPlugins,
+        loadFrontendPlugin,
 
         -- * Force loading information
         forceLoadModuleInterfaces,
@@ -23,23 +24,23 @@ module DynamicLoading (
 
 #ifdef GHCI
 import Linker           ( linkModule, getHValue )
+import GHCi             ( wormhole )
 import SrcLoc           ( noSrcSpan )
-import Finder           ( findImportedModule, cannotFindModule )
+import Finder           ( findPluginModule, cannotFindModule )
 import TcRnMonad        ( initTcInteractive, initIfaceTcRn )
 import LoadIface        ( loadPluginInterface )
 import RdrName          ( RdrName, ImportSpec(..), ImpDeclSpec(..)
                         , ImpItemSpec(..), mkGlobalRdrEnv, lookupGRE_RdrName
                         , gre_name, mkRdrQual )
-import OccName          ( mkVarOcc )
+import OccName          ( OccName, mkVarOcc )
 import RnNames          ( gresFromAvails )
 import DynFlags
-import Plugins          ( Plugin, CommandLineOption )
-import PrelNames        ( pluginTyConName )
+import Plugins          ( Plugin, FrontendPlugin, CommandLineOption )
+import PrelNames        ( pluginTyConName, frontendPluginTyConName )
 
 import HscTypes
-import BasicTypes       ( HValue )
-import TypeRep          ( mkTyConTy, pprTyThingCategory )
-import Type             ( Type, eqType )
+import GHCi.RemoteTypes ( HValue )
+import Type             ( Type, eqType, mkTyConTy, pprTyThingCategory )
 import TyCon            ( TyCon )
 import Name             ( Name, nameModule_maybe )
 import Id               ( idType )
@@ -69,8 +70,14 @@ loadPlugins hsc_env
                             , opt_mod_nm == mod_nm ]
 
 loadPlugin :: HscEnv -> ModuleName -> IO Plugin
-loadPlugin hsc_env mod_name
-  = do { let plugin_rdr_name = mkRdrQual mod_name (mkVarOcc "plugin")
+loadPlugin = loadPlugin' (mkVarOcc "plugin") pluginTyConName
+
+loadFrontendPlugin :: HscEnv -> ModuleName -> IO FrontendPlugin
+loadFrontendPlugin = loadPlugin' (mkVarOcc "frontendPlugin") frontendPluginTyConName
+
+loadPlugin' :: OccName -> Name -> HscEnv -> ModuleName -> IO a
+loadPlugin' occ_name plugin_name hsc_env mod_name
+  = do { let plugin_rdr_name = mkRdrQual mod_name occ_name
              dflags = hsc_dflags hsc_env
        ; mb_name <- lookupRdrNameInModuleForPlugins hsc_env mod_name
                         plugin_rdr_name
@@ -82,7 +89,7 @@ loadPlugin hsc_env mod_name
                           , ppr plugin_rdr_name ]) ;
             Just name ->
 
-     do { plugin_tycon <- forceLoadTyCon hsc_env pluginTyConName
+     do { plugin_tycon <- forceLoadTyCon hsc_env plugin_name
         ; mb_plugin <- getValueSafely hsc_env name (mkTyConTy plugin_tycon)
         ; case mb_plugin of
             Nothing ->
@@ -99,7 +106,7 @@ forceLoadModuleInterfaces :: HscEnv -> SDoc -> [Module] -> IO ()
 forceLoadModuleInterfaces hsc_env doc modules
     = (initTcInteractive hsc_env $
        initIfaceTcRn $
-       mapM_ (loadPluginInterface doc) modules) 
+       mapM_ (loadPluginInterface doc) modules)
       >> return ()
 
 -- | Force the interface for the module containing the name to be loaded. The 'SDoc' parameter is used
@@ -117,7 +124,7 @@ forceLoadNameModuleInterface hsc_env reason name = do
 forceLoadTyCon :: HscEnv -> Name -> IO TyCon
 forceLoadTyCon hsc_env con_name = do
     forceLoadNameModuleInterface hsc_env (ptext (sLit "contains a name used in an invocation of loadTyConTy")) con_name
-    
+
     mb_con_thing <- lookupTypeHscEnv hsc_env con_name
     case mb_con_thing of
         Nothing -> throwCmdLineErrorS dflags $ missingTyThingError con_name
@@ -164,7 +171,7 @@ getHValueSafely hsc_env val_name expected_type = do
                                    return ()
                     Nothing ->  return ()
                 -- Find the value that we just linked in and cast it given that we have proved it's type
-                hval <- getHValue hsc_env val_name
+                hval <- getHValue hsc_env val_name >>= wormhole dflags
                 return (Just hval)
              else return Nothing
         Just val_thing -> throwCmdLineErrorS dflags $ wrongTyThingError val_name val_thing
@@ -196,12 +203,10 @@ lessUnsafeCoerce dflags context what = do
 -- loaded very partially: just enough that it can be used, without its
 -- rules and instances affecting (and being linked from!) the module
 -- being compiled.  This was introduced by 57d6798.
---
--- See Note [Care with plugin imports] in LoadIface.
 lookupRdrNameInModuleForPlugins :: HscEnv -> ModuleName -> RdrName -> IO (Maybe Name)
 lookupRdrNameInModuleForPlugins hsc_env mod_name rdr_name = do
     -- First find the package the module resides in by searching exposed packages and home modules
-    found_module <- findImportedModule hsc_env mod_name Nothing
+    found_module <- findPluginModule hsc_env mod_name
     case found_module of
         Found _ mod -> do
             -- Find the exports of the module

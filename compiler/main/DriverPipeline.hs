@@ -62,6 +62,7 @@ import MonadUtils
 import Platform
 import TcRnTypes
 import Hooks
+import qualified GHC.LanguageExtensions as LangExt
 
 import Exception
 import System.Directory
@@ -137,8 +138,8 @@ compileOne' m_tc_result mHscMessage
        location    = ms_location summary
        input_fnpp  = ms_hspp_file summary
        mod_graph   = hsc_mod_graph hsc_env0
-       needsTH     = any (xopt Opt_TemplateHaskell . ms_hspp_opts) mod_graph
-       needsQQ     = any (xopt Opt_QuasiQuotes     . ms_hspp_opts) mod_graph
+       needsTH     = any (xopt LangExt.TemplateHaskell . ms_hspp_opts) mod_graph
+       needsQQ     = any (xopt LangExt.QuasiQuotes     . ms_hspp_opts) mod_graph
        needsLinker = needsTH || needsQQ
        isDynWay    = any (== WayDyn) (ways dflags0)
        isProfWay   = any (== WayProf) (ways dflags0)
@@ -233,12 +234,12 @@ compileOne' m_tc_result mHscMessage
        location    = ms_location summary
        input_fn    = expectJust "compile:hs" (ml_hs_file location)
        mod_graph   = hsc_mod_graph hsc_env0
-       needsTH     = any (xopt Opt_TemplateHaskell . ms_hspp_opts) mod_graph
-       needsQQ     = any (xopt Opt_QuasiQuotes     . ms_hspp_opts) mod_graph
+       needsTH     = any (xopt LangExt.TemplateHaskell . ms_hspp_opts) mod_graph
+       needsQQ     = any (xopt LangExt.QuasiQuotes     . ms_hspp_opts) mod_graph
        needsLinker = needsTH || needsQQ
        isDynWay    = any (== WayDyn) (ways dflags0)
        isProfWay   = any (== WayProf) (ways dflags0)
-
+       internalInterpreter = not (gopt Opt_ExternalInterpreter dflags0)
 
        src_flavour = ms_hsc_src summary
        mod_name = ms_mod_name summary
@@ -246,9 +247,10 @@ compileOne' m_tc_result mHscMessage
        object_filename = ml_obj_file location
 
        -- #8180 - when using TemplateHaskell, switch on -dynamic-too so
-       -- the linker can correctly load the object files.
-
-       dflags1 = if needsLinker && dynamicGhc && not isDynWay && not isProfWay
+       -- the linker can correctly load the object files.  This isn't necessary
+       -- when using -fexternal-interpreter.
+       dflags1 = if needsLinker && dynamicGhc && internalInterpreter &&
+                    not isDynWay && not isProfWay
                   then gopt_set dflags0 Opt_BuildDynamicToo
                   else dflags0
 
@@ -485,7 +487,7 @@ ghcLinkInfoNoteName = "GHC link info"
 
 findHSLib :: DynFlags -> [String] -> String -> IO (Maybe FilePath)
 findHSLib dflags dirs lib = do
-  let batch_lib_file = if gopt Opt_Static dflags
+  let batch_lib_file = if WayDyn `notElem` ways dflags
                        then "lib" ++ lib <.> "a"
                        else mkSOName (targetPlatform dflags) lib
   found <- filterM doesFileExist (map (</> batch_lib_file) dirs)
@@ -843,7 +845,7 @@ runPhase (RealPhase (Cpp sf)) input_fn dflags0
        setDynFlags dflags1
        liftIO $ checkProcessArgsResult dflags1 unhandled_flags
 
-       if not (xopt Opt_Cpp dflags1) then do
+       if not (xopt LangExt.Cpp dflags1) then do
            -- we have to be careful to emit warnings only once.
            unless (gopt Opt_Pp dflags1) $
                liftIO $ handleFlagWarnings dflags1 warns
@@ -1419,7 +1421,7 @@ runPhase (RealPhase LlvmLlc) input_fn dflags
         -- DATA segment or dyld traps at runtime writing into TEXT: see #7722
         rmodel | platformOS (targetPlatform dflags) == OSiOS = "dynamic-no-pic"
                | gopt Opt_PIC dflags                         = "pic"
-               | not (gopt Opt_Static dflags)                = "dynamic-no-pic"
+               | WayDyn `elem` ways dflags                   = "dynamic-no-pic"
                | otherwise                                   = "static"
         tbaa | gopt Opt_LlvmTBAA dflags = "--enable-tbaa=true"
              | otherwise                = "--enable-tbaa=false"
@@ -1949,7 +1951,7 @@ linkBinary' staticLink dflags o_files dep_packages = do
         get_pkg_lib_path_opts l
          | osElfTarget (platformOS platform) &&
            dynLibLoader dflags == SystemDependent &&
-           not (gopt Opt_Static dflags)
+           WayDyn `elem` ways dflags
             = let libpath = if gopt Opt_RelativeDynlibPaths dflags
                             then "$ORIGIN" </>
                                  (l `makeRelativeTo` full_output_fn)
@@ -1969,7 +1971,7 @@ linkBinary' staticLink dflags o_files dep_packages = do
               in ["-L" ++ l] ++ rpathlink ++ rpath
          | osMachOTarget (platformOS platform) &&
            dynLibLoader dflags == SystemDependent &&
-           not (gopt Opt_Static dflags) &&
+           WayDyn `elem` ways dflags &&
            gopt Opt_RPath dflags
             = let libpath = if gopt Opt_RelativeDynlibPaths dflags
                             then "@loader_path" </>
@@ -2386,7 +2388,8 @@ joinObjectFiles dflags o_files output_fn = do
                         -- gcc on sparc sets -Wl,--relax implicitly, but
                         -- -r and --relax are incompatible for ld, so
                         -- disable --relax explicitly.
-                     ++ (if platformArch (targetPlatform dflags) == ArchSPARC
+                     ++ (if platformArch (targetPlatform dflags)
+                                `elem` [ArchSPARC, ArchSPARC64]
                          && ldIsGnuLd
                             then [SysTools.Option "-Wl,-no-relax"]
                             else [])

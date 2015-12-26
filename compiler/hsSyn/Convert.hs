@@ -35,7 +35,7 @@ import Lexeme
 import Util
 import FastString
 import Outputable
---import TcEvidence
+import MonadUtils ( foldrM )
 
 import qualified Data.ByteString as BS
 import Control.Monad( unless, liftM, ap )
@@ -45,7 +45,7 @@ import Control.Applicative (Applicative(..))
 
 import Data.Char ( chr )
 import Data.Word ( Word8 )
-import Data.Maybe( catMaybes )
+import Data.Maybe( catMaybes, fromMaybe, isNothing )
 import Language.Haskell.TH as TH hiding (sigP)
 import Language.Haskell.TH.Syntax as TH
 
@@ -193,25 +193,38 @@ cvtDec (TySynD tc tvs rhs)
                   , tcdTyVars = tvs', tcdFVs = placeHolderNames
                   , tcdRhs = rhs' } }
 
-cvtDec (DataD ctxt tc tvs constrs derivs)
-  = do  { (ctxt', tc', tvs') <- cvt_tycl_hdr ctxt tc tvs
+cvtDec (DataD ctxt tc tvs ksig constrs derivs)
+  = do  { let isGadtCon (GadtC    _ _ _ _) = True
+              isGadtCon (RecGadtC _ _ _ _) = True
+              isGadtCon (ForallC  _ _ c  ) = isGadtCon c
+              isGadtCon _                  = False
+              isGadtDecl  = all isGadtCon constrs
+              isH98Decl   = all (not . isGadtCon) constrs
+        ; unless (isGadtDecl || isH98Decl)
+                 (failWith (text "Cannot mix GADT constructors with Haskell 98"
+                        <+> text "constructors"))
+        ; unless (isNothing ksig || isGadtDecl)
+                 (failWith (text "Kind signatures are only allowed on GADTs"))
+        ; (ctxt', tc', tvs') <- cvt_tycl_hdr ctxt tc tvs
+        ; ksig' <- cvtKind `traverse` ksig
         ; cons' <- mapM cvtConstr constrs
         ; derivs' <- cvtDerivs derivs
         ; let defn = HsDataDefn { dd_ND = DataType, dd_cType = Nothing
                                 , dd_ctxt = ctxt'
-                                , dd_kindSig = Nothing
+                                , dd_kindSig = ksig'
                                 , dd_cons = cons', dd_derivs = derivs' }
         ; returnJustL $ TyClD (DataDecl { tcdLName = tc', tcdTyVars = tvs'
                                         , tcdDataDefn = defn
                                         , tcdFVs = placeHolderNames }) }
 
-cvtDec (NewtypeD ctxt tc tvs constr derivs)
+cvtDec (NewtypeD ctxt tc tvs ksig constr derivs)
   = do  { (ctxt', tc', tvs') <- cvt_tycl_hdr ctxt tc tvs
+        ; ksig' <- cvtKind `traverse` ksig
         ; con' <- cvtConstr constr
         ; derivs' <- cvtDerivs derivs
         ; let defn = HsDataDefn { dd_ND = NewType, dd_cType = Nothing
                                 , dd_ctxt = ctxt'
-                                , dd_kindSig = Nothing
+                                , dd_kindSig = ksig'
                                 , dd_cons = [con']
                                 , dd_derivs = derivs' }
         ; returnJustL $ TyClD (DataDecl { tcdLName = tc', tcdTyVars = tvs'
@@ -223,7 +236,8 @@ cvtDec (ClassD ctxt cl tvs fds decs)
         ; fds'  <- mapM cvt_fundep fds
         ; (binds', sigs', fams', ats', adts') <- cvt_ci_decs (ptext (sLit "a class declaration")) decs
         ; unless (null adts')
-            (failWith $ (ptext (sLit "Default data instance declarations are not allowed:"))
+            (failWith $ (text "Default data instance declarations"
+                     <+> text "are not allowed:")
                    $$ (Outputable.ppr adts'))
         ; at_defs <- mapM cvt_at_def ats'
         ; returnJustL $ TyClD $
@@ -265,13 +279,14 @@ cvtDec (DataFamilyD tc tvs kind)
        ; returnJustL $ TyClD $ FamDecl $
          FamilyDecl DataFamily tc' tvs' result Nothing }
 
-cvtDec (DataInstD ctxt tc tys constrs derivs)
+cvtDec (DataInstD ctxt tc tys ksig constrs derivs)
   = do { (ctxt', tc', typats') <- cvt_tyinst_hdr ctxt tc tys
+       ; ksig' <- cvtKind `traverse` ksig
        ; cons' <- mapM cvtConstr constrs
        ; derivs' <- cvtDerivs derivs
        ; let defn = HsDataDefn { dd_ND = DataType, dd_cType = Nothing
                                , dd_ctxt = ctxt'
-                               , dd_kindSig = Nothing
+                               , dd_kindSig = ksig'
                                , dd_cons = cons', dd_derivs = derivs' }
 
        ; returnJustL $ InstD $ DataFamInstD
@@ -279,13 +294,14 @@ cvtDec (DataInstD ctxt tc tys constrs derivs)
                                          , dfid_defn = defn
                                          , dfid_fvs = placeHolderNames } }}
 
-cvtDec (NewtypeInstD ctxt tc tys constr derivs)
+cvtDec (NewtypeInstD ctxt tc tys ksig constr derivs)
   = do { (ctxt', tc', typats') <- cvt_tyinst_hdr ctxt tc tys
+       ; ksig' <- cvtKind `traverse` ksig
        ; con' <- cvtConstr constr
        ; derivs' <- cvtDerivs derivs
        ; let defn = HsDataDefn { dd_ND = NewType, dd_cType = Nothing
                                , dd_ctxt = ctxt'
-                               , dd_kindSig = Nothing
+                               , dd_kindSig = ksig'
                                , dd_cons = [con'], dd_derivs = derivs' }
        ; returnJustL $ InstD $ DataFamInstD
            { dfid_inst = DataFamInstDecl { dfid_tycon = tc', dfid_pats = typats'
@@ -299,20 +315,16 @@ cvtDec (TySynInstD tc eqn)
             { tfid_inst = TyFamInstDecl { tfid_eqn = eqn'
                                         , tfid_fvs = placeHolderNames } } }
 
-cvtDec (OpenTypeFamilyD tc tvs result injectivity)
-  = do { (_, tc', tvs') <- cvt_tycl_hdr [] tc tvs
-       ; result' <- cvtFamilyResultSig result
-       ; injectivity' <- traverse cvtInjectivityAnnotation injectivity
+cvtDec (OpenTypeFamilyD head)
+  = do { (tc', tyvars', result', injectivity') <- cvt_tyfam_head head
        ; returnJustL $ TyClD $ FamDecl $
-         FamilyDecl OpenTypeFamily tc' tvs' result' injectivity' }
+         FamilyDecl OpenTypeFamily tc' tyvars' result' injectivity' }
 
-cvtDec (ClosedTypeFamilyD tc tyvars result injectivity eqns)
-  = do { (_, tc', tvs') <- cvt_tycl_hdr [] tc tyvars
-       ; result' <- cvtFamilyResultSig result
+cvtDec (ClosedTypeFamilyD head eqns)
+  = do { (tc', tyvars', result', injectivity') <- cvt_tyfam_head head
        ; eqns' <- mapM (cvtTySynEqn tc') eqns
-       ; injectivity' <- traverse cvtInjectivityAnnotation injectivity
        ; returnJustL $ TyClD $ FamDecl $
-         FamilyDecl (ClosedTypeFamily (Just eqns')) tc' tvs' result'
+         FamilyDecl (ClosedTypeFamily (Just eqns')) tc' tyvars' result'
                                       injectivity' }
 
 cvtDec (TH.RoleAnnotD tc roles)
@@ -383,6 +395,19 @@ cvt_tyinst_hdr cxt tc tys
        ; tys' <- mapM cvtType tys
        ; return (cxt', tc', mkHsImplicitBndrs tys') }
 
+----------------
+cvt_tyfam_head :: TypeFamilyHead
+               -> CvtM ( Located RdrName
+                       , LHsQTyVars RdrName
+                       , Hs.LFamilyResultSig RdrName
+                       , Maybe (Hs.LInjectivityAnn RdrName))
+
+cvt_tyfam_head (TypeFamilyHead tc tyvars result injectivity)
+  = do {(_, tc', tyvars') <- cvt_tycl_hdr [] tc tyvars
+       ; result' <- cvtFamilyResultSig result
+       ; injectivity' <- traverse cvtInjectivityAnnotation injectivity
+       ; return (tc', tyvars', result', injectivity') }
+
 -------------------------------------------------------------------
 --              Partitioning declarations
 -------------------------------------------------------------------
@@ -414,7 +439,6 @@ mkBadDecMsg doc bads
 
 ---------------------------------------------------
 --      Data types
--- Can't handle GADTs yet
 ---------------------------------------------------
 
 cvtConstr :: TH.Con -> CvtM (LConDecl RdrName)
@@ -423,60 +447,100 @@ cvtConstr (NormalC c strtys)
   = do  { c'   <- cNameL c
         ; cxt' <- returnL []
         ; tys' <- mapM cvt_arg strtys
-        ; returnL $ mkSimpleConDecl c' Nothing cxt' (PrefixCon tys') }
+        ; returnL $ mkConDeclH98 c' Nothing cxt' (PrefixCon tys') }
 
 cvtConstr (RecC c varstrtys)
   = do  { c'    <- cNameL c
         ; cxt'  <- returnL []
         ; args' <- mapM cvt_id_arg varstrtys
-        ; returnL $ mkSimpleConDecl c' Nothing cxt'
+        ; returnL $ mkConDeclH98 c' Nothing cxt'
                                    (RecCon (noLoc args')) }
 
 cvtConstr (InfixC st1 c st2)
-  = do  { c' <- cNameL c
+  = do  { c'   <- cNameL c
         ; cxt' <- returnL []
         ; st1' <- cvt_arg st1
         ; st2' <- cvt_arg st2
-        ; returnL $ mkSimpleConDecl c' Nothing cxt' (InfixCon st1' st2') }
+        ; returnL $ mkConDeclH98 c' Nothing cxt' (InfixCon st1' st2') }
 
 cvtConstr (ForallC tvs ctxt con)
-  = do  { tvs'  <- cvtTvs tvs
+  = do  { tvs'        <- cvtTvs tvs
         ; L loc ctxt' <- cvtContext ctxt
-        ; L _ con' <- cvtConstr con
-        ; returnL $ con' { con_qvars = mkHsQTvs (hsQTvBndrs tvs' ++ hsQTvBndrs (con_qvars con'))
-                         , con_explicit = True
-                         , con_cxt = L loc (ctxt' ++ (unLoc $ con_cxt con')) } }
+        ; L _ con'    <- cvtConstr con
+        ; returnL $ case con' of
+                ConDeclGADT { con_type = conT } ->
+                  con' { con_type =
+                         HsIB PlaceHolder
+                         (noLoc $ HsForAllTy (hsq_explicit tvs') $
+                          (noLoc $ HsQualTy (L loc ctxt') (hsib_body conT))) }
+                ConDeclH98  {} ->
+                  let qvars = case (tvs, con_qvars con') of
+                        ([], Nothing) -> Nothing
+                        (_ , m_qvs  ) -> Just $
+                          mkHsQTvs (hsQTvExplicit tvs' ++
+                                    maybe [] hsQTvExplicit m_qvs)
+                  in con' { con_qvars = qvars
+                          , con_cxt = Just $
+                            L loc (ctxt' ++
+                                   unLoc (fromMaybe (noLoc [])
+                                          (con_cxt con'))) } }
 
-cvt_arg :: (TH.Strict, TH.Type) -> CvtM (LHsType RdrName)
-cvt_arg (NotStrict, ty) = cvtType ty
-cvt_arg (IsStrict,  ty)
-  = do { ty' <- cvtType ty
-       ; returnL $ HsBangTy (HsSrcBang Nothing NoSrcUnpack SrcStrict) ty' }
-cvt_arg (Unpacked,  ty)
-  = do { ty' <- cvtType ty
-       ; returnL $ HsBangTy (HsSrcBang Nothing SrcUnpack   SrcStrict) ty' }
+cvtConstr (GadtC c strtys ty idx)
+  = do  { c'   <- mapM cNameL c
+        ; args <- mapM cvt_arg strtys
+        ; idx' <- mapM cvtType idx
+        ; ty'  <- tconNameL ty
+        ; L _ ret_ty <- mk_apps (HsTyVar ty') idx'
+        ; c_ty       <- mk_arr_apps args ret_ty
+        ; returnL $ mkGadtDecl c' (mkLHsSigType c_ty)}
 
-cvt_id_arg :: (TH.Name, TH.Strict, TH.Type) -> CvtM (LConDeclField RdrName)
+cvtConstr (RecGadtC c varstrtys ty idx)
+  = do  { c'       <- mapM cNameL c
+        ; ty'      <- tconNameL ty
+        ; rec_flds <- mapM cvt_id_arg varstrtys
+        ; idx'     <- mapM cvtType idx
+        ; ret_ty   <- mk_apps (HsTyVar ty') idx'
+        ; let rec_ty = noLoc (HsFunTy (noLoc $ HsRecTy rec_flds) ret_ty)
+        ; returnL $ mkGadtDecl c' (mkLHsSigType rec_ty) }
+
+cvtSrcUnpackedness :: TH.SourceUnpackedness -> SrcUnpackedness
+cvtSrcUnpackedness NoSourceUnpackedness = NoSrcUnpack
+cvtSrcUnpackedness SourceNoUnpack       = SrcNoUnpack
+cvtSrcUnpackedness SourceUnpack         = SrcUnpack
+
+cvtSrcStrictness :: TH.SourceStrictness -> SrcStrictness
+cvtSrcStrictness NoSourceStrictness = NoSrcStrict
+cvtSrcStrictness SourceLazy         = SrcLazy
+cvtSrcStrictness SourceStrict       = SrcStrict
+
+cvt_arg :: (TH.Bang, TH.Type) -> CvtM (LHsType RdrName)
+cvt_arg (Bang su ss, ty)
+  = do { ty' <- cvtType ty
+       ; let su' = cvtSrcUnpackedness su
+       ; let ss' = cvtSrcStrictness ss
+       ; returnL $ HsBangTy (HsSrcBang Nothing su' ss') ty' }
+
+cvt_id_arg :: (TH.Name, TH.Bang, TH.Type) -> CvtM (LConDeclField RdrName)
 cvt_id_arg (i, str, ty)
-  = do  { i' <- vNameL i
+  = do  { L li i' <- vNameL i
         ; ty' <- cvt_arg (str,ty)
-        ; return $ noLoc (ConDeclField { cd_fld_names = [fmap (flip FieldOcc PlaceHolder) i']
-                                       , cd_fld_type =  ty'
-                                       , cd_fld_doc = Nothing}) }
+        ; return $ noLoc (ConDeclField
+                          { cd_fld_names
+                              = [L li $ FieldOcc (L li i') PlaceHolder]
+                          , cd_fld_type =  ty'
+                          , cd_fld_doc = Nothing}) }
 
-cvtDerivs :: [TH.Name] -> CvtM (HsDeriving RdrName)
+cvtDerivs :: TH.Cxt -> CvtM (HsDeriving RdrName)
 cvtDerivs [] = return Nothing
-cvtDerivs cs = do { cs' <- mapM cvt_one cs
-                  ; return (Just (noLoc cs')) }
-        where
-          cvt_one c = do { c' <- tconName c
-                         ; ty <- returnL $ HsTyVar (noLoc c')
-                         ; return (mkLHsSigType ty) }
+cvtDerivs cs = fmap (Just . mkSigTypes) (cvtContext cs)
+  where
+    mkSigTypes :: Located (HsContext RdrName) -> Located [LHsSigType RdrName]
+    mkSigTypes = fmap (map mkLHsSigType)
 
 cvt_fundep :: FunDep -> CvtM (Located (Class.FunDep (Located RdrName)))
-cvt_fundep (FunDep xs ys) = do { xs' <- mapM tName xs
-                               ; ys' <- mapM tName ys
-                               ; returnL (map noLoc xs', map noLoc ys') }
+cvt_fundep (FunDep xs ys) = do { xs' <- mapM tNameL xs
+                               ; ys' <- mapM tNameL ys
+                               ; returnL (xs', ys') }
 
 
 ------------------------------------------
@@ -722,10 +786,12 @@ cvtl e = wrapL (cvt e)
     cvt (SigE e t)       = do { e' <- cvtl e; t' <- cvtType t
                               ; return $ ExprWithTySig e' (mkLHsSigWcType t') }
     cvt (RecConE c flds) = do { c' <- cNameL c
-                              ; flds' <- mapM (cvtFld mkFieldOcc) flds
+                              ; flds' <- mapM (cvtFld (mkFieldOcc . noLoc)) flds
                               ; return $ mkRdrRecordCon c' (HsRecFields flds' Nothing) }
     cvt (RecUpdE e flds) = do { e' <- cvtl e
-                              ; flds'<- mapM (cvtFld mkAmbiguousFieldOcc) flds
+                              ; flds'
+                                  <- mapM (cvtFld (mkAmbiguousFieldOcc . noLoc))
+                                           flds
                               ; return $ mkRdrRecordUpd e' flds' }
     cvt (StaticE e)      = fmap HsStatic $ cvtl e
     cvt (UnboundVarE s)  = do { s' <- vName s; return $ HsVar (noLoc s') }
@@ -777,7 +843,7 @@ the trees to reflect the fixities of the underlying operators:
 This is done by the renamer (see @mkOppAppRn@, @mkConOppPatRn@, and
 @mkHsOpTyRn@ in RnTypes), which expects that the input will be completely
 right-biased for types and left-biased for everything else. So we left-bias the
-trees of @UInfixP@ and @UInfixE@ and right-bias the trees of @UInfixT@.
+trees of @UInfixP@ and @UInfixE@ and use HsAppsTy for UInfixT.
 
 Sample input:
 
@@ -969,8 +1035,9 @@ cvtp (ViewP e p)       = do { e' <- cvtl e; p' <- cvtPat p
 
 cvtPatFld :: (TH.Name, TH.Pat) -> CvtM (LHsRecField RdrName (LPat RdrName))
 cvtPatFld (s,p)
-  = do  { s' <- vNameL s; p' <- cvtPat p
-        ; return (noLoc $ HsRecField { hsRecFieldLbl = fmap mkFieldOcc s'
+  = do  { L ls s' <- vNameL s; p' <- cvtPat p
+        ; return (noLoc $ HsRecField { hsRecFieldLbl
+                                         = L ls $ mkFieldOcc (L ls s')
                                      , hsRecFieldArg = p'
                                      , hsRecPun      = False}) }
 
@@ -996,12 +1063,12 @@ cvtTvs tvs = do { tvs' <- mapM cvt_tv tvs; return (mkHsQTvs tvs') }
 
 cvt_tv :: TH.TyVarBndr -> CvtM (LHsTyVarBndr RdrName)
 cvt_tv (TH.PlainTV nm)
-  = do { nm' <- tName nm
-       ; returnL $ UserTyVar (noLoc nm') }
+  = do { nm' <- tNameL nm
+       ; returnL $ UserTyVar nm' }
 cvt_tv (TH.KindedTV nm ki)
-  = do { nm' <- tName nm
+  = do { nm' <- tNameL nm
        ; ki' <- cvtKind ki
-       ; returnL $ KindedTyVar (noLoc nm') ki' }
+       ; returnL $ KindedTyVar nm' ki' }
 
 cvtRole :: TH.Role -> Maybe Coercion.Role
 cvtRole TH.NominalR          = Just Coercion.Nominal
@@ -1046,8 +1113,8 @@ cvtTypeKind ty_str ty
              | [x']    <- tys' -> returnL (HsListTy x')
              | otherwise
                         -> mk_apps (HsTyVar (noLoc (getRdrName listTyCon))) tys'
-           VarT nm -> do { nm' <- tName nm
-                         ; mk_apps (HsTyVar (noLoc nm')) tys' }
+           VarT nm -> do { nm' <- tNameL nm
+                         ; mk_apps (HsTyVar nm') tys' }
            ConT nm -> do { nm' <- tconName nm
                          ; mk_apps (HsTyVar (noLoc nm')) tys' }
 
@@ -1058,7 +1125,7 @@ cvtTypeKind ty_str ty
                    ; ty'  <- cvtType ty
                    ; loc <- getL
                    ; let hs_ty | null tvs  = rho_ty
-                               | otherwise = L loc (HsForAllTy { hst_bndrs = hsQTvBndrs tvs'
+                               | otherwise = L loc (HsForAllTy { hst_bndrs = hsQTvExplicit tvs'
                                                                , hst_body  = rho_ty })
                          rho_ty | null cxt  = ty'
                                 | otherwise = L loc (HsQualTy { hst_ctxt = cxt'
@@ -1075,12 +1142,8 @@ cvtTypeKind ty_str ty
            LitT lit
              -> returnL (HsTyLit (cvtTyLit lit))
 
-           WildCardT Nothing
+           WildCardT
              -> mk_apps mkAnonWildCardTy tys'
-
-           WildCardT (Just nm)
-             -> do { nm' <- tName nm
-                   ; mk_apps (mkNamedWildCardTy (noLoc nm')) tys' }
 
            InfixT t1 s t2
              -> do { s'  <- tconName s
@@ -1090,8 +1153,10 @@ cvtTypeKind ty_str ty
                    }
 
            UInfixT t1 s t2
-             -> do { t2' <- cvtType t2
-                   ; cvtOpAppT t1 s t2'
+             -> do { t1' <- cvtType t1
+                   ; t2' <- cvtType t2
+                   ; s'  <- tconName s
+                   ; return $ cvtOpAppT t1' s' t2'
                    } -- Note [Converting UInfix]
 
            ParensT t
@@ -1137,10 +1202,18 @@ cvtTypeKind ty_str ty
            _ -> failWith (ptext (sLit ("Malformed " ++ ty_str)) <+> text (show ty))
     }
 
+-- | Constructs an application of a type to arguments passed in a list.
 mk_apps :: HsType RdrName -> [LHsType RdrName] -> CvtM (LHsType RdrName)
 mk_apps head_ty []       = returnL head_ty
 mk_apps head_ty (ty:tys) = do { head_ty' <- returnL head_ty
                               ; mk_apps (HsAppTy head_ty' ty) tys }
+
+-- | Constructs an arrow type with a specified return type
+mk_arr_apps :: [LHsType RdrName] -> HsType RdrName -> CvtM (LHsType RdrName)
+mk_arr_apps tys return_ty = foldrM go return_ty tys >>= returnL
+    where go :: LHsType RdrName -> HsType RdrName -> CvtM (HsType RdrName)
+          go arg ret_ty = do { ret_ty_l <- returnL ret_ty
+                             ; return (HsFunTy arg ret_ty_l) }
 
 split_ty_app :: TH.Type -> CvtM (TH.Type, [LHsType RdrName])
 split_ty_app ty = go ty []
@@ -1149,23 +1222,26 @@ split_ty_app ty = go ty []
     go f as           = return (f,as)
 
 cvtTyLit :: TH.TyLit -> HsTyLit
-cvtTyLit (NumTyLit i) = HsNumTy (show i) i
-cvtTyLit (StrTyLit s) = HsStrTy s        (fsLit s)
+cvtTyLit (TH.NumTyLit i) = HsNumTy (show i) i
+cvtTyLit (TH.StrTyLit s) = HsStrTy s        (fsLit s)
 
-{- | @cvtOpAppT x op y@ converts @op@ and @y@ and produces the operator
-application @x `op` y@. The produced tree of infix types will be right-biased,
-provided @y@ is.
-
-See the @cvtOpApp@ documentation for how this function works.
+{- | @cvtOpAppT x op y@ takes converted arguments and flattens any HsAppsTy
+   structure in them.
 -}
-cvtOpAppT :: TH.Type -> TH.Name -> LHsType RdrName -> CvtM (LHsType RdrName)
-cvtOpAppT (UInfixT x op2 y) op1 z
-  = do { l <- cvtOpAppT y op1 z
-       ; cvtOpAppT x op2 l }
-cvtOpAppT x op y
-  = do { op' <- tconNameL op
-       ; x' <- cvtType x
-       ; returnL (mkHsOpTy x' op' y) }
+cvtOpAppT :: LHsType RdrName -> RdrName -> LHsType RdrName -> LHsType RdrName
+cvtOpAppT t1@(L loc1 _) op t2@(L loc2 _)
+  = L (combineSrcSpans loc1 loc2) $
+    HsAppsTy (t1' ++ [noLoc $ HsAppInfix (noLoc op)] ++ t2')
+  where
+    t1' | L _ (HsAppsTy t1s) <- t1
+        = t1s
+        | otherwise
+        = [noLoc $ HsAppPrefix t1]
+
+    t2' | L _ (HsAppsTy t2s) <- t2
+        = t2s
+        | otherwise
+        = [noLoc $ HsAppPrefix t2]
 
 cvtKind :: TH.Kind -> CvtM (LHsKind RdrName)
 cvtKind = cvtTypeKind "kind"

@@ -54,6 +54,7 @@ import StringBuffer
 import SysTools
 import UniqFM
 import Util
+import qualified GHC.LanguageExtensions as LangExt
 
 import Data.Either ( rights, partitionEithers )
 import qualified Data.Map as Map
@@ -531,7 +532,7 @@ unload :: HscEnv -> [Linkable] -> IO ()
 unload hsc_env stable_linkables -- Unload everthing *except* 'stable_linkables'
   = case ghcLink (hsc_dflags hsc_env) of
 #ifdef GHCI
-        LinkInMemory -> Linker.unload (hsc_dflags hsc_env) stable_linkables
+        LinkInMemory -> Linker.unload hsc_env stable_linkables
 #else
         LinkInMemory -> panic "unload: no interpreter"
                                 -- urgh.  avoid warnings:
@@ -739,7 +740,7 @@ parUpsweep n_jobs old_hpt stable_mods cleanup sccs = do
     hsc_env_var <- liftIO $ newMVar hsc_env
 
     -- The old HPT is used for recompilation checking in upsweep_mod. When a
-    -- module sucessfully gets compiled, its HMI is pruned from the old HPT.
+    -- module successfully gets compiled, its HMI is pruned from the old HPT.
     old_hpt_var <- liftIO $ newIORef old_hpt
 
     -- What we use to limit parallelism with.
@@ -1885,13 +1886,11 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
                 | isJust (ml_hs_file location) ->
                         -- Home package
                          just_found location mod
-                | otherwise ->
-                        -- Drop external-pkg
-                        ASSERT(moduleUnitId mod /= thisPackage dflags)
-                        return Nothing
 
-             err -> return $ Just $ Left $ noModError dflags loc wanted_mod err
+             _ -> return Nothing
                         -- Not found
+                        -- (If it is TRULY not found at all, we'll
+                        -- error when we actually try to compile)
 
     just_found location mod = do
                 -- Adjust location to point to the hs-boot source file,
@@ -1986,7 +1985,7 @@ preprocessFile hsc_env src_fn mb_phase (Just (buf, _time))
                 | Just (Unlit _) <- mb_phase    = True
                 | Nothing <- mb_phase, Unlit _ <- startPhase src_fn  = True
                   -- note: local_opts is only required if there's no Unlit phase
-                | xopt Opt_Cpp dflags'          = True
+                | xopt LangExt.Cpp dflags'      = True
                 | gopt Opt_Pp  dflags'          = True
                 | otherwise                     = False
 

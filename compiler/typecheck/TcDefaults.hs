@@ -14,13 +14,14 @@ import TcRnMonad
 import TcEnv
 import TcHsType
 import TcSimplify
+import TcMType
 import TcType
 import PrelNames
-import DynFlags
 import SrcLoc
 import Data.Maybe
 import Outputable
 import FastString
+import qualified GHC.LanguageExtensions as LangExt
 
 tcDefaults :: [LDefaultDecl Name]
            -> TcM (Maybe [Type])    -- Defaulting types to heave
@@ -45,7 +46,7 @@ tcDefaults [L _ (DefaultDecl [])]
 tcDefaults [L locn (DefaultDecl mono_tys)]
   = setSrcSpan locn                     $
     addErrCtxt defaultDeclCtxt          $
-    do  { ovl_str <- xoptM Opt_OverloadedStrings
+    do  { ovl_str <- xoptM LangExt.OverloadedStrings
         ; num_class    <- tcLookupClass numClassName
         ; is_str_class <- tcLookupClass isStringClassName
         ; let deflt_clss | ovl_str   = [num_class, is_str_class]
@@ -62,7 +63,9 @@ tcDefaults decls@(L locn (DefaultDecl _) : _)
 
 tc_default_ty :: [Class] -> LHsType Name -> TcM Type
 tc_default_ty deflt_clss hs_ty
- = do   { ty <- tcHsLiftedType hs_ty
+ = do   { ty <- solveEqualities $
+                tcHsLiftedType hs_ty
+        ; ty <- zonkTcType ty   -- establish Type invariants
         ; checkTc (isTauTy ty) (polyDefErr hs_ty)
 
         -- Check that the type is an instance of at least one of the deflt_clss

@@ -226,3 +226,9 @@ test('T7969',
 test('T9127', normal, compile, [''])
 test('T4426', normal, compile_fail, [''])
 test('T9778', normal, compile, ['-fwarn-unticked-promoted-constructors'])
+test('T11164',
+     extra_clean(['T11164a.hi', 'T11164a.o',
+                  'T11164b.hi', 'T11164b.o']),
+     multimod_compile, ['T11164', '-v0'])
+test('T11167', normal, compile, [''])
+test('T11167_ambig', normal, compile, [''])

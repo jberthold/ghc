@@ -157,6 +157,10 @@
       SymI_HasProto(erfc)                                \
       SymI_HasProto(erff)                                \
       SymI_HasProto(erfcf)                               \
+      SymI_HasProto(expm1)                               \
+      SymI_HasProto(expm1f)                              \
+      SymI_HasProto(log1p)                               \
+      SymI_HasProto(log1pf)                              \
       SymI_HasProto(memcpy)                              \
       SymI_HasProto(rts_InstallConsoleEvent)             \
       SymI_HasProto(rts_ConsoleHandlerDone)              \
@@ -454,7 +458,8 @@
 
 #if defined(openbsd_HOST_OS)
 #define RTS_OPENBSD_ONLY_SYMBOLS                            \
-     SymE_NeedsProto(__guard_local)
+     SymE_NeedsProto(__guard_local)                         \
+     SymE_NeedsProto(_DYNAMIC)
 #else
 #define RTS_OPENBSD_ONLY_SYMBOLS
 #endif
@@ -666,6 +671,7 @@
       SymI_HasProto(stg_restore_cccs_info)      \
       SymI_HasProto(enterFunCCS)                \
       SymI_HasProto(pushCostCentre)             \
+      SymI_HasProto(mkCostCentre)               \
       SymI_HasProto(era)
 #else
 #define RTS_PROF_SYMBOLS /* empty */
@@ -730,6 +736,7 @@
       SymI_HasProto(stg_catchRetryzh)                                   \
       SymI_HasProto(stg_catchSTMzh)                                     \
       SymI_HasProto(stg_checkzh)                                        \
+      SymI_HasProto(stg_clearCCSzh)                                     \
       SymI_HasProto(closure_flags)                                      \
       SymI_HasProto(cmp_thread)                                         \
       SymI_HasProto(createAdjustor)                                     \

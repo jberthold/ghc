@@ -17,6 +17,8 @@ module Debugger (pprintClosureCommand, showTerm, pprTypeAndContents) where
 import Linker
 import RtClosureInspect
 
+import GHCi
+import GHCi.RemoteTypes
 import GhcMonad
 import HscTypes
 import Id
@@ -53,7 +55,7 @@ pprintClosureCommand bindThings force str = do
   let ids = [id | AnId id <- tythings]
 
   -- Obtain the terms and the recovered type information
-  (subst, terms) <- mapAccumLM go emptyTvSubst ids
+  (subst, terms) <- mapAccumLM go emptyTCvSubst ids
 
   -- Apply the substitutions obtained after recovering the types
   modifySession $ \hsc_env ->
@@ -69,7 +71,7 @@ pprintClosureCommand bindThings force str = do
                     docterms)
  where
    -- Do the obtainTerm--bindSuspensions-computeSubstitution dance
-   go :: GhcMonad m => TvSubst -> Id -> m (TvSubst, Term)
+   go :: GhcMonad m => TCvSubst -> Id -> m (TCvSubst, Term)
    go subst id = do
        let id' = id `setIdType` substTy subst (idType id)
        term_    <- GHC.obtainTermFromId maxBound force id'
@@ -88,13 +90,13 @@ pprintClosureCommand bindThings force str = do
          Just subst' -> do { traceOptIf Opt_D_dump_rtti
                                (fsep $ [text "RTTI Improvement for", ppr id,
                                 text "is the substitution:" , ppr subst'])
-                           ; return (subst `unionTvSubst` subst', term')}
+                           ; return (subst `unionTCvSubst` subst', term')}
 
    tidyTermTyVars :: GhcMonad m => Term -> m Term
    tidyTermTyVars t =
      withSession $ \hsc_env -> do
-     let env_tvs      = tyThingsTyVars $ ic_tythings $ hsc_IC hsc_env
-         my_tvs       = termTyVars t
+     let env_tvs      = tyThingsTyCoVars $ ic_tythings $ hsc_IC hsc_env
+         my_tvs       = termTyCoVars t
          tvs          = env_tvs `minusVarSet` my_tvs
          tyvarOccName = nameOccName . tyVarName
          tidyEnv      = (initTidyOccEnv (map tyvarOccName (varSetElems tvs))
@@ -117,7 +119,8 @@ bindSuspensions t = do
       let ids = [ mkVanillaGlobal name ty
                 | (name,ty) <- zip names tys]
           new_ic = extendInteractiveContextWithIds ictxt ids
-      liftIO $ extendLinkEnv (zip names hvals)
+      fhvs <- liftIO $ mapM (mkFinalizedHValue hsc_env <=< mkHValueRef) hvals
+      liftIO $ extendLinkEnv (zip names fhvs)
       modifySession $ \_ -> hsc_env {hsc_IC = new_ic }
       return t'
      where
@@ -170,7 +173,8 @@ showTerm term = do
            let noop_log _ _ _ _ _ = return ()
                expr = "show " ++ showPpr dflags bname
            _ <- GHC.setSessionDynFlags dflags{log_action=noop_log}
-           txt_ <- withExtendedLinkEnv [(bname, val)]
+           fhv <- liftIO $ mkFinalizedHValue hsc_env =<< mkHValueRef val
+           txt_ <- withExtendedLinkEnv [(bname, fhv)]
                                        (GHC.compileExpr expr)
            let myprec = 10 -- application precedence. TODO Infix constructors
            let txt = unsafeCoerce# txt_ :: [a]

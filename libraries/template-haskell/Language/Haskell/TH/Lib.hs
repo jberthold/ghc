@@ -11,38 +11,45 @@ module Language.Haskell.TH.Lib where
 
 import Language.Haskell.TH.Syntax hiding (Role, InjectivityAnn)
 import qualified Language.Haskell.TH.Syntax as TH
-import Control.Monad( liftM, liftM2 )
+import Control.Monad( liftM, liftM2, liftM3 )
 import Data.Word( Word8 )
 
 ----------------------------------------------------------
 -- * Type synonyms
 ----------------------------------------------------------
 
-type InfoQ          = Q Info
-type PatQ           = Q Pat
-type FieldPatQ      = Q FieldPat
-type ExpQ           = Q Exp
-type TExpQ a        = Q (TExp a)
-type DecQ           = Q Dec
-type DecsQ          = Q [Dec]
-type ConQ           = Q Con
-type TypeQ          = Q Type
-type TyLitQ         = Q TyLit
-type CxtQ           = Q Cxt
-type PredQ          = Q Pred
-type MatchQ         = Q Match
-type ClauseQ        = Q Clause
-type BodyQ          = Q Body
-type GuardQ         = Q Guard
-type StmtQ          = Q Stmt
-type RangeQ         = Q Range
-type StrictTypeQ    = Q StrictType
-type VarStrictTypeQ = Q VarStrictType
-type FieldExpQ      = Q FieldExp
-type RuleBndrQ      = Q RuleBndr
-type TySynEqnQ      = Q TySynEqn
-type Role           = TH.Role       -- must be defined here for DsMeta to find it
-type InjectivityAnn = TH.InjectivityAnn
+type InfoQ               = Q Info
+type PatQ                = Q Pat
+type FieldPatQ           = Q FieldPat
+type ExpQ                = Q Exp
+type TExpQ a             = Q (TExp a)
+type DecQ                = Q Dec
+type DecsQ               = Q [Dec]
+type ConQ                = Q Con
+type TypeQ               = Q Type
+type TyLitQ              = Q TyLit
+type CxtQ                = Q Cxt
+type PredQ               = Q Pred
+type MatchQ              = Q Match
+type ClauseQ             = Q Clause
+type BodyQ               = Q Body
+type GuardQ              = Q Guard
+type StmtQ               = Q Stmt
+type RangeQ              = Q Range
+type SourceStrictnessQ   = Q SourceStrictness
+type SourceUnpackednessQ = Q SourceUnpackedness
+type BangQ               = Q Bang
+type BangTypeQ           = Q BangType
+type VarBangTypeQ        = Q VarBangType
+type StrictTypeQ         = Q StrictType
+type VarStrictTypeQ      = Q VarStrictType
+type FieldExpQ           = Q FieldExp
+type RuleBndrQ           = Q RuleBndr
+type TySynEqnQ           = Q TySynEqn
+
+-- must be defined here for DsMeta to find it
+type Role                = TH.Role
+type InjectivityAnn      = TH.InjectivityAnn
 
 ----------------------------------------------------------
 -- * Lowercase pattern syntax functions
@@ -338,19 +345,21 @@ funD nm cs =
 tySynD :: Name -> [TyVarBndr] -> TypeQ -> DecQ
 tySynD tc tvs rhs = do { rhs1 <- rhs; return (TySynD tc tvs rhs1) }
 
-dataD :: CxtQ -> Name -> [TyVarBndr] -> [ConQ] -> [Name] -> DecQ
-dataD ctxt tc tvs cons derivs =
+dataD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> [ConQ] -> CxtQ -> DecQ
+dataD ctxt tc tvs ksig cons derivs =
   do
     ctxt1 <- ctxt
     cons1 <- sequence cons
-    return (DataD ctxt1 tc tvs cons1 derivs)
+    derivs1 <- derivs
+    return (DataD ctxt1 tc tvs ksig cons1 derivs1)
 
-newtypeD :: CxtQ -> Name -> [TyVarBndr] -> ConQ -> [Name] -> DecQ
-newtypeD ctxt tc tvs con derivs =
+newtypeD :: CxtQ -> Name -> [TyVarBndr] -> Maybe Kind -> ConQ -> CxtQ -> DecQ
+newtypeD ctxt tc tvs ksig con derivs =
   do
     ctxt1 <- ctxt
     con1 <- con
-    return (NewtypeD ctxt1 tc tvs con1 derivs)
+    derivs1 <- derivs
+    return (NewtypeD ctxt1 tc tvs ksig con1 derivs1)
 
 classD :: CxtQ -> Name -> [TyVarBndr] -> [FunDep] -> [DecQ] -> DecQ
 classD ctxt cls tvs fds decs =
@@ -423,21 +432,23 @@ pragAnnD target expr
 pragLineD :: Int -> String -> DecQ
 pragLineD line file = return $ PragmaD $ LineP line file
 
-dataInstD :: CxtQ -> Name -> [TypeQ] -> [ConQ] -> [Name] -> DecQ
-dataInstD ctxt tc tys cons derivs =
+dataInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> [ConQ] -> CxtQ -> DecQ
+dataInstD ctxt tc tys ksig cons derivs =
   do
     ctxt1 <- ctxt
     tys1  <- sequence tys
     cons1 <- sequence cons
-    return (DataInstD ctxt1 tc tys1 cons1 derivs)
+    derivs1 <- derivs
+    return (DataInstD ctxt1 tc tys1 ksig cons1 derivs1)
 
-newtypeInstD :: CxtQ -> Name -> [TypeQ] -> ConQ -> [Name] -> DecQ
-newtypeInstD ctxt tc tys con derivs =
+newtypeInstD :: CxtQ -> Name -> [TypeQ] -> Maybe Kind -> ConQ -> CxtQ -> DecQ
+newtypeInstD ctxt tc tys ksig con derivs =
   do
     ctxt1 <- ctxt
     tys1  <- sequence tys
     con1  <- con
-    return (NewtypeInstD ctxt1 tc tys1 con1 derivs)
+    derivs1 <- derivs
+    return (NewtypeInstD ctxt1 tc tys1 ksig con1 derivs1)
 
 tySynInstD :: Name -> TySynEqnQ -> DecQ
 tySynInstD tc eqn =
@@ -452,13 +463,13 @@ dataFamilyD tc tvs kind
 openTypeFamilyD :: Name -> [TyVarBndr] -> FamilyResultSig
                 -> Maybe InjectivityAnn -> DecQ
 openTypeFamilyD tc tvs res inj
-    = return $ OpenTypeFamilyD tc tvs res inj
+    = return $ OpenTypeFamilyD (TypeFamilyHead tc tvs res inj)
 
 closedTypeFamilyD :: Name -> [TyVarBndr] -> FamilyResultSig
                   -> Maybe InjectivityAnn -> [TySynEqnQ] -> DecQ
 closedTypeFamilyD tc tvs result injectivity eqns =
   do eqns1 <- sequence eqns
-     return (ClosedTypeFamilyD tc tvs result injectivity eqns1)
+     return (ClosedTypeFamilyD (TypeFamilyHead tc tvs result injectivity) eqns1)
 
 -- These were deprecated in GHC 7.12 with a plan to remove them in 7.14. If you
 -- remove this check please also:
@@ -467,7 +478,7 @@ closedTypeFamilyD tc tvs result injectivity eqns =
 --   3. remove the FamFlavour data type from Syntax module
 --   4. make sure that all references to FamFlavour are gone from DsMeta,
 --      Convert, TcSplice (follows from 3)
-#if __GLASGOW_HASKELL__ > 712
+#if __GLASGOW_HASKELL__ > 800
 #error Remove deprecated familyNoKindD, familyKindD, closedTypeFamilyNoKindD and closedTypeFamilyKindD
 #endif
 
@@ -476,13 +487,14 @@ closedTypeFamilyD tc tvs result injectivity eqns =
 familyNoKindD :: FamFlavour -> Name -> [TyVarBndr] -> DecQ
 familyNoKindD flav tc tvs =
     case flav of
-      TypeFam -> return $ OpenTypeFamilyD tc tvs NoSig Nothing
+      TypeFam -> return $ OpenTypeFamilyD (TypeFamilyHead tc tvs NoSig Nothing)
       DataFam -> return $ DataFamilyD tc tvs Nothing
 
 familyKindD :: FamFlavour -> Name -> [TyVarBndr] -> Kind -> DecQ
 familyKindD flav tc tvs k =
     case flav of
-      TypeFam -> return $ OpenTypeFamilyD tc tvs (KindSig k) Nothing
+      TypeFam ->
+        return $ OpenTypeFamilyD (TypeFamilyHead tc tvs (KindSig k) Nothing)
       DataFam -> return $ DataFamilyD tc tvs (Just k)
 
 {-# DEPRECATED closedTypeFamilyNoKindD, closedTypeFamilyKindD
@@ -490,12 +502,13 @@ familyKindD flav tc tvs k =
 closedTypeFamilyNoKindD :: Name -> [TyVarBndr] -> [TySynEqnQ] -> DecQ
 closedTypeFamilyNoKindD tc tvs eqns =
  do eqns1 <- sequence eqns
-    return (ClosedTypeFamilyD tc tvs NoSig Nothing eqns1)
+    return (ClosedTypeFamilyD (TypeFamilyHead tc tvs NoSig Nothing) eqns1)
 
 closedTypeFamilyKindD :: Name -> [TyVarBndr] -> Kind -> [TySynEqnQ] -> DecQ
 closedTypeFamilyKindD tc tvs kind eqns =
  do eqns1 <- sequence eqns
-    return (ClosedTypeFamilyD tc tvs (KindSig kind) Nothing eqns1)
+    return (ClosedTypeFamilyD (TypeFamilyHead tc tvs (KindSig kind) Nothing)
+            eqns1)
 
 roleAnnotD :: Name -> [Role] -> DecQ
 roleAnnotD name roles = return $ RoleAnnotD name roles
@@ -523,13 +536,13 @@ tySynEqn lhs rhs =
 cxt :: [PredQ] -> CxtQ
 cxt = sequence
 
-normalC :: Name -> [StrictTypeQ] -> ConQ
+normalC :: Name -> [BangTypeQ] -> ConQ
 normalC con strtys = liftM (NormalC con) $ sequence strtys
 
-recC :: Name -> [VarStrictTypeQ] -> ConQ
+recC :: Name -> [VarBangTypeQ] -> ConQ
 recC con varstrtys = liftM (RecC con) $ sequence varstrtys
 
-infixC :: Q (Strict, Type) -> Name -> Q (Strict, Type) -> ConQ
+infixC :: Q (Bang, Type) -> Name -> Q (Bang, Type) -> ConQ
 infixC st1 con st2 = do st1' <- st1
                         st2' <- st2
                         return $ InfixC st1' con st2'
@@ -537,6 +550,13 @@ infixC st1 con st2 = do st1' <- st1
 forallC :: [TyVarBndr] -> CxtQ -> ConQ -> ConQ
 forallC ns ctxt con = liftM2 (ForallC ns) ctxt con
 
+gadtC :: [Name] -> [StrictTypeQ] -> Name -> [TypeQ] -> ConQ
+gadtC cons strtys ty idx = liftM3 (GadtC cons) (sequence strtys)
+                                  (return ty)  (sequence idx)
+
+recGadtC :: [Name] -> [VarStrictTypeQ] -> Name -> [TypeQ] -> ConQ
+recGadtC cons varstrtys ty idx = liftM3 (RecGadtC cons) (sequence varstrtys)
+                                        (return ty)     (sequence idx)
 
 -------------------------------------------------------------------------------
 -- *   Type
@@ -598,10 +618,7 @@ equalityT :: TypeQ
 equalityT = return EqualityT
 
 wildCardT :: TypeQ
-wildCardT = return (WildCardT Nothing)
-
-namedWildCardT :: Name -> TypeQ
-namedWildCardT = return . WildCardT . Just
+wildCardT = return WildCardT
 
 {-# DEPRECATED classP "As of template-haskell-2.10, constraint predicates (Pred) are just types (Type), in keeping with ConstraintKinds. Please use 'conT' and 'appT'." #-}
 classP :: Name -> [Q Type] -> Q Pred
@@ -631,17 +648,37 @@ promotedNilT = return PromotedNilT
 promotedConsT :: TypeQ
 promotedConsT = return PromotedConsT
 
-isStrict, notStrict, unpacked :: Q Strict
-isStrict = return $ IsStrict
-notStrict = return $ NotStrict
-unpacked = return Unpacked
+noSourceUnpackedness, sourceNoUnpack, sourceUnpack :: SourceUnpackednessQ
+noSourceUnpackedness = return NoSourceUnpackedness
+sourceNoUnpack       = return SourceNoUnpack
+sourceUnpack         = return SourceUnpack
 
+noSourceStrictness, sourceLazy, sourceStrict :: SourceStrictnessQ
+noSourceStrictness = return NoSourceStrictness
+sourceLazy         = return SourceLazy
+sourceStrict       = return SourceStrict
+
+bang :: SourceUnpackednessQ -> SourceStrictnessQ -> BangQ
+bang u s = do u' <- u
+              s' <- s
+              return (Bang u' s')
+
+bangType :: BangQ -> TypeQ -> BangTypeQ
+bangType = liftM2 (,)
+
+varBangType :: Name -> BangTypeQ -> VarBangTypeQ
+varBangType v bt = do (b, t) <- bt
+                      return (v, b, t)
+
+{-# DEPRECATED strictType
+               "As of @template-haskell-2.11.0.0@, 'StrictType' has been replaced by 'BangType'. Please use 'bangType' instead." #-}
 strictType :: Q Strict -> TypeQ -> StrictTypeQ
-strictType = liftM2 (,)
+strictType = bangType
 
+{-# DEPRECATED varStrictType
+               "As of @template-haskell-2.11.0.0@, 'VarStrictType' has been replaced by 'VarBangType'. Please use 'varBangType' instead." #-}
 varStrictType :: Name -> StrictTypeQ -> VarStrictTypeQ
-varStrictType v st = do (s, t) <- st
-                        return (v, s, t)
+varStrictType = varBangType
 
 -- * Type Literals
 

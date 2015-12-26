@@ -44,7 +44,6 @@ import {-# SOURCE #-}   Match ( matchSimply )
 
 import HsSyn
 import TcHsSyn
-import Coercion( Coercion, isReflCo )
 import TcType( tcSplitTyConApp )
 import CoreSyn
 import DsMonad
@@ -60,6 +59,7 @@ import ConLike
 import DataCon
 import PatSyn
 import Type
+import Coercion
 import TysPrim
 import TysWiredIn
 import BasicTypes
@@ -72,6 +72,7 @@ import SrcLoc
 import Util
 import DynFlags
 import FastString
+import qualified GHC.LanguageExtensions as LangExt
 
 import TcEvidence
 
@@ -253,10 +254,10 @@ mkGuardedMatchResult pred_expr (MatchResult _ body_fn)
   = MatchResult CanFail (\fail -> do body <- body_fn fail
                                      return (mkIfThenElse pred_expr body fail))
 
-mkCoPrimCaseMatchResult :: Id                           -- Scrutinee
-                    -> Type                             -- Type of the case
-                    -> [(Literal, MatchResult)]         -- Alternatives
-                    -> MatchResult                      -- Literals are all unlifted
+mkCoPrimCaseMatchResult :: Id                        -- Scrutinee
+                        -> Type                      -- Type of the case
+                        -> [(Literal, MatchResult)]  -- Alternatives
+                        -> MatchResult               -- Literals are all unlifted
 mkCoPrimCaseMatchResult var ty match_alts
   = MatchResult CanFail mk_case
   where
@@ -271,7 +272,7 @@ mkCoPrimCaseMatchResult var ty match_alts
             return (LitAlt lit, [], body)
 
 data CaseAlt a = MkCaseAlt{ alt_pat :: a,
-                            alt_bndrs :: [CoreBndr],
+                            alt_bndrs :: [Var],
                             alt_wrapper :: HsWrapper,
                             alt_result :: MatchResult }
 
@@ -341,7 +342,8 @@ sort_alts = sortWith (dataConTag . alt_pat)
 
 mkPatSynCase :: Id -> Type -> CaseAlt PatSyn -> CoreExpr -> DsM CoreExpr
 mkPatSynCase var ty alt fail = do
-    matcher <- dsLExpr $ mkLHsWrap wrapper $ nlHsTyApp matcher [ty]
+    matcher <- dsLExpr $ mkLHsWrap wrapper $
+                         nlHsTyApp matcher [getLevity "mkPatSynCase" ty, ty]
     let MatchResult _ mkCont = match_result
     cont <- mkCoreLams bndrs <$> mkCont fail
     return $ mkCoreAppsDs (text "patsyn" <+> ppr var) matcher [Var var, ensure_unstrict cont, Lam voidArgId fail]
@@ -467,7 +469,7 @@ mkErrorAppDs err_id ty msg = do
         full_msg = showSDoc dflags (hcat [ppr src_loc, vbar, msg])
         core_msg = Lit (mkMachString full_msg)
         -- mkMachString returns a result of type String#
-    return (mkApps (Var err_id) [Type ty, core_msg])
+    return (mkApps (Var err_id) [Type (getLevity "mkErrorAppDs" ty), Type ty, core_msg])
 
 {-
 'mkCoreAppDs' and 'mkCoreAppsDs' hand the special-case desugaring of 'seq'.
@@ -633,7 +635,8 @@ mkSelectorBinds is_strict ticks pat val_expr
   = return (Nothing, [])
   | isSingleton binders || is_simple_lpat pat
     -- See Note [mkSelectorBinds]
-  = do { val_var <- newSysLocalDs (hsLPatType pat)
+  = do { let pat_ty = hsLPatType pat
+       ; val_var <- newSysLocalDs pat_ty
         -- Make up 'v' in Note [mkSelectorBinds]
         -- NB: give it the type of *pattern* p, not the type of the *rhs* e.
         -- This does not matter after desugaring, but there's a subtle
@@ -651,7 +654,7 @@ mkSelectorBinds is_strict ticks pat val_expr
         -- But we need it at different types, so we make it polymorphic:
         --     err_var = /\a. iRREFUT_PAT_ERR a "blah blah blah"
        ; err_app <- mkErrorAppDs iRREFUT_PAT_ERROR_ID alphaTy (ppr pat)
-       ; err_var <- newSysLocalDs (mkForAllTy alphaTyVar alphaTy)
+       ; err_var <- newSysLocalDs (mkInvForAllTys [alphaTyVar] alphaTy)
        ; binds   <- zipWithM (mk_bind val_var err_var) ticks' binders
        ; return (Just val_var
                 ,(val_var, val_expr) :
@@ -869,11 +872,11 @@ mkBinaryTickBox ixT ixF e = do
 -- also make irrefutable patterns ordinary patterns if -XStrict.
 --
 -- Example:
--- ~pat    => False, pat -- when -XStrict
--- ~pat    => False, ~pat -- without -XStrict
--- ~(~pat) => False, ~pat -- when -XStrict
--- pat     => True, pat -- when -XStrict
--- !pat    => True, pat -- always
+-- ~pat    => False, pat   -- when -XStrict
+-- ~pat    => False, ~pat  -- without -XStrict
+-- ~(~pat) => False, ~pat  -- when -XStrict
+-- pat     => True,  pat   -- when -XStrict
+-- !pat    => True,  pat   -- always
 getUnBangedLPat :: DynFlags
                 -> LPat id  -- ^ Original pattern
                 -> (Bool, LPat id) -- is bind strict?, pattern without bangs
@@ -883,7 +886,7 @@ getUnBangedLPat dflags (L l (ParPat p))
 getUnBangedLPat _ (L _ (BangPat p))
   = (True,p)
 getUnBangedLPat dflags (L _ (LazyPat p))
-  | xopt Opt_Strict dflags
+  | xopt LangExt.Strict dflags
   = (False,p)
 getUnBangedLPat dflags p
-  = (xopt Opt_Strict dflags,p)
+  = (xopt LangExt.Strict dflags,p)

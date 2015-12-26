@@ -48,8 +48,8 @@ Library
                    directory  >= 1   && < 1.3,
                    process    >= 1   && < 1.5,
                    bytestring >= 0.9 && < 0.11,
-                   binary     >= 0.7 && < 0.8,
-                   time                 < 1.6,
+                   binary     == 0.8.*,
+                   time       >= 1.4 && < 1.7,
                    containers >= 0.5 && < 0.6,
                    array      >= 0.1 && < 0.6,
                    filepath   >= 1   && < 1.5,
@@ -63,6 +63,9 @@ Library
         Build-Depends: Win32
     else
         Build-Depends: unix
+
+    if flag(ghci)
+        Build-Depends: ghci
 
     GHC-Options: -Wall -fno-warn-name-shadowing
 
@@ -125,7 +128,6 @@ Library
         cbits/genSym.c
 
     hs-source-dirs:
-        backpack
         basicTypes
         cmm
         codeGen
@@ -439,7 +441,7 @@ Library
         CoAxiom
         Kind
         Type
-        TypeRep
+        TyCoRep
         Unify
         Bag
         Binary
@@ -467,7 +469,6 @@ Library
         Pair
         Panic
         Pretty
-        Serialized
         State
         Stream
         StringBuffer
@@ -578,14 +579,14 @@ Library
     if flag(ghci)
         Exposed-Modules:
             Convert
+            ByteCodeTypes
             ByteCodeAsm
             ByteCodeGen
             ByteCodeInstr
             ByteCodeItbls
             ByteCodeLink
             Debugger
-            LibFFI
             Linker
-            ObjLink
             RtClosureInspect
             DebuggerUtils
+            GHCi

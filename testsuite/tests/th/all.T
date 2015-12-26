@@ -47,9 +47,19 @@ test('TH_spliceE5_prof',
      [req_profiling,
       omit_ways(['ghci']),
       extra_clean(['TH_spliceE5_prof_Lib.p.o', 'TH_spliceE5_prof_Lib.hi',
+                   'TH_spliceE5_prof_Lib.dyn_o', 'TH_spliceE5_prof_Lib.dyn_hi',
+                   'TH_spliceE5_prof.dyn_o', 'TH_spliceE5_prof.dyn_hi',
                    'TH_spliceE5_prof_Lib.o','TH_spliceE5_prof.p.o'])],
      run_command,
      ['$MAKE -s --no-print-directory TH_spliceE5_prof'])
+
+test('TH_spliceE5_prof_ext',
+     [req_profiling,
+      omit_ways(['ghci']),
+      extra_clean(['TH_spliceE5_prof_ext_Lib.hi',
+                   'TH_spliceE5_prof_ext_Lib.o'])],
+     run_command,
+     ['$MAKE -s --no-print-directory TH_spliceE5_prof_ext'])
 
 test('TH_spliceD1',
      extra_clean(['TH_spliceD1_Lib.hi', 'TH_spliceD1_Lib.o']),
@@ -262,7 +272,7 @@ test('T7532',
      ['T7532', '-v0 ' + config.ghc_th_way_flags])
 test('T2222', normal, compile, ['-v0'])
 test('T1849', normal, ghci_script, ['T1849.script'])
-test('T7681', normal, compile, ['-v0'])
+test('T7681', when(compiler_debugged(), expect_broken(11287)), compile, ['-v0'])
 test('T7910', normal, compile_and_run, ['-v0'])
 
 test('ClosedFam1TH', normal, compile, ['-dsuppress-uniques -v0'])
@@ -350,6 +360,15 @@ test('T10306', normal, compile, ['-v0'])
 test('T10596', normal, compile, ['-v0'])
 test('T10620', normal, compile_and_run, ['-v0'])
 test('T10638', normal, compile_fail, ['-v0'])
+test('T10697_decided_1', normal, compile_and_run, ['-v0'])
+test('T10697_decided_2', normal, compile_and_run, ['-XStrictData -v0'])
+test('T10697_decided_3', normal,
+                         compile_and_run,
+                         ['-XStrictData -funbox-strict-fields -O2 -v0'])
+test('T10697_source',
+     extra_clean(['T10697_sourceUtil.hi', 'T10697_sourceUtil.o']),
+     multimod_compile_and_run,
+     ['T10697_source', '-w ' + config.ghc_th_way_flags])
 test('T10704',
      extra_clean(['T10704a.o','T10704a.hi']),
      multimod_compile_and_run,
@@ -361,8 +380,21 @@ test('T10796a', normal, compile, ['-v0'])
 test('T10796b', normal, compile_fail, ['-v0'])
 test('T10811', normal, compile, ['-v0'])
 test('T10810', normal, compile, ['-v0'])
+test('T10828', normalise_version('array', 'base', 'binary', 'bytestring',
+                                 'containers', 'deepseq', 'ghc-boot',
+                                 'ghc-prim', 'integer-gmp', 'pretty',
+                                 'template-haskell'
+                              ), compile, ['-v0 -ddump-tc -dsuppress-uniques'])
+test('T10828a', normal, compile_fail, ['-v0'])
+test('T10828b', normal, compile_fail, ['-v0'])
 test('T10891', normal, compile, ['-v0'])
 test('T10945', normal, compile_fail, ['-v0'])
 test('T10946', expect_broken(10946), compile, ['-v0'])
 test('T10734', normal, compile_and_run, ['-v0'])
+test('T10819',
+     extra_clean(['T10819_Lib.hi', 'T10819_Lib.o']),
+     multimod_compile,
+     ['T10819.hs', '-v0 ' + config.ghc_th_way_flags])
+test('T10820', normal, compile_and_run, ['-v0'])
 
+test('TH_finalizer', normal, compile, ['-v0'])
