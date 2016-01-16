@@ -79,7 +79,8 @@ module TcRnTypes(
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
         toDerivedWC,
-        andWC, unionsWC, addSimples, addImplics, mkSimpleWC, addInsols,
+        andWC, unionsWC, mkSimpleWC, mkImplicWC,
+        addInsols, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
         isDroppableDerivedLoc, insolubleImplic,
         arisesFromGivens,
@@ -176,6 +177,7 @@ import qualified Control.Monad.Fail as MonadFail
 import Data.Map      ( Map )
 import Data.Dynamic  ( Dynamic )
 import Data.Typeable ( TypeRep )
+import GHCi.Message
 import GHCi.RemoteTypes
 
 import qualified Language.Haskell.TH as TH
@@ -495,7 +497,7 @@ data TcGblEnv
         -- ^ Template Haskell module finalizers
 
         tcg_th_state :: TcRef (Map TypeRep Dynamic),
-        tcg_th_remote_state :: TcRef (Maybe ForeignHValue),
+        tcg_th_remote_state :: TcRef (Maybe (ForeignRef (IORef QState))),
         -- ^ Template Haskell state
 #endif /* GHCI */
 
@@ -873,9 +875,10 @@ data TcTyThing
                                 -- for error-message purposes; it is the corresponding
                                 -- Name in the domain of the envt
 
-  | AThing  TcKind   -- Used temporarily, during kind checking, for the
+  | ATcTyCon TyCon   -- Used temporarily, during kind checking, for the
                      -- tycons and clases in this recursive group
-                     -- Can be a mono-kind or a poly-kind; in TcTyClsDcls see
+                     -- The TyCon is always a TcTyCon.  Its kind
+                     -- can be a mono-kind or a poly-kind; in TcTyClsDcls see
                      -- Note [Type checking recursive type and class declarations]
 
   | APromotionErr PromotionErr
@@ -903,7 +906,7 @@ instance Outputable TcTyThing where     -- Debugging only
                                  <> ppr (varType (tct_id elt)) <> comma
                                  <+> ppr (tct_closed elt))
    ppr (ATyVar n tv)    = text "Type variable" <+> quotes (ppr n) <+> equals <+> ppr tv
-   ppr (AThing k)       = text "AThing" <+> ppr k
+   ppr (ATcTyCon tc)    = text "ATcTyCon" <+> ppr tc
    ppr (APromotionErr err) = text "APromotionErr" <+> ppr err
 
 instance Outputable PromotionErr where
@@ -920,7 +923,7 @@ pprTcTyThingCategory :: TcTyThing -> SDoc
 pprTcTyThingCategory (AGlobal thing)    = pprTyThingCategory thing
 pprTcTyThingCategory (ATyVar {})        = ptext (sLit "Type variable")
 pprTcTyThingCategory (ATcId {})         = ptext (sLit "Local identifier")
-pprTcTyThingCategory (AThing {})        = ptext (sLit "Kinded thing")
+pprTcTyThingCategory (ATcTyCon {})     = ptext (sLit "Local tycon")
 pprTcTyThingCategory (APromotionErr pe) = pprPECategory pe
 
 pprPECategory :: PromotionErr -> SDoc
@@ -1730,9 +1733,9 @@ isTypeHoleCt (CHoleCan { cc_hole = TypeHole }) = True
 isTypeHoleCt _ = False
 
 -- | The following constraints are considered to be a custom type error:
---    1. TypeError msg
---    2. TypeError msg ~ Something  (and the other way around)
---    3. C (TypeError msg)          (for any parameter of class constraint)
+--    1. TypeError msg a b c
+--    2. TypeError msg a b c ~ Something (and the other way around)
+--    4. C (TypeError msg a b c)         (for any parameter of class constraint)
 getUserTypeErrorMsg :: Ct -> Maybe Type
 getUserTypeErrorMsg ct
   | Just (_,t1,t2) <- getEqPredTys_maybe ctT    = oneOf [t1,t2]
@@ -1835,6 +1838,10 @@ mkSimpleWC cts
   = WC { wc_simple = listToBag (map mkNonCanonical cts)
        , wc_impl = emptyBag
        , wc_insol = emptyBag }
+
+mkImplicWC :: Bag Implication -> WantedConstraints
+mkImplicWC implic
+  = WC { wc_simple = emptyBag, wc_impl = implic, wc_insol = emptyBag }
 
 isEmptyWC :: WantedConstraints -> Bool
 isEmptyWC (WC { wc_simple = f, wc_impl = i, wc_insol = n })
@@ -2482,6 +2489,9 @@ data SkolemInfo
 
   | ClsSkol Class       -- Bound at a class decl
 
+  | DerivSkol Type      -- Bound by a 'deriving' clause;
+                        -- the type is the instance we are trying to derive
+
   | InstSkol            -- Bound at an instance decl
   | InstSC TypeSize     -- A "given" constraint obtained by superclass selection.
                         -- If (C ty1 .. tyn) is the largest class from
@@ -2527,6 +2537,7 @@ pprSkolInfo (SigSkol ctxt ty) = pprSigSkolInfo ctxt ty
 pprSkolInfo (IPSkol ips)      = ptext (sLit "the implicit-parameter binding") <> plural ips <+> ptext (sLit "for")
                                 <+> pprWithCommas ppr ips
 pprSkolInfo (ClsSkol cls)     = ptext (sLit "the class declaration for") <+> quotes (ppr cls)
+pprSkolInfo (DerivSkol pred)  = ptext (sLit "the deriving clause for") <+> quotes (ppr pred)
 pprSkolInfo InstSkol          = ptext (sLit "the instance declaration")
 pprSkolInfo (InstSC n)        = ptext (sLit "the instance declaration") <> ifPprDebug (parens (ppr n))
 pprSkolInfo DataSkol          = ptext (sLit "a data type declaration")

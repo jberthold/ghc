@@ -13,6 +13,7 @@ TcSplice: Template Haskell splices
 {-# LANGUAGE InstanceSigs #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE MultiWayIf #-}
 {-# OPTIONS_GHC -fno-warn-orphans #-}
 
 module TcSplice(
@@ -911,9 +912,9 @@ finishTH = do
       case th_state of
         Nothing -> return () -- TH was not started, nothing to do
         Just fhv -> do
-          liftIO $ withForeignHValue fhv $ \rhv ->
+          liftIO $ withForeignRef fhv $ \rhv ->
             writeIServ i (putMessage (FinishTH rhv))
-          () <- runRemoteTH i
+          () <- runRemoteTH i []
           writeTcRef (tcg_th_remote_state tcg) Nothing
 
 runTHExp :: ForeignHValue -> TcM TH.Exp
@@ -944,27 +945,73 @@ runTH ty fhv = do
         rstate <- getTHState i
         loc <- TH.qLocation
         liftIO $
-          withForeignHValue rstate $ \state_hv ->
-          withForeignHValue fhv $ \q_hv ->
+          withForeignRef rstate $ \state_hv ->
+          withForeignRef fhv $ \q_hv ->
             writeIServ i (putMessage (RunTH state_hv q_hv ty (Just loc)))
-        bs <- runRemoteTH i
+        bs <- runRemoteTH i []
         return $! runGet get (LB.fromStrict bs)
 
 -- | communicate with a remotely-running TH computation until it
 -- finishes and returns a result.
-runRemoteTH :: Binary a => IServ -> TcM a
-runRemoteTH iserv = do
+runRemoteTH
+  :: Binary a
+  => IServ
+  -> [Messages]   --  saved from nested calls to qRecover
+  -> TcM a
+runRemoteTH iserv recovers = do
   Msg msg <- liftIO $ readIServ iserv getMessage
   case msg of
     QDone -> liftIO $ readIServ iserv get
     QException str -> liftIO $ throwIO (ErrorCall str)
     QFail str -> fail str
+    StartRecover -> do -- Note [TH recover with -fexternal-interpreter]
+      v <- getErrsVar
+      msgs <- readTcRef v
+      writeTcRef v emptyMessages
+      runRemoteTH iserv (msgs : recovers)
+    EndRecover caught_error -> do
+      v <- getErrsVar
+      let (prev_msgs, rest) = case recovers of
+             [] -> panic "EndRecover"
+             a : b -> (a,b)
+      if caught_error
+        then writeTcRef v prev_msgs
+        else updTcRef v (unionMessages prev_msgs)
+      runRemoteTH iserv rest
     _other -> do
       r <- handleTHMessage msg
       liftIO $ writeIServ iserv (put r)
-      runRemoteTH iserv
+      runRemoteTH iserv recovers
 
-getTHState :: IServ -> TcM ForeignHValue
+{- Note [TH recover with -fexternal-interpreter]
+
+Recover is slightly tricky to implement.
+
+The meaning of "recover a b" is
+ - Do a
+   - If it finished successfully, then keep the messages it generated
+   - If it failed, discard any messages it generated, and do b
+
+The messages are managed by GHC in the TcM monad, whereas the
+exception-handling is done in the ghc-iserv process, so we have to
+coordinate between the two.
+
+On the server:
+  - emit a StartRecover message
+  - run "a" inside a catch
+    - if it finishes, emit EndRecover False
+    - if it fails, emit EndRecover True, then run "b"
+
+Back in GHC, when we receive:
+
+  StartRecover
+    save the current messages and start with an empty set.
+  EndRecover caught_error
+    Restore the previous messages,
+    and merge in the new messages if caught_error is false.
+-}
+
+getTHState :: IServ -> TcM (ForeignRef (IORef QState))
 getTHState i = do
   tcg <- getGblEnv
   th_state <- readTcRef (tcg_th_remote_state tcg)
@@ -1338,41 +1385,44 @@ reifyDataCon isGadtDataCon tys dc
              (ex_tvs, theta, arg_tys)
                  = dataConInstSig dc tys
              -- used for GADTs data constructors
-             (g_univ_tvs, g_ex_tvs, g_eq_spec, g_theta, g_arg_tys, _)
+             (g_univ_tvs, g_ex_tvs, g_eq_spec, g_theta, g_arg_tys, g_res_ty)
                  = dataConFullSig dc
              (srcUnpks, srcStricts)
                  = mapAndUnzip reifySourceBang (dataConSrcBangs dc)
              dcdBangs  = zipWith TH.Bang srcUnpks srcStricts
              fields    = dataConFieldLabels dc
              name      = reifyName dc
-             r_ty_name = reifyName (dataConTyCon dc) -- return type for GADTs
-             -- return type indices
+             -- Universal tvs present in eq_spec need to be filtered out, as
+             -- they will not appear anywhere in the type.
              subst     = mkTopTCvSubst (map eqSpecPair g_eq_spec)
-             idx       = substTyVars subst g_univ_tvs
-             -- universal tvs that were not substituted
              g_unsbst_univ_tvs = filter (`notElemTCvSubst` subst) g_univ_tvs
 
        ; r_arg_tys <- reifyTypes (if isGadtDataCon then g_arg_tys else arg_tys)
-       ; idx_tys   <- reifyTypes idx
 
-       ; let main_con | not (null fields) && not isGadtDataCon
-                      = TH.RecC name (zip3 (map reifyFieldLabel fields)
-                                      dcdBangs r_arg_tys)
-                      | not (null fields)
-                      = TH.RecGadtC [name]
-                                   (zip3 (map (reifyName . flSelector) fields)
-                                    dcdBangs r_arg_tys) r_ty_name idx_tys
-                      | dataConIsInfix dc
-                      = ASSERT( length arg_tys == 2 )
-                        TH.InfixC (s1,r_a1) name (s2,r_a2)
-                      | isGadtDataCon
-                      = TH.GadtC [name] (dcdBangs `zip` r_arg_tys) r_ty_name
-                                 idx_tys
-                      | otherwise
-                      = TH.NormalC name (dcdBangs `zip` r_arg_tys)
-             [r_a1, r_a2] = r_arg_tys
-             [s1,   s2]   = dcdBangs
-             (ex_tvs', theta') | isGadtDataCon = ( g_unsbst_univ_tvs ++ g_ex_tvs
+       ; main_con <-
+           if | not (null fields) && not isGadtDataCon ->
+                  return $ TH.RecC name (zip3 (map reifyFieldLabel fields)
+                                         dcdBangs r_arg_tys)
+              | not (null fields) -> do
+                  { res_ty <- reifyType g_res_ty
+                  ; return $ TH.RecGadtC [name]
+                                     (zip3 (map (reifyName . flSelector) fields)
+                                      dcdBangs r_arg_tys) res_ty }
+                -- We need to check not isGadtDataCon here because GADT
+                -- constructors can be declared infix.
+                -- See Note [Infix GADT constructors] in TcTyClsDecls.
+              | dataConIsInfix dc && not isGadtDataCon ->
+                  ASSERT( length arg_tys == 2 ) do
+                  { let [r_a1, r_a2] = r_arg_tys
+                        [s1,   s2]   = dcdBangs
+                  ; return $ TH.InfixC (s1,r_a1) name (s2,r_a2) }
+              | isGadtDataCon -> do
+                  { res_ty <- reifyType g_res_ty
+                  ; return $ TH.GadtC [name] (dcdBangs `zip` r_arg_tys) res_ty }
+              | otherwise ->
+                  return $ TH.NormalC name (dcdBangs `zip` r_arg_tys)
+
+       ; let (ex_tvs', theta') | isGadtDataCon = ( g_unsbst_univ_tvs ++ g_ex_tvs
                                                  , g_theta )
                                | otherwise     = ( ex_tvs, theta )
              ret_con | null ex_tvs' && null theta' = return main_con
@@ -1756,10 +1806,28 @@ reifySelector id tc
       Nothing -> pprPanic "reifySelector: missing field" (ppr id $$ ppr tc)
 
 ------------------------------
-reifyFixity :: Name -> TcM TH.Fixity
+reifyFixity :: Name -> TcM (Maybe TH.Fixity)
 reifyFixity name
-  = do  { fix <- lookupFixityRn name
-        ; return (conv_fix fix) }
+  = do { -- Repeat much of lookupFixityRn, because if we don't find a
+         -- user-supplied fixity declaration, we want to return Nothing
+         -- instead of defaultFixity
+       ; env <- getFixityEnv
+       ; case lookupNameEnv env name of
+              Just (FixItem _ fix) -> return (Just (conv_fix fix))
+              Nothing ->
+                do { this_mod <- getModule
+                   ; if nameIsLocalOrFrom this_mod name
+                        then return Nothing
+                        else
+                          -- Do NOT use mi_fix_fn to look up the fixity,
+                          -- because if there is a cache miss, it will return
+                          -- defaultFixity, which we want to avoid
+                          do { let doc = ptext (sLit "Checking fixity for")
+                                           <+> ppr name
+                             ; iface <- loadInterfaceForName doc name
+                             ; return . fmap conv_fix
+                                      . lookup (nameOccName name)
+                                      $ mi_fixities iface } } }
     where
       conv_fix (BasicTypes.Fixity i d) = TH.Fixity i (conv_dir d)
       conv_dir BasicTypes.InfixR = TH.InfixR

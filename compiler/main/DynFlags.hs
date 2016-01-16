@@ -236,6 +236,59 @@ import qualified GHC.LanguageExtensions as LangExt
 -- have effect, and annotate it accordingly. For Flags use defFlag, defGhcFlag,
 -- defGhciFlag, and for FlagSpec use flagSpec or flagGhciSpec.
 
+-- Note [Adding a language extension]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--
+-- There are a few steps to adding (or removing) a language extension,
+--
+--  * Adding the extension to GHC.LanguageExtensions
+--
+--    The Extension type in libraries/ghc-boot/GHC/LanguageExtensions.hs is
+--    the canonical list of language extensions known by GHC.
+--
+--  * Adding a flag to DynFlags.xFlags
+--
+--    This is fairly self-explanatory. The name should be concise, memorable,
+--    and consistent with any previous implementations of the similar idea in
+--    other Haskell compilers.
+--
+--  * Adding the flag to the documentation
+--
+--    This is the same as any other flag. See
+--    Note [Updating flag description in the User's Guide]
+--
+--  * Adding the flag to Cabal
+--
+--    The Cabal library has its own list of all language extensions supported
+--    by all major compilers. This is the list that user code being uploaded
+--    to Hackage is checked against to ensure language extension validity.
+--    Consequently, it is very important that this list remains up-to-date.
+--
+--    To this end, there is a testsuite test (testsuite/tests/driver/T4437.hs)
+--    whose job it is to ensure these GHC's extensions are consistent with
+--    Cabal.
+--
+--    The recommended workflow is,
+--
+--     1. Temporarily add your new language extension to the
+--        expectedGhcOnlyExtensions list in T4437 to ensure the test doesn't
+--        break while Cabal is updated.
+--
+--     2. After your GHC change is accepted, submit a Cabal pull request adding
+--        your new extension to Cabal's list (found in
+--        Cabal/Language/Haskell/Extension.hs).
+--
+--     3. After your Cabal change is accepted, let the GHC developers know so
+--        they can update the Cabal submodule and remove the extensions from
+--        expectedGhcOnlyExtensions.
+--
+--  * Adding the flag to the GHC Wiki
+--
+--    There is a change log tracking language extension additions and removals
+--    on the GHC wiki:  https://ghc.haskell.org/trac/ghc/wiki/LanguagePragmaHistory
+--
+--  See Trac #4437 and #8176.
+
 -- -----------------------------------------------------------------------------
 -- DynFlags
 
@@ -992,7 +1045,15 @@ opt_i dflags = sOpt_i (settings dflags)
 versionedAppDir :: DynFlags -> IO FilePath
 versionedAppDir dflags = do
   appdir <- getAppUserDataDirectory (programName dflags)
-  return $ appdir </> (TARGET_ARCH ++ '-':TARGET_OS ++ '-':projectVersion dflags)
+  return $ appdir </> versionedFilePath dflags
+
+-- | A filepath like @x86_64-linux-7.6.3@ with the platform string to use when
+-- constructing platform-version-dependent files that need to co-exist.
+--
+versionedFilePath :: DynFlags -> FilePath
+versionedFilePath dflags =     TARGET_ARCH
+                        ++ '-':TARGET_OS
+                        ++ '-':projectVersion dflags
   -- NB: This functionality is reimplemented in Cabal, so if you
   -- change it, be sure to update Cabal.
 
@@ -3152,6 +3213,7 @@ xFlags :: [FlagSpec LangExt.Extension]
 xFlags = [
 -- See Note [Updating flag description in the User's Guide]
 -- See Note [Supporting CLI completion]
+-- See Note [Adding a language extension]
 -- Please keep the list of flags below sorted alphabetically
   flagSpec "AllowAmbiguousTypes"              LangExt.AllowAmbiguousTypes,
   flagSpec "AlternativeLayoutRule"            LangExt.AlternativeLayoutRule,
@@ -3203,6 +3265,7 @@ xFlags = [
   flagSpec "ImpredicativeTypes"               LangExt.ImpredicativeTypes,
   flagSpec' "IncoherentInstances"             LangExt.IncoherentInstances
                                               setIncoherentInsts,
+  flagSpec "TypeFamilyDependencies"           LangExt.TypeFamilyDependencies,
   flagSpec "InstanceSigs"                     LangExt.InstanceSigs,
   flagSpec "ApplicativeDo"                    LangExt.ApplicativeDo,
   flagSpec "InterruptibleFFI"                 LangExt.InterruptibleFFI,
@@ -3342,6 +3405,7 @@ impliedXFlags
     , (LangExt.FlexibleInstances,         turnOn, LangExt.TypeSynonymInstances)
     , (LangExt.FunctionalDependencies,    turnOn, LangExt.MultiParamTypeClasses)
     , (LangExt.MultiParamTypeClasses,     turnOn, LangExt.ConstrainedClassMethods)  -- c.f. Trac #7854
+    , (LangExt.TypeFamilyDependencies,    turnOn, LangExt.TypeFamilies)
 
     , (LangExt.RebindableSyntax, turnOff, LangExt.ImplicitPrelude)      -- NB: turn off!
 
@@ -3457,7 +3521,6 @@ optLevelFlags -- see Note [Documenting optimisation flags]
 standardWarnings :: [WarningFlag]
 standardWarnings -- see Note [Documenting warning flags]
     = [ Opt_WarnOverlappingPatterns,
-        Opt_WarnTooManyGuards,
         Opt_WarnWarningsDeprecations,
         Opt_WarnDeprecatedFlags,
         Opt_WarnDeferredTypeErrors,
@@ -3893,46 +3956,58 @@ setUnitId p s =  s{ thisPackage = stringToUnitId p }
 -- | Find the package environment (if one exists)
 --
 -- We interpret the package environment as a set of package flags; to be
--- specific, if we find a package environment
+-- specific, if we find a package environment file like
 --
--- > id1
--- > id2
--- > ..
--- > idn
+-- > clear-package-db
+-- > global-package-db
+-- > package-db blah/package.conf.d
+-- > package-id id1
+-- > package-id id2
 --
 -- we interpret this as
 --
 -- > [ -hide-all-packages
+-- > , -clear-package-db
+-- > , -global-package-db
+-- > , -package-db blah/package.conf.d
 -- > , -package-id id1
 -- > , -package-id id2
--- > , ..
--- > , -package-id idn
 -- > ]
+--
+-- There's also an older syntax alias for package-id, which is just an
+-- unadorned package id
+--
+-- > id1
+-- > id2
+--
 interpretPackageEnv :: DynFlags -> IO DynFlags
 interpretPackageEnv dflags = do
     mPkgEnv <- runMaybeT $ msum $ [
                    getCmdLineArg >>= \env -> msum [
-                       loadEnvFile  env
-                     , loadEnvName  env
+                       probeEnvFile env
+                     , probeEnvName env
                      , cmdLineError env
                      ]
                  , getEnvVar >>= \env -> msum [
-                       loadEnvFile env
-                     , loadEnvName env
-                     , envError    env
+                       probeEnvFile env
+                     , probeEnvName env
+                     , envError     env
                      ]
-                 , loadEnvFile localEnvFile
-                 , loadEnvName defaultEnvName
+                 , notIfHideAllPackages >> msum [
+                       findLocalEnvFile >>= probeEnvFile
+                     , probeEnvName defaultEnvName
+                     ]
                  ]
     case mPkgEnv of
       Nothing ->
         -- No environment found. Leave DynFlags unchanged.
         return dflags
-      Just ids -> do
+      Just envfile -> do
+        content <- readFile envfile
         let setFlags :: DynP ()
             setFlags = do
               setGeneralFlag Opt_HideAllPackages
-              mapM_ exposePackageId (lines ids)
+              parseEnvFile envfile content
 
             (_, dflags') = runCmdLine (runEwM setFlags) dflags
 
@@ -3945,13 +4020,31 @@ interpretPackageEnv dflags = do
      appdir <- liftMaybeT $ versionedAppDir dflags
      return $ appdir </> "environments" </> name
 
-    loadEnvName :: String -> MaybeT IO String
-    loadEnvName name = loadEnvFile =<< namedEnvPath name
+    probeEnvName :: String -> MaybeT IO FilePath
+    probeEnvName name = probeEnvFile =<< namedEnvPath name
 
-    loadEnvFile :: String -> MaybeT IO String
-    loadEnvFile path = do
+    probeEnvFile :: FilePath -> MaybeT IO FilePath
+    probeEnvFile path = do
       guard =<< liftMaybeT (doesFileExist path)
-      liftMaybeT $ readFile path
+      return path
+
+    parseEnvFile :: FilePath -> String -> DynP ()
+    parseEnvFile envfile = mapM_ parseEntry . lines
+      where
+        parseEntry str = case words str of
+          ["package-db", db]    -> addPkgConfRef (PkgConfFile (envdir </> db))
+            -- relative package dbs are interpreted relative to the env file
+            where envdir = takeDirectory envfile
+          ["clear-package-db"]  -> clearPkgConf
+          ["global-package-db"] -> addPkgConfRef GlobalPkgConf
+          ["user-package-db"]   -> addPkgConfRef UserPkgConf
+          ["package-id", pkgid] -> exposePackageId pkgid
+          -- and the original syntax introduced in 7.10:
+          [pkgid]               -> exposePackageId pkgid
+          []                    -> return ()
+          _                     -> throwGhcException $ CmdLineError $
+                                        "Can't parse environment file entry: "
+                                     ++ envfile ++ ": " ++ str
 
     -- Various ways to define which environment to use
 
@@ -3966,11 +4059,34 @@ interpretPackageEnv dflags = do
         Left err  -> if isDoesNotExistError err then mzero
                                                 else liftMaybeT $ throwIO err
 
+    notIfHideAllPackages :: MaybeT IO ()
+    notIfHideAllPackages =
+      guard (not (gopt Opt_HideAllPackages dflags))
+
     defaultEnvName :: String
     defaultEnvName = "default"
 
-    localEnvFile :: FilePath
-    localEnvFile = "./.ghc.environment"
+    -- e.g. .ghc.environment.x86_64-linux-7.6.3
+    localEnvFileName :: FilePath
+    localEnvFileName = ".ghc.environment" <.> versionedFilePath dflags
+
+    -- Search for an env file, starting in the current dir and looking upwards.
+    -- Fail if we get to the users home dir or the filesystem root. That is,
+    -- we don't look for an env file in the user's home dir. The user-wide
+    -- env lives in ghc's versionedAppDir/environments/default
+    findLocalEnvFile :: MaybeT IO FilePath
+    findLocalEnvFile = do
+        curdir  <- liftMaybeT getCurrentDirectory
+        homedir <- liftMaybeT getHomeDirectory
+        let probe dir | isDrive dir || dir == homedir
+                      = mzero
+            probe dir = do
+              let file = dir </> localEnvFileName
+              exists <- liftMaybeT (doesFileExist file)
+              if exists
+                then return file
+                else probe (takeDirectory dir)
+        probe curdir
 
     -- Error reporting
 

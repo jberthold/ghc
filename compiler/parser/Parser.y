@@ -650,22 +650,23 @@ qcnames :: { ([AddAnn], [Located (Maybe RdrName)]) }
   | qcnames1                      { $1 }
 
 qcnames1 :: { ([AddAnn], [Located (Maybe RdrName)]) }     -- A reversed list
-        :  qcnames1 ',' qcname_ext_w_wildcard  {% case (last (snd $1)) of
+        :  qcnames1 ',' qcname_ext_w_wildcard  {% case (head (snd $1)) of
                                                     l@(L _ Nothing) ->
-                                                      return ([mj AnnComma $2, mj AnnDotdot l]
-                                                              ,($3  : snd $1))
-                                                    l -> (aa (head (snd $1)) (AnnComma, $2) >>
-                                                          return (fst $1, $3 : snd $1)) }
+                                                       return ([mj AnnComma $2, mj AnnDotdot l]
+                                                               ,(snd (unLoc $3)  : snd $1))
+                                                    l -> (ams (head (snd $1)) [mj AnnComma $2] >>
+                                                          return (fst $1 ++ fst (unLoc $3),
+                                                                  snd (unLoc $3) : snd $1)) }
 
 
-        -- Annotations readded in mkImpExpSubSpec
-        |  qcname_ext_w_wildcard                   { ([],[$1])  }
+        -- Annotations re-added in mkImpExpSubSpec
+        |  qcname_ext_w_wildcard                   { (fst (unLoc $1),[snd (unLoc $1)]) }
 
 -- Variable, data constructor or wildcard
 -- or tagged type constructor
-qcname_ext_w_wildcard :: { Located (Maybe RdrName) }
-        :  qcname_ext               { Just `fmap` $1 }
-        |  '..'                     { Nothing <$ $1 }
+qcname_ext_w_wildcard :: { Located ([AddAnn],Located (Maybe RdrName)) }
+        :  qcname_ext               { sL1 $1 ([],Just `fmap` $1) }
+        |  '..'                     { sL1 $1 ([mj AnnDotdot $1], sL1 $1 Nothing) }
 
 qcname_ext :: { Located RdrName }
         :  qcname                   { $1 }
@@ -1591,7 +1592,7 @@ context :: { LHsContext RdrName }
                                                 } }
 
 context_no_ops :: { LHsContext RdrName }
-        : btype_no_ops                 {% do { let { ty = splitTilde $1 }
+        : btype_no_ops                 {% do { ty <- splitTilde $1
                                              ; (anns,ctx) <- checkContext ty
                                              ; if null (unLoc ctx)
                                                    then addAnnotation (gl ty) AnnUnit (gl ty)
@@ -1899,7 +1900,8 @@ constr_stuff :: { Located (Located RdrName, HsConDeclDetails RdrName) }
     -- see Note [Parsing data constructors is hard]
         : btype_no_ops                         {% do { c <- splitCon $1
                                                      ; return $ sLL $1 $> c } }
-        | btype_no_ops conop btype_no_ops      {  sLL $1 $> ($2, InfixCon (splitTilde $1) $3) }
+        | btype_no_ops conop btype_no_ops      {% do { ty <- splitTilde $1
+                                                     ; return $ sLL $1 $> ($2, InfixCon ty $3) } }
 
 {- Note [Parsing data constructors is hard]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -3336,9 +3338,6 @@ For the general principles of the following routines, see Note [Api annotations]
 in ApiAnnotation.hs
 
 -}
-
-addAnnsAt :: SrcSpan -> [AddAnn] -> P ()
-addAnnsAt loc anns = mapM_ (\a -> a loc) anns
 
 -- |Construct an AddAnn from the annotation keyword and the location
 -- of the keyword itself

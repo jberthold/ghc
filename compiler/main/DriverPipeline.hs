@@ -179,7 +179,7 @@ compileOne' m_tc_result mHscMessage
             let linkable = LM o_time this_mod [DotO object_filename]
             return hmi0 { hm_linkable = Just linkable }
         (HscRecomp cgguts summary, HscInterpreted) -> do
-            (hasStub, comp_bc, modBreaks) <- hscInteractive hsc_env cgguts summary
+            (hasStub, comp_bc) <- hscInteractive hsc_env cgguts summary
 
             stub_o <- case hasStub of
                       Nothing -> return []
@@ -187,7 +187,7 @@ compileOne' m_tc_result mHscMessage
                           stub_o <- compileStub hsc_env stub_c
                           return [DotO stub_o]
 
-            let hs_unlinked = [BCOs comp_bc modBreaks]
+            let hs_unlinked = [BCOs comp_bc]
                 unlinked_time = ms_hs_date summary
               -- Why do we use the timestamp of the source file here,
               -- rather than the current time?  This works better in
@@ -2279,9 +2279,9 @@ doCpp dflags raw input_fn output_fn = do
     backend_defs <- getBackendDefs dflags
 
 #ifdef GHCI
-    let th_defs = [ "-D__GLASGOW_HASKELL_TH__=YES" ]
+    let th_defs = [ "-D__GLASGOW_HASKELL_TH__=1" ]
 #else
-    let th_defs = [ "-D__GLASGOW_HASKELL_TH__=NO" ]
+    let th_defs = [ "-D__GLASGOW_HASKELL_TH__=0" ]
 #endif
     -- Default CPP defines in Haskell source
     ghcVersionH <- getGhcVersionPathName dflags

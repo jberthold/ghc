@@ -66,7 +66,7 @@ instance Ppr Info where
               case mb_d of { Nothing -> empty; Just d -> ppr d }]
 
 ppr_sig :: Name -> Type -> Doc
-ppr_sig v ty = ppr v <+> dcolon <+> ppr ty
+ppr_sig v ty = pprName' Applied v <+> dcolon <+> ppr ty
 
 pprFixity :: Name -> Fixity -> Doc
 pprFixity _ f | f == defaultFixity = empty
@@ -361,10 +361,10 @@ ppr_data maybeInst ctxt t argsDoc ksig cs decs
 
     isGadtDecl :: Bool
     isGadtDecl = not (null cs) && all isGadtCon cs
-        where isGadtCon (GadtC _ _ _ _   ) = True
-              isGadtCon (RecGadtC _ _ _ _) = True
-              isGadtCon (ForallC _ _ x   ) = isGadtCon x
-              isGadtCon  _                 = False
+        where isGadtCon (GadtC _ _ _   ) = True
+              isGadtCon (RecGadtC _ _ _) = True
+              isGadtCon (ForallC _ _ x ) = isGadtCon x
+              isGadtCon  _               = False
 
     ksigDoc = case ksig of
                 Nothing -> empty
@@ -506,38 +506,42 @@ instance Ppr Con where
                          <+> pprName' Infix c
                          <+> pprBangType st2
 
-    ppr (ForallC ns ctxt (GadtC c sts ty idx))
-        = commaSep c <+> dcolon <+> pprForall ns ctxt <+> pprGadtRHS sts ty idx
+    ppr (ForallC ns ctxt (GadtC c sts ty))
+        = commaSepApplied c <+> dcolon <+> pprForall ns ctxt
+      <+> pprGadtRHS sts ty
 
-    ppr (ForallC ns ctxt (RecGadtC c vsts ty idx))
-        = commaSep c <+> dcolon <+> pprForall ns ctxt
-      <+> pprRecFields vsts ty idx
+    ppr (ForallC ns ctxt (RecGadtC c vsts ty))
+        = commaSepApplied c <+> dcolon <+> pprForall ns ctxt
+      <+> pprRecFields vsts ty
 
     ppr (ForallC ns ctxt con)
         = pprForall ns ctxt <+> ppr con
 
-    ppr (GadtC c sts ty idx)
-        = commaSep c <+> dcolon <+> pprGadtRHS sts ty idx
+    ppr (GadtC c sts ty)
+        = commaSepApplied c <+> dcolon <+> pprGadtRHS sts ty
 
-    ppr (RecGadtC c vsts ty idx)
-        = commaSep c <+> dcolon <+> pprRecFields vsts ty idx
+    ppr (RecGadtC c vsts ty)
+        = commaSepApplied c <+> dcolon <+> pprRecFields vsts ty
+
+commaSepApplied :: [Name] -> Doc
+commaSepApplied = commaSepWith (pprName' Applied)
 
 pprForall :: [TyVarBndr] -> Cxt -> Doc
 pprForall ns ctxt
     = text "forall" <+> hsep (map ppr ns)
   <+> char '.' <+> pprCxt ctxt
 
-pprRecFields :: [(Name, Strict, Type)] -> Name -> [Type] -> Doc
-pprRecFields vsts ty idx
+pprRecFields :: [(Name, Strict, Type)] -> Type -> Doc
+pprRecFields vsts ty
     = braces (sep (punctuate comma $ map pprVarBangType vsts))
-  <+> arrow <+> ppr ty <+> sep (map ppr idx)
+  <+> arrow <+> ppr ty
 
-pprGadtRHS :: [(Strict, Type)] -> Name -> [Type] -> Doc
-pprGadtRHS [] ty idx
-    = ppr ty <+> sep (map ppr idx)
-pprGadtRHS sts ty idx
+pprGadtRHS :: [(Strict, Type)] -> Type -> Doc
+pprGadtRHS [] ty
+    = ppr ty
+pprGadtRHS sts ty
     = sep (punctuate (space <> arrow) (map pprBangType sts))
-  <+> arrow <+> ppr ty <+> sep (map ppr idx)
+  <+> arrow <+> ppr ty
 
 ------------------------------
 pprVarBangType :: VarBangType -> Doc
@@ -615,6 +619,9 @@ pprParendType WildCardT           = char '_'
 pprParendType (InfixT x n y)      = parens (ppr x <+> pprName' Infix n <+> ppr y)
 pprParendType t@(UInfixT {})      = parens (pprUInfixT t)
 pprParendType (ParensT t)         = ppr t
+pprParendType tuple | (TupleT n, args) <- split tuple
+                    , length args == n
+                    = parens (commaSep args)
 pprParendType other               = parens (ppr other)
 
 pprUInfixT :: Type -> Doc
@@ -728,7 +735,12 @@ instance Ppr Loc where
 -- Takes a list of printable things and prints them separated by commas followed
 -- by space.
 commaSep :: Ppr a => [a] -> Doc
-commaSep = sep . punctuate comma . map ppr
+commaSep = commaSepWith ppr
+
+-- Takes a list of things and prints them with the given pretty-printing
+-- function, separated by commas followed by space.
+commaSepWith :: (a -> Doc) -> [a] -> Doc
+commaSepWith pprFun = sep . punctuate comma . map pprFun
 
 -- Takes a list of printable things and prints them separated by semicolons
 -- followed by space.
