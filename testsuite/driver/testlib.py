@@ -1697,14 +1697,17 @@ def normalise_callstacks(str):
     # Ignore line number differences in call stacks (#10834).
     return re.sub(', called at (.+):[\\d]+:[\\d]+ in [\\w\-\.]+:', repl, str)
 
+tyCon_re = re.compile(r'TyCon\s*\d+L?\#\#\s*\d+L?\#\#\s*', flags=re.MULTILINE)
+
 def normalise_type_reps(str):
     """ Normalise out fingerprints from Typeable TyCon representations """
-    return re.sub(r'TyCon\s*\d+L?\#\#\s*\d+L?\#\#\s*',
-                  'TyCon FINGERPRINT FINGERPRINT ',
-                  str,
-                  flags=re.MULTILINE)
+    return re.sub(tyCon_re, 'TyCon FINGERPRINT FINGERPRINT ', str)
 
 def normalise_errmsg( str ):
+    """Normalise error-messages emitted via stderr"""
+    # IBM AIX's `ld` is a bit chatty
+    if opsys('aix'):
+        str = str.replace('ld: 0706-027 The -x flag is ignored.\n', '')
     # remove " error:" and lower-case " Warning:" to make patch for
     # trac issue #10021 smaller
     str = modify_lines(str, lambda l: re.sub(' error:', '', l))

@@ -1458,10 +1458,11 @@ if test "$RELEASE" = "NO"; then
         AC_MSG_RESULT(given $PACKAGE_VERSION)
     elif test -d .git; then
         changequote(, )dnl
-        ver_date=`git log -n 1 --date=short --pretty=format:%ci | cut -d ' ' -f 1 | tr -d -`
+        ver_posixtime=`git log -1 --pretty=format:%ct`
+        ver_date=`perl -MPOSIX -e "print strftime('%Y%m%d', gmtime($ver_posixtime));"`
         if echo $ver_date | grep '^[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]$' 2>&1 >/dev/null; then true; else
         changequote([, ])dnl
-                AC_MSG_ERROR([failed to detect version date: check that git is in your path])
+                AC_MSG_ERROR([failed to detect version date: check that git and perl are in your path])
         fi
         PACKAGE_VERSION=${PACKAGE_VERSION}.$ver_date
         AC_MSG_RESULT(inferred $PACKAGE_VERSION)
@@ -1532,8 +1533,22 @@ AC_SUBST([ProjectPatchLevel2])
 ProjectPatchLevel=`echo $ProjectPatchLevel | sed 's/\.//'`
 
 AC_SUBST([ProjectPatchLevel])
-])# FP_SETUP_PROJECT_VERSION
 
+# The version of the GHC package changes every day, since the
+# patchlevel is the current date.  We don't want to force
+# recompilation of the entire compiler when this happens, so for
+# GHC HEAD we omit the patchlevel from the package version number.
+#
+# The ProjectPatchLevel1 > 20000000 iff GHC HEAD. If it's for a stable
+# release like 7.10.1 or for a release candidate such as 7.10.1.20141224
+# then we don't omit the patchlevel components.
+
+ProjectVersionMunged="$ProjectVersion"
+if test "$ProjectPatchLevel1" -gt 20000000; then
+  ProjectVersionMunged="${VERSION_MAJOR}.${VERSION_MINOR}"
+fi
+AC_SUBST([ProjectVersionMunged])
+])# FP_SETUP_PROJECT_VERSION
 
 # Check for a working timer_create().  We need a pretty detailed check
 # here, because there exist partially-working implementations of

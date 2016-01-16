@@ -272,7 +272,7 @@ test('T7532',
      ['T7532', '-v0 ' + config.ghc_th_way_flags])
 test('T2222', normal, compile, ['-v0'])
 test('T1849', normal, ghci_script, ['T1849.script'])
-test('T7681', when(compiler_debugged(), expect_broken(11287)), compile, ['-v0'])
+test('T7681', normal, compile, ['-v0'])
 test('T7910', normal, compile_and_run, ['-v0'])
 
 test('ClosedFam1TH', normal, compile, ['-dsuppress-uniques -v0'])
@@ -284,8 +284,9 @@ test('T8028',
      ['T8028', '-v0 ' + config.ghc_th_way_flags])
 
 test('TH_Roles1', normal, compile_fail, ['-v0'])
-test('TH_Roles2', normalise_version('array', 'base', 'deepseq', 'ghc-prim',
-                                    'integer-gmp', 'pretty', 'template-haskell'
+test('TH_Roles2', normalise_version('array', 'base', 'deepseq', 'ghc-prim', 'ghc-boot',
+                                    'integer-gmp', 'pretty', 'template-haskell',
+                                    'binary', 'bytestring', 'containers'
                                     ), compile, ['-v0 -ddump-tc'])
 test('TH_Roles3', normal, compile, ['-v0 -dsuppress-uniques'])
 test('TH_Roles4', normal, compile, ['-v0'])

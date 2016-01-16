@@ -598,8 +598,8 @@ mode_flags =
           "LibDir",
           "Global Package DB",
           "C compiler flags",
-          "Gcc Linker flags",
-          "Ld Linker flags"],
+          "C compiler link flags",
+          "ld flags"],
     let k' = "-print-" ++ map (replaceSpace . toLower) k
         replaceSpace ' ' = '-'
         replaceSpace c   = c
@@ -694,13 +694,7 @@ addFlag s flag = liftEwM $ do
 
 doMake :: [(String,Maybe Phase)] -> Ghc ()
 doMake srcs  = do
-    let (hs_srcs, non_hs_srcs) = partition haskellish srcs
-
-        haskellish (f,Nothing) =
-          looksLikeModuleName f || isHaskellSrcFilename f || '.' `notElem` f
-        haskellish (_,Just phase) =
-          phase `notElem` [ As True, As False, Cc, Cobjc, Cobjcxx, CmmCpp, Cmm
-                          , StopLn]
+    let (hs_srcs, non_hs_srcs) = partition isHaskellishTarget srcs
 
     hsc_env <- GHC.getSession
 

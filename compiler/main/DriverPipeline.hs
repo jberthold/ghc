@@ -25,7 +25,7 @@ module DriverPipeline (
 
         -- Exports for hooks to override runPhase and link
    PhasePlus(..), CompPipeline(..), PipeEnv(..), PipeState(..),
-   phaseOutputFilename, getPipeState, getPipeEnv,
+   phaseOutputFilename, getOutputFilename, getPipeState, getPipeEnv,
    hscPostBackendPhase, getLocation, setModLocation, setDynFlags,
    runPhase, exeFileName,
    mkExtraObjToLinkIntoBinary, mkNoteObjsToLinkIntoBinary,
@@ -132,22 +132,6 @@ compileOne' m_tc_result mHscMessage
             hsc_env0 summary mod_index nmods mb_old_iface maybe_old_linkable
             source_modified0
  = do
-   let dflags0     = ms_hspp_opts summary
-       this_mod    = ms_mod summary
-       src_flavour = ms_hsc_src summary
-       location    = ms_location summary
-       input_fnpp  = ms_hspp_file summary
-       mod_graph   = hsc_mod_graph hsc_env0
-       needsTH     = any (xopt LangExt.TemplateHaskell . ms_hspp_opts) mod_graph
-       needsQQ     = any (xopt LangExt.QuasiQuotes     . ms_hspp_opts) mod_graph
-       needsLinker = needsTH || needsQQ
-       isDynWay    = any (== WayDyn) (ways dflags0)
-       isProfWay   = any (== WayProf) (ways dflags0)
-   -- #8180 - when using TemplateHaskell, switch on -dynamic-too so
-   -- the linker can correctly load the object files.
-   let dflags1 = if needsLinker && dynamicGhc && not isDynWay && not isProfWay
-                  then gopt_set dflags0 Opt_BuildDynamicToo
-                  else dflags0
 
    debugTraceMsg dflags1 2 (text "compile: input file" <+> text input_fnpp)
 
@@ -231,8 +215,11 @@ compileOne' m_tc_result mHscMessage
             return hmi0 { hm_linkable = Just linkable }
 
  where dflags0     = ms_hspp_opts summary
+
+       this_mod    = ms_mod summary
        location    = ms_location summary
        input_fn    = expectJust "compile:hs" (ml_hs_file location)
+       input_fnpp  = ms_hspp_file summary
        mod_graph   = hsc_mod_graph hsc_env0
        needsTH     = any (xopt LangExt.TemplateHaskell . ms_hspp_opts) mod_graph
        needsQQ     = any (xopt LangExt.QuasiQuotes     . ms_hspp_opts) mod_graph
@@ -723,6 +710,9 @@ runHookedPhase pp input dflags =
 -- output.  All the logic about which filenames we generate output
 -- into is embodied in the following function.
 
+-- | Computes the next output filename after we run @next_phase@.
+-- Like 'getOutputFilename', but it operates in the 'CompPipeline' monad
+-- (which specifies all of the ambient information.)
 phaseOutputFilename :: Phase{-next phase-} -> CompPipeline FilePath
 phaseOutputFilename next_phase = do
   PipeEnv{stop_phase, src_basename, output_spec} <- getPipeEnv
@@ -731,6 +721,21 @@ phaseOutputFilename next_phase = do
   liftIO $ getOutputFilename stop_phase output_spec
                              src_basename dflags next_phase maybe_loc
 
+-- | Computes the next output filename for something in the compilation
+-- pipeline.  This is controlled by several variables:
+--
+--      1. 'Phase': the last phase to be run (e.g. 'stopPhase').  This
+--         is used to tell if we're in the last phase or not, because
+--         in that case flags like @-o@ may be important.
+--      2. 'PipelineOutput': is this intended to be a 'Temporary' or
+--         'Persistent' build output?  Temporary files just go in
+--         a fresh temporary name.
+--      3. 'String': what was the basename of the original input file?
+--      4. 'DynFlags': the obvious thing
+--      5. 'Phase': the phase we want to determine the output filename of.
+--      6. @Maybe ModLocation@: the 'ModLocation' of the module we're
+--         compiling; this can be used to override the default output
+--         of an object file.  (TODO: do we actually need this?)
 getOutputFilename
   :: Phase -> PipelineOutput -> String
   -> DynFlags -> Phase{-next phase-} -> Maybe ModLocation -> IO FilePath

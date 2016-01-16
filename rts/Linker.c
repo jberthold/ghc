@@ -326,6 +326,30 @@ static void m32_allocator_init(struct m32_allocator_t *m32);
 #endif
 
 /*
+  Note [The ARM/Thumb Story]
+  ~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+  Support for the ARM architecture is complicated by the fact that ARM has not
+  one but several instruction encodings. The two relevant ones here are the original
+  ARM encoding and Thumb, a more dense variant of ARM supporting only a subset
+  of the instruction set.
+
+  How the CPU decodes a particular instruction is determined by a mode bit. This
+  mode bit is set on jump instructions, the value being determined by the low
+  bit of the target address: An odd address means the target is a procedure
+  encoded in the Thumb encoding whereas an even address means it's a traditional
+  ARM procedure (the actual address jumped to is even regardless of the encoding bit).
+
+  Interoperation between Thumb- and ARM-encoded object code (known as "interworking")
+  is tricky. If the linker needs to link a call by an ARM object into Thumb code
+  (or vice-versa) it will produce a jump island. This, however, is incompatible with
+  GHC's tables-next-to-code. For this reason, it is critical that GHC emit
+  exclusively ARM or Thumb objects for all Haskell code.
+
+  We still do, however, need to worry about foreign code.
+*/
+
+/*
  * Due to the small memory model (see above), on x86_64 we have to map
  * all our non-PIC object files into the low 2Gb of the address space
  * (why 2Gb and not 4Gb?  Because all addresses must be reachable
@@ -2723,8 +2747,16 @@ static int ocAllocateSymbolExtras( ObjectCode* oc, int count, int first )
 static void
 ocFlushInstructionCache( ObjectCode *oc )
 {
+    int i;
     // Object code
-    __clear_cache(oc->image, oc->image + oc->fileSize);
+    for (i=0; i < oc->n_sections; i++) {
+        Section *s = &oc->sections[i];
+        // This is a bit too broad but we don't have any way to determine what
+        // is certainly code
+        if (s->kind == SECTIONKIND_CODE_OR_RODATA)
+            __clear_cache(s->start, (void*) ((uintptr_t) s->start + s->size));
+    }
+
     // Jump islands
     __clear_cache(oc->symbol_extras, &oc->symbol_extras[oc->n_symbol_extras]);
 }
@@ -3617,7 +3649,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
    sections = (Section*)stgCallocBytes(
        sizeof(Section),
        hdr->NumberOfSections + 1, /* +1 for the global BSS section see below */
-       "ocGetNames_ELF(sections)");
+       "ocGetNames_PEi386(sections)");
    oc->sections = sections;
    oc->n_sections = hdr->NumberOfSections + 1;
 
@@ -4135,7 +4167,9 @@ ocRunInit_PEi386 ( ObjectCode *oc )
 #  define ELF_TARGET_X64_64
 #  define ELF_64BIT
 #  define ELF_TARGET_AMD64 /* Used inside <elf.h> on Solaris 11 */
-#elif defined(powerpc64_HOST_ARCH)
+#elif defined(powerpc64_HOST_ARCH) || defined(powerpc64le_HOST_ARCH)
+#  define ELF_64BIT
+#elif defined(ia64_HOST_ARCH)
 #  define ELF_64BIT
 #endif
 
@@ -4785,7 +4819,7 @@ ocGetNames_ELF ( ObjectCode* oc )
               if (start == NULL) goto fail;
               alloc = SECTION_MMAP;
           }
-          addProddableBlock(oc, ehdrC + offset, size);
+          addProddableBlock(oc, start, size);
       }
 
       addSection(&sections[i], kind, alloc, start, size,
@@ -5022,10 +5056,6 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
 #ifdef arm_HOST_ARCH
          // Thumb instructions have bit 0 of symbol's st_value set
          is_target_thm = S & 0x1;
-
-         if (is_target_thm)
-            errorBelch( "Symbol `%s' requires Thumb linkage which is not "
-                        "currently supported.\n", symbol );
 
          T = sym.st_info & STT_FUNC && is_target_thm;
 
@@ -5268,7 +5298,7 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
 #if defined(SHN_XINDEX)
    Elf_Word* shndx_table = get_shndx_table((Elf_Ehdr*)ehdrC);
 #endif
-#if defined(DEBUG) || defined(sparc_HOST_ARCH) || defined(ia64_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+#if defined(DEBUG) || defined(sparc_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
    /* This #ifdef only serves to avoid unused-var warnings. */
    Elf_Addr targ = (Elf_Addr) oc->sections[target_shndx].start;
 #endif
@@ -5286,13 +5316,13 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
    }
 
    for (j = 0; j < nent; j++) {
-#if defined(DEBUG) || defined(sparc_HOST_ARCH) || defined(ia64_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+#if defined(DEBUG) || defined(sparc_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
       /* This #ifdef only serves to avoid unused-var warnings. */
       Elf_Addr  offset = rtab[j].r_offset;
       Elf_Addr  P      = targ + offset;
       Elf_Addr  A      = rtab[j].r_addend;
 #endif
-#if defined(sparc_HOST_ARCH) || defined(ia64_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+#if defined(sparc_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
       Elf_Addr  value;
 #endif
       Elf_Addr  info   = rtab[j].r_info;
@@ -5358,7 +5388,7 @@ do_Elf_Rela_relocations ( ObjectCode* oc, char* ehdrC,
                                         (void*)P, (void*)S, (void*)A ));
       /* checkProddableBlock ( oc, (void*)P ); */
 
-#if defined(sparc_HOST_ARCH) || defined(ia64_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
+#if defined(sparc_HOST_ARCH) || defined(powerpc_HOST_ARCH) || defined(x86_64_HOST_ARCH)
       value = S + A;
 #endif
 
