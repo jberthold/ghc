@@ -58,9 +58,6 @@ import Outputable
 import Util
 import qualified GHC.LanguageExtensions as LangExt
 
-#if __GLASGOW_HASKELL__ < 709
-import Data.Traversable ( traverse )
-#endif
 import Control.Monad
 import Data.List  ( partition )
 
@@ -446,6 +443,26 @@ zonk_bind env (AbsBinds { abs_tvs = tyvars, abs_ev_vars = evs
                         , abe_mono = zonkIdOcc env mono_id
                         , abe_prags = new_prags })
 
+zonk_bind env (AbsBindsSig { abs_tvs         = tyvars
+                           , abs_ev_vars     = evs
+                           , abs_sig_export  = poly
+                           , abs_sig_prags   = prags
+                           , abs_sig_ev_bind = ev_bind
+                           , abs_sig_bind    = bind })
+  = ASSERT( all isImmutableTyVar tyvars )
+    do { (env0, new_tyvars)  <- zonkTyBndrsX env  tyvars
+       ; (env1, new_evs)     <- zonkEvBndrsX env0 evs
+       ; (env2, new_ev_bind) <- zonkTcEvBinds env1 ev_bind
+       ; new_val_bind        <- zonk_lbind env2 bind
+       ; new_poly_id         <- zonkIdBndr env2 poly
+       ; new_prags           <- zonkSpecPrags env2 prags
+       ; return (AbsBindsSig { abs_tvs         = new_tyvars
+                             , abs_ev_vars     = new_evs
+                             , abs_sig_export  = new_poly_id
+                             , abs_sig_prags   = new_prags
+                             , abs_sig_ev_bind = new_ev_bind
+                             , abs_sig_bind    = new_val_bind  }) }
+
 zonk_bind env (PatSynBind bind@(PSB { psb_id = L loc id
                                     , psb_args = details
                                     , psb_def = lpat
@@ -708,9 +725,9 @@ zonkExpr env (HsSCC src lbl expr)
   = do new_expr <- zonkLExpr env expr
        return (HsSCC src lbl new_expr)
 
-zonkExpr env (HsTickPragma src info expr)
+zonkExpr env (HsTickPragma src info srcInfo expr)
   = do new_expr <- zonkLExpr env expr
-       return (HsTickPragma src info new_expr)
+       return (HsTickPragma src info srcInfo new_expr)
 
 -- hdaume: core annotations
 zonkExpr env (HsCoreAnn src lbl expr)

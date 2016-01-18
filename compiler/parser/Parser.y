@@ -86,9 +86,9 @@ import Prelude
 import qualified GHC.LanguageExtensions as LangExt
 }
 
-{- Last updated: 18 Nov 2015
+%expect 36 -- shift/reduce conflicts
 
-Conflicts: 36 shift/reduce
+{- Last updated: 9 Jan 2016
 
 If you modify this parser and add a conflict, please update this comment.
 You can learn more about the conflicts by passing 'happy' the -i flag:
@@ -96,17 +96,16 @@ You can learn more about the conflicts by passing 'happy' the -i flag:
     happy -agc --strict compiler/parser/Parser.y -idetailed-info
 
 How is this section formatted? Look up the state the conflict is
-reported at, and copy the list of applicable rules (at the top).  Mark
-*** for the rule that is the conflicting reduction (that is, the
-interpretation which is NOT taken).  NB: Happy doesn't print a rule in a
-state if it is empty, but you should include it in the list (you can
+reported at, and copy the list of applicable rules (at the top, without the
+rule numbers).  Mark *** for the rule that is the conflicting reduction (that
+is, the interpretation which is NOT taken).  NB: Happy doesn't print a rule
+in a state if it is empty, but you should include it in the list (you can
 look these up in the Grammar section of the info file).
 
 Obviously the state numbers are not stable across modifications to the parser,
 the idea is to reproduce enough information on each conflict so you can figure
 out what happened if the states were renumbered.  Try not to gratuitously move
-productions around in this file.  It's probably less important to keep
-the rule annotations up-to-date.
+productions around in this file.
 
 -------------------------------------------------------------------------------
 
@@ -122,8 +121,8 @@ follows. Shift parses as if the 'module' keyword follows.
 
 state 46 contains 2 shift/reduce conflicts.
 
-    *** strict_mark -> unpackedness .                       (rule 268)
-        strict_mark -> unpackedness . strictness            (rule 269)
+    *** strict_mark -> unpackedness .
+        strict_mark -> unpackedness . strictness
 
     Conflicts: '~' '!'
 
@@ -131,9 +130,9 @@ state 46 contains 2 shift/reduce conflicts.
 
 state 50 contains 1 shift/reduce conflict.
 
-        context -> btype .                                  (rule 295)
-    *** type -> btype .                                     (rule 297)
-        type -> btype . '->' ctype                          (rule 298)
+        context -> btype .
+    *** type -> btype .
+        type -> btype . '->' ctype
 
     Conflicts: '->'
 
@@ -141,8 +140,8 @@ state 50 contains 1 shift/reduce conflict.
 
 state 51 contains 9 shift/reduce conflicts.
 
-    *** btype -> tyapps .                                   (rule 303)
-        tyapps -> tyapps . tyapp                            (rule 307)
+    *** btype -> tyapps .
+        tyapps -> tyapps . tyapp
 
     Conflicts: ':' '-' '!' '.' '`' VARSYM CONSYM QVARSYM QCONSYM
 
@@ -150,13 +149,13 @@ state 51 contains 9 shift/reduce conflicts.
 
 state 132 contains 14 shift/reduce conflicts.
 
-        exp -> infixexp . '::' sigtype                      (rule 416)
-        exp -> infixexp . '-<' exp                          (rule 417)
-        exp -> infixexp . '>-' exp                          (rule 418)
-        exp -> infixexp . '-<<' exp                         (rule 419)
-        exp -> infixexp . '>>-' exp                         (rule 420)
-    *** exp -> infixexp .                                   (rule 421)
-        infixexp -> infixexp . qop exp10                    (rule 423)
+        exp -> infixexp . '::' sigtype
+        exp -> infixexp . '-<' exp
+        exp -> infixexp . '>-' exp
+        exp -> infixexp . '-<<' exp
+        exp -> infixexp . '>>-' exp
+    *** exp -> infixexp .
+        infixexp -> infixexp . qop exp10
 
     Conflicts: ':' '::' '-' '!' '-<' '>-' '-<<' '>>-'
                '.' '`' VARSYM CONSYM QVARSYM QCONSYM
@@ -173,9 +172,9 @@ Shift parses as (per longest-parse rule):
 
 -------------------------------------------------------------------------------
 
-state 292 contains 1 shift/reduce conflicts.
+state 295 contains 1 shift/reduce conflicts.
 
-        rule -> STRING . rule_activation rule_forall infixexp '=' exp    (rule 215)
+        rule -> STRING . rule_activation rule_forall infixexp '=' exp
 
     Conflict: '[' (empty rule_activation reduces)
 
@@ -191,10 +190,10 @@ a rule instructing how to rewrite the expression '[0] f'.
 
 -------------------------------------------------------------------------------
 
-state 301 contains 1 shift/reduce conflict.
+state 304 contains 1 shift/reduce conflict.
 
-    *** type -> btype .                                     (rule 297)
-        type -> btype . '->' ctype                          (rule 298)
+    *** type -> btype .
+        type -> btype . '->' ctype
 
     Conflict: '->'
 
@@ -202,11 +201,11 @@ Same as state 50 but without contexts.
 
 -------------------------------------------------------------------------------
 
-state 337 contains 1 shift/reduce conflicts.
+state 340 contains 1 shift/reduce conflicts.
 
-        tup_exprs -> commas . tup_tail                      (rule 505)
-        sysdcon_nolist -> '(' commas . ')'                  (rule 616)
-        commas -> commas . ','                              (rule 734)
+        tup_exprs -> commas . tup_tail
+        sysdcon_nolist -> '(' commas . ')'
+        commas -> commas . ','
 
     Conflict: ')' (empty tup_tail reduces)
 
@@ -217,11 +216,11 @@ if -XTupleSections is not specified.
 
 -------------------------------------------------------------------------------
 
-state 388 contains 1 shift/reduce conflicts.
+state 391 contains 1 shift/reduce conflicts.
 
-        tup_exprs -> commas . tup_tail                      (rule 505)
-        sysdcon_nolist -> '(#' commas . '#)'                (rule 618)
-        commas -> commas . ','                              (rule 734)
+        tup_exprs -> commas . tup_tail
+        sysdcon_nolist -> '(#' commas . '#)'
+        commas -> commas . ','
 
     Conflict: '#)' (empty tup_tail reduces)
 
@@ -229,10 +228,10 @@ Same as State 324 for unboxed tuples.
 
 -------------------------------------------------------------------------------
 
-state 460 contains 1 shift/reduce conflict.
+state 465 contains 1 shift/reduce conflict.
 
-        oqtycon -> '(' qtyconsym . ')'                      (rule 621)
-    *** qtyconop -> qtyconsym .                             (rule 628)
+        oqtycon -> '(' qtyconsym . ')'
+    *** qtyconop -> qtyconsym .
 
     Conflict: ')'
 
@@ -240,10 +239,10 @@ TODO: Why?
 
 -------------------------------------------------------------------------------
 
-state 635 contains 1 shift/reduce conflicts.
+state 639 contains 1 shift/reduce conflicts.
 
-    *** aexp2 -> ipvar .                                    (rule 466)
-        dbind -> ipvar . '=' exp                            (rule 590)
+    *** aexp2 -> ipvar .
+        dbind -> ipvar . '=' exp
 
     Conflict: '='
 
@@ -255,9 +254,9 @@ sensible meaning, namely the lhs of an implicit binding.
 
 -------------------------------------------------------------------------------
 
-state 702 contains 1 shift/reduce conflicts.
+state 707 contains 1 shift/reduce conflicts.
 
-        rule -> STRING rule_activation . rule_forall infixexp '=' exp    (rule 215)
+        rule -> STRING rule_activation . rule_forall infixexp '=' exp
 
     Conflict: 'forall' (empty rule_forall reduces)
 
@@ -272,20 +271,20 @@ doesn't include 'forall'.
 
 -------------------------------------------------------------------------------
 
-state 930 contains 1 shift/reduce conflicts.
+state 933 contains 1 shift/reduce conflicts.
 
-        transformqual -> 'then' 'group' . 'using' exp       (rule 528)
-        transformqual -> 'then' 'group' . 'by' exp 'using' exp    (rule 529)
-    *** special_id -> 'group' .                             (rule 711)
+        transformqual -> 'then' 'group' . 'using' exp
+        transformqual -> 'then' 'group' . 'by' exp 'using' exp
+    *** special_id -> 'group' .
 
     Conflict: 'by'
 
 -------------------------------------------------------------------------------
 
-state 1270 contains 1 shift/reduce conflict.
+state 1269 contains 1 shift/reduce conflict.
 
-    *** atype -> tyvar .                                    (rule 314)
-        tv_bndr -> '(' tyvar . '::' kind ')'                (rule 346)
+    *** atype -> tyvar .
+        tv_bndr -> '(' tyvar . '::' kind ')'
 
     Conflict: '::'
 
@@ -650,22 +649,23 @@ qcnames :: { ([AddAnn], [Located (Maybe RdrName)]) }
   | qcnames1                      { $1 }
 
 qcnames1 :: { ([AddAnn], [Located (Maybe RdrName)]) }     -- A reversed list
-        :  qcnames1 ',' qcname_ext_w_wildcard  {% case (last (snd $1)) of
+        :  qcnames1 ',' qcname_ext_w_wildcard  {% case (head (snd $1)) of
                                                     l@(L _ Nothing) ->
-                                                      return ([mj AnnComma $2, mj AnnDotdot l]
-                                                              ,($3  : snd $1))
-                                                    l -> (aa (head (snd $1)) (AnnComma, $2) >>
-                                                          return (fst $1, $3 : snd $1)) }
+                                                       return ([mj AnnComma $2, mj AnnDotdot l]
+                                                               ,(snd (unLoc $3)  : snd $1))
+                                                    l -> (ams (head (snd $1)) [mj AnnComma $2] >>
+                                                          return (fst $1 ++ fst (unLoc $3),
+                                                                  snd (unLoc $3) : snd $1)) }
 
 
-        -- Annotations readded in mkImpExpSubSpec
-        |  qcname_ext_w_wildcard                   { ([],[$1])  }
+        -- Annotations re-added in mkImpExpSubSpec
+        |  qcname_ext_w_wildcard                   { (fst (unLoc $1),[snd (unLoc $1)]) }
 
 -- Variable, data constructor or wildcard
 -- or tagged type constructor
-qcname_ext_w_wildcard :: { Located (Maybe RdrName) }
-        :  qcname_ext               { Just `fmap` $1 }
-        |  '..'                     { Nothing <$ $1 }
+qcname_ext_w_wildcard :: { Located ([AddAnn],Located (Maybe RdrName)) }
+        :  qcname_ext               { sL1 $1 ([],Just `fmap` $1) }
+        |  '..'                     { sL1 $1 ([mj AnnDotdot $1], sL1 $1 Nothing) }
 
 qcname_ext :: { Located RdrName }
         :  qcname                   { $1 }
@@ -757,10 +757,10 @@ impspec :: { Located (Bool, Located [LIE RdrName]) }
 -----------------------------------------------------------------------------
 -- Fixity Declarations
 
-prec    :: { Located Int }
-        : {- empty -}           { noLoc 9 }
+prec    :: { Located (SourceText,Int) }
+        : {- empty -}           { noLoc ("",9) }
         | INTEGER
-                 {% checkPrecP (sL1 $1 (fromInteger (getINTEGER $1))) }
+                 {% checkPrecP (sL1 $1 (getINTEGERs $1,fromInteger (getINTEGER $1))) }
 
 infix   :: { Located FixityDirection }
         : 'infix'                               { sL1 $1 InfixN  }
@@ -1362,9 +1362,9 @@ rule_activation :: { ([AddAnn],Maybe Activation) }
 rule_explicit_activation :: { ([AddAnn]
                               ,Activation) }  -- In brackets
         : '[' INTEGER ']'       { ([mos $1,mj AnnVal $2,mcs $3]
-                                  ,ActiveAfter  (fromInteger (getINTEGER $2))) }
+                                  ,ActiveAfter  (getINTEGERs $2) (fromInteger (getINTEGER $2))) }
         | '[' '~' INTEGER ']'   { ([mos $1,mj AnnTilde $2,mj AnnVal $3,mcs $4]
-                                  ,ActiveBefore (fromInteger (getINTEGER $3))) }
+                                  ,ActiveBefore (getINTEGERs $3) (fromInteger (getINTEGER $3))) }
         | '[' '~' ']'           { ([mos $1,mj AnnTilde $2,mcs $3]
                                   ,NeverActive) }
 
@@ -1591,7 +1591,7 @@ context :: { LHsContext RdrName }
                                                 } }
 
 context_no_ops :: { LHsContext RdrName }
-        : btype_no_ops                 {% do { let { ty = splitTilde $1 }
+        : btype_no_ops                 {% do { ty <- splitTilde $1
                                              ; (anns,ctx) <- checkContext ty
                                              ; if null (unLoc ctx)
                                                    then addAnnotation (gl ty) AnnUnit (gl ty)
@@ -1772,9 +1772,9 @@ varids0 :: { Located [Located RdrName] }
 Note [Parsing ~]
 ~~~~~~~~~~~~~~~~
 
-Due to parsing conflicts between lazyness annotations in data type
+Due to parsing conflicts between laziness annotations in data type
 declarations (see strict_mark) and equality types ~'s are always
-parsed as lazyness annotations, and turned into HsEqTy's in the
+parsed as laziness annotations, and turned into HsEqTy's in the
 correct places using RdrHsSyn.splitTilde.
 
 Since strict_mark is parsed as part of atype which is part of type,
@@ -1899,7 +1899,8 @@ constr_stuff :: { Located (Located RdrName, HsConDeclDetails RdrName) }
     -- see Note [Parsing data constructors is hard]
         : btype_no_ops                         {% do { c <- splitCon $1
                                                      ; return $ sLL $1 $> c } }
-        | btype_no_ops conop btype_no_ops      {  sLL $1 $> ($2, InfixCon (splitTilde $1) $3) }
+        | btype_no_ops conop btype_no_ops      {% do { ty <- splitTilde $1
+                                                     ; return $ sLL $1 $> ($2, InfixCon ty $3) } }
 
 {- Note [Parsing data constructors is hard]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2054,7 +2055,7 @@ sigdecl :: { LHsDecl RdrName }
         | infix prec ops
               {% ams (sLL $1 $> $ SigD
                         (FixSig (FixitySig (fromOL $ unLoc $3)
-                                (Fixity (unLoc $2) (unLoc $1)))))
+                                (Fixity (fst $ unLoc $2) (snd $ unLoc $2) (unLoc $1)))))
                      [mj AnnInfix $1,mj AnnVal $2] }
 
         | pattern_synonym_sig   { sLL $1 $> . SigD . unLoc $ $1 }
@@ -2094,10 +2095,10 @@ activation :: { ([AddAnn],Maybe Activation) }
 
 explicit_activation :: { ([AddAnn],Activation) }  -- In brackets
         : '[' INTEGER ']'       { ([mj AnnOpenS $1,mj AnnVal $2,mj AnnCloseS $3]
-                                  ,ActiveAfter  (fromInteger (getINTEGER $2))) }
+                                  ,ActiveAfter  (getINTEGERs $2) (fromInteger (getINTEGER $2))) }
         | '[' '~' INTEGER ']'   { ([mj AnnOpenS $1,mj AnnTilde $2,mj AnnVal $3
                                                  ,mj AnnCloseS $4]
-                                  ,ActiveBefore (fromInteger (getINTEGER $3))) }
+                                  ,ActiveBefore (getINTEGERs $3) (fromInteger (getINTEGER $3))) }
 
 -----------------------------------------------------------------------------
 -- Expressions
@@ -2182,8 +2183,9 @@ exp10 :: { LHsExpr RdrName }
         | scc_annot exp        {% ams (sLL $1 $> $ HsSCC (snd $ fst $ unLoc $1) (snd $ unLoc $1) $2)
                                       (fst $ fst $ unLoc $1) }
 
-        | hpc_annot exp        {% ams (sLL $1 $> $ HsTickPragma (snd $ fst $ unLoc $1) (snd $ unLoc $1) $2)
-                                      (fst $ fst $ unLoc $1) }
+        | hpc_annot exp        {% ams (sLL $1 $> $ HsTickPragma (snd $ fst $ fst $ unLoc $1)
+                                                                (snd $ fst $ unLoc $1) (snd $ unLoc $1) $2)
+                                      (fst $ fst $ fst $ unLoc $1) }
 
         | 'proc' aexp '->' exp
                        {% checkPattern empty $2 >>= \ p ->
@@ -2212,9 +2214,11 @@ scc_annot :: { Located (([AddAnn],SourceText),StringLiteral) }
                                          ,mc $3],getSCC_PRAGs $1)
                                         ,(StringLiteral (unpackFS $ getVARID $2) (getVARID $2))) }
 
-hpc_annot :: { Located (([AddAnn],SourceText),(StringLiteral,(Int,Int),(Int,Int))) }
+hpc_annot :: { Located ( (([AddAnn],SourceText),(StringLiteral,(Int,Int),(Int,Int))),
+                         ((SourceText,SourceText),(SourceText,SourceText))
+                       ) }
       : '{-# GENERATED' STRING INTEGER ':' INTEGER '-' INTEGER ':' INTEGER '#-}'
-                                      { sLL $1 $> $ (([mo $1,mj AnnVal $2
+                                      { sLL $1 $> $ ((([mo $1,mj AnnVal $2
                                               ,mj AnnVal $3,mj AnnColon $4
                                               ,mj AnnVal $5,mj AnnMinus $6
                                               ,mj AnnVal $7,mj AnnColon $8
@@ -2228,6 +2232,12 @@ hpc_annot :: { Located (([AddAnn],SourceText),(StringLiteral,(Int,Int),(Int,Int)
                                                 , fromInteger $ getINTEGER $9
                                                 )
                                                ))
+                                             , (( getINTEGERs $3
+                                                , getINTEGERs $5
+                                                )
+                                               ,( getINTEGERs $7
+                                                , getINTEGERs $9
+                                                )))
                                          }
 
 fexp    :: { LHsExpr RdrName }
@@ -2839,7 +2849,7 @@ oqtycon :: { Located RdrName }  -- An "ordinary" qualified tycon;
         | '(' qtyconsym ')'             {% ams (sLL $1 $> (unLoc $2))
                                                [mop $1,mj AnnVal $2,mcp $3] }
         | '(' '~' ')'                   {% ams (sLL $1 $> $ eqTyCon_RDR)
-                                               [mop $1,mj AnnTilde $2,mcp $3] }
+                                               [mop $1,mj AnnVal $2,mcp $3] }
 
 oqtycon_no_varcon :: { Located RdrName }  -- Type constructor which cannot be mistaken
                                           -- for variable constructor in export lists
@@ -3336,9 +3346,6 @@ For the general principles of the following routines, see Note [Api annotations]
 in ApiAnnotation.hs
 
 -}
-
-addAnnsAt :: SrcSpan -> [AddAnn] -> P ()
-addAnnsAt loc anns = mapM_ (\a -> a loc) anns
 
 -- |Construct an AddAnn from the annotation keyword and the location
 -- of the keyword itself

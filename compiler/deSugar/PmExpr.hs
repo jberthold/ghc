@@ -25,9 +25,6 @@ import SrcLoc
 import FastString -- sLit
 import VarSet
 
-#if __GLASGOW_HASKELL__ < 709
-import Data.Functor ((<$>))
-#endif
 import Data.Maybe (mapMaybe)
 import Data.List (groupBy, sortBy, nubBy)
 import Control.Monad.Trans.State.Lazy
@@ -266,7 +263,7 @@ hsExprToPmExpr e@(RecordCon   _ _ _ _) = PmExprOther e
 
 hsExprToPmExpr (HsTick            _ e) = lhsExprToPmExpr e
 hsExprToPmExpr (HsBinTick       _ _ e) = lhsExprToPmExpr e
-hsExprToPmExpr (HsTickPragma    _ _ e) = lhsExprToPmExpr e
+hsExprToPmExpr (HsTickPragma  _ _ _ e) = lhsExprToPmExpr e
 hsExprToPmExpr (HsSCC           _ _ e) = lhsExprToPmExpr e
 hsExprToPmExpr (HsCoreAnn       _ _ e) = lhsExprToPmExpr e
 hsExprToPmExpr (ExprWithTySig     e _) = lhsExprToPmExpr e

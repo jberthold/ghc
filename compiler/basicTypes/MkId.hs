@@ -1119,7 +1119,8 @@ seqId = pcMiscPrelId seqName ty info
                        `setUnfoldingInfo`  mkCompulsoryUnfolding rhs
                        `setRuleInfo`       mkRuleInfo [seq_cast_rule]
 
-    inline_prag = alwaysInlinePragma `setInlinePragmaActivation` ActiveAfter 0
+    inline_prag
+         = alwaysInlinePragma `setInlinePragmaActivation` ActiveAfter "0" 0
                   -- Make 'seq' not inline-always, so that simpleOptExpr
                   -- (see CoreSubst.simple_app) won't inline 'seq' on the
                   -- LHS of rules.  That way we can have rules for 'seq';
@@ -1179,7 +1180,14 @@ oneShotId = pcMiscPrelId oneShotName ty info
 runRWId :: Id -- See Note [runRW magic] in this module
 runRWId = pcMiscPrelId runRWName ty info
   where
-    info    = noCafIdInfo `setInlinePragInfo` neverInlinePragma
+    info = noCafIdInfo `setInlinePragInfo` neverInlinePragma
+                       `setStrictnessInfo` strict_sig
+                       `setArityInfo`      1
+    strict_sig = mkClosedStrictSig [strictApply1Dmd] topRes
+      -- Important to express its strictness,
+      -- since it is not inlined until CorePrep
+      -- Also see Note [runRW arg] in CorePrep
+
     -- State# RealWorld
     stateRW = mkTyConApp statePrimTyCon [realWorldTy]
     -- (# State# RealWorld, o #)

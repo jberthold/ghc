@@ -6,7 +6,6 @@
 This module converts Template Haskell syntax into HsSyn
 -}
 
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
 module Convert( convertToHsExpr, convertToPat, convertToHsDecls,
@@ -39,9 +38,6 @@ import MonadUtils ( foldrM )
 
 import qualified Data.ByteString as BS
 import Control.Monad( unless, liftM, ap )
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 
 import Data.Char ( chr )
 import Data.Word ( Word8 )
@@ -91,7 +87,6 @@ instance Applicative CvtM where
     (<*>) = ap
 
 instance Monad CvtM where
-  return = pure
   (CvtM m) >>= k = CvtM $ \loc -> case m loc of
                                   Left err -> Left err
                                   Right (loc',v) -> unCvtM (k v) loc'
@@ -194,10 +189,10 @@ cvtDec (TySynD tc tvs rhs)
                   , tcdRhs = rhs' } }
 
 cvtDec (DataD ctxt tc tvs ksig constrs derivs)
-  = do  { let isGadtCon (GadtC    _ _ _ _) = True
-              isGadtCon (RecGadtC _ _ _ _) = True
-              isGadtCon (ForallC  _ _ c  ) = isGadtCon c
-              isGadtCon _                  = False
+  = do  { let isGadtCon (GadtC    _ _ _) = True
+              isGadtCon (RecGadtC _ _ _) = True
+              isGadtCon (ForallC  _ _ c) = isGadtCon c
+              isGadtCon _                = False
               isGadtDecl  = all isGadtCon constrs
               isH98Decl   = all (not . isGadtCon) constrs
         ; unless (isGadtDecl || isH98Decl)
@@ -485,22 +480,18 @@ cvtConstr (ForallC tvs ctxt con)
                                    unLoc (fromMaybe (noLoc [])
                                           (con_cxt con'))) } }
 
-cvtConstr (GadtC c strtys ty idx)
-  = do  { c'   <- mapM cNameL c
-        ; args <- mapM cvt_arg strtys
-        ; idx' <- mapM cvtType idx
-        ; ty'  <- tconNameL ty
-        ; L _ ret_ty <- mk_apps (HsTyVar ty') idx'
-        ; c_ty       <- mk_arr_apps args ret_ty
+cvtConstr (GadtC c strtys ty)
+  = do  { c'      <- mapM cNameL c
+        ; args    <- mapM cvt_arg strtys
+        ; L _ ty' <- cvtType ty
+        ; c_ty    <- mk_arr_apps args ty'
         ; returnL $ mkGadtDecl c' (mkLHsSigType c_ty)}
 
-cvtConstr (RecGadtC c varstrtys ty idx)
+cvtConstr (RecGadtC c varstrtys ty)
   = do  { c'       <- mapM cNameL c
-        ; ty'      <- tconNameL ty
+        ; ty'      <- cvtType ty
         ; rec_flds <- mapM cvt_id_arg varstrtys
-        ; idx'     <- mapM cvtType idx
-        ; ret_ty   <- mk_apps (HsTyVar ty') idx'
-        ; let rec_ty = noLoc (HsFunTy (noLoc $ HsRecTy rec_flds) ret_ty)
+        ; let rec_ty = noLoc (HsFunTy (noLoc $ HsRecTy rec_flds) ty')
         ; returnL $ mkGadtDecl c' (mkLHsSigType rec_ty) }
 
 cvtSrcUnpackedness :: TH.SourceUnpackedness -> SrcUnpackedness
@@ -673,8 +664,8 @@ cvtRuleMatch TH.FunLike = Hs.FunLike
 
 cvtPhases :: TH.Phases -> Activation -> Activation
 cvtPhases AllPhases       dflt = dflt
-cvtPhases (FromPhase i)   _    = ActiveAfter i
-cvtPhases (BeforePhase i) _    = ActiveBefore i
+cvtPhases (FromPhase i)   _    = ActiveAfter (show i) i
+cvtPhases (BeforePhase i) _    = ActiveBefore (show i) i
 
 cvtRuleBndr :: TH.RuleBndr -> CvtM (Hs.LRuleBndr RdrName)
 cvtRuleBndr (RuleVar n)
@@ -721,8 +712,10 @@ cvtl e = wrapL (cvt e)
     cvt (LitE l)
       | overloadedLit l = do { l' <- cvtOverLit l; return $ HsOverLit l' }
       | otherwise       = do { l' <- cvtLit l;     return $ HsLit l' }
-
-    cvt (AppE x y)     = do { x' <- cvtl x; y' <- cvtl y; return $ HsApp x' y' }
+    cvt (AppE x@(LamE _ _) y) = do { x' <- cvtl x; y' <- cvtl y
+                              ; return $ HsApp (mkLHsPar x') y' }
+    cvt (AppE x y)            = do { x' <- cvtl x; y' <- cvtl y
+                              ; return $ HsApp x' y' }
     cvt (LamE ps e)    = do { ps' <- cvtPats ps; e' <- cvtl e
                             ; return $ HsLam (mkMatchGroup FromSource [mkSimpleMatch ps' e']) }
     cvt (LamCaseE ms)  = do { ms' <- mapM cvtMatch ms
@@ -1274,7 +1267,7 @@ cvtInjectivityAnnotation (TH.InjectivityAnn annLHS annRHS)
 
 -----------------------------------------------------------
 cvtFixity :: TH.Fixity -> Hs.Fixity
-cvtFixity (TH.Fixity prec dir) = Hs.Fixity prec (cvt_dir dir)
+cvtFixity (TH.Fixity prec dir) = Hs.Fixity (show prec) prec (cvt_dir dir)
    where
      cvt_dir TH.InfixL = Hs.InfixL
      cvt_dir TH.InfixR = Hs.InfixR

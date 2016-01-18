@@ -11,7 +11,7 @@ module Language.Haskell.TH.Lib where
 
 import Language.Haskell.TH.Syntax hiding (Role, InjectivityAnn)
 import qualified Language.Haskell.TH.Syntax as TH
-import Control.Monad( liftM, liftM2, liftM3 )
+import Control.Monad( liftM, liftM2 )
 import Data.Word( Word8 )
 
 ----------------------------------------------------------
@@ -478,7 +478,7 @@ closedTypeFamilyD tc tvs result injectivity eqns =
 --   3. remove the FamFlavour data type from Syntax module
 --   4. make sure that all references to FamFlavour are gone from DsMeta,
 --      Convert, TcSplice (follows from 3)
-#if __GLASGOW_HASKELL__ > 800
+#if __GLASGOW_HASKELL__ >= 802
 #error Remove deprecated familyNoKindD, familyKindD, closedTypeFamilyNoKindD and closedTypeFamilyKindD
 #endif
 
@@ -550,13 +550,11 @@ infixC st1 con st2 = do st1' <- st1
 forallC :: [TyVarBndr] -> CxtQ -> ConQ -> ConQ
 forallC ns ctxt con = liftM2 (ForallC ns) ctxt con
 
-gadtC :: [Name] -> [StrictTypeQ] -> Name -> [TypeQ] -> ConQ
-gadtC cons strtys ty idx = liftM3 (GadtC cons) (sequence strtys)
-                                  (return ty)  (sequence idx)
+gadtC :: [Name] -> [StrictTypeQ] -> TypeQ -> ConQ
+gadtC cons strtys ty = liftM2 (GadtC cons) (sequence strtys) ty
 
-recGadtC :: [Name] -> [VarStrictTypeQ] -> Name -> [TypeQ] -> ConQ
-recGadtC cons varstrtys ty idx = liftM3 (RecGadtC cons) (sequence varstrtys)
-                                        (return ty)     (sequence idx)
+recGadtC :: [Name] -> [VarStrictTypeQ] -> TypeQ -> ConQ
+recGadtC cons varstrtys ty = liftM2 (RecGadtC cons) (sequence varstrtys) ty
 
 -------------------------------------------------------------------------------
 -- *   Type
@@ -657,6 +655,20 @@ noSourceStrictness, sourceLazy, sourceStrict :: SourceStrictnessQ
 noSourceStrictness = return NoSourceStrictness
 sourceLazy         = return SourceLazy
 sourceStrict       = return SourceStrict
+
+{-# DEPRECATED isStrict
+    ["Use 'bang'. See https://ghc.haskell.org/trac/ghc/wiki/Migration/8.0. ",
+     "Example usage: 'bang noSourceUnpackedness sourceStrict'"] #-}
+{-# DEPRECATED notStrict
+    ["Use 'bang'. See https://ghc.haskell.org/trac/ghc/wiki/Migration/8.0. ",
+     "Example usage: 'bang noSourceUnpackedness noSourceStrictness'"] #-}
+{-# DEPRECATED unpacked
+    ["Use 'bang'. See https://ghc.haskell.org/trac/ghc/wiki/Migration/8.0. ",
+     "Example usage: 'bang sourceUnpack sourceStrict'"] #-}
+isStrict, notStrict, unpacked :: Q Strict
+isStrict = bang noSourceUnpackedness sourceStrict
+notStrict = bang noSourceUnpackedness noSourceStrictness
+unpacked = bang sourceUnpack sourceStrict
 
 bang :: SourceUnpackednessQ -> SourceStrictnessQ -> BangQ
 bang u s = do u' <- u

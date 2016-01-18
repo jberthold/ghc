@@ -57,9 +57,6 @@ import ErrUtils
 import qualified Stream
 
 import Control.Monad (ap)
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 
 -- ----------------------------------------------------------------------------
 -- * Some Data Types
@@ -221,7 +218,6 @@ instance Applicative LlvmM where
     (<*>) = ap
 
 instance Monad LlvmM where
-    return = pure
     m >>= f  = LlvmM $ \env -> do (x, env') <- runLlvmM m env
                                   runLlvmM (f x) env'
 

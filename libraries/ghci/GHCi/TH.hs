@@ -28,18 +28,6 @@ import qualified Language.Haskell.TH        as TH
 import qualified Language.Haskell.TH.Syntax as TH
 import Unsafe.Coerce
 
-data QState = QState
-  { qsMap        :: Map TypeRep Dynamic
-       -- ^ persistent data between splices in a module
-  , qsFinalizers :: [TH.Q ()]
-       -- ^ registered finalizers (in reverse order)
-  , qsLocation   :: Maybe TH.Loc
-       -- ^ location for current splice, if any
-  , qsPipe :: Pipe
-       -- ^ pipe to communicate with GHC
-  }
-instance Show QState where show _ = "<QState>"
-
 initQState :: Pipe -> QState
 initQState p = QState M.empty [] Nothing p
 
@@ -72,7 +60,6 @@ instance Monad GHCiQ where
     do (m', s')  <- runGHCiQ m s
        (a,  s'') <- runGHCiQ (f m') s'
        return (a, s'')
-  return    = pure
   fail err  = GHCiQ $ \s -> throwIO (GHCiQException s err)
 
 getState :: GHCiQ QState
@@ -94,27 +81,28 @@ ghcCmd m = GHCiQ $ \s -> do
 instance TH.Quasi GHCiQ where
   qNewName str = ghcCmd (NewName str)
   qReport isError msg = ghcCmd (Report isError msg)
-  qRecover = undefined
-{-
-  qRecover (GHCiQ h) (GHCiQ a) = GHCiQ $ \s -> do
-    let r :: Bool -> IO ()
-        r b = do EndRecover' <- sendRequest (EndRecover b)
-                 return ()
-    StartRecover' <- sendRequest StartRecover
-    (a s >>= \s' -> r False >> return s') `E.catch`
-      \(GHCiQException s' _ _) -> r True >> h s
--}
+
+  -- See Note [TH recover with -fexternal-interpreter] in TcSplice
+  qRecover (GHCiQ h) (GHCiQ a) = GHCiQ $ \s -> (do
+    remoteCall (qsPipe s) StartRecover
+    (r, s') <- a s
+    remoteCall (qsPipe s) (EndRecover False)
+    return (r,s'))
+      `catch`
+       \GHCiQException{} -> remoteCall (qsPipe s) (EndRecover True) >> h s
   qLookupName isType occ = ghcCmd (LookupName isType occ)
   qReify name = ghcCmd (Reify name)
   qReifyFixity name = ghcCmd (ReifyFixity name)
   qReifyInstances name tys = ghcCmd (ReifyInstances name tys)
   qReifyRoles name = ghcCmd (ReifyRoles name)
 
-  -- To reify annotations, we send GHC the AnnLookup and also the TypeRep of the
-  -- thing we're looking for, to avoid needing to serialize irrelevant annotations.
+  -- To reify annotations, we send GHC the AnnLookup and also the
+  -- TypeRep of the thing we're looking for, to avoid needing to
+  -- serialize irrelevant annotations.
   qReifyAnnotations :: forall a . Data a => TH.AnnLookup -> GHCiQ [a]
   qReifyAnnotations lookup =
-    map (deserializeWithData . B.unpack) <$> ghcCmd (ReifyAnnotations lookup typerep)
+    map (deserializeWithData . B.unpack) <$>
+      ghcCmd (ReifyAnnotations lookup typerep)
     where typerep = typeOf (undefined :: a)
 
   qReifyModule m = ghcCmd (ReifyModule m)
@@ -134,41 +122,42 @@ instance TH.Quasi GHCiQ where
   qIsExtEnabled x = ghcCmd (IsExtEnabled x)
   qExtsEnabled = ghcCmd ExtsEnabled
 
-startTH :: IO HValueRef
+startTH :: IO (RemoteRef (IORef QState))
 startTH = do
   r <- newIORef (initQState (error "startTH: no pipe"))
-  mkHValueRef (unsafeCoerce r)
+  mkRemoteRef r
 
-finishTH :: Pipe -> HValueRef -> IO ()
+finishTH :: Pipe -> RemoteRef (IORef QState) -> IO ()
 finishTH pipe rstate = do
-  qstateref <- unsafeCoerce <$> localHValueRef rstate
+  qstateref <- localRef rstate
   qstate <- readIORef qstateref
   _ <- runGHCiQ runModFinalizers qstate { qsPipe = pipe }
-  freeHValueRef rstate
+  freeRemoteRef rstate
   return ()
 
 runTH
-  :: Pipe -> HValueRef -> HValueRef
+  :: Pipe -> RemoteRef (IORef QState) -> HValueRef
   -> THResultType
   -> Maybe TH.Loc
   -> IO ByteString
 runTH pipe rstate rhv ty mb_loc = do
-  hv <- localHValueRef rhv
+  hv <- localRef rhv
   case ty of
     THExp -> runTHQ pipe rstate mb_loc (unsafeCoerce hv :: TH.Q TH.Exp)
     THPat -> runTHQ pipe rstate mb_loc (unsafeCoerce hv :: TH.Q TH.Pat)
     THType -> runTHQ pipe rstate mb_loc (unsafeCoerce hv :: TH.Q TH.Type)
     THDec -> runTHQ pipe rstate mb_loc (unsafeCoerce hv :: TH.Q [TH.Dec])
     THAnnWrapper -> do
-      hv <- unsafeCoerce <$> localHValueRef rhv
+      hv <- unsafeCoerce <$> localRef rhv
       case hv :: AnnotationWrapper of
-        AnnotationWrapper thing ->
-          return $! LB.toStrict (runPut (put (toSerialized serializeWithData thing)))
+        AnnotationWrapper thing -> return $!
+          LB.toStrict (runPut (put (toSerialized serializeWithData thing)))
 
-runTHQ :: Binary a => Pipe -> HValueRef -> Maybe TH.Loc -> TH.Q a
-       -> IO ByteString
+runTHQ
+  :: Binary a => Pipe -> RemoteRef (IORef QState) -> Maybe TH.Loc -> TH.Q a
+  -> IO ByteString
 runTHQ pipe@Pipe{..} rstate mb_loc ghciq = do
-  qstateref <- unsafeCoerce <$> localHValueRef rstate
+  qstateref <- localRef rstate
   qstate <- readIORef qstateref
   let st = qstate { qsLocation = mb_loc, qsPipe = pipe }
   (r,new_state) <- runGHCiQ (TH.runQ ghciq) st

@@ -13,7 +13,6 @@ Datatype for: @BindGroup@, @Bind@, @Sig@, @Bind@.
 {-# LANGUAGE UndecidableInstances #-} -- Note [Pass sensitive types]
                                       -- in module PlaceHolder
 {-# LANGUAGE ConstraintKinds #-}
-{-# LANGUAGE CPP #-}
 {-# LANGUAGE BangPatterns #-}
 
 module HsBinds where
@@ -44,11 +43,6 @@ import Data.Data hiding ( Fixity )
 import Data.List hiding ( foldr )
 import Data.Ord
 import Data.Foldable ( Foldable(..) )
-#if __GLASGOW_HASKELL__ < 709
-import Data.Traversable ( Traversable(..) )
-import Data.Monoid ( mappend )
-import Control.Applicative hiding (empty)
-#endif
 
 {-
 ************************************************************************
@@ -209,6 +203,20 @@ data HsBindLR idL idR
 
         -- | Typechecked user bindings
         abs_binds    :: LHsBinds idL
+    }
+
+  | AbsBindsSig {  -- Simpler form of AbsBinds, used with a type sig
+                   -- in tcPolyCheck. Produces simpler desugaring and
+                   -- is necessary to avoid #11405, comment:3.
+        abs_tvs     :: [TyVar],
+        abs_ev_vars :: [EvVar],
+
+        abs_sig_export :: idL,  -- like abe_poly
+        abs_sig_prags  :: TcSpecPrags,
+
+        abs_sig_ev_bind :: TcEvBinds,  -- no list needed here
+        abs_sig_bind    :: LHsBind idL -- always only one, and it's always a
+                                       -- FunBind
     }
 
   | PatSynBind (PatSynBind idL idR)
@@ -556,7 +564,7 @@ ppr_monobind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dictvars
                        , abs_exports = exports, abs_binds = val_binds
                        , abs_ev_binds = ev_binds })
   = sdocWithDynFlags $ \ dflags ->
-    if gopt Opt_PrintTypechekerElaboration dflags then
+    if gopt Opt_PrintTypecheckerElaboration dflags then
       -- Show extra information (bug number: #10662)
       hang (ptext (sLit "AbsBinds") <+> brackets (interpp'SP tyvars)
                                     <+> brackets (interpp'SP dictvars))
@@ -569,6 +577,19 @@ ppr_monobind (AbsBinds { abs_tvs = tyvars, abs_ev_vars = dictvars
       , ptext (sLit "Evidence:") <+> ppr ev_binds ]
     else
       pprLHsBinds val_binds
+ppr_monobind (AbsBindsSig { abs_tvs         = tyvars
+                          , abs_ev_vars     = dictvars
+                          , abs_sig_ev_bind = ev_bind
+                          , abs_sig_bind    = bind })
+  = sdocWithDynFlags $ \ dflags ->
+    if gopt Opt_PrintTypecheckerElaboration dflags then
+      hang (text "AbsBindsSig" <+> brackets (interpp'SP tyvars)
+                               <+> brackets (interpp'SP dictvars))
+         2 $ braces $ vcat
+      [ text "Bind:"     <+> ppr bind
+      , text "Evidence:" <+> ppr ev_bind ]
+    else
+      ppr bind
 
 instance (OutputableBndr id) => Outputable (ABExport id) where
   ppr (ABE { abe_wrap = wrap, abe_inst_wrap = inst_wrap
@@ -708,7 +729,7 @@ data Sig name
       -- P :: forall a b. Prov => Req => ty
 
       -- | A signature for a class method
-      --   False: ordinary class-method signauure
+      --   False: ordinary class-method signature
       --   True:  default class method signature
       -- e.g.   class C a where
       --          op :: a -> a                   -- Ordinary
@@ -1029,8 +1050,6 @@ instance Foldable HsPatSynDetails where
     foldr1 f (RecordPatSyn args) =
       Data.List.foldr1 f (map (Data.Foldable.foldr1 f) args)
 
--- TODO: After a few more versions, we should probably use these.
-#if __GLASGOW_HASKELL__ >= 709
     length (InfixPatSyn _ _) = 2
     length (PrefixPatSyn args) = Data.List.length args
     length (RecordPatSyn args) = Data.List.length args
@@ -1042,7 +1061,6 @@ instance Foldable HsPatSynDetails where
     toList (InfixPatSyn left right) = [left, right]
     toList (PrefixPatSyn args) = args
     toList (RecordPatSyn args) = foldMap toList args
-#endif
 
 instance Traversable HsPatSynDetails where
     traverse f (InfixPatSyn left right) = InfixPatSyn <$> f left <*> f right

@@ -132,7 +132,7 @@ module GHC (
 
         -- ** Other
         runTcInteractive,   -- Desired by some clients (Trac #8878)
-        isStmt, isImport, isDecl,
+        isStmt, hasImport, isImport, isDecl,
 
         -- ** The debugger
         SingleStep(..),
@@ -145,7 +145,6 @@ module GHC (
         modInfoModBreaks,
         ModBreaks(..), BreakIndex,
         BreakInfo(breakInfo_number, breakInfo_module),
-        BreakArray, setBreakOn, setBreakOff, getBreak,
         InteractiveEval.back,
         InteractiveEval.forward,
 
@@ -272,6 +271,7 @@ module GHC (
         ApiAnns,AnnKeywordId(..),AnnotationComment(..),
         getAnnotation, getAndRemoveAnnotation,
         getAnnotationComments, getAndRemoveAnnotationComments,
+        unicodeAnn,
 
         -- * Miscellaneous
         --sessionHscEnv,
@@ -289,8 +289,8 @@ module GHC (
 
 #ifdef GHCI
 import ByteCodeTypes
-import BreakArray
 import InteractiveEval
+import InteractiveEvalTypes
 import TcRnDriver       ( runTcInteractive )
 import GHCi
 import GHCi.RemoteTypes
@@ -449,12 +449,7 @@ runGhc mb_top_dir ghc = do
 -- to this function will create a new session which should not be shared among
 -- several threads.
 
-#if __GLASGOW_HASKELL__ < 710
--- Pre-AMP change
-runGhcT :: (ExceptionMonad m, Functor m) =>
-#else
-runGhcT :: (ExceptionMonad m) =>
-#endif
+runGhcT :: ExceptionMonad m =>
            Maybe FilePath  -- ^ See argument to 'initGhcMonad'.
         -> GhcT m a        -- ^ The action to perform.
         -> m a

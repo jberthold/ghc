@@ -213,9 +213,6 @@ import qualified GHC.LanguageExtensions as LangExt
 
 import Data.IORef
 import Control.Monad (liftM, ap)
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..), (<$>) )
-#endif
 import Data.Functor.Identity
 
 {-
@@ -1436,7 +1433,6 @@ instance Applicative OccCheckResult where
       (<*>) = ap
 
 instance Monad OccCheckResult where
-  return            = pure
   OC_OK x     >>= k = k x
   OC_Forall   >>= _ = OC_Forall
   OC_NonTyVar >>= _ = OC_NonTyVar

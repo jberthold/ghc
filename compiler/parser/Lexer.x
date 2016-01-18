@@ -70,13 +70,11 @@ module Lexer (
    sccProfilingOn, hpcEnabled,
    addWarning,
    lexTokenStream,
-   addAnnotation,AddAnn,mkParensApiAnn
+   addAnnotation,AddAnn,addAnnsAt,mkParensApiAnn,
+   moveAnnotations
   ) where
 
 -- base
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative
-#endif
 import Control.Monad
 #if __GLASGOW_HASKELL__ > 710
 import Control.Monad.Fail
@@ -1786,7 +1784,6 @@ instance Applicative P where
   (<*>) = ap
 
 instance Monad P where
-  return = pure
   (>>=) = thenP
   fail = failP
 
@@ -2696,6 +2693,10 @@ addAnnotationOnly l a v = P $ \s -> POk s {
   annotations = ((l,a), [v]) : annotations s
   } ()
 
+-- |Given a location and a list of AddAnn, apply them all to the location.
+addAnnsAt :: SrcSpan -> [AddAnn] -> P ()
+addAnnsAt loc anns = mapM_ (\a -> a loc) anns
+
 -- |Given a 'SrcSpan' that surrounds a 'HsPar' or 'HsParTy', generate
 -- 'AddAnn' values for the opening and closing bordering on the start
 -- and end of the span
@@ -2711,6 +2712,23 @@ mkParensApiAnn s@(RealSrcSpan ss) = [mj AnnOpenP lo,mj AnnCloseP lc]
     ec = srcSpanEndCol ss
     lo = mkSrcSpan (srcSpanStart s)         (mkSrcLoc f sl (sc+1))
     lc = mkSrcSpan (mkSrcLoc f el (ec - 1)) (srcSpanEnd s)
+
+-- | Move the annotations and comments belonging to the @old@ span to the @new@
+--   one.
+moveAnnotations :: SrcSpan -> SrcSpan -> P ()
+moveAnnotations old new = P $ \s ->
+  let
+    updateAnn ((l,a),v)
+      | l == old = ((new,a),v)
+      | otherwise = ((l,a),v)
+    updateComment (l,c)
+      | l == old = (new,c)
+      | otherwise = (l,c)
+  in
+    POk s {
+       annotations = map updateAnn (annotations s)
+     , annotations_comments = map updateComment (annotations_comments s)
+     } ()
 
 queueComment :: Located Token -> P()
 queueComment c = P $ \s -> POk s {

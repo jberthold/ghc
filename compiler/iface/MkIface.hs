@@ -353,14 +353,15 @@ mkHashFun hsc_env eps
       let
         mod = ASSERT2( isExternalName name, ppr name ) nameModule name
         occ = nameOccName name
-        iface = lookupIfaceByModule (hsc_dflags hsc_env) hpt pit mod `orElse`
+        iface = lookupIfaceByModule dflags hpt pit mod `orElse`
                    pprPanic "lookupVers2" (ppr mod <+> ppr occ)
       in
         snd (mi_hash_fn iface occ `orElse`
                   pprPanic "lookupVers1" (ppr mod <+> ppr occ))
   where
-      hpt = hsc_HPT hsc_env
-      pit = eps_PIT eps
+      dflags = hsc_dflags hsc_env
+      hpt    = hsc_HPT hsc_env
+      pit    = eps_PIT eps
 
 -- ---------------------------------------------------------------------------
 -- Compute fingerprints for the interface
@@ -646,7 +647,7 @@ The ABI of a declaration consists of:
        definition of an Id is included in the fingerprint only if
        it is made available as an unfolding in the interface.
 
-   (c) the fixity of the identifier
+   (c) the fixity of the identifier (if it exists)
    (d) for Ids: rules
    (e) for classes: instances, fixity & rules for methods
    (f) for datatypes: instances, fixity & rules for constrs
@@ -663,29 +664,29 @@ data IfaceDeclExtras
   = IfaceIdExtras IfaceIdExtras
 
   | IfaceDataExtras
-       Fixity                   -- Fixity of the tycon itself
+       (Maybe Fixity)           -- Fixity of the tycon itself (if it exists)
        [IfaceInstABI]           -- Local class and family instances of this tycon
                                 -- See Note [Orphans] in InstEnv
        [AnnPayload]             -- Annotations of the type itself
        [IfaceIdExtras]          -- For each constructor: fixity, RULES and annotations
 
   | IfaceClassExtras
-       Fixity                   -- Fixity of the class itself
+       (Maybe Fixity)           -- Fixity of the class itself (if it exists)
        [IfaceInstABI]           -- Local instances of this class *or*
                                 --   of its associated data types
                                 -- See Note [Orphans] in InstEnv
        [AnnPayload]             -- Annotations of the type itself
        [IfaceIdExtras]          -- For each class method: fixity, RULES and annotations
 
-  | IfaceSynonymExtras Fixity [AnnPayload]
+  | IfaceSynonymExtras (Maybe Fixity) [AnnPayload]
 
-  | IfaceFamilyExtras   Fixity [IfaceInstABI] [AnnPayload]
+  | IfaceFamilyExtras   (Maybe Fixity) [IfaceInstABI] [AnnPayload]
 
   | IfaceOtherDeclExtras
 
 data IfaceIdExtras
   = IdExtras
-       Fixity                   -- Fixity of the Id
+       (Maybe Fixity)           -- Fixity of the Id (if it exists)
        [IfaceRule]              -- Rules for the Id
        [AnnPayload]             -- Annotations for the Id
 
@@ -761,7 +762,7 @@ instance Binary IfaceIdExtras where
   get _bh = panic "no get for IfaceIdExtras"
   put_ bh (IdExtras fix rules anns)= do { put_ bh fix; put_ bh rules; put_ bh anns }
 
-declExtras :: (OccName -> Fixity)
+declExtras :: (OccName -> Maybe Fixity)
            -> (OccName -> [AnnPayload])
            -> OccEnv [IfaceRule]
            -> OccEnv [IfaceClsInst]

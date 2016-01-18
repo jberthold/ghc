@@ -49,6 +49,7 @@ module TysWiredIn (
         listTyCon, listTyCon_RDR, listTyConName, listTyConKey,
         nilDataCon, nilDataConName, nilDataConKey,
         consDataCon_RDR, consDataCon, consDataConName,
+        promotedNilDataCon, promotedConsDataCon,
 
         mkListTy,
 
@@ -82,11 +83,6 @@ module TysWiredIn (
         heqTyCon, heqClass, heqDataCon,
         coercibleTyCon, coercibleDataCon, coercibleClass,
 
-        -- * Implicit Parameters
-        ipTyCon, ipDataCon, ipClass,
-
-        callStackTyCon,
-
         mkWiredInTyConName, -- This is used in TcTypeNats to define the
                             -- built-in functions for evaluation.
 
@@ -96,7 +92,10 @@ module TysWiredIn (
         levityTy, levityTyCon, liftedDataCon, unliftedDataCon,
         liftedPromDataCon, unliftedPromDataCon,
         liftedDataConTy, unliftedDataConTy,
-        liftedDataConName, unliftedDataConName
+        liftedDataConName, unliftedDataConName,
+
+        -- * Helpers for building type representations
+        tyConRepModOcc
     ) where
 
 #include "HsVersions.h"
@@ -108,7 +107,6 @@ import PrelNames
 import TysPrim
 
 -- others:
-import FamInstEnv( mkNewTypeCoAxiom )
 import CoAxiom
 import Id
 import Constants        ( mAX_TUPLE_SIZE, mAX_CTUPLE_SIZE )
@@ -137,6 +135,48 @@ alpha_tyvar = [alphaTyVar]
 
 alpha_ty :: [Type]
 alpha_ty = [alphaTy]
+
+-- * Some helpers for generating type representations
+
+-- | Make a 'Name' for the 'Typeable' representation of the given wired-in type
+mkPrelTyConRepName :: Name -> Name
+-- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
+-- This doesn't really belong here but a refactoring of this code eliminating
+-- these manually-defined representations is imminent
+mkPrelTyConRepName tc_name  -- Prelude tc_name is always External,
+                            -- so nameModule will work
+  = mkExternalName rep_uniq rep_mod rep_occ (nameSrcSpan tc_name)
+  where
+    name_occ  = nameOccName tc_name
+    name_mod  = nameModule  tc_name
+    name_uniq = nameUnique  tc_name
+    rep_uniq | isTcOcc name_occ = tyConRepNameUnique   name_uniq
+             | otherwise        = dataConRepNameUnique name_uniq
+    (rep_mod, rep_occ) = tyConRepModOcc name_mod name_occ
+
+-- | The name (and defining module) for the Typeable representation (TyCon) of a
+-- type constructor.
+--
+-- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
+tyConRepModOcc :: Module -> OccName -> (Module, OccName)
+tyConRepModOcc tc_module tc_occ
+  -- The list type is defined in GHC.Types and therefore must have its
+  -- representations defined manually in Data.Typeable.Internal.
+  -- However, $tc': isn't a valid Haskell identifier, so we override the derived
+  -- name here.
+  | is_wired_in promotedConsDataCon
+  = (tYPEABLE_INTERNAL, mkOccName varName "tc'Cons")
+  | is_wired_in promotedNilDataCon
+  = (tYPEABLE_INTERNAL, mkOccName varName "tc'Nil")
+
+  | tc_module == gHC_TYPES
+  = (tYPEABLE_INTERNAL, mkTyConRepUserOcc tc_occ)
+  | otherwise
+  = (tc_module,         mkTyConRepSysOcc tc_occ)
+  where
+    is_wired_in :: TyCon -> Bool
+    is_wired_in tc =
+      tc_module == gHC_TYPES && tc_occ == nameOccName (tyConName tc)
 
 {-
 ************************************************************************
@@ -187,7 +227,6 @@ wiredInTyCons = [ unitTyCon     -- Not treated like other tuples, because
               , liftedTypeKindTyCon
               , starKindTyCon
               , unicodeStarKindTyCon
-              , ipTyCon
               ]
 
 mkWiredInTyConName :: BuiltInSyntax -> Module -> FastString -> Unique -> TyCon -> Name
@@ -200,13 +239,6 @@ mkWiredInDataConName :: BuiltInSyntax -> Module -> FastString -> Unique -> DataC
 mkWiredInDataConName built_in modu fs unique datacon
   = mkWiredInName modu (mkDataOccFS fs) unique
                   (AConLike (RealDataCon datacon))    -- Relevant DataCon
-                  built_in
-
-mkWiredInCoAxiomName :: BuiltInSyntax -> Module -> FastString -> Unique
-                     -> CoAxiom Branched -> Name
-mkWiredInCoAxiomName built_in modu fs unique ax
-  = mkWiredInName modu (mkTcOccFS fs) unique
-                  (ACoAxiom ax)        -- Relevant CoAxiom
                   built_in
 
 mkWiredInIdName :: Module -> FastString -> Unique -> Id -> Name
@@ -1063,54 +1095,7 @@ promotedLTDataCon     = promoteDataCon ltDataCon
 promotedEQDataCon     = promoteDataCon eqDataCon
 promotedGTDataCon     = promoteDataCon gtDataCon
 
-{-
-Note [The Implicit Parameter class]
-
-Implicit parameters `?x :: a` are desugared into dictionaries for the
-class `IP "x" a`, which is defined (in GHC.Classes) as
-
-  class IP (x :: Symbol) a | x -> a
-
-This class is wired-in so that `error` and `undefined`, which have
-wired-in types, can use the implicit-call-stack feature to provide
-a call-stack alongside the error message.
--}
-
-ipDataConName, ipTyConName, ipCoName :: Name
-ipDataConName = mkWiredInDataConName UserSyntax gHC_CLASSES (fsLit "IP")
-                  ipDataConKey ipDataCon
-ipTyConName   = mkWiredInTyConName UserSyntax gHC_CLASSES (fsLit "IP")
-                  ipTyConKey ipTyCon
-ipCoName      = mkWiredInCoAxiomName BuiltInSyntax gHC_CLASSES (fsLit "NTCo:IP")
-                  ipCoNameKey (toBranchedAxiom ipCoAxiom)
-
--- See Note [The Implicit Parameter class]
-ipTyCon :: TyCon
-ipTyCon = mkClassTyCon ipTyConName kind [ip,a] [] rhs ipClass NonRecursive
-                       (mkPrelTyConRepName ipTyConName)
-  where
-    kind = mkFunTys [typeSymbolKind, liftedTypeKind] constraintKind
-    [ip,a] = mkTemplateTyVars [typeSymbolKind, liftedTypeKind]
-    rhs = NewTyCon ipDataCon (mkTyVarTy a) ([], mkTyVarTy a) ipCoAxiom
-
-ipCoAxiom :: CoAxiom Unbranched
-ipCoAxiom = mkNewTypeCoAxiom ipCoName ipTyCon [ip,a] [Nominal, Nominal] (mkTyVarTy a)
-  where
-    [ip,a] = mkTemplateTyVars [typeSymbolKind, liftedTypeKind]
-
-ipDataCon :: DataCon
-ipDataCon = pcDataCon ipDataConName [ip,a] ts ipTyCon
-  where
-    [ip,a] = mkTemplateTyVars [typeSymbolKind, liftedTypeKind]
-    ts  = [mkTyVarTy a]
-
-ipClass :: Class
-ipClass = mkClass (tyConTyVars ipTyCon) [([ip], [a])] [] [] [] [] (mkAnd [])
-            ipTyCon
-  where
-    [ip, a] = tyConTyVars ipTyCon
-
--- this is a fake version of the CallStack TyCon so we can refer to it
--- in MkCore.errorTy
-callStackTyCon :: TyCon
-callStackTyCon = pcNonRecDataTyCon callStackTyConName Nothing [] []
+-- Promoted List
+promotedConsDataCon, promotedNilDataCon :: TyCon
+promotedConsDataCon   = promoteDataCon consDataCon
+promotedNilDataCon    = promoteDataCon nilDataCon

@@ -5,17 +5,13 @@
 -- Monadic streams
 --
 -- -----------------------------------------------------------------------------
-{-# LANGUAGE CPP #-}
 module Stream (
     Stream(..), yield, liftIO,
     collect, fromList,
     Stream.map, Stream.mapM, Stream.mapAccumL
   ) where
-import Control.Monad
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative
-#endif
 
+import Control.Monad
 
 -- |
 -- @Stream m a b@ is a computation in some Monad @m@ that delivers a sequence
@@ -50,7 +46,6 @@ instance Monad m => Applicative (Stream m a) where
   (<*>) = ap
 
 instance Monad m => Monad (Stream m a) where
-  return = pure
 
   Stream m >>= k = Stream $ do
                 r <- m

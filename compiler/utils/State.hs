@@ -1,10 +1,6 @@
-{-# LANGUAGE UnboxedTuples, CPP #-}
+{-# LANGUAGE UnboxedTuples #-}
 
 module State where
-
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative
-#endif
 
 newtype State s a = State { runState' :: s -> (# a, s #) }
 
@@ -19,7 +15,6 @@ instance Applicative (State s) where
                                            (# x, s'' #) -> (# f x, s'' #)
 
 instance Monad (State s) where
-    return = pure
     m >>= n  = State $ \s -> case runState' m s of
                              (# r, s' #) -> runState' (n r) s'
 

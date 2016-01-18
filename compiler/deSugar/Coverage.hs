@@ -10,6 +10,9 @@ module Coverage (addTicksToBinds, hpcInitCode) where
 #ifdef GHCI
 import qualified GHCi
 import GHCi.RemoteTypes
+import Data.Array
+import ByteCodeTypes
+import GHC.Stack.CCS
 #endif
 import Type
 import HsSyn
@@ -37,14 +40,14 @@ import Maybes
 import CLabel
 import Util
 
-import Data.Array
 import Data.Time
+import Foreign.C
 import System.Directory
 
 import Trace.Hpc.Mix
 import Trace.Hpc.Util
 
-import BreakArray
+import qualified Data.ByteString as B
 import Data.Map (Map)
 import qualified Data.Map as Map
 
@@ -65,7 +68,7 @@ addTicksToBinds
                                 -- hasn't set it), so we have to work from this set.
         -> [TyCon]              -- Type constructor in this module
         -> LHsBinds Id
-        -> IO (LHsBinds Id, HpcInfo, ModBreaks)
+        -> IO (LHsBinds Id, HpcInfo, Maybe ModBreaks)
 
 addTicksToBinds hsc_env mod mod_loc exports tyCons binds
   | let dflags = hsc_dflags hsc_env
@@ -73,7 +76,7 @@ addTicksToBinds hsc_env mod mod_loc exports tyCons binds
     Just orig_file <- ml_hs_file mod_loc = do
 
      if "boot" `isSuffixOf` orig_file
-         then return (binds, emptyHpcInfo False, emptyModBreaks)
+         then return (binds, emptyHpcInfo False, Nothing)
          else do
 
      us <- mkSplitUniqSupply 'C' -- for cost centres
@@ -93,7 +96,7 @@ addTicksToBinds hsc_env mod mod_loc exports tyCons binds
                       , density      = mkDensity tickish dflags
                       , this_mod     = mod
                       , tickishType  = tickish
-                      }
+}
                 (binds',_,st') = unTM (addTickLHsBinds binds) env st
             in (binds', st')
 
@@ -113,9 +116,9 @@ addTicksToBinds hsc_env mod mod_loc exports tyCons binds
          log_action dflags dflags SevDump noSrcSpan defaultDumpStyle
              (pprLHsBinds binds1)
 
-     return (binds1, HpcInfo tickCount hashNo, modBreaks)
+     return (binds1, HpcInfo tickCount hashNo, Just modBreaks)
 
-  | otherwise = return (binds, emptyHpcInfo False, emptyModBreaks)
+  | otherwise = return (binds, emptyHpcInfo False, Nothing)
 
 guessSourceFile :: LHsBinds Id -> FilePath -> FilePath
 guessSourceFile binds orig_file =
@@ -131,12 +134,13 @@ guessSourceFile binds orig_file =
 
 
 mkModBreaks :: HscEnv -> Module -> Int -> [MixEntry_] -> IO ModBreaks
+#ifndef GHCI
+mkModBreaks _hsc_env _mod _count _entries = return emptyModBreaks
+#else
 mkModBreaks hsc_env mod count entries
   | HscInterpreted <- hscTarget (hsc_dflags hsc_env) = do
-    breakArray <- newBreakArray (length entries)
-#ifdef GHCI
+    breakArray <- GHCi.newBreakArray hsc_env (length entries)
     ccs <- mkCCSArray hsc_env mod count entries
-#endif
     let
            locsTicks  = listArray (0,count-1) [ span  | (span,_,_,_)  <- entries ]
            varsTicks  = listArray (0,count-1) [ vars  | (_,_,vars,_)  <- entries ]
@@ -146,31 +150,30 @@ mkModBreaks hsc_env mod count entries
                        , modBreaks_locs  = locsTicks
                        , modBreaks_vars  = varsTicks
                        , modBreaks_decls = declsTicks
-#ifdef GHCI
                        , modBreaks_ccs   = ccs
-#endif
                        }
   | otherwise = return emptyModBreaks
 
-#ifdef GHCI
 mkCCSArray
   :: HscEnv -> Module -> Int -> [MixEntry_]
-  -> IO (Array BreakIndex RemotePtr {- CCostCentre -})
+  -> IO (Array BreakIndex (RemotePtr GHC.Stack.CCS.CostCentre))
 mkCCSArray hsc_env modul count entries = do
   if interpreterProfiled (hsc_dflags hsc_env)
     then do
       let module_bs = fastStringToByteString (moduleNameFS (moduleName modul))
-      c_module <- GHCi.mallocData hsc_env module_bs
-      costcentres <- mapM (mkCostCentre hsc_env (toRemotePtr c_module)) entries
+      c_module <- GHCi.mallocData hsc_env (module_bs `B.snoc` 0)
+        -- NB. null-terminate the string
+      costcentres <-
+        mapM (mkCostCentre hsc_env (castRemotePtr c_module)) entries
       return (listArray (0,count-1) costcentres)
     else do
       return (listArray (0,-1) [])
  where
     mkCostCentre
      :: HscEnv
-     -> RemotePtr {- CChar -}
+     -> RemotePtr CChar
      -> MixEntry_
-     -> IO (RemotePtr {- CCostCentre -})
+     -> IO (RemotePtr GHC.Stack.CCS.CostCentre)
     mkCostCentre hsc_env@HscEnv{..}  c_module (srcspan, decl_path, _, _) = do
       let name = concat (intersperse "." decl_path)
           src = showSDoc hsc_dflags (ppr srcspan)
@@ -291,6 +294,29 @@ addTickLHsBind (L pos bind@(AbsBinds { abs_binds   = binds,
                       | ABE{ abe_poly = pid, abe_mono = mid } <- abs_exports
                       , isAnyInlinePragma (idInlinePragma pid) ] }
 
+addTickLHsBind (L pos bind@(AbsBindsSig { abs_sig_bind   = val_bind
+                                        , abs_sig_export = poly_id }))
+  | L _ FunBind { fun_id = L _ mono_id } <- val_bind
+  = do withEnv (add_export  mono_id) $ do
+       withEnv (add_inlines mono_id) $ do
+       val_bind' <- addTickLHsBind val_bind
+       return $ L pos $ bind { abs_sig_bind = val_bind' }
+
+  | otherwise
+  = pprPanic "addTickLHsBind" (ppr bind)
+ where
+  -- see AbsBinds comments
+  add_export mono_id env
+    | idName poly_id `elemNameSet` exports env
+    = env { exports = exports env `extendNameSet` idName mono_id }
+    | otherwise
+    = env
+
+  add_inlines mono_id env
+    | isAnyInlinePragma (idInlinePragma poly_id)
+    = env { inlines = inlines env `extendVarSet` mono_id }
+    | otherwise
+    = env
 
 addTickLHsBind (L pos (funBind@(FunBind { fun_id = (L _ id)  }))) = do
   let name = getOccString id
@@ -596,7 +622,7 @@ addTickHsExpr (HsTick t e) =
 addTickHsExpr (HsBinTick t0 t1 e) =
         liftM (HsBinTick t0 t1) (addTickLHsExprNever e)
 
-addTickHsExpr (HsTickPragma _ _ (L pos e0)) = do
+addTickHsExpr (HsTickPragma _ _ _ (L pos e0)) = do
     e2 <- allocTickBox (ExpBox False) False False pos $
                 addTickHsExpr e0
     return $ unLoc e2
@@ -1010,9 +1036,7 @@ data TickishType = ProfNotes | HpcTicks | Breakpoints | SourceNotes
 
 coveragePasses :: DynFlags -> [TickishType]
 coveragePasses dflags =
-    ifa (hscTarget dflags == HscInterpreted &&
-         not (gopt Opt_ExternalInterpreter dflags)) Breakpoints $
-         -- TODO: breakpoints don't work with -fexternal-interpreter yet
+    ifa (hscTarget dflags == HscInterpreted) Breakpoints $
     ifa (gopt Opt_Hpc dflags)                HpcTicks $
     ifa (gopt Opt_SccProfilingOn dflags &&
          profAuto dflags /= NoProfAuto)      ProfNotes $
@@ -1055,7 +1079,6 @@ instance Applicative TM where
     (<*>) = ap
 
 instance Monad TM where
-  return = pure
   (TM m) >>= k = TM $ \ env st ->
                                 case m env st of
                                   (r1,fv1,st1) ->

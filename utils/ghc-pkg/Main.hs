@@ -36,9 +36,6 @@ import qualified Control.Exception as Exception
 import Data.Maybe
 
 import Data.Char ( isSpace, toLower )
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 import Control.Monad
 import System.Directory ( doesDirectoryExist, getDirectoryContents,
                           doesFileExist, removeFile,
@@ -1520,7 +1517,6 @@ instance Applicative Validate where
     (<*>) = ap
 
 instance Monad Validate where
-   return = pure
    m >>= k = V $ do
       (a, es, ws) <- runValidate m
       (b, es', ws') <- runValidate (k a)

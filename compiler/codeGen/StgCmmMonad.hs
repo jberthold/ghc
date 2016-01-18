@@ -77,7 +77,6 @@ import UniqSupply
 import FastString
 import Outputable
 
-import qualified Control.Applicative as A
 import Control.Monad
 import Data.List
 import Prelude hiding( sequence, succ )
@@ -117,17 +116,22 @@ newtype FCode a = FCode (CgInfoDownwards -> CgState -> (# a, CgState #))
 instance Functor FCode where
   fmap f (FCode g) = FCode $ \i s -> case g i s of (# a, s' #) -> (# f a, s' #)
 
-instance A.Applicative FCode where
+instance Applicative FCode where
       pure = returnFC
       (<*>) = ap
 
 instance Monad FCode where
         (>>=) = thenFC
-        return = A.pure
 
 {-# INLINE thenC #-}
 {-# INLINE thenFC #-}
 {-# INLINE returnFC #-}
+
+instance MonadUnique FCode where
+  getUniqueSupplyM = cgs_uniqs <$> getState
+  getUniqueM = FCode $ \_ st ->
+    let (u, us') = takeUniqFromSupply (cgs_uniqs st)
+    in (# u, st { cgs_uniqs = us' } #)
 
 initC :: IO CgState
 initC  = do { uniqs <- mkSplitUniqSupply 'c'

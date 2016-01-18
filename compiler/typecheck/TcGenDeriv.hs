@@ -41,8 +41,7 @@ import Encoding
 import DynFlags
 import PrelInfo
 import FamInstEnv( FamInst )
-import MkCore ( eRROR_ID )
-import PrelNames hiding (error_RDR)
+import PrelNames
 import THNames
 import Module ( moduleName, moduleNameString
               , moduleUnitId, unitIdString )
@@ -61,9 +60,6 @@ import VarEnv
 import State
 import Util
 import Var
-#if __GLASGOW_HASKELL__ < 709
-import MonadUtils
-#endif
 import Outputable
 import Lexeme
 import FastString
@@ -1229,7 +1225,7 @@ appPrecedence = fromIntegral maxPrecedence + 1
 getPrecedence :: (Name -> Fixity) -> Name -> Integer
 getPrecedence get_fixity nm
    = case get_fixity nm of
-        Fixity x _assoc -> fromIntegral x
+        Fixity _ x _assoc -> fromIntegral x
           -- NB: the Report says that associativity is not taken
           --     into account for either Read or Show; hence we
           --     ignore associativity here
@@ -2387,10 +2383,9 @@ f_Pat           = nlVarPat f_RDR
 k_Pat           = nlVarPat k_RDR
 z_Pat           = nlVarPat z_RDR
 
-minusInt_RDR, tagToEnum_RDR, error_RDR :: RdrName
+minusInt_RDR, tagToEnum_RDR :: RdrName
 minusInt_RDR  = getRdrName (primOpId IntSubOp   )
 tagToEnum_RDR = getRdrName (primOpId TagToEnumOp)
-error_RDR     = getRdrName eRROR_ID
 
 con2tag_RDR, tag2con_RDR, maxtag_RDR :: TyCon -> RdrName
 -- Generates Orig s RdrName, for the binding positions

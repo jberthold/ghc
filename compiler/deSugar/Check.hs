@@ -52,6 +52,8 @@ import DsGRHSs    -- isTrueLHsExpr
 import Data.List     -- find
 import Data.Maybe    -- isNothing, isJust, fromJust
 import Control.Monad -- liftM3, forM
+import Coercion
+import TcEvidence
 
 {-
 This module checks pattern matches for:
@@ -281,11 +283,15 @@ translatePat pat = case pat of
 
   SigPatOut p _ty -> translatePat (unLoc p)
 
-  CoPat wrapper p ty -> do
-    ps      <- translatePat p
-    (xp,xe) <- mkPmId2FormsSM ty
-    let g = mkGuard ps (HsWrap wrapper (unLoc xe))
-    return [xp,g]
+  -- See Note [Translate CoPats]
+  CoPat wrapper p ty
+    | isIdHsWrapper wrapper                   -> translatePat p
+    | WpCast co <-  wrapper, isReflexiveCo co -> translatePat p
+    | otherwise -> do
+        ps      <- translatePat p
+        (xp,xe) <- mkPmId2FormsSM ty
+        let g = mkGuard ps (HsWrap wrapper (unLoc xe))
+        return [xp,g]
 
   -- (n + k)  ===>   x (True <- x >= k) (n <- x-k)
   NPlusKPat (L _ n) k ge minus -> do
@@ -615,6 +621,19 @@ in the pattern bind case). Hence, we safely drop them.
 Additionally, top-level guard translation (performed by @translateGuards@)
 replaces guards that cannot be reasoned about (like the ones we described in
 1-4) with a single @fake_pat@ to record the possibility of failure to match.
+
+Note [Translate CoPats]
+~~~~~~~~~~~~~~~~~~~~~~~
+The pattern match checker did not know how to handle coerced patterns `CoPat`
+efficiently, which gave rise to #11276. The original approach translated
+`CoPat`s:
+
+    pat |> co    ===>    x (pat <- (e |> co))
+
+Instead, we now check whether the coercion is a hole or if it is just refl, in
+which case we can drop it. Unfortunately, data families generate useful
+coercions so guards are still generated in these cases and checking data
+families is not really efficient.
 
 %************************************************************************
 %*                                                                      *
@@ -1420,9 +1439,11 @@ dsPmWarn dflags ctx@(DsMatchContext kind loc) mPmResult
       vcat (map (ppr_eqn f kind) (take maximum_output qs)) $$ dots qs
 
     pprEqnsU qs = pp_context ctx (ptext (sLit "are non-exhaustive")) $ \_ ->
-      let us = map ppr_uncovered qs
-      in  hang (ptext (sLit "Patterns not matched:")) 4
-               (vcat (take maximum_output us) $$ dots us)
+      case qs of -- See #11245
+           [([],_)] -> ptext (sLit "Guards do not cover entire pattern space")
+           _missing -> let us = map ppr_uncovered qs
+                       in  hang (ptext (sLit "Patterns not matched:")) 4
+                                (vcat (take maximum_output us) $$ dots us)
 
 dots :: [a] -> SDoc
 dots qs | qs `lengthExceeds` maximum_output = ptext (sLit "...")

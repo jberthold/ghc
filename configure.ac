@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Parallel Haskell Compilation System], [7.11], [eden@mathematik.uni-marburg.de], [ghc])
+AC_INIT([The Parallel Haskell Compilation System], [8.1], [eden@mathematik.uni-marburg.de], [ghc])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=NO}
@@ -135,8 +135,8 @@ if test "$WithGhc" = ""
 then
     AC_MSG_ERROR([GHC is required.])
 fi
-FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[7.8],
-    [AC_MSG_ERROR([GHC version 7.8 or later is required to compile GHC.])])
+FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[7.10],
+    [AC_MSG_ERROR([GHC version 7.10 or later is required to compile GHC.])])
 
 if test `expr $GhcMinVersion % 2` = "1"
 then
@@ -152,17 +152,6 @@ fi
 
 GHC_PACKAGE_DB_FLAG=package-db
 AC_SUBST(GHC_PACKAGE_DB_FLAG)
-
-# GHC 7.7+ needs -fcmm-sink when compiling Parser.hs. See #8182
-FP_COMPARE_VERSIONS([$GhcVersion],[-gt],[7.7],
-                    CMM_SINK_BOOTSTRAP_IS_NEEDED=YES,
-                    CMM_SINK_BOOTSTRAP_IS_NEEDED=NO)
-AC_SUBST(CMM_SINK_BOOTSTRAP_IS_NEEDED)
-
-FP_COMPARE_VERSIONS([$GhcVersion],[-lt],[7.9],
-                    SUPPORTS_COMPONENT_ID=NO,
-                    SUPPORTS_COMPONENT_ID=YES)
-AC_SUBST(SUPPORTS_COMPONENT_ID)
 
 # GHC is passed to Cabal, so we need a native path
 if test "${WithGhc}" != ""
@@ -269,8 +258,7 @@ AC_ARG_WITH(hc,
 )
 AC_SUBST(WithHc)
 
-# This uses GHC, so put it after the "GHC is required" check above:
-FP_INTREE_GHC_PWD
+# Requires FPTOOLS_SET_PLATFORM_VARS to be run first.
 FP_FIND_ROOT
 
 fail() {
@@ -1259,27 +1247,38 @@ if test -e shake-build/cfg/system.config.in; then
     AC_CONFIG_FILES([shake-build/cfg/system.config])
 fi
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
-AC_OUTPUT
-
 # We got caught by
 #     http://savannah.gnu.org/bugs/index.php?1516
 #     $(eval ...) inside conditionals causes errors
 # with make 3.80, so warn the user if it looks like they're about to
 # try to use it.
 # We would use "grep -q" here, but Solaris's grep doesn't support it.
+print_make_warning=""
 checkMake380() {
-    if $1 --version 2>&1 | head -1 | grep 'GNU Make 3\.80' > /dev/null
+    make_ver=`$1 --version 2>&1 | head -1`
+    if echo "$make_ver" | grep 'GNU Make 3\.80' > /dev/null
     then
-        echo
-        echo "WARNING: It looks like \"$1\" is GNU make 3.80."
-        echo "This version cannot be used to build GHC."
-        echo "Please use GNU make >= 3.81."
+        print_make_warning="true"
+    fi
+    if echo "$make_ver" | grep 'GNU Make' > /dev/null
+    then
+        MakeCmd=$1
+        AC_SUBST(MakeCmd)
     fi
 }
 
 checkMake380 make
 checkMake380 gmake
+
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
+AC_OUTPUT
+
+if test "$print_make_warning" = "true"; then
+   echo
+   echo "WARNING: It looks like \"$MakeCmd\" is GNU make 3.80."
+   echo "This version cannot be used to build GHC."
+   echo "Please use GNU make >= 3.81."
+fi
 
 echo ["
 ----------------------------------------------------------------------

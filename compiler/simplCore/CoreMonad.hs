@@ -4,7 +4,7 @@
 \section[CoreMonad]{The core pipeline monad}
 -}
 
-{-# LANGUAGE CPP, UndecidableInstances #-}
+{-# LANGUAGE CPP #-}
 
 module CoreMonad (
     -- * Configuration of the core-to-core passes
@@ -88,8 +88,8 @@ import Data.IORef
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Word
-import qualified Control.Applicative as A
 import Control.Monad
+import Control.Applicative ( Alternative(..) )
 
 import Prelude hiding   ( read )
 
@@ -557,7 +557,6 @@ instance Functor CoreM where
     fmap = liftM
 
 instance Monad CoreM where
-    return = pure
     mx >>= f = CoreM $ \s -> do
             (x, s', w1) <- unCoreM mx s
             (y, s'', w2) <- unCoreM (f x) s'
@@ -566,20 +565,16 @@ instance Monad CoreM where
             -- forcing w before building the tuple avoids a space leak
             -- (Trac #7702)
 
-instance A.Applicative CoreM where
+instance Applicative CoreM where
     pure x = CoreM $ \s -> nop s x
     (<*>) = ap
     m *> k = m >>= \_ -> k
 
-instance MonadPlus IO => A.Alternative CoreM where
-    empty = mzero
-    (<|>) = mplus
+instance Alternative CoreM where
+    empty   = CoreM (const Control.Applicative.empty)
+    m <|> n = CoreM (\rs -> unCoreM m rs <|> unCoreM n rs)
 
--- For use if the user has imported Control.Monad.Error from MTL
--- Requires UndecidableInstances
-instance MonadPlus IO => MonadPlus CoreM where
-    mzero = CoreM (const mzero)
-    m `mplus` n = CoreM (\rs -> unCoreM m rs `mplus` unCoreM n rs)
+instance MonadPlus CoreM
 
 instance MonadUnique CoreM where
     getUniqueSupplyM = do

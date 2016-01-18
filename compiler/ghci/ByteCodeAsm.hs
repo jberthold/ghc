@@ -32,13 +32,11 @@ import DynFlags
 import Outputable
 import Platform
 import Util
+import Unique
 
 -- From iserv
 import SizedSeq
 
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 import Control.Monad
 import Control.Monad.ST ( runST )
 import Control.Monad.Trans.Class
@@ -89,11 +87,18 @@ bcoFreeNames bco
 -- bytecode address in this BCO.
 
 -- Top level assembler fn.
-assembleBCOs :: HscEnv -> [ProtoBCO Name] -> [TyCon] -> IO CompiledByteCode
-assembleBCOs hsc_env proto_bcos tycons = do
+assembleBCOs
+  :: HscEnv -> [ProtoBCO Name] -> [TyCon] -> Maybe ModBreaks
+  -> IO CompiledByteCode
+assembleBCOs hsc_env proto_bcos tycons modbreaks = do
   itblenv <- mkITbls hsc_env tycons
   bcos    <- mapM (assembleBCO (hsc_dflags hsc_env)) proto_bcos
-  return (ByteCode bcos itblenv (concat (map protoBCOFFIs proto_bcos)))
+  return CompiledByteCode
+    { bc_bcos = bcos
+    , bc_itbls =  itblenv
+    , bc_ffis = concat (map protoBCOFFIs proto_bcos)
+    , bc_breaks = modbreaks
+    }
 
 assembleBCO :: DynFlags -> ProtoBCO Name -> IO UnlinkedBCO
 assembleBCO dflags (ProtoBCO nm instrs bitmap bsize arity _origin _malloced) = do
@@ -173,7 +178,6 @@ instance Applicative Assembler where
     (<*>) = ap
 
 instance Monad Assembler where
-  return = pure
   NullAsm x >>= f = f x
   AllocPtr p k >>= f = AllocPtr p (k >=> f)
   AllocLit l k >>= f = AllocLit l (k >=> f)
@@ -360,11 +364,11 @@ assembleI dflags i = case i of
   RETURN_UBX rep           -> emit (return_ubx rep) []
   CCALL off m_addr i       -> do np <- addr m_addr
                                  emit bci_CCALL [SmallOp off, Op np, SmallOp i]
-  BRK_FUN array index info cc -> do p1 <- ptr (BCOPtrArray array)
-                                    p2 <- ptr (BCOPtrBreakInfo info)
-                                    np <- addr cc
-                                    emit bci_BRK_FUN [Op p1, SmallOp index,
-                                                      Op p2, Op np]
+  BRK_FUN index uniq cc    -> do p1 <- ptr BCOPtrBreakArray
+                                 q <- int (getKey uniq)
+                                 np <- addr cc
+                                 emit bci_BRK_FUN [Op p1, SmallOp index,
+                                                   Op q, Op np]
 
   where
     literal (MachLabel fs (Just sz) _)
@@ -478,14 +482,7 @@ mkLitI64 dflags ii
    | otherwise
    = panic "mkLitI64: Bad wORD_SIZE"
 
-mkLitI i
-   = runST (do
-        arr <- newArray_ ((0::Int),0)
-        writeArray arr 0 i
-        i_arr <- castSTUArray arr
-        w0 <- readArray i_arr 0
-        return [w0 :: Word]
-     )
+mkLitI i = [fromIntegral i :: Word]
 
 iNTERP_STACK_CHECK_THRESH :: Int
 iNTERP_STACK_CHECK_THRESH = INTERP_STACK_CHECK_THRESH

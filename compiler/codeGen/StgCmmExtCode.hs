@@ -1,5 +1,3 @@
-{-# LANGUAGE CPP #-}
-
 -- | Our extended FCode monad.
 
 -- We add a mapping from names to CmmExpr, to support local variable names in
@@ -54,9 +52,6 @@ import UniqFM
 import Unique
 
 import Control.Monad (liftM, ap)
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 
 -- | The environment contains variable definitions or blockids.
 data Named
@@ -94,7 +89,6 @@ instance Applicative CmmParse where
 
 instance Monad CmmParse where
   (>>=) = thenExtFC
-  return = pure
 
 instance HasDynFlags CmmParse where
     getDynFlags = EC (\_ _ d -> do dflags <- getDynFlags

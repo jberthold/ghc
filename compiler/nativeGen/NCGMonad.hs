@@ -52,9 +52,6 @@ import DynFlags
 import Module
 
 import Control.Monad    ( liftM, ap )
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative ( Applicative(..) )
-#endif
 
 import Compiler.Hoopl   ( LabelMap, Label )
 
@@ -97,7 +94,6 @@ instance Applicative NatM where
 
 instance Monad NatM where
   (>>=) = thenNat
-  return = pure
 
 
 thenNat :: NatM a -> (a -> NatM b) -> NatM b

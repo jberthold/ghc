@@ -55,10 +55,6 @@ import Data.Word
 import System.IO
 import qualified Data.Map as Map
 import Control.Monad (liftM, ap)
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
-
 import qualified Data.Array.Unsafe as U ( castSTUArray )
 import Data.Array.ST
 
@@ -1012,7 +1008,6 @@ instance Applicative TE where
 
 instance Monad TE where
    TE m >>= k  = TE $ \s -> case m s of (a, s') -> unTE (k a) s'
-   return = pure
 
 te_lbl :: CLabel -> TE ()
 te_lbl lbl = TE $ \(temps,lbls) -> ((), (temps, Map.insert lbl () lbls))

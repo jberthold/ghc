@@ -326,9 +326,14 @@ basicKnownKeyNames
         -- Overloaded labels
         isLabelClassName,
 
-        -- Source locations
-        callStackDataConName, callStackTyConName,
+        -- Implicit Parameters
+        ipClassName,
+
+        -- Call Stacks
+        callStackTyConName,
         emptyCallStackName, pushCallStackName,
+
+        -- Source Locations
         srcLocDataConName,
 
         -- Annotation type checking
@@ -822,29 +827,6 @@ mkSpecialTyConRepName fs tc_name
                    tYPEABLE_INTERNAL
                    (mkVarOccFS fs)
                    wiredInSrcSpan
-
--- | Make a 'Name' for the 'Typeable' representation of the given wired-in type
-mkPrelTyConRepName :: Name -> Name
--- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
-mkPrelTyConRepName tc_name  -- Prelude tc_name is always External,
-                            -- so nameModule will work
-  = mkExternalName rep_uniq rep_mod rep_occ (nameSrcSpan tc_name)
-  where
-    name_occ  = nameOccName tc_name
-    name_mod  = nameModule  tc_name
-    name_uniq = nameUnique  tc_name
-    rep_uniq | isTcOcc name_occ = tyConRepNameUnique   name_uniq
-             | otherwise        = dataConRepNameUnique name_uniq
-    (rep_mod, rep_occ) = tyConRepModOcc name_mod name_occ
-
--- | TODO
--- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
-tyConRepModOcc :: Module -> OccName -> (Module, OccName)
-tyConRepModOcc tc_module tc_occ
-  | tc_module == gHC_TYPES
-  = (tYPEABLE_INTERNAL, mkTyConRepUserOcc tc_occ)
-  | otherwise
-  = (tc_module,         mkTyConRepSysOcc tc_occ)
 
 wildCardName :: Name
 wildCardName = mkSystemVarName wildCardKey (fsLit "wild")
@@ -1350,11 +1332,14 @@ isLabelClassName :: Name
 isLabelClassName
  = clsQual gHC_OVER_LABELS (fsLit "IsLabel") isLabelClassNameKey
 
+-- Implicit Parameters
+ipClassName :: Name
+ipClassName
+  = clsQual gHC_CLASSES (fsLit "IP") ipClassKey
+
 -- Source Locations
-callStackDataConName, callStackTyConName, emptyCallStackName, pushCallStackName,
+callStackTyConName, emptyCallStackName, pushCallStackName,
   srcLocDataConName :: Name
-callStackDataConName
-  = dcQual gHC_STACK_TYPES  (fsLit "CallStack") callStackDataConKey
 callStackTyConName
   = tcQual gHC_STACK_TYPES  (fsLit "CallStack") callStackTyConKey
 emptyCallStackName
@@ -1506,6 +1491,10 @@ isLabelClassNameKey = mkPreludeClassUnique 45
 semigroupClassKey, monoidClassKey :: Unique
 semigroupClassKey = mkPreludeClassUnique 46
 monoidClassKey    = mkPreludeClassUnique 47
+
+-- Implicit Parameters
+ipClassKey :: Unique
+ipClassKey = mkPreludeClassUnique 48
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES ClassUniques 200-299
@@ -1734,13 +1723,6 @@ callStackTyConKey = mkPreludeTyConUnique 182
 typeRepTyConKey :: Unique
 typeRepTyConKey = mkPreludeTyConUnique 183
 
--- Implicit Parameters
-ipTyConKey :: Unique
-ipTyConKey = mkPreludeTyConUnique 184
-
-ipCoNameKey :: Unique
-ipCoNameKey = mkPreludeTyConUnique 185
-
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES TyConUniques 200-299
 -----------------------------------------------------
@@ -1815,12 +1797,8 @@ staticPtrInfoDataConKey                 = mkPreludeDataConUnique 34
 fingerprintDataConKey :: Unique
 fingerprintDataConKey                   = mkPreludeDataConUnique 35
 
-callStackDataConKey, srcLocDataConKey :: Unique
-callStackDataConKey                     = mkPreludeDataConUnique 36
+srcLocDataConKey :: Unique
 srcLocDataConKey                        = mkPreludeDataConUnique 37
-
-ipDataConKey :: Unique
-ipDataConKey                            = mkPreludeDataConUnique 38
 
 -- Levity
 liftedDataConKey, unliftedDataConKey :: Unique

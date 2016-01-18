@@ -363,7 +363,7 @@ test('T10620', normal, compile_and_run, ['-v0'])
 test('T10638', normal, compile_fail, ['-v0'])
 test('T10697_decided_1', normal, compile_and_run, ['-v0'])
 test('T10697_decided_2', normal, compile_and_run, ['-XStrictData -v0'])
-test('T10697_decided_3', normal,
+test('T10697_decided_3', omit_ways(['ghci']),  # ghci doesn't support -O(2)
                          compile_and_run,
                          ['-XStrictData -funbox-strict-fields -O2 -v0'])
 test('T10697_source',
@@ -381,11 +381,7 @@ test('T10796a', normal, compile, ['-v0'])
 test('T10796b', normal, compile_fail, ['-v0'])
 test('T10811', normal, compile, ['-v0'])
 test('T10810', normal, compile, ['-v0'])
-test('T10828', normalise_version('array', 'base', 'binary', 'bytestring',
-                                 'containers', 'deepseq', 'ghc-boot',
-                                 'ghc-prim', 'integer-gmp', 'pretty',
-                                 'template-haskell'
-                              ), compile, ['-v0 -ddump-tc -dsuppress-uniques'])
+test('T10828', normal, compile, ['-v0 -dsuppress-uniques'])
 test('T10828a', normal, compile_fail, ['-v0'])
 test('T10828b', normal, compile_fail, ['-v0'])
 test('T10891', normal, compile, ['-v0'])
@@ -397,5 +393,8 @@ test('T10819',
      multimod_compile,
      ['T10819.hs', '-v0 ' + config.ghc_th_way_flags])
 test('T10820', normal, compile_and_run, ['-v0'])
+test('T11341', normal, compile, ['-v0 -dsuppress-uniques'])
+test('T11345', normal, compile_and_run, ['-v0 -dsuppress-uniques'])
 
 test('TH_finalizer', normal, compile, ['-v0'])
+test('T10603', normal, compile, ['-ddump-splices -dsuppress-uniques'])

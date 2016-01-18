@@ -84,9 +84,6 @@ import Data.List
 import Data.Maybe
 import Data.Ord         ( comparing )
 import Control.Exception
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 import Control.Monad
 import System.IO
 
@@ -986,7 +983,6 @@ instance Applicative CmmOptM where
     (<*>) = ap
 
 instance Monad CmmOptM where
-  return = pure
   (CmmOptM f) >>= g =
     CmmOptM $ \dflags this_mod imports ->
                 case f dflags this_mod imports of

@@ -1,4 +1,4 @@
-{-# LANGUAGE TemplateHaskell, TypeFamilies, PolyKinds #-}
+{-# LANGUAGE TemplateHaskell, TypeFamilyDependencies, PolyKinds #-}
 
 module T8884 where
 

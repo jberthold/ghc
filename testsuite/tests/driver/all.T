@@ -352,6 +352,11 @@ test('withRtsOpts', [ extra_clean(['withRtsOpts', 'withRtsOpts.exe',
 test('T3389', normal, compile_and_run, [''])
 test('T3364', normalise_fun(normalise_errmsg), run_command,
      ['$MAKE -s --no-print-directory T3364'])
+
+# T4437: A test to ensure that Cabal's language extension list remains
+# consistent with those known by GHC.
+#
+# See Note [Adding a language extension] in DynFlags.hs for details.
 test('T4437', only_ways(['normal']), compile_and_run, ['-package ghc'])
 
 test('werror', normal, compile_fail, [''])
@@ -461,3 +466,4 @@ test('T10970', normal, compile_and_run, ['-hide-all-packages -package base -pack
 test('T10970a', normal, compile_and_run, [''])
 test('T4931', normal, compile_and_run, [''])
 test('T11182', normal, compile_and_run, [''])
+test('T11381', normal, compile_fail, [''])

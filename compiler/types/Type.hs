@@ -221,12 +221,6 @@ import Data.Maybe       ( isJust, mapMaybe )
 import Control.Monad    ( guard )
 import Control.Arrow    ( first, second )
 
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative ( Applicative, (<*>), (<$>), pure )
-import Data.Monoid         ( Monoid(..) )
-import Data.Foldable       ( foldMap )
-#endif
-
 -- $type_classification
 -- #type_classification#
 --
@@ -320,6 +314,9 @@ expandTypeSynonyms :: Type -> Type
 -- ^ Expand out all type synonyms.  Actually, it'd suffice to expand out
 -- just the ones that discard type variables (e.g.  type Funny a = Int)
 -- But we don't know which those are currently, so we just expand all.
+--
+-- 'expandTypeSynonyms' only expands out type synonyms mentioned in the type,
+-- not in the kinds of any TyCon or TyVar mentioned in the type.
 expandTypeSynonyms ty
   = go (mkEmptyTCvSubst (mkTyCoInScopeSet [ty] [])) ty
   where
@@ -443,7 +440,7 @@ data TyCoMapper env m
       }
 
 {-# INLINABLE mapType #-}  -- See Note [Specialising mappers]
-mapType :: (Applicative m, Monad m) => TyCoMapper env m -> env -> Type -> m Type
+mapType :: Monad m => TyCoMapper env m -> env -> Type -> m Type
 mapType mapper@(TyCoMapper { tcm_smart = smart, tcm_tyvar = tyvar
                            , tcm_tybinder = tybinder })
         env ty
@@ -466,7 +463,7 @@ mapType mapper@(TyCoMapper { tcm_smart = smart, tcm_tyvar = tyvar
       | otherwise = (TyConApp,   AppTy,   CastTy,   ForAllTy . Anon)
 
 {-# INLINABLE mapCoercion #-}  -- See Note [Specialising mappers]
-mapCoercion :: (Applicative m, Monad m)
+mapCoercion :: Monad m
             => TyCoMapper env m -> env -> Coercion -> m Coercion
 mapCoercion mapper@(TyCoMapper { tcm_smart = smart, tcm_covar = covar
                                , tcm_hole = cohole, tcm_tybinder = tybinder })
@@ -713,7 +710,10 @@ isStrLitTy _                    = Nothing
 -- If so, give us the kind and the error message.
 userTypeError_maybe :: Type -> Maybe Type
 userTypeError_maybe t
-  = do { (tc, [_kind, msg]) <- splitTyConApp_maybe t
+  = do { (tc, _kind : msg : _) <- splitTyConApp_maybe t
+          -- There may be more than 2 arguments, if the type error is
+          -- used as a type constructor (e.g. at kind `Type -> Type`).
+
        ; guard (tyConName tc == errorMessageTypeErrorFamName)
        ; return msg }
 
@@ -1554,11 +1554,11 @@ isIPPred ty = case tyConAppTyCon_maybe ty of
     _       -> False
 
 isIPTyCon :: TyCon -> Bool
-isIPTyCon tc = tc `hasKey` ipTyConKey
+isIPTyCon tc = tc `hasKey` ipClassKey
+  -- Class and its corresponding TyCon have the same Unique
 
 isIPClass :: Class -> Bool
-isIPClass cls = cls `hasKey` ipTyConKey
-  -- Class and it corresponding TyCon have the same Unique
+isIPClass cls = cls `hasKey` ipClassKey
 
 isCTupleClass :: Class -> Bool
 isCTupleClass cls = isTupleTyCon (classTyCon cls)

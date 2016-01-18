@@ -79,7 +79,8 @@ module TcRnTypes(
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
         toDerivedWC,
-        andWC, unionsWC, addSimples, addImplics, mkSimpleWC, addInsols,
+        andWC, unionsWC, mkSimpleWC, mkImplicWC,
+        addInsols, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
         isDroppableDerivedLoc, insolubleImplic,
         arisesFromGivens,
@@ -111,7 +112,8 @@ module TcRnTypes(
 
         CtFlavour(..), ctEvFlavour,
         CtFlavourRole, ctEvFlavourRole, ctFlavourRole,
-        eqCanRewrite, eqCanRewriteFR, canDischarge, canDischargeFR,
+        eqCanRewrite, eqCanRewriteFR,  eqCanDischarge,
+        funEqCanDischarge, funEqCanDischargeFR,
 
         -- Pretty printing
         pprEvVarTheta,
@@ -128,7 +130,6 @@ import HsSyn
 import CoreSyn
 import HscTypes
 import TcEvidence
-import TysWiredIn ( callStackTyCon, ipClass )
 import Type
 import Class    ( Class )
 import TyCon    ( TyCon )
@@ -137,6 +138,8 @@ import ConLike  ( ConLike(..) )
 import DataCon  ( DataCon, dataConUserType, dataConOrigArgTys )
 import PatSyn   ( PatSyn, patSynType )
 import Id       ( idName )
+import PrelNames ( callStackTyConKey, ipClassKey )
+import Unique ( hasKey )
 import FieldLabel ( FieldLabel )
 import TcType
 import Annotations
@@ -176,6 +179,7 @@ import qualified Control.Monad.Fail as MonadFail
 import Data.Map      ( Map )
 import Data.Dynamic  ( Dynamic )
 import Data.Typeable ( TypeRep )
+import GHCi.Message
 import GHCi.RemoteTypes
 
 import qualified Language.Haskell.TH as TH
@@ -221,7 +225,7 @@ data Env gbl lcl
                              -- Includes all info about imported things
 
         env_us   :: {-# UNPACK #-} !(IORef UniqSupply),
-                             -- Unique supply for local varibles
+                             -- Unique supply for local variables
 
         env_gbl  :: gbl,     -- Info about things defined at the top level
                              -- of the module being compiled
@@ -495,7 +499,7 @@ data TcGblEnv
         -- ^ Template Haskell module finalizers
 
         tcg_th_state :: TcRef (Map TypeRep Dynamic),
-        tcg_th_remote_state :: TcRef (Maybe ForeignHValue),
+        tcg_th_remote_state :: TcRef (Maybe (ForeignRef (IORef QState))),
         -- ^ Template Haskell state
 #endif /* GHCI */
 
@@ -873,9 +877,10 @@ data TcTyThing
                                 -- for error-message purposes; it is the corresponding
                                 -- Name in the domain of the envt
 
-  | AThing  TcKind   -- Used temporarily, during kind checking, for the
+  | ATcTyCon TyCon   -- Used temporarily, during kind checking, for the
                      -- tycons and clases in this recursive group
-                     -- Can be a mono-kind or a poly-kind; in TcTyClsDcls see
+                     -- The TyCon is always a TcTyCon.  Its kind
+                     -- can be a mono-kind or a poly-kind; in TcTyClsDcls see
                      -- Note [Type checking recursive type and class declarations]
 
   | APromotionErr PromotionErr
@@ -903,7 +908,7 @@ instance Outputable TcTyThing where     -- Debugging only
                                  <> ppr (varType (tct_id elt)) <> comma
                                  <+> ppr (tct_closed elt))
    ppr (ATyVar n tv)    = text "Type variable" <+> quotes (ppr n) <+> equals <+> ppr tv
-   ppr (AThing k)       = text "AThing" <+> ppr k
+   ppr (ATcTyCon tc)    = text "ATcTyCon" <+> ppr tc
    ppr (APromotionErr err) = text "APromotionErr" <+> ppr err
 
 instance Outputable PromotionErr where
@@ -920,7 +925,7 @@ pprTcTyThingCategory :: TcTyThing -> SDoc
 pprTcTyThingCategory (AGlobal thing)    = pprTyThingCategory thing
 pprTcTyThingCategory (ATyVar {})        = ptext (sLit "Type variable")
 pprTcTyThingCategory (ATcId {})         = ptext (sLit "Local identifier")
-pprTcTyThingCategory (AThing {})        = ptext (sLit "Kinded thing")
+pprTcTyThingCategory (ATcTyCon {})     = ptext (sLit "Local tycon")
 pprTcTyThingCategory (APromotionErr pe) = pprPECategory pe
 
 pprPECategory :: PromotionErr -> SDoc
@@ -1730,9 +1735,9 @@ isTypeHoleCt (CHoleCan { cc_hole = TypeHole }) = True
 isTypeHoleCt _ = False
 
 -- | The following constraints are considered to be a custom type error:
---    1. TypeError msg
---    2. TypeError msg ~ Something  (and the other way around)
---    3. C (TypeError msg)          (for any parameter of class constraint)
+--    1. TypeError msg a b c
+--    2. TypeError msg a b c ~ Something (and the other way around)
+--    4. C (TypeError msg a b c)         (for any parameter of class constraint)
 getUserTypeErrorMsg :: Ct -> Maybe Type
 getUserTypeErrorMsg ct
   | Just (_,t1,t2) <- getEqPredTys_maybe ctT    = oneOf [t1,t2]
@@ -1753,10 +1758,10 @@ isUserTypeErrorCt ct = case getUserTypeErrorMsg ct of
 -- If so, returns @Just "name"@.
 isCallStackCt :: Ct -> Maybe FastString
 isCallStackCt CDictCan { cc_class = cls, cc_tyargs = tys }
-  | cls == ipClass
+  | cls `hasKey` ipClassKey
   , [ip_name_ty, ty] <- tys
   , Just (tc, _) <- splitTyConApp_maybe ty
-  , tc == callStackTyCon
+  , tc `hasKey` callStackTyConKey
   = isStrLitTy ip_name_ty
 isCallStackCt _
   = Nothing
@@ -1835,6 +1840,10 @@ mkSimpleWC cts
   = WC { wc_simple = listToBag (map mkNonCanonical cts)
        , wc_impl = emptyBag
        , wc_insol = emptyBag }
+
+mkImplicWC :: Bag Implication -> WantedConstraints
+mkImplicWC implic
+  = WC { wc_simple = emptyBag, wc_impl = implic, wc_insol = emptyBag }
 
 isEmptyWC :: WantedConstraints -> Bool
 isEmptyWC (WC { wc_simple = f, wc_impl = i, wc_insol = n })
@@ -1998,7 +2007,7 @@ Note [Shadowing in a constraint]
 We assume NO SHADOWING in a constraint.  Specifically
  * The unification variables are all implicitly quantified at top
    level, and are all unique
- * The skolem varibles bound in ic_skols are all freah when the
+ * The skolem variables bound in ic_skols are all freah when the
    implication is created.
 So we can safely substitute. For example, if we have
    forall a.  a~Int => ...(forall b. ...a...)...
@@ -2266,54 +2275,74 @@ we can; straight from the Wanteds during improvment. And from a Derived
 ReprEq we could conceivably get a Derived NomEq improvment (by decomposing
 a type constructor with Nomninal role), and hence unify.
 
-Note [canDischarge]
-~~~~~~~~~~~~~~~~~~~
-(x1:c1 `canDischarge` x2:c2) returns True if we can use c1 to
-/discharge/ c2; that is, if we can simply drop (x2:c2) altogether,
-perhaps adding a binding for x2 in terms of x1.  We only ask this
-question in two cases:
+Note [funEqCanDischarge]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have two CFunEqCans with the same LHS:
+    (x1:F ts ~ f1) `funEqCanDischarge` (x2:F ts ~ f2)
+Can we drop x2 in favour of x1, either unifying
+f2 (if it's a flatten meta-var) or adding a new Given
+(f1 ~ f2), if x2 is a Given?
 
-* Identical equality constraints:
-      (x1:s~t) `canDischarge` (xs:s~t)
-  In this case we can just drop x2 in favour of x1.
+Answer: yes if funEqCanDischarge is true.
 
-* Function calls with the same LHS:
-    (x1:F ts ~ f1) `canDischarge` (x2:F ts ~ f2)
-  Here we can drop x2 in favour of x1, either unifying
-  f2 (if it's a flatten meta-var) or adding a new Given
-  (f1 ~ f2), if x2 is a Given.
+Note [eqCanDischarge]
+~~~~~~~~~~~~~~~~~~~~~
+Suppose we have two identicla equality constraints
+(i.e. both LHS and RHS are the same)
+      (x1:s~t) `eqCanDischarge` (xs:s~t)
+Can we just drop x2 in favour of x1?
 
-This is different from eqCanRewrite; for exammple, a Wanted
-can certainly discharge an identical Wanted.  So canDicharge
-does /not/ define a can-rewrite relation in the sense of
-Definition [Can-rewrite relation] in TcSMonad.
+Answer: yes if eqCanDischarge is true.
+
+Note that we do /not/ allow Wanted to discharge Derived.
+We must keep both.  Why?  Because the Derived may rewrite
+other Deriveds in the model whereas the Wanted cannot.
+
+However a Wanted can certainly discharge an identical Wanted.  So
+eqCanDischarge does /not/ define a can-rewrite relation in the
+sense of Definition [Can-rewrite relation] in TcSMonad.
 -}
 
+-----------------
 eqCanRewrite :: CtEvidence -> CtEvidence -> Bool
-eqCanRewrite ev1 ev2 = eqCanRewriteFR (ctEvFlavourRole ev1)
-                                      (ctEvFlavourRole ev2)
-
-eqCanRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
 -- Very important function!
 -- See Note [eqCanRewrite]
 -- See Note [Wanteds do not rewrite Wanteds]
 -- See Note [Deriveds do rewrite Deriveds]
-eqCanRewriteFR (Given, NomEq)  (_, _)      = True
-eqCanRewriteFR (Given, ReprEq) (_, ReprEq) = True
-eqCanRewriteFR _               _           = False
-
-canDischarge :: CtEvidence -> CtEvidence -> Bool
--- See Note [canDischarge]
-canDischarge ev1 ev2 = canDischargeFR (ctEvFlavourRole ev1)
+eqCanRewrite ev1 ev2 = eqCanRewriteFR (ctEvFlavourRole ev1)
                                       (ctEvFlavourRole ev2)
 
-canDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
-canDischargeFR (_, ReprEq)  (_, NomEq)   = False
-canDischargeFR (Given,   _) _            = True
-canDischargeFR (Wanted,  _) (Wanted,  _) = True
-canDischargeFR (Wanted,  _) (Derived, _) = True
-canDischargeFR (Derived, _) (Derived, _) = True
-canDischargeFR _            _            = False
+eqCanRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
+eqCanRewriteFR (Given, NomEq)   (_, _)           = True
+eqCanRewriteFR (Given, ReprEq)  (_, ReprEq)      = True
+eqCanRewriteFR (Derived, NomEq) (Derived, NomEq) = True
+eqCanRewriteFR _                _                = False
+
+-----------------
+funEqCanDischarge :: CtEvidence -> CtEvidence -> Bool
+-- See Note [funEqCanDischarge]
+funEqCanDischarge ev1 ev2 = funEqCanDischargeFR (ctEvFlavourRole ev1)
+                                      (ctEvFlavourRole ev2)
+
+funEqCanDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
+funEqCanDischargeFR (_, ReprEq)  (_, NomEq)   = False
+funEqCanDischargeFR (Given,   _) _            = True
+funEqCanDischargeFR (Wanted,  _) (Wanted,  _) = True
+funEqCanDischargeFR (Wanted,  _) (Derived, _) = True
+funEqCanDischargeFR (Derived, _) (Derived, _) = True
+funEqCanDischargeFR _            _            = False
+
+-----------------
+eqCanDischarge :: CtEvidence -> CtEvidence -> Bool
+-- See Note [eqCanDischarge]
+eqCanDischarge ev1 ev2 = eqCanDischargeFR (ctEvFlavourRole ev1)
+                                          (ctEvFlavourRole ev2)
+eqCanDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
+eqCanDischargeFR (_, ReprEq)  (_, NomEq)   = False
+eqCanDischargeFR (Given,   _) (Given,_)    = True
+eqCanDischargeFR (Wanted,  _) (Wanted,  _) = True
+eqCanDischargeFR (Derived, _) (Derived, _) = True
+eqCanDischargeFR _            _            = False
 
 {-
 ************************************************************************
@@ -2482,6 +2511,9 @@ data SkolemInfo
 
   | ClsSkol Class       -- Bound at a class decl
 
+  | DerivSkol Type      -- Bound by a 'deriving' clause;
+                        -- the type is the instance we are trying to derive
+
   | InstSkol            -- Bound at an instance decl
   | InstSC TypeSize     -- A "given" constraint obtained by superclass selection.
                         -- If (C ty1 .. tyn) is the largest class from
@@ -2513,7 +2545,6 @@ data SkolemInfo
   | BracketSkol         -- Template Haskell bracket
 
   | UnifyForAllSkol     -- We are unifying two for-all types
-       [TcTyVar]        -- The instantiated skolem variables
        TcType           -- The instantiated type *inside* the forall
 
   | UnkSkol             -- Unhelpful info (until I improve it)
@@ -2527,6 +2558,7 @@ pprSkolInfo (SigSkol ctxt ty) = pprSigSkolInfo ctxt ty
 pprSkolInfo (IPSkol ips)      = ptext (sLit "the implicit-parameter binding") <> plural ips <+> ptext (sLit "for")
                                 <+> pprWithCommas ppr ips
 pprSkolInfo (ClsSkol cls)     = ptext (sLit "the class declaration for") <+> quotes (ppr cls)
+pprSkolInfo (DerivSkol pred)  = ptext (sLit "the deriving clause for") <+> quotes (ppr pred)
 pprSkolInfo InstSkol          = ptext (sLit "the instance declaration")
 pprSkolInfo (InstSC n)        = ptext (sLit "the instance declaration") <> ifPprDebug (parens (ppr n))
 pprSkolInfo DataSkol          = ptext (sLit "a data type declaration")
@@ -2539,7 +2571,7 @@ pprSkolInfo (PatSkol cl mc)   = sep [ pprPatSkolInfo cl
 pprSkolInfo (InferSkol ids)   = sep [ ptext (sLit "the inferred type of")
                                     , vcat [ ppr name <+> dcolon <+> ppr ty
                                            | (name,ty) <- ids ]]
-pprSkolInfo (UnifyForAllSkol tvs ty) = ptext (sLit "the type") <+> ppr (mkInvForAllTys tvs ty)
+pprSkolInfo (UnifyForAllSkol ty) = ptext (sLit "the type") <+> ppr ty
 
 -- UnkSkol
 -- For type variables the others are dealt with by pprSkolTvBinding.
@@ -2745,7 +2777,7 @@ exprCtOrigin (HsArrApp {})      = panic "exprCtOrigin HsArrApp"
 exprCtOrigin (HsArrForm {})     = panic "exprCtOrigin HsArrForm"
 exprCtOrigin (HsTick _ (L _ e)) = exprCtOrigin e
 exprCtOrigin (HsBinTick _ _ (L _ e)) = exprCtOrigin e
-exprCtOrigin (HsTickPragma _ _ (L _ e)) = exprCtOrigin e
+exprCtOrigin (HsTickPragma _ _ _ (L _ e)) = exprCtOrigin e
 exprCtOrigin EWildPat           = panic "exprCtOrigin EWildPat"
 exprCtOrigin (EAsPat {})        = panic "exprCtOrigin EAsPat"
 exprCtOrigin (EViewPat {})      = panic "exprCtOrigin EViewPat"
@@ -2903,7 +2935,6 @@ instance Applicative TcPluginM where
   (<*>) = ap
 
 instance Monad TcPluginM where
-  return = pure
   fail x   = TcPluginM (const $ fail x)
   TcPluginM m >>= k =
     TcPluginM (\ ev -> do a <- m ev

@@ -47,11 +47,7 @@ import Platform
 import Util
 import Coercion     (mkUnbranchedAxInstCo,mkSymCo,Role(..))
 
-#if __GLASGOW_HASKELL__ >= 709
 import Control.Applicative ( Alternative(..) )
-#else
-import Control.Applicative ( Applicative(..), Alternative(..) )
-#endif
 
 import Control.Monad
 #if __GLASGOW_HASKELL__ > 710
@@ -649,7 +645,6 @@ instance Applicative RuleM where
     (<*>) = ap
 
 instance Monad RuleM where
-  return = pure
   RuleM f >>= g = RuleM $ \dflags iu e -> case f dflags iu e of
     Nothing -> Nothing
     Just r -> runRuleM (g r) dflags iu e
@@ -661,13 +656,11 @@ instance MonadFail.MonadFail RuleM where
 #endif
 
 instance Alternative RuleM where
-    empty = mzero
-    (<|>) = mplus
+  empty = RuleM $ \_ _ _ -> Nothing
+  RuleM f1 <|> RuleM f2 = RuleM $ \dflags iu args ->
+    f1 dflags iu args <|> f2 dflags iu args
 
-instance MonadPlus RuleM where
-  mzero = RuleM $ \_ _ _ -> Nothing
-  mplus (RuleM f1) (RuleM f2) = RuleM $ \dflags iu args ->
-    f1 dflags iu args `mplus` f2 dflags iu args
+instance MonadPlus RuleM
 
 instance HasDynFlags RuleM where
     getDynFlags = RuleM $ \dflags _ _ -> Just dflags

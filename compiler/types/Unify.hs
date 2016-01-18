@@ -41,9 +41,6 @@ import Control.Monad
 #if __GLASGOW_HASKELL__ > 710
 import qualified Control.Monad.Fail as MonadFail
 #endif
-#if __GLASGOW_HASKELL__ < 709
-import Data.Traversable ( traverse )
-#endif
 import Control.Applicative hiding ( empty )
 import qualified Control.Applicative
 
@@ -377,7 +374,6 @@ instance Applicative UnifyResultM where
   (<*>) = ap
 
 instance Monad UnifyResultM where
-  return = pure
 
   SurelyApart  >>= _ = SurelyApart
   MaybeApart x >>= f = case f x of
@@ -394,9 +390,7 @@ instance Alternative UnifyResultM where
   _                 <|> b@(MaybeApart {}) = b
   SurelyApart       <|> SurelyApart       = SurelyApart
 
-instance MonadPlus UnifyResultM where
-  mzero = Control.Applicative.empty
-  mplus = (<|>)
+instance MonadPlus UnifyResultM
 
 -- | @tcUnifyTysFG bind_tv tys1 tys2@ attepts to find a substitution @s@ (whose
 -- domain elements all respond 'BindMe' to @bind_tv@) such that
@@ -911,22 +905,19 @@ instance Applicative UM where
       (<*>)  = ap
 
 instance Monad UM where
-  return   = pure
   fail _   = UM (\_ _ -> SurelyApart) -- failed pattern match
   m >>= k  = UM (\env state ->
                   do { (state', v) <- unUM m env state
                      ; unUM (k v) env state' })
 
+-- need this instance because of a use of 'guard' above
 instance Alternative UM where
-  empty     = UM (\_ _ -> mzero)
+  empty     = UM (\_ _ -> Control.Applicative.empty)
   m1 <|> m2 = UM (\env state ->
                   unUM m1 env state <|>
                   unUM m2 env state)
 
-  -- need this instance because of a use of 'guard' above
-instance MonadPlus UM where
-  mzero = Control.Applicative.empty
-  mplus = (<|>)
+instance MonadPlus UM
 
 #if __GLASGOW_HASKELL__ > 710
 instance MonadFail.MonadFail UM where

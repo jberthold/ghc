@@ -79,10 +79,18 @@
 #endif
 
 
-/* PowerPC has relative branch instructions with only 24 bit displacements
- * and therefore needs jump islands contiguous with each object code module.
+/* PowerPC and ARM have relative branch instructions with only 24 bit
+ * displacements and therefore need jump islands contiguous with each object
+ * code module.
  */
-#if (USE_MMAP && defined(powerpc_HOST_ARCH) && defined(linux_HOST_OS))
+#if defined(powerpc_HOST_ARCH)
+#define SHORT_REL_BRANCH 1
+#endif
+#if defined(arm_HOST_ARCH)
+#define SHORT_REL_BRANCH 1
+#endif
+
+#if (USE_MMAP && defined(SHORT_REL_BRANCH) && defined(linux_HOST_OS))
 #define USE_CONTIGUOUS_MMAP 1
 #else
 #define USE_CONTIGUOUS_MMAP 0
@@ -2758,7 +2766,9 @@ ocFlushInstructionCache( ObjectCode *oc )
     }
 
     // Jump islands
-    __clear_cache(oc->symbol_extras, &oc->symbol_extras[oc->n_symbol_extras]);
+    // Note the (+1) to ensure that the last symbol extra is covered by the
+    // flush.
+    __clear_cache(oc->symbol_extras, &oc->symbol_extras[oc->n_symbol_extras+1]);
 }
 
 #endif
@@ -3220,62 +3230,6 @@ cstring_from_section_name (UChar* name, UChar* strtab)
         newstr[8] = 0;
         return newstr;
     }
-}
-
-/* Just compares the short names (first 8 chars) */
-static COFF_section *
-findPEi386SectionCalled ( ObjectCode* oc,  UChar* name, UChar* strtab )
-{
-   int i;
-   rtsBool long_name = rtsFalse;
-   COFF_header* hdr
-      = (COFF_header*)(oc->image);
-   COFF_section* sectab
-      = (COFF_section*) (
-           ((UChar*)(oc->image))
-           + sizeof_COFF_header + hdr->SizeOfOptionalHeader
-        );
-   // String is longer than 8 bytes, swap in the proper
-   // (NULL-terminated) version, and make a note that this
-   // is a long name.
-   if (name[0]==0 && name[1]==0 && name[2]==0 && name[3]==0) {
-      UInt32 strtab_offset = * (UInt32*)(name+4);
-      name = ((UChar*)strtab) + strtab_offset;
-      long_name = rtsTrue;
-   }
-   for (i = 0; i < hdr->NumberOfSections; i++) {
-      UChar* n1;
-      UChar* n2;
-      COFF_section* section_i
-         = (COFF_section*)
-           myindex ( sizeof_COFF_section, sectab, i );
-      n1 = (UChar*) &(section_i->Name);
-      n2 = name;
-      // Long section names are prefixed with a slash, see
-      // also cstring_from_section_name
-      if (n1[0] == '/' && long_name) {
-         // Long name check
-         // We don't really want to make an assumption that the string
-         // table indexes are the same, so we'll do a proper check.
-         int n1_strtab_offset = strtol((char*)n1+1,NULL,10);
-         n1 = (UChar*) (((char*)strtab) + n1_strtab_offset);
-         if (0==strcmp((const char*)n1, (const char*)n2)) {
-            return section_i;
-         }
-      } else if (n1[0] != '/' && !long_name) {
-         // Short name check
-         if (n1[0]==n2[0] && n1[1]==n2[1] && n1[2]==n2[2] &&
-             n1[3]==n2[3] && n1[4]==n2[4] && n1[5]==n2[5] &&
-             n1[6]==n2[6] && n1[7]==n2[7]) {
-            return section_i;
-         }
-      } else {
-         // guaranteed to mismatch, because we never attempt to link
-         // in an executable where the section name may be truncated
-      }
-   }
-
-   return NULL;
 }
 
 /* See Note [mingw-w64 name decoration scheme] */
@@ -3976,13 +3930,7 @@ ocResolve_PEi386 ( ObjectCode* oc )
 
          if (sym->StorageClass == MYIMAGE_SYM_CLASS_STATIC) {
             COFF_section* section_sym
-               = findPEi386SectionCalled ( oc, sym->Name, strtab );
-            if (!section_sym) {
-               errorBelch("%" PATH_FMT ": can't find section named: ", oc->fileName);
-               printName(sym->Name, strtab);
-               errorBelch(" in %s", secname);
-               return 0;
-            }
+              = (COFF_section*) myindex ( sizeof_COFF_section, sectab, sym->SectionNumber-1 );
             S = ((size_t)(oc->image))
               + ((size_t)(section_sym->PointerToRawData))
               + ((size_t)(sym->Value));
@@ -4170,6 +4118,8 @@ ocRunInit_PEi386 ( ObjectCode *oc )
 #elif defined(powerpc64_HOST_ARCH) || defined(powerpc64le_HOST_ARCH)
 #  define ELF_64BIT
 #elif defined(ia64_HOST_ARCH)
+#  define ELF_64BIT
+#elif defined(aarch64_HOST_ARCH)
 #  define ELF_64BIT
 #endif
 
@@ -4969,6 +4919,21 @@ end:
    return result;
 }
 
+#ifdef arm_HOST_ARCH
+// TODO: These likely belong in a library somewhere
+
+// Signed extend a number to a 32-bit int.
+static inline StgInt32 sign_extend32(nat bits, StgWord32 x) {
+    return ((StgInt32) (x << (32 - bits))) >> (32 - bits);
+}
+
+// Does the given signed integer fit into the given bit width?
+static inline StgBool is_int(nat bits, StgInt32 x) {
+    return bits > 32 || (-(1 << (bits-1)) <= x
+                         && x < (1 << (bits-1)));
+}
+#endif
+
 /* Do ELF relocations which lack an explicit addend.  All x86-linux
    and arm-linux relocations appear to be of this form. */
 static int
@@ -5019,7 +4984,7 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
       int is_target_thm=0, T=0;
 #endif
 
-      IF_DEBUG(linker,debugBelch( "Rel entry %3d is raw(%6p %6p)",
+      IF_DEBUG(linker,debugBelch( "Rel entry %3d is raw(%6p %6p): ",
                              j, (void*)offset, (void*)info ));
       if (!info) {
          IF_DEBUG(linker,debugBelch( " ZERO" ));
@@ -5066,15 +5031,16 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
 #endif
       }
 
-      IF_DEBUG(linker,debugBelch( "Reloc: P = %p   S = %p   A = %p\n",
-                             (void*)P, (void*)S, (void*)A ));
+      int reloc_type = ELF_R_TYPE(info);
+      IF_DEBUG(linker,debugBelch( "Reloc: P = %p   S = %p   A = %p   type=%d\n",
+                             (void*)P, (void*)S, (void*)A, reloc_type ));
       checkProddableBlock ( oc, pP, sizeof(Elf_Word) );
 
 #ifdef i386_HOST_ARCH
       value = S + A;
 #endif
 
-      switch (ELF_R_TYPE(info)) {
+      switch (reloc_type) {
 #        ifdef i386_HOST_ARCH
          case R_386_32:   *pP = value;     break;
          case R_386_PC32: *pP = value - P; break;
@@ -5096,44 +5062,53 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
          case R_ARM_CALL:
          case R_ARM_JUMP24:
          {
+            // N.B. LLVM's LLD linker's relocation implement is a fantastic
+            // resource
             StgWord32 *word = (StgWord32 *)P;
-            StgInt32 imm = (*word & 0x00ffffff) << 2;
-            StgInt32 offset;
-            int overflow;
+            StgInt32 imm = (*word & ((1<<24)-1)) << 2;
 
-            // Sign extend 24 to 32 bits
-            if (imm & 0x02000000)
-               imm -= 0x04000000;
-            offset = ((S + imm) | T) - P;
+            const StgBool is_blx = (*word & 0xf0000000) == 0xf0000000;
+            const StgWord32 hBit = is_blx ? ((*word >> 24) & 1) : 0;
+            imm |= hBit << 1;
 
-            overflow = offset <= (StgInt32)0xfe000000 || offset >= (StgInt32)0x02000000;
+            // Sign extend to 32 bits
+            // I would have thought this would be 24 bits but LLD uses 26 here.
+            // Hmm.
+            imm = sign_extend32(26, imm);
 
-            if ((is_target_thm && ELF_R_TYPE(info) == R_ARM_JUMP24) || overflow) {
+            StgWord32 result = ((S + imm) | T) - P;
+
+            const StgBool overflow = !is_int(26, (StgInt32) result);
+
+            // Handle overflow and Thumb interworking
+            const StgBool needs_veneer = (is_target_thm && ELF_R_TYPE(info) == R_ARM_JUMP24) || overflow;
+            if (needs_veneer) {
                // Generate veneer
                // The +8 below is to undo the PC-bias compensation done by the object producer
                SymbolExtra *extra = makeArmSymbolExtra(oc, ELF_R_SYM(info), S+imm+8, 0, is_target_thm);
                // The -8 below is to compensate for PC bias
-               offset = (StgWord32) &extra->jumpIsland - P - 8;
-               offset &= ~1; // Clear thumb indicator bit
-            } else if (is_target_thm && ELF_R_TYPE(info) == R_ARM_CALL) {
-               StgWord32 cond = (*word & 0xf0000000) >> 28;
-               if (cond == 0xe) {
-                  // Change instruction to BLX
-                  *word |= 0xf0000000; // Set first nibble
-                  *word = (*word & ~0x01ffffff)
-                        | ((offset >> 2) & 0x00ffffff)  // imm24
-                        | ((offset & 0x2) << 23);       // H
-                  break;
-               } else {
-                  errorBelch("%s: Can't transition from ARM to Thumb when cond != 0xe\n",
-                        oc->fileName);
+               result = (StgWord32) ((StgInt32) extra->jumpIsland - P - 8);
+               result &= ~1; // Clear thumb indicator bit
+               if (!is_int(26, (StgInt32) result)) {
+                  errorBelch("Unable to fixup overflow'd R_ARM_CALL: jump island=%p, reloc=%p\n",
+                             (void*) extra->jumpIsland, (void*) P);
                   return 0;
                }
             }
 
-            offset >>= 2;
+            // Update the branch target
+            const StgWord32 imm24 = (result & 0x03fffffc) >> 2;
             *word = (*word & ~0x00ffffff)
-                  | (offset & 0x00ffffff);
+                  | (imm24 & 0x00ffffff);
+
+            // Change the relocated branch into a BLX if necessary
+            const StgBool switch_mode = is_target_thm && (reloc_type == R_ARM_CALL);
+            if (!needs_veneer && switch_mode) {
+               const StgWord32 hBit = (result & 0x2) >> 1;
+               // Change instruction to BLX
+               *word = (*word & ~0xFF000000) | ((0xfa | hBit) << 24);
+               IF_DEBUG(linker, debugBelch("Changed BL to BLX at %p\n", word));
+            }
             break;
          }
 
@@ -5141,20 +5116,17 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
          case R_ARM_MOVW_ABS_NC:
          {
             StgWord32 *word = (StgWord32 *)P;
-            StgInt32 offset = ((*word & 0xf0000) >> 4)
-                            | (*word & 0xfff);
-            // Sign extend from 16 to 32 bits
-            offset = (offset ^ 0x8000) - 0x8000;
+            StgWord32 imm12 = *word & 0xfff;
+            StgWord32 imm4 = (*word >> 16) & 0xf;
+            StgInt32 offset = imm4 << 12 | imm12;
+            StgWord32 result = (S + offset) | T;
 
-            offset += S;
-            if (ELF_R_TYPE(info) == R_ARM_MOVT_ABS)
-               offset >>= 16;
-            else
-               offset |= T;
+            if (reloc_type == R_ARM_MOVT_ABS)
+                result = (result & 0xffff0000) >> 16;
 
-            *word = (*word & 0xfff0f000)
-                  | ((offset & 0xf000) << 4)
-                  | (offset & 0x0fff);
+            StgWord32 result12 = result & 0xfff;
+            StgWord32 result4 = (result >> 12) & 0xf;
+            *word = (*word & ~0xf0fff) | (result4 << 16) | result12;
             break;
          }
 

@@ -29,6 +29,7 @@ import FamInstEnv
 import TcHsType
 import TcMType
 import TcSimplify
+import TcUnify( buildImplicationFor )
 import LoadIface( loadInterfaceForName )
 import Module( getModule )
 
@@ -596,7 +597,11 @@ deriveTyData tvs tc tc_args deriv_pred
               (tc_args_to_keep, args_to_drop)
                               = splitAt n_args_to_keep tc_args
               inst_ty_kind    = typeKind (mkTyConApp tc tc_args_to_keep)
-              dropped_tvs     = tyCoVarsOfTypes args_to_drop
+              -- Use exactTyCoVarsOfTypes, not tyCoVarsOfTypes, so that we
+              -- don't mistakenly grab a type variable mentioned in a type
+              -- synonym that drops it.
+              -- See Note [Eta-reducing type synonyms].
+              dropped_tvs     = exactTyCoVarsOfTypes args_to_drop
 
               -- Match up the kinds, and apply the resulting kind substitution
               -- to the types.  See Note [Unify kinds in deriving]
@@ -700,6 +705,32 @@ When deriving Functor for P, we unify k to *, but we then want
 an instance   $df :: forall (x:*->*). Functor x => Functor (P * (x:*->*))
 and similarly for C.  Notice the modified kind of x, both at binding
 and occurrence sites.
+
+Note [Eta-reducing type synonyms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+One can instantiate a type in a data family instance with a type synonym that
+mentions other type variables:
+
+  type Const a b = a
+  data family Fam (f :: * -> *) (a :: *)
+  newtype instance Fam f (Const a f) = Fam (f a) deriving Functor
+
+With -XTypeInType, it is also possible to define kind synonyms, and they can
+mention other types in a datatype declaration. For example,
+
+  type Const a b = a
+  newtype T f (a :: Const * f) = T (f a) deriving Functor
+
+When deriving, we need to perform eta-reduction analysis to ensure that none of
+the eta-reduced type variables are mentioned elsewhere in the declaration. But
+we need to be careful, because if we don't expand through the Const type
+synonym, we will mistakenly believe that f is an eta-reduced type variable and
+fail to derive Functor, even though the code above is correct (see Trac #11416,
+where this was first noticed).
+
+For this reason, we call exactTyCoVarsOfTypes on the eta-reduced types so that
+we only consider the type variables that remain after expanding through type
+synonyms.
 -}
 
 mkEqnHelp :: Maybe OverlapMode
@@ -1816,18 +1847,23 @@ simplifyDeriv pred tvs theta
                 -- We use *non-overlappable* (vanilla) skolems
                 -- See Note [Overlap and deriving]
 
-       ; let skol_set = mkVarSet tvs_skols
+       ; let skol_set  = mkVarSet tvs_skols
+             skol_info = DerivSkol pred
              doc = ptext (sLit "deriving") <+> parens (ppr pred)
+             mk_ct (PredOrigin t o t_or_k)
+                 = newWanted o (Just t_or_k) (substTy skol_subst t)
 
-       ; wanted <- mapM (\(PredOrigin t o t_or_k)
-                         -> newWanted o (Just t_or_k) (substTy skol_subst t)) theta
+       ; (wanted, tclvl) <- pushTcLevelM (mapM mk_ct theta)
 
        ; traceTc "simplifyDeriv" $
          vcat [ pprTvBndrs tvs $$ ppr theta $$ ppr wanted, doc ]
        ; residual_wanted <- simplifyWantedsTcM wanted
+            -- Result is zonked
 
-       ; residual_simple <- zonkSimples (wc_simple residual_wanted)
-       ; let (good, bad) = partitionBagWith get_good residual_simple
+       ; let residual_simple = wc_simple residual_wanted
+             (good, bad) = partitionBagWith get_good residual_simple
+             unsolved    = residual_wanted { wc_simple = bad }
+
                          -- See Note [Exotic derived instance contexts]
 
              get_good :: Ct -> Either PredType Ct
@@ -1848,7 +1884,12 @@ simplifyDeriv pred tvs theta
        -- constraints.  They'll come up again when we typecheck the
        -- generated instance declaration
        ; defer <- goptM Opt_DeferTypeErrors
-       ; unless defer (reportAllUnsolved (residual_wanted { wc_simple = bad }))
+       ; (implic, _) <- buildImplicationFor tclvl skol_info tvs_skols [] unsolved
+                   -- The buildImplication is just to bind the skolems, in
+                   -- case they are mentioned in error messages
+                   -- See Trac #11347
+       ; unless defer (reportAllUnsolved (mkImplicWC implic))
+
 
        ; let min_theta  = mkMinimalBySCs (bagToList good)
              subst_skol = zipTopTCvSubst tvs_skols $ mkTyVarTys tvs
@@ -2096,7 +2137,7 @@ getDataConFixityFun tc
                  ; return (lookupFixity fix_env) }
          else do { iface <- loadInterfaceForName doc name
                             -- Should already be loaded!
-                 ; return (mi_fix_fn iface . nameOccName) } }
+                 ; return (mi_fix iface . nameOccName) } }
   where
     name = tyConName tc
     doc = ptext (sLit "Data con fixities for") <+> ppr name

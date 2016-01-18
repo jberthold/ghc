@@ -26,9 +26,6 @@ import Util
 import SrcLoc
 import Outputable
 import FastString
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative ( Applicative(..) )
-#endif
 import Control.Monad
 import Data.Function
 
@@ -318,7 +315,6 @@ instance Applicative LintM where
       (*>)  = thenL_
 
 instance Monad LintM where
-    return = pure
     (>>=) = thenL
     (>>)  = (*>)
 

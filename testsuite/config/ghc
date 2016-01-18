@@ -23,7 +23,7 @@ config.compile_ways       = ['normal', 'hpc']
 config.run_ways           = ['normal', 'hpc']
 
 # ways that are not enabled by default, but can always be invoked explicitly
-config.other_ways         = ['prof',
+config.other_ways         = ['prof', 'normal_h',
                              'prof_hc_hb','prof_hb',
                              'prof_hd','prof_hy','prof_hr',
                              'threaded1_ls', 'threaded2_hT',
@@ -85,6 +85,7 @@ config.clean_only       = clean_only
 
 config.way_flags = lambda name : {
     'normal'       : [],
+    'normal_h'     : [],
     'g1'           : [],
     'optasm'       : ['-O', '-fasm'],
     'llvm'         : ['-fllvm'],
@@ -114,8 +115,9 @@ config.way_flags = lambda name : {
     'ghci-ext'         : ['--interactive', '-v0', '-ignore-dot-ghci', '-fexternal-interpreter', '+RTS', '-I0.1', '-RTS'],
    }
 
-config.way_rts_flags = { 
+config.way_rts_flags = {
     'normal'       : [],
+    'normal_h'     : ['-h'], # works without -prof
     'g1'           : ['-G1'],
     'optasm'       : [],
     'llvm'         : [],
@@ -216,4 +218,3 @@ def get_compiler_info():
         config.ghci_way_flags   = "-static"
         config.ghc_th_way       = "normal"
         config.ghc_plugin_way   = "normal"
-

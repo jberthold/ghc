@@ -291,6 +291,7 @@ checkValidType :: UserTypeCtxt -> Type -> TcM ()
 checkValidType ctxt ty
   = do { traceTc "checkValidType" (ppr ty <+> text "::" <+> ppr (typeKind ty))
        ; rankn_flag  <- xoptM LangExt.RankNTypes
+       ; impred_flag <- xoptM LangExt.ImpredicativeTypes
        ; let gen_rank :: Rank -> Rank
              gen_rank r | rankn_flag = ArbitraryRank
                         | otherwise  = r
@@ -310,7 +311,12 @@ checkValidType ctxt ty
                  TySynCtxt _    -> rank0
 
                  ExprSigCtxt    -> rank1
-                 TypeAppCtxt    -> rank0
+                 TypeAppCtxt | impred_flag -> ArbitraryRank
+                             | otherwise   -> tyConArgMonoType
+                    -- Normally, ImpredicativeTypes is handled in check_arg_type,
+                    -- but visible type applications don't go through there.
+                    -- So we do this check here.
+
                  FunSigCtxt {}  -> rank1
                  InfSigCtxt _   -> ArbitraryRank        -- Inferred type
                  ConArgCtxt _   -> rank1 -- We are given the type of the entire
@@ -446,12 +452,17 @@ check_type env ctxt rank ty
                 -- but not   type T = ?x::Int
 
         ; check_type env' ctxt rank tau      -- Allow foralls to right of arrow
-        ; checkTcM (not (any (`elemVarSet` tyCoVarsOfType tau_kind) tvs))
+        ; checkTcM (not (any (`elemVarSet` tyCoVarsOfType phi_kind) tvs))
                    (forAllEscapeErr env' ty tau_kind)
         }
   where
     (tvs, theta, tau) = tcSplitSigmaTy ty
     tau_kind          = typeKind tau
+
+    phi_kind | null theta = tau_kind
+             | otherwise  = liftedTypeKind
+        -- If there are any constraints, the kind is *. (#11405)
+
     (env', _)         = tidyTyCoVarBndrs env tvs
 
 check_type _ _ _ (TyVarTy _) = return ()
@@ -1022,7 +1033,7 @@ It checks for three things
     Note that 'b' isn't a parameter of T.  This gives rise to all sorts of
     problems; in particular, it's hard to compare solutions for equality
     when finding the fixpoint, and that means the inferContext loop does
-   not converge.  See Trac #5287.
+    not converge.  See Trac #5287.
 
 Note [Equality class instances]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1328,7 +1339,7 @@ checkValidCoAxiom ax@(CoAxiom { co_ax_tc = fam_tc, co_ax_branches = branches })
                         -> CoAxBranch      -- current branch
                         -> TcM [CoAxBranch]-- current branch : previous branches
     -- Check for
-    --   (a) this banch is dominated by previous ones
+    --   (a) this branch is dominated by previous ones
     --   (b) failure of injectivity
     check_branch_compat prev_branches cur_branch
       | cur_branch `isDominatedBy` prev_branches

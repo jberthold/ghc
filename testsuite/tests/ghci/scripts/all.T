@@ -225,6 +225,7 @@ test('T10466', normal, ghci_script, ['T10466.script'])
 test('T10501', normal, ghci_script, ['T10501.script'])
 test('T10508', normal, ghci_script, ['T10508.script'])
 test('T10520', normal, ghci_script, ['T10520.script'])
+test('T10663', normal, ghci_script, ['T10663.script'])
 test('T10989',
     [
       extra_clean(['dummy.hs', 'dummy.lhs', 'dummy.tags'])
@@ -232,3 +233,7 @@ test('T10989',
     ghci_script, ['T10989.script'])
 test('T11098', normal, ghci_script, ['T11098.script'])
 test('T8316', expect_broken(8316), ghci_script, ['T8316.script'])
+test('T11252', normal, ghci_script, ['T11252.script'])
+
+test('T10576a', expect_broken(10576), ghci_script, ['T10576a.script'])
+test('T10576b', expect_broken(10576), ghci_script, ['T10576b.script'])

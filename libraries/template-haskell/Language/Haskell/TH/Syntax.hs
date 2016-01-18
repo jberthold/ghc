@@ -30,9 +30,6 @@ module Language.Haskell.TH.Syntax
     ) where
 
 import Data.Data hiding (Fixity(..))
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative( Applicative(..) )
-#endif
 import Data.IORef
 import System.IO.Unsafe ( unsafePerformIO )
 import Control.Monad (liftM)
@@ -55,7 +52,7 @@ import Numeric.Natural
 --
 -----------------------------------------------------
 
-class (Applicative m, Monad m) => Quasi m where
+class Monad m => Quasi m where
   qNewName :: String -> m Name
         -- ^ Fresh names
 
@@ -70,7 +67,7 @@ class (Applicative m, Monad m) => Quasi m where
   qLookupName :: Bool -> String -> m (Maybe Name)
        -- True <=> type namespace, False <=> value namespace
   qReify          :: Name -> m Info
-  qReifyFixity    :: Name -> m Fixity
+  qReifyFixity    :: Name -> m (Maybe Fixity)
   qReifyInstances :: Name -> [Type] -> m [Dec]
        -- Is (n tys) an instance?
        -- Returns list of matching instance Decs
@@ -173,7 +170,6 @@ runQ (Q m) = m
 instance Monad Q where
   Q m >>= k  = Q (m >>= \x -> unQ (k x))
   (>>) = (*>)
-  return     = pure
   fail s     = report True s >> Q (fail "Q monad failure")
 
 instance Functor Q where
@@ -359,10 +355,13 @@ and to get information about @D@-the-type, use 'lookupTypeName'.
 reify :: Name -> Q Info
 reify v = Q (qReify v)
 
-{- | @reifyFixity nm@ returns the fixity of @nm@. If a fixity value cannot be
-found, 'defaultFixity' is returned.
+{- | @reifyFixity nm@ attempts to find a fixity declaration for @nm@. For
+example, if the function @foo@ has the fixity declaration @infixr 7 foo@, then
+@reifyFixity 'foo@ would return @'Just' ('Fixity' 7 'InfixR')@. If the function
+@bar@ does not have a fixity declaration, then @reifyFixity 'bar@ returns
+'Nothing', so you may assume @bar@ has 'defaultFixity'.
 -}
-reifyFixity :: Name -> Q Fixity
+reifyFixity :: Name -> Q (Maybe Fixity)
 reifyFixity nm = Q (qReifyFixity nm)
 
 {- | @reifyInstances nm tys@ returns a list of visible instances of @nm tys@. That is,
@@ -1636,25 +1635,40 @@ data Con = NormalC Name [BangType]       -- ^ @C Int a@
          | InfixC BangType Name BangType -- ^ @Int :+ a@
          | ForallC [TyVarBndr] Cxt Con   -- ^ @forall a. Eq a => C [a]@
          | GadtC [Name] [BangType]
-                 Name                    -- See Note [GADT return type]
-                 [Type]                  -- Indices of the type constructor
+                 Type                    -- See Note [GADT return type]
                                          -- ^ @C :: a -> b -> T b Int@
          | RecGadtC [Name] [VarBangType]
-                    Name                 -- See Note [GADT return type]
-                    [Type]               -- Indices of the type constructor
+                    Type                 -- See Note [GADT return type]
                                          -- ^ @C :: { v :: Int } -> T b Int@
         deriving (Show, Eq, Ord, Data, Typeable, Generic)
 
 -- Note [GADT return type]
 -- ~~~~~~~~~~~~~~~~~~~~~~~
 --
--- The name of the return type stored by a GADT constructor does not necessarily
--- match the name of the data type:
+-- The return type of a GADT constructor does not necessarily match the name of
+-- the data type:
 --
 -- type S = T
 --
 -- data T a where
 --     MkT :: S Int
+--
+--
+-- type S a = T
+--
+-- data T a where
+--     MkT :: S Char Int
+--
+--
+-- type Id a = a
+-- type S a = T
+--
+-- data T a where
+--     MkT :: Id (S Char Int)
+--
+--
+-- That is why we allow the return type stored by a constructor to be an
+-- arbitrary type. See also #11341
 
 data Bang = Bang SourceUnpackedness SourceStrictness
          -- ^ @C { {\-\# UNPACK \#-\} !}a@

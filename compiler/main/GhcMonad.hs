@@ -104,7 +104,6 @@ instance Applicative Ghc where
   g <*> m = do f <- g; a <- m; return (f a)
 
 instance Monad Ghc where
-  return = pure
   m >>= g  = Ghc $ \s -> do a <- unGhc m s; unGhc (g a) s
 
 instance MonadIO Ghc where
@@ -168,11 +167,10 @@ instance Applicative m => Applicative (GhcT m) where
   pure x  = GhcT $ \_ -> pure x
   g <*> m = GhcT $ \s -> unGhcT g s <*> unGhcT m s
 
-instance (Applicative m, Monad m) => Monad (GhcT m) where
-  return = pure
+instance Monad m => Monad (GhcT m) where
   m >>= k  = GhcT $ \s -> do a <- unGhcT m s; unGhcT (k a) s
 
-instance (Applicative m, MonadIO m) => MonadIO (GhcT m) where
+instance MonadIO m => MonadIO (GhcT m) where
   liftIO ioA = GhcT $ \_ -> liftIO ioA
 
 instance ExceptionMonad m => ExceptionMonad (GhcT m) where
@@ -188,12 +186,7 @@ instance ExceptionMonad m => ExceptionMonad (GhcT m) where
 instance MonadIO m => HasDynFlags (GhcT m) where
   getDynFlags = GhcT $ \(Session r) -> liftM hsc_dflags (liftIO $ readIORef r)
 
-#if __GLASGOW_HASKELL__ < 710
--- Pre-AMP change
-instance (ExceptionMonad m, Functor m) => GhcMonad (GhcT m) where
-#else
-instance (ExceptionMonad m) => GhcMonad (GhcT m) where
-#endif
+instance ExceptionMonad m => GhcMonad (GhcT m) where
   getSession = GhcT $ \(Session r) -> liftIO $ readIORef r
   setSession s' = GhcT $ \(Session r) -> liftIO $ writeIORef r s'
 

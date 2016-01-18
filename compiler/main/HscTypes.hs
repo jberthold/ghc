@@ -70,7 +70,7 @@ module HscTypes (
 
         -- * Interfaces
         ModIface(..), mkIfaceWarnCache, mkIfaceHashCache, mkIfaceFixCache,
-        emptyIfaceWarnCache, mi_boot,
+        emptyIfaceWarnCache, mi_boot, mi_fix,
 
         -- * Fixity
         FixityEnv, FixItem(..), lookupFixity, emptyFixityEnv,
@@ -111,8 +111,7 @@ module HscTypes (
         HpcInfo(..), emptyHpcInfo, isHpcUsed, AnyHpcUsage,
 
         -- * Breakpoints
-        ModBreaks (..), BreakIndex, emptyModBreaks,
-        CCostCentre,
+        ModBreaks (..), emptyModBreaks,
 
         -- * Vectorisation information
         VectInfo(..), IfaceVectInfo(..), noVectInfo, plusVectInfo,
@@ -134,7 +133,7 @@ module HscTypes (
 #include "HsVersions.h"
 
 #ifdef GHCI
-import ByteCodeTypes        ( CompiledByteCode )
+import ByteCodeTypes
 import InteractiveEvalTypes ( Resume )
 import GHCi.Message         ( Pipe )
 import GHCi.RemoteTypes
@@ -176,7 +175,6 @@ import IfaceSyn
 import CoreSyn          ( CoreRule, CoreVect )
 import Maybes
 import Outputable
-import BreakArray
 import SrcLoc
 -- import Unique
 import UniqFM
@@ -195,7 +193,6 @@ import GHC.Serialized   ( Serialized )
 import Foreign
 import Control.Monad    ( guard, liftM, when, ap )
 import Control.Concurrent
-import Data.Array       ( Array, array )
 import Data.IORef
 import Data.Time
 import Data.Typeable    ( Typeable )
@@ -228,7 +225,6 @@ instance Applicative Hsc where
     (<*>) = ap
 
 instance Monad Hsc where
-    return = pure
     Hsc m >>= k = Hsc $ \e w -> do (a, w1) <- m e w
                                    case k a of
                                        Hsc k' -> k' e w1
@@ -834,7 +830,7 @@ data ModIface
                 -- and are not put into the interface file
         mi_warn_fn   :: OccName -> Maybe WarningTxt,
                 -- ^ Cached lookup for 'mi_warns'
-        mi_fix_fn    :: OccName -> Fixity,
+        mi_fix_fn    :: OccName -> Maybe Fixity,
                 -- ^ Cached lookup for 'mi_fixities'
         mi_hash_fn   :: OccName -> Maybe (OccName, Fingerprint),
                 -- ^ Cached lookup for 'mi_decls'.
@@ -862,6 +858,11 @@ data ModIface
 -- file.
 mi_boot :: ModIface -> Bool
 mi_boot iface = mi_hsc_src iface == HsBootFile
+
+-- | Lookups up a (possibly cached) fixity from a 'ModIface'. If one cannot be
+-- found, 'defaultFixity' is returned instead.
+mi_fix :: ModIface -> OccName -> Fixity
+mi_fix iface name = mi_fix_fn iface name `orElse` defaultFixity
 
 instance Binary ModIface where
    put_ bh (ModIface {
@@ -1100,7 +1101,7 @@ data ModGuts
         mg_warns     :: !Warnings,       -- ^ Warnings declared in the module
         mg_anns      :: [Annotation],    -- ^ Annotations declared in this module
         mg_hpc_info  :: !HpcInfo,        -- ^ Coverage tick boxes in the module
-        mg_modBreaks :: !ModBreaks,      -- ^ Breakpoints for the module
+        mg_modBreaks :: !(Maybe ModBreaks), -- ^ Breakpoints for the module
         mg_vect_decls:: ![CoreVect],     -- ^ Vectorisation declarations in this module
                                          --   (produced by desugarer & consumed by vectoriser)
         mg_vect_info :: !VectInfo,       -- ^ Pool of vectorised declarations in the module
@@ -1158,7 +1159,7 @@ data CgGuts
         cg_dep_pkgs  :: ![UnitId],    -- ^ Dependent packages, used to
                                          -- generate #includes for C code gen
         cg_hpc_info  :: !HpcInfo,        -- ^ Program coverage tick box information
-        cg_modBreaks :: !ModBreaks       -- ^ Module breakpoints
+        cg_modBreaks :: !(Maybe ModBreaks) -- ^ Module breakpoints
     }
 
 -----------------------------------
@@ -1625,7 +1626,7 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
         forceUnqualNames :: [Name]
         forceUnqualNames =
           map tyConName [ constraintKindTyCon, heqTyCon, coercibleTyCon
-                        , starKindTyCon, unicodeStarKindTyCon, ipTyCon ]
+                        , starKindTyCon, unicodeStarKindTyCon ]
           ++ [ eqTyConName ]
 
         right_name gre = nameModule_maybe (gre_name gre) == Just mod
@@ -2059,14 +2060,14 @@ plusWarns (WarnAll t) _ = WarnAll t
 plusWarns (WarnSome v1) (WarnSome v2) = WarnSome (v1 ++ v2)
 
 -- | Creates cached lookup for the 'mi_fix_fn' field of 'ModIface'
-mkIfaceFixCache :: [(OccName, Fixity)] -> OccName -> Fixity
+mkIfaceFixCache :: [(OccName, Fixity)] -> OccName -> Maybe Fixity
 mkIfaceFixCache pairs
-  = \n -> lookupOccEnv env n `orElse` defaultFixity
+  = \n -> lookupOccEnv env n
   where
    env = mkOccEnv pairs
 
-emptyIfaceFixCache :: OccName -> Fixity
-emptyIfaceFixCache _ = defaultFixity
+emptyIfaceFixCache :: OccName -> Maybe Fixity
+emptyIfaceFixCache _ = Nothing
 
 -- | Fixity environment mapping names to their fixities
 type FixityEnv = NameEnv FixItem
@@ -2820,12 +2821,16 @@ data Unlinked
    = DotO FilePath      -- ^ An object file (.o)
    | DotA FilePath      -- ^ Static archive file (.a)
    | DotDLL FilePath    -- ^ Dynamically linked library file (.so, .dll, .dylib)
-   | BCOs CompiledByteCode ModBreaks    -- ^ A byte-code object, lives only in memory
+   | BCOs CompiledByteCode    -- ^ A byte-code object, lives only in memory
 
 #ifndef GHCI
 data CompiledByteCode = CompiledByteCodeUndefined
-_unused :: CompiledByteCode
-_unused = CompiledByteCodeUndefined
+_unusedCompiledByteCode :: CompiledByteCode
+_unusedCompiledByteCode = CompiledByteCodeUndefined
+
+data ModBreaks = ModBreaksUndefined
+emptyModBreaks :: ModBreaks
+emptyModBreaks = ModBreaksUndefined
 #endif
 
 instance Outputable Unlinked where
@@ -2833,9 +2838,9 @@ instance Outputable Unlinked where
    ppr (DotA path)   = text "DotA" <+> text path
    ppr (DotDLL path) = text "DotDLL" <+> text path
 #ifdef GHCI
-   ppr (BCOs bcos _) = text "BCOs" <+> ppr bcos
+   ppr (BCOs bcos) = text "BCOs" <+> ppr bcos
 #else
-   ppr (BCOs _ _)    = text "No byte code"
+   ppr (BCOs _)    = text "No byte code"
 #endif
 
 -- | Is this an actual file on disk we can link in somehow?
@@ -2858,50 +2863,6 @@ nameOfObject other       = pprPanic "nameOfObject" (ppr other)
 
 -- | Retrieve the compiled byte-code if possible. Panic if it is a file-based linkable
 byteCodeOfObject :: Unlinked -> CompiledByteCode
-byteCodeOfObject (BCOs bc _) = bc
-byteCodeOfObject other       = pprPanic "byteCodeOfObject" (ppr other)
+byteCodeOfObject (BCOs bc) = bc
+byteCodeOfObject other     = pprPanic "byteCodeOfObject" (ppr other)
 
-{-
-************************************************************************
-*                                                                      *
-\subsection{Breakpoint Support}
-*                                                                      *
-************************************************************************
--}
-
--- | Breakpoint index
-type BreakIndex = Int
-
--- | C CostCentre type
-data CCostCentre
-
--- | All the information about the breakpoints for a given module
-data ModBreaks
-   = ModBreaks
-   { modBreaks_flags :: BreakArray
-        -- ^ The array of flags, one per breakpoint,
-        -- indicating which breakpoints are enabled.
-   , modBreaks_locs :: !(Array BreakIndex SrcSpan)
-        -- ^ An array giving the source span of each breakpoint.
-   , modBreaks_vars :: !(Array BreakIndex [OccName])
-        -- ^ An array giving the names of the free variables at each breakpoint.
-   , modBreaks_decls :: !(Array BreakIndex [String])
-        -- ^ An array giving the names of the declarations enclosing each breakpoint.
-#ifdef GHCI
-   , modBreaks_ccs :: !(Array BreakIndex (RemotePtr {- CCostCentre -}))
-        -- ^ Array pointing to cost centre for each breakpoint
-#endif
-   }
-
--- | Construct an empty ModBreaks
-emptyModBreaks :: ModBreaks
-emptyModBreaks = ModBreaks
-   { modBreaks_flags = error "ModBreaks.modBreaks_array not initialised"
-         -- ToDo: can we avoid this?
-   , modBreaks_locs  = array (0,-1) []
-   , modBreaks_vars  = array (0,-1) []
-   , modBreaks_decls = array (0,-1) []
-#ifdef GHCI
-   , modBreaks_ccs = array (0,-1) []
-#endif
-   }

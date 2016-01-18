@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveDataTypeable, UndecidableInstances #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE CPP #-}
 
 --
@@ -62,7 +62,6 @@ unIOEnv (IOEnv m) = m
 instance Monad (IOEnv m) where
     (>>=)  = thenM
     (>>)   = (*>)
-    return = pure
     fail _ = failM -- Ignore the string
 
 #if __GLASGOW_HASKELL__ > 710
@@ -178,15 +177,11 @@ uninterruptibleMaskM_ (IOEnv m) = IOEnv (\ env -> uninterruptibleMask_ (m env))
 -- Alternative/MonadPlus
 ----------------------------------------------------------------------
 
-instance MonadPlus IO => Alternative (IOEnv env) where
-      empty = mzero
-      (<|>) = mplus
+instance Alternative (IOEnv env) where
+    empty   = IOEnv (const empty)
+    m <|> n = IOEnv (\env -> unIOEnv m env <|> unIOEnv n env)
 
--- For use if the user has imported Control.Monad.Error from MTL
--- Requires UndecidableInstances
-instance MonadPlus IO => MonadPlus (IOEnv env) where
-    mzero = IOEnv (const mzero)
-    m `mplus` n = IOEnv (\env -> unIOEnv m env `mplus` unIOEnv n env)
+instance MonadPlus (IOEnv env)
 
 ----------------------------------------------------------------------
 -- Accessing input/output

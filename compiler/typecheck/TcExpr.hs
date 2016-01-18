@@ -172,9 +172,9 @@ tcExpr (HsSCC src lbl expr) res_ty
   = do { expr' <- tcMonoExpr expr res_ty
        ; return (HsSCC src lbl expr') }
 
-tcExpr (HsTickPragma src info expr) res_ty
+tcExpr (HsTickPragma src info srcInfo expr) res_ty
   = do { expr' <- tcMonoExpr expr res_ty
-       ; return (HsTickPragma src info expr') }
+       ; return (HsTickPragma src info srcInfo expr') }
 
 tcExpr (HsCoreAnn src lbl expr) res_ty
   = do  { expr' <- tcMonoExpr expr res_ty
@@ -199,6 +199,7 @@ tcExpr e@(HsIPVar x) res_ty
               be a tau-type.) -}
          ip_ty <- newOpenFlexiTyVarTy
        ; let ip_name = mkStrLitTy (hsIPNameFS x)
+       ; ipClass <- tcLookupClass ipClassName
        ; ip_var <- emitWantedEvVar origin (mkClassPred ipClass [ip_name, ip_ty])
        ; tcWrapResult e (fromDict ipClass ip_name ip_ty (HsVar (noLoc ip_var)))
                       ip_ty res_ty }
@@ -1178,7 +1179,7 @@ tcArgs fun orig_fun_ty fun_orig orig_args herald
     ty_app_err ty arg
       = do { (_, ty) <- zonkTidyTcType emptyTidyEnv ty
            ; failWith $
-               text "Cannot not apply expression of type" <+> quotes (ppr ty) $$
+               text "Cannot apply expression of type" <+> quotes (ppr ty) $$
                text "to a visible type argument" <+> quotes (ppr arg) }
 
 ----------------

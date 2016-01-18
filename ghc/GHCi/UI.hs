@@ -39,6 +39,8 @@ import Debugger
 
 -- The GHC interface
 import GHCi
+import GHCi.RemoteTypes
+import GHCi.BreakArray
 import DynFlags
 import ErrUtils
 import GhcMonad ( modifySession )
@@ -58,7 +60,6 @@ import PrelNames
 import RdrName ( RdrName, getGRE_NameQualifier_maybes, getRdrName )
 import SrcLoc
 import qualified Lexer
-import ByteCodeTypes (BreakInfo(..))
 
 import StringBuffer
 import Outputable hiding ( printForUser, printForUserPartWay, bold )
@@ -110,6 +111,7 @@ import System.IO.Unsafe ( unsafePerformIO )
 import System.Process
 import Text.Printf
 import Text.Read ( readMaybe )
+import Text.Read.Lex (isSymbolChar)
 
 #ifndef mingw32_HOST_OS
 import System.Posix hiding ( getEnv )
@@ -230,10 +232,12 @@ ghciCommands = map mkCmd [
 -- NOTE: in order for us to override the default correctly, any custom entry
 -- must be a SUBSET of word_break_chars.
 word_break_chars :: String
-word_break_chars = let symbols = "!#$%&*+/<=>?@\\^|-~"
-                       specials = "(),;[]`{}"
-                       spaces = " \t\n"
-                   in spaces ++ specials ++ symbols
+word_break_chars = spaces ++ specials ++ symbols
+
+symbols, specials, spaces :: String
+symbols = "!#$%&*+/<=>?@\\^|-~"
+specials = "(),;[]`{}"
+spaces = " \t\n"
 
 flagWordBreakChars :: String
 flagWordBreakChars = " \t\n"
@@ -524,6 +528,7 @@ runGHCi paths maybe_exprs = do
              do runInputTWithPrefs defaultPrefs defaultSettings $
                           runCommands $ fileLoop hdl
                 liftIO (hClose hdl `catchIO` \_ -> return ())
+                liftIO $ putStrLn ("Loaded GHCi configuration from " ++ file)
 
   --
 
@@ -532,12 +537,13 @@ runGHCi paths maybe_exprs = do
   dot_cfgs <- if ignore_dot_ghci then return [] else do
     dot_files <- catMaybes <$> sequence [ current_dir, app_user_dir, home_dir ]
     liftIO $ filterM checkFileAndDirPerms dot_files
+  mdot_cfgs <- liftIO $ mapM canonicalizePath' dot_cfgs
+
   let arg_cfgs = reverse $ ghciScripts dflags
     -- -ghci-script are collected in reverse order
-  mcfgs <- liftIO $ mapM canonicalizePath' $ dot_cfgs ++ arg_cfgs
     -- We don't require that a script explicitly added by -ghci-script
     -- is owned by the current user. (#6017)
-  mapM_ sourceConfigFile $ nub $ catMaybes mcfgs
+  mapM_ sourceConfigFile $ nub $ (catMaybes mdot_cfgs) ++ arg_cfgs
     -- nub, because we don't want to read .ghci twice if the CWD is $HOME.
 
   -- Perform a :load for files given on the GHCi command line
@@ -932,12 +938,21 @@ enqueueCommands cmds = do
 runStmt :: String -> SingleStep -> GHCi (Maybe GHC.ExecResult)
 runStmt stmt step = do
   dflags <- GHC.getInteractiveDynFlags
-  if | GHC.isStmt dflags stmt   -> run_stmt
-     | GHC.isImport dflags stmt -> run_imports
-     | otherwise                -> run_decl
+  if | GHC.isStmt dflags stmt    -> run_stmt
+     | GHC.isImport dflags stmt  -> run_import
+     -- Every import declaration should be handled by `run_import`. As GHCi
+     -- in general only accepts one command at a time, we simply throw an
+     -- exception when the input contains multiple commands of which at least
+     -- one is an import command (see #10663).
+     | GHC.hasImport dflags stmt -> throwGhcException
+       (CmdLineError "error: expecting a single import declaration")
+     -- Note: `GHC.isDecl` returns False on input like
+     -- `data Infix a b = a :@: b; infixl 4 :@:`
+     -- and should therefore not be used here.
+     | otherwise                 -> run_decl
 
   where
-    run_imports = do
+    run_import = do
       addImportToContext stmt
       return (Just (GHC.ExecComplete (Right []) 0))
 
@@ -2651,7 +2666,7 @@ pprStopped res =
          <> text (GHC.resumeDecl res))
     <> char ',' <+> ppr (GHC.resumeSpan res)
  where
-  mb_mod_name = moduleName <$> breakInfo_module <$> GHC.resumeBreakInfo res
+  mb_mod_name = moduleName <$> GHC.breakInfo_module <$> GHC.resumeBreakInfo res
 
 showPackages :: GHCi ()
 showPackages = do
@@ -2758,13 +2773,24 @@ completeGhciCommand, completeMacro, completeIdentifier, completeModule,
     completeHomeModuleOrFile, completeExpression
     :: CompletionFunc GHCi
 
+-- | Provide completions for last word in a given string.
+--
+-- Takes a tuple of two strings.  First string is a reversed line to be
+-- completed.  Second string is likely unused, 'completeCmd' always passes an
+-- empty string as second item in tuple.
 ghciCompleteWord :: CompletionFunc GHCi
 ghciCompleteWord line@(left,_) = case firstWord of
+    -- If given string starts with `:` colon, and there is only one following
+    -- word then provide REPL command completions.  If there is more than one
+    -- word complete either filename or builtin ghci commands or macros.
     ':':cmd     | null rest     -> completeGhciCommand line
                 | otherwise     -> do
                         completion <- lookupCompletion cmd
                         completion line
+    -- If given string starts with `import` keyword provide module name
+    -- completions
     "import"    -> completeModule line
+    -- otherwise provide identifier completions
     _           -> completeExpression line
   where
     (firstWord,rest) = break isSpace $ dropWhile isSpace $ reverse left
@@ -2789,10 +2815,16 @@ completeMacro = wrapIdentCompleter $ \w -> do
   cmds <- liftIO $ readIORef macros_ref
   return (filter (w `isPrefixOf`) (map cmdName cmds))
 
-completeIdentifier = wrapIdentCompleter $ \w -> do
-  rdrs <- GHC.getRdrNamesInScope
-  dflags <- GHC.getSessionDynFlags
-  return (filter (w `isPrefixOf`) (map (showPpr dflags) rdrs))
+completeIdentifier line@(left, _) =
+  -- Note: `left` is a reversed input
+  case left of
+    (x:_) | isSymbolChar x -> wrapCompleter (specials ++ spaces) complete line
+    _                      -> wrapIdentCompleter complete line
+  where
+    complete w = do
+      rdrs <- GHC.getRdrNamesInScope
+      dflags <- GHC.getSessionDynFlags
+      return (filter (w `isPrefixOf`) (map (showPpr dflags) rdrs))
 
 completeModule = wrapIdentCompleter $ \w -> do
   dflags <- GHC.getSessionDynFlags
@@ -3094,24 +3126,19 @@ findBreakAndSet md lookupTickTree = do
       some -> mapM_ (breakAt breakArray) some
  where
    breakAt breakArray (tick, pan) = do
-         success <- liftIO $ setBreakFlag True breakArray tick
-         if success
-            then do
-               (alreadySet, nm) <-
-                     recordBreak $ BreakLocation
-                             { breakModule = md
-                             , breakLoc = RealSrcSpan pan
-                             , breakTick = tick
-                             , onBreakCmd = ""
-                             }
-               printForUser $
-                  text "Breakpoint " <> ppr nm <>
-                  if alreadySet
-                     then text " was already set at " <> ppr pan
-                     else text " activated at " <> ppr pan
-            else do
-            printForUser $ text "Breakpoint could not be activated at"
-                                 <+> ppr pan
+         setBreakFlag True breakArray tick
+         (alreadySet, nm) <-
+               recordBreak $ BreakLocation
+                       { breakModule = md
+                       , breakLoc = RealSrcSpan pan
+                       , breakTick = tick
+                       , onBreakCmd = ""
+                       }
+         printForUser $
+            text "Breakpoint " <> ppr nm <>
+            if alreadySet
+               then text " was already set at " <> ppr pan
+               else text " activated at " <> ppr pan
 
 -- When a line number is specified, the current policy for choosing
 -- the best breakpoint is this:
@@ -3390,12 +3417,13 @@ deleteBreak identity = do
            mapM_ (turnOffBreak.snd) this
            setGHCiState $ st { breaks = rest }
 
-turnOffBreak :: BreakLocation -> GHCi Bool
+turnOffBreak :: BreakLocation -> GHCi ()
 turnOffBreak loc = do
   (arr, _) <- getModBreak (breakModule loc)
-  liftIO $ setBreakFlag False arr (breakTick loc)
+  hsc_env <- GHC.getSession
+  liftIO $ enableBreakpoint hsc_env arr (breakTick loc) False
 
-getModBreak :: Module -> GHCi (GHC.BreakArray, Array Int SrcSpan)
+getModBreak :: Module -> GHCi (ForeignRef BreakArray, Array Int SrcSpan)
 getModBreak m = do
    Just mod_info <- GHC.getModuleInfo m
    let modBreaks  = GHC.modInfoModBreaks mod_info
@@ -3403,11 +3431,10 @@ getModBreak m = do
    let ticks      = GHC.modBreaks_locs  modBreaks
    return (arr, ticks)
 
-setBreakFlag :: Bool -> GHC.BreakArray -> Int -> IO Bool
-setBreakFlag toggle arr i
-   | toggle    = GHC.setBreakOn  arr i
-   | otherwise = GHC.setBreakOff arr i
-
+setBreakFlag :: Bool -> ForeignRef BreakArray -> Int -> GHCi ()
+setBreakFlag toggle arr i = do
+  hsc_env <- GHC.getSession
+  liftIO $ enableBreakpoint hsc_env arr i toggle
 
 -- ---------------------------------------------------------------------------
 -- User code exception handling

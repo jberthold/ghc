@@ -82,7 +82,7 @@ testOneFile libdir fileName = do
      doHsExpr :: HsExpr RdrName -> [(String,[Located (SourceText,FastString)])]
      doHsExpr (HsCoreAnn src ss _) = [("co",[conv (noLoc ss)])]
      doHsExpr (HsSCC     src ss _) = [("sc",[conv (noLoc ss)])]
-     doHsExpr (HsTickPragma src (ss,_,_) _) = [("tp",[conv (noLoc ss)])]
+     doHsExpr (HsTickPragma src (ss,_,_) _ss2 _) = [("tp",[conv (noLoc ss)])]
      doHsExpr _ = []
 
      conv (GHC.L l (StringLiteral st fs)) = GHC.L l (st,fs)

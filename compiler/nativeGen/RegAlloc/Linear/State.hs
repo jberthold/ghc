@@ -1,5 +1,4 @@
 {-# LANGUAGE UnboxedTuples #-}
-{-# LANGUAGE CPP #-}
 
 -- | State monad for the linear register allocator.
 
@@ -44,9 +43,6 @@ import Unique
 import UniqSupply
 
 import Control.Monad (liftM, ap)
-#if __GLASGOW_HASKELL__ < 709
-import Control.Applicative (Applicative(..))
-#endif
 
 -- | The register allocator monad type.
 newtype RegM freeRegs a
@@ -61,7 +57,6 @@ instance Applicative (RegM freeRegs) where
 
 instance Monad (RegM freeRegs) where
   m >>= k   =  RegM $ \s -> case unReg m s of { (# s, a #) -> unReg (k a) s }
-  return    =  pure
 
 instance HasDynFlags (RegM a) where
     getDynFlags = RegM $ \s -> (# s, ra_DynFlags s #)

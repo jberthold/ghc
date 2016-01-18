@@ -340,6 +340,14 @@ languageOptions =
          , flagReverse = "-XNoIncoherentInstances"
          , flagSince = "6.8.1"
          }
+  , flag { flagName = "-XTypeFamilyDependencies"
+         , flagDescription =
+           "Enable :ref:`injective type families <injective-ty-fams>`. "++
+           "Implies ``-XTypeFamilies``."
+         , flagType = DynamicFlag
+         , flagReverse = "-XNoTypeFamilyDependencies"
+         , flagSince = "8.0.1"
+         }
   , flag { flagName = "-XInstanceSigs"
          , flagDescription =
            "Enable :ref:`instance signatures <instance-sigs>`."
