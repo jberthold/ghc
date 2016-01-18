@@ -291,6 +291,7 @@ checkValidType :: UserTypeCtxt -> Type -> TcM ()
 checkValidType ctxt ty
   = do { traceTc "checkValidType" (ppr ty <+> text "::" <+> ppr (typeKind ty))
        ; rankn_flag  <- xoptM LangExt.RankNTypes
+       ; impred_flag <- xoptM LangExt.ImpredicativeTypes
        ; let gen_rank :: Rank -> Rank
              gen_rank r | rankn_flag = ArbitraryRank
                         | otherwise  = r
@@ -310,7 +311,12 @@ checkValidType ctxt ty
                  TySynCtxt _    -> rank0
 
                  ExprSigCtxt    -> rank1
-                 TypeAppCtxt    -> rank0
+                 TypeAppCtxt | impred_flag -> ArbitraryRank
+                             | otherwise   -> tyConArgMonoType
+                    -- Normally, ImpredicativeTypes is handled in check_arg_type,
+                    -- but visible type applications don't go through there.
+                    -- So we do this check here.
+
                  FunSigCtxt {}  -> rank1
                  InfSigCtxt _   -> ArbitraryRank        -- Inferred type
                  ConArgCtxt _   -> rank1 -- We are given the type of the entire
@@ -446,12 +452,17 @@ check_type env ctxt rank ty
                 -- but not   type T = ?x::Int
 
         ; check_type env' ctxt rank tau      -- Allow foralls to right of arrow
-        ; checkTcM (not (any (`elemVarSet` tyCoVarsOfType tau_kind) tvs))
+        ; checkTcM (not (any (`elemVarSet` tyCoVarsOfType phi_kind) tvs))
                    (forAllEscapeErr env' ty tau_kind)
         }
   where
     (tvs, theta, tau) = tcSplitSigmaTy ty
     tau_kind          = typeKind tau
+
+    phi_kind | null theta = tau_kind
+             | otherwise  = liftedTypeKind
+        -- If there are any constraints, the kind is *. (#11405)
+
     (env', _)         = tidyTyCoVarBndrs env tvs
 
 check_type _ _ _ (TyVarTy _) = return ()

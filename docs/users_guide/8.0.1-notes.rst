@@ -7,6 +7,18 @@ The significant changes to the various parts of the compiler are listed
 in the following sections. There have also been numerous bug fixes and
 performance improvements over the 7.10 branch.
 
+.. warning::
+
+    Only Cabal versions 1.24 and newer will function properly with this release.
+    Consequently it will likely be necessary to recompile ``cabal-install``
+    before installing new packages.
+
+    The reason for this is a change in how packages are identified in GHC
+    8.0. While previous versions of Cabal identified packages to GHC with a
+    package key (with GHC's :ghc-flag:`-this-package-key` argument), GHC 8.0 and
+    later uses installed package IDs in place of package keys.
+
+
 Highlights
 ----------
 
@@ -23,7 +35,7 @@ The highlights, since the 7.10 branch, are:
 
 - More reliable DWARF debugging information
 
-- Support for :ref:`injective type classes <injective-ty-fams>`
+- Support for :ref:`injective type families <injective-ty-fams>`
 
 - Applicative ``do`` notation (see :ref:`applicative-do`)
 
@@ -49,6 +61,8 @@ The highlights, since the 7.10 branch, are:
 - GHCi now provides access to stack traces when used with
   :ghc-flag:`-fexternal-interpreter` and :ghc-flag:`-prof` (see
   :ref:`ghci-stack-traces`).
+
+- A native code generator for powerpc64 and powerpc64le architectures
 
 - The reworked users guide you are now reading
 
@@ -92,7 +106,7 @@ Language
    programmers to easily specify how type parameters should be
    instantiated when calling a function. See
    :ref:`visible-type-application` for the details.
-   
+
 -  To conform to the common case, the default role assigned to
    parameters of datatypes declared in ``hs-boot`` files is
    ``representational``. However, if the constructor(s) for the datatype
@@ -524,6 +538,14 @@ ghc
    ``GHC.Lemexe`` module of the ``ghc-boot`` library.
 
 -  Add ``isImport``, ``isDecl``, and ``isStmt`` functions.
+
+-  The `mi_fix_fn` field of `ModIface` had its type changed from
+   ``OccName -> Fixity`` to ``OccName -> Maybe Fixity``, where a returned value
+   of ``Nothing`` indicates a cache miss. As a result, the types of
+   ``mkIfaceFixCache`` and ``emptyIfaceFixCache`` were also changed to have a
+   return type of ``Maybe Fixity``, and a new ``mi_fix :: OccName -> Fixity``
+   function was introduced which invokes ``mi_fix_fn`` but returns
+   ``defaultFixity`` upon a cache miss.
 
 ghc-boot
 ~~~~~~~~
