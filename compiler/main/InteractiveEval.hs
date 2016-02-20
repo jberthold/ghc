@@ -235,8 +235,9 @@ runStmtWithLocation source linenumber expr step = do
 runDecls :: GhcMonad m => String -> m [Name]
 runDecls = runDeclsWithLocation "<interactive>" 1
 
-runDeclsWithLocation
- :: GhcMonad m => String -> Int -> String -> m [Name]
+-- | Run some declarations and return any user-visible names that were brought
+-- into scope.
+runDeclsWithLocation :: GhcMonad m => String -> Int -> String -> m [Name]
 runDeclsWithLocation source linenumber expr =
   do
     hsc_env <- getSession
@@ -246,8 +247,19 @@ runDeclsWithLocation source linenumber expr =
     hsc_env <- getSession
     hsc_env' <- liftIO $ rttiEnvironment hsc_env
     modifySession (\_ -> hsc_env')
-    return (map getName tyThings)
+    return $ filter (not . isDerivedOccName . nameOccName)
+             -- For this filter, see Note [What to show to users]
+           $ map getName tyThings
 
+{- Note [What to show to users]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We don't want to display internally-generated bindings to users.
+Things like the coercion axiom for newtypes. These bindings all get
+OccNames that users can't write, to avoid the possiblity of name
+clashes (in linker symbols).  That gives a convenient way to suppress
+them. The relevant predicate is OccName.isDerivedOccName.
+See Trac #11051 for more background and examples.
+-}
 
 withVirtualCWD :: GhcMonad m => m a -> m a
 withVirtualCWD m = do
@@ -536,7 +548,8 @@ bindLocalsAtBreakpoint hsc_env apStack_fhv (Just BreakInfo{..}) = do
    new_ids     <- zipWith3M mkNewId occs tidy_tys filtered_ids
    result_name <- newInteractiveBinder hsc_env (mkVarOccFS result_fs) span
 
-   let result_id = Id.mkVanillaGlobal result_name (substTy tv_subst result_ty)
+   let result_id = Id.mkVanillaGlobal result_name
+                     (substTy tv_subst result_ty)
        result_ok = isPointer result_id
 
        final_ids | result_ok = result_id : new_ids
@@ -564,9 +577,9 @@ bindLocalsAtBreakpoint hsc_env apStack_fhv (Just BreakInfo{..}) = do
      -- Similarly, clone the type variables mentioned in the types
      -- we have here, *and* make them all RuntimeUnk tyars
    newTyVars us tvs
-     = mkTopTCvSubst [ (tv, mkTyVarTy (mkRuntimeUnkTyVar name (tyVarKind tv)))
-                     | (tv, uniq) <- varSetElems tvs `zip` uniqsFromSupply us
-                     , let name = setNameUnique (tyVarName tv) uniq ]
+     = mkTvSubstPrs [ (tv, mkTyVarTy (mkRuntimeUnkTyVar name (tyVarKind tv)))
+                    | (tv, uniq) <- varSetElems tvs `zip` uniqsFromSupply us
+                    , let name = setNameUnique (tyVarName tv) uniq ]
 
 rttiEnvironment :: HscEnv -> IO HscEnv
 rttiEnvironment hsc_env@HscEnv{hsc_IC=ic} = do
@@ -787,13 +800,16 @@ getNamesInScope :: GhcMonad m => m [Name]
 getNamesInScope = withSession $ \hsc_env -> do
   return (map gre_name (globalRdrEnvElts (ic_rn_gbl_env (hsc_IC hsc_env))))
 
+-- | Returns all 'RdrName's in scope in the current interactive
+-- context, excluding any that are internally-generated.
 getRdrNamesInScope :: GhcMonad m => m [RdrName]
 getRdrNamesInScope = withSession $ \hsc_env -> do
   let
       ic = hsc_IC hsc_env
       gbl_rdrenv = ic_rn_gbl_env ic
       gbl_names = concatMap greRdrNames $ globalRdrEnvElts gbl_rdrenv
-  return gbl_names
+  -- Exclude internally generated names; see e.g. Trac #11328
+  return (filter (not . isDerivedOccName . rdrNameOcc) gbl_names)
 
 
 -- | Parses a string as an identifier, and returns the list of 'Name's that

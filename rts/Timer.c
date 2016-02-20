@@ -72,9 +72,16 @@ handle_tick(int unused STG_UNUSED)
 #endif
           } else {
               recent_activity = ACTIVITY_DONE_GC;
-              // disable timer signals (see #1623, #5991)
-              // but only if we're not profiling
-#ifndef PROFILING
+              // disable timer signals (see #1623, #5991, #9105)
+              // but only if we're not profiling (e.g. passed -h or -p RTS
+              // flags). If we are profiling we need to keep the timer active
+              // so that samples continue to be collected.
+#ifdef PROFILING
+              if (!(RtsFlags.ProfFlags.doHeapProfile
+                    || RtsFlags.CcFlags.doCostCentres)) {
+                  stopTimer();
+              }
+#else
               stopTimer();
 #endif
           }

@@ -44,7 +44,6 @@ import Var
 import VarSet
 import BasicTypes    ( IntWithInf, intGtLimit )
 import ErrUtils      ( emptyMessages )
-import FastString
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad ( when, unless )
@@ -98,11 +97,11 @@ simplifyTop wanteds
        ; return (evBindMapBinds binds1 `unionBags` binds2) }
 
 -- | Type-check a thing that emits only equality constraints, then
--- solve those constraints. Emits errors -- but does not fail --
--- if there is trouble.
+-- solve those constraints. Fails outright if there is trouble.
 solveEqualities :: TcM a -> TcM a
 solveEqualities thing_inside
-  = do { (result, wanted) <- captureConstraints thing_inside
+  = checkNoErrs $  -- See Note [Fail fast on kind errors]
+    do { (result, wanted) <- captureConstraints thing_inside
        ; traceTc "solveEqualities {" $ text "wanted = " <+> ppr wanted
        ; final_wc <- runTcSEqualities $ simpl_top wanted
        ; traceTc "End solveEqualities }" empty
@@ -147,7 +146,7 @@ simpl_top wanteds
            ; if something_happened
              then do { wc_residual <- nestTcS (solveWantedsAndDrop wc)
                      ; try_class_defaulting wc_residual }
-                  -- See Note [Overview of implicit CallStacks]
+                  -- See Note [Overview of implicit CallStacks] in TcEvidence
              else try_callstack_defaulting wc }
 
     try_callstack_defaulting :: WantedConstraints -> TcS WantedConstraints
@@ -159,7 +158,7 @@ simpl_top wanteds
 
 -- | Default any remaining @CallStack@ constraints to empty @CallStack@s.
 defaultCallStacks :: WantedConstraints -> TcS WantedConstraints
--- See Note [Overview of implicit CallStacks]
+-- See Note [Overview of implicit CallStacks] in TcEvidence
 defaultCallStacks wanteds
   = do simples <- handle_simples (wc_simple wanteds)
        implics <- mapBagM handle_implic (wc_impl wanteds)
@@ -174,16 +173,37 @@ defaultCallStacks wanteds
     wanteds <- defaultCallStacks (ic_wanted implic)
     return (implic { ic_wanted = wanteds })
 
-  defaultCallStack ct@(CDictCan { cc_ev = ev_w })
-    | Just _ <- isCallStackCt ct
-    = do { solveCallStack ev_w EvCsEmpty
+  defaultCallStack ct
+    | Just (cls, tys) <- getClassPredTys_maybe (ctPred ct)
+    , Just _ <- isCallStackDict cls tys
+    = do { solveCallStack (cc_ev ct) EvCsEmpty
          ; return Nothing }
 
   defaultCallStack ct
     = return (Just ct)
 
 
-{-
+{- Note [Fail fast on kind errors]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+solveEqualities is used to solve kind equalities when kind-checking
+user-written types. If solving fails we should fail outright, rather
+than just accumulate an error message, for two reasons:
+
+  * A kind-bogus type signature may cause a cascade of knock-on
+    errors if we let it pass
+
+  * More seriously, we don't have a convenient term-level place to add
+    deferred bindings for unsolved kind-equality constraints, so we
+    don't build evidence bindings (by usine reportAllUnsolved). That
+    means that we'll be left with with a type that has coercion holes
+    in it, something like
+           <type> |> co-hole
+    where co-hole is not filled in.  Eeek!  That un-filled-in
+    hole actually causes GHC to crash with "fvProv falls into a hole"
+    See Trac #11563, #11520, #11516, #11399
+
+So it's important to use 'checkNoErrs' here!
+
 Note [When to do type-class defaulting]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In GHC 7.6 and 7.8.2, we did type-class defaulting only if insolubleWC
@@ -396,13 +416,14 @@ simplifyDefault :: ThetaType    -- Wanted; has no type variables in it
                 -> TcM ()       -- Succeeds if the constraint is soluble
 simplifyDefault theta
   = do { traceTc "simplifyInteractive" empty
-       ; wanted <- newWanteds DefaultOrigin theta
-       ; unsolved <- simplifyWantedsTcM wanted
-
+       ; loc <- getCtLocM DefaultOrigin Nothing
+       ; let wanted = [ CtDerived { ctev_pred = pred
+                                  , ctev_loc  = loc }
+                      | pred <- theta ]
+       ; unsolved <- runTcSDeriveds (solveWanteds (mkSimpleWC wanted))
        ; traceTc "reportUnsolved {" empty
        ; reportAllUnsolved unsolved
        ; traceTc "reportUnsolved }" empty
-
        ; return () }
 
 ------------------
@@ -500,11 +521,11 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
 
   | otherwise
   = do { traceTc "simplifyInfer {"  $ vcat
-             [ ptext (sLit "sigs =") <+> ppr sigs
-             , ptext (sLit "binds =") <+> ppr name_taus
-             , ptext (sLit "rhs_tclvl =") <+> ppr rhs_tclvl
-             , ptext (sLit "apply_mr =") <+> ppr apply_mr
-             , ptext (sLit "(unzonked) wanted =") <+> ppr wanteds
+             [ text "sigs =" <+> ppr sigs
+             , text "binds =" <+> ppr name_taus
+             , text "rhs_tclvl =" <+> ppr rhs_tclvl
+             , text "apply_mr =" <+> ppr apply_mr
+             , text "(unzonked) wanted =" <+> ppr wanteds
              ]
 
        -- First do full-blown solving
@@ -545,8 +566,8 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
                             -- again later. All we want here are the predicates over which to
                             -- quantify.
                             --
-                            -- If any meta-tyvar unifications take place (unlikely), we'll
-                            -- pick that up later.
+                            -- If any meta-tyvar unifications take place (unlikely),
+                            -- we'll pick that up later.
 
                       -- See Note [Promote _and_ default when inferring]
                       ; let def_tyvar tv
@@ -558,9 +579,10 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
                       ; WC { wc_simple = simples }
                            <- setTcLevel rhs_tclvl $
                               runTcSDeriveds       $
-                              solveSimpleWanteds $ mapBag toDerivedCt quant_cand
-                                -- NB: we don't want evidence, so used
-                                -- Derived constraints
+                              solveSimpleWanteds   $
+                              mapBag toDerivedCt quant_cand
+                                -- NB: we don't want evidence,
+                                -- so use Derived constraints
 
                       ; simples <- TcM.zonkSimples simples
 
@@ -630,13 +652,13 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
 
          -- All done!
        ; traceTc "} simplifyInfer/produced residual implication for quantification" $
-         vcat [ ptext (sLit "quant_pred_candidates =") <+> ppr quant_pred_candidates
-              , ptext (sLit "zonked_taus") <+> ppr zonked_taus
-              , ptext (sLit "zonked_tau_tvs=") <+> ppr zonked_tau_tvs
-              , ptext (sLit "promote_tvs=") <+> ppr promote_tvs
-              , ptext (sLit "bound_theta =") <+> ppr bound_theta
-              , ptext (sLit "qtvs =") <+> ppr qtvs
-              , ptext (sLit "implic =") <+> ppr implic ]
+         vcat [ text "quant_pred_candidates =" <+> ppr quant_pred_candidates
+              , text "zonked_taus" <+> ppr zonked_taus
+              , text "zonked_tau_tvs=" <+> ppr zonked_tau_tvs
+              , text "promote_tvs=" <+> ppr promote_tvs
+              , text "bound_theta =" <+> ppr bound_theta
+              , text "qtvs =" <+> ppr qtvs
+              , text "implic =" <+> ppr implic ]
 
        ; return ( qtvs, bound_theta_vars, TcEvBinds ev_binds_var ) }
 
@@ -722,10 +744,10 @@ decideQuantification apply_mr sigs name_taus constraints
        ; let mr_bites = constrained_tvs `intersectsVarSet` zonked_tkvs
        ; warnTc (warn_mono && mr_bites) $
          hang (text "The Monomorphism Restriction applies to the binding"
-               <> plural bndrs <+> ptext (sLit "for") <+> pp_bndrs)
+               <> plural bndrs <+> text "for" <+> pp_bndrs)
              2 (text "Consider giving a type signature for"
                 <+> if isSingleton bndrs then pp_bndrs
-                                         else ptext (sLit "these binders"))
+                                         else text "these binders")
 
        -- All done
        ; traceTc "decideQuantification 1" (vcat [ppr constraints, ppr gbl_tvs, ppr mono_tvs
@@ -961,7 +983,7 @@ This only half-works, but then let-generalisation only half-works.
 -}
 
 simplifyWantedsTcM :: [CtEvidence] -> TcM WantedConstraints
--- Zonk the input constraints, and simplify them
+-- Solve the specified Wanted constraints
 -- Discard the evidence binds
 -- Discards all Derived stuff in result
 -- Postcondition: fully zonked and unflattened constraints
@@ -1018,18 +1040,28 @@ simpl_loop n limit floated_eqs no_new_scs
   = return wc  -- Done!
 
   | n `intGtLimit` limit
-  = failTcS (hang (ptext (sLit "solveWanteds: too many iterations")
-                   <+> parens (ptext (sLit "limit =") <+> ppr limit))
-                2 (vcat [ ptext (sLit "Unsolved:") <+> ppr wc
+  = do { -- Add an error (not a warning) if we blow the limit,
+         -- Typically if we blow the limit we are going to report some other error
+         -- (an unsolved constraint), and we don't want that error to suppress
+         -- the iteration limit warning!
+         addErrTcS (hang (text "solveWanteds: too many iterations"
+                   <+> parens (text "limit =" <+> ppr limit))
+                2 (vcat [ text "Unsolved:" <+> ppr wc
                         , ppUnless (isEmptyBag floated_eqs) $
-                          ptext (sLit "Floated equalities:") <+> ppr floated_eqs
+                          text "Floated equalities:" <+> ppr floated_eqs
                         , ppUnless no_new_scs $
-                          ptext (sLit "New superclasses found")
-                        , ptext (sLit "Set limit with -fconstraint-solver-iterations=n; n=0 for no limit")
+                          text "New superclasses found"
+                        , text "Set limit with -fconstraint-solver-iterations=n; n=0 for no limit"
                   ]))
+       ; return wc }
 
   | otherwise
-  = do { traceTcS "simpl_loop, iteration" (int n)
+  = do { let n_floated = lengthBag floated_eqs
+       ; csTraceTcS $
+         text "simpl_loop iteration=" <> int n
+         <+> (parens $ hsep [ text "no new scs =" <+> ppr no_new_scs <> comma
+                            , int n_floated <+> text "floated eqs" <> comma
+                            , int (lengthBag simples) <+> text "simples to solve" ])
 
        -- solveSimples may make progress if either float_eqs hold
        ; (unifs1, wc1) <- reportUnifications $
@@ -1058,20 +1090,26 @@ expandSuperClasses :: WantedConstraints -> TcS (Bool, WantedConstraints)
 -- unsolved wanteds or givens
 -- See Note [The superclass story] in TcCanonical
 expandSuperClasses wc@(WC { wc_simple = unsolved, wc_insol = insols })
-  | isEmptyBag unsolved  -- No unsolved simple wanteds, so do not add suerpclasses
+  | not (anyBag superClassesMightHelp unsolved)
   = return (True, wc)
   | otherwise
-  = do { let (pending_wanted, unsolved') = mapAccumBagL get [] unsolved
+  = do { traceTcS "expandSuperClasses {" empty
+       ; let (pending_wanted, unsolved') = mapAccumBagL get [] unsolved
              get acc ct = case isPendingScDict ct of
                             Just ct' -> (ct':acc, ct')
                             Nothing  -> (acc,     ct)
        ; pending_given <- getPendingScDicts
        ; if null pending_given && null pending_wanted
-         then return (True, wc)
+         then do { traceTcS "End expandSuperClasses no-op }" empty
+                 ; return (True, wc) }
          else
     do { new_given  <- makeSuperClasses pending_given
        ; new_insols <- solveSimpleGivens new_given
        ; new_wanted <- makeSuperClasses pending_wanted
+       ; traceTcS "End expandSuperClasses }"
+                  (vcat [ text "Given:" <+> ppr pending_given
+                        , text "Insols from given:" <+> ppr new_insols
+                        , text "Wanted:" <+> ppr new_wanted ])
        ; return (False, wc { wc_simple = unsolved' `unionBags` listToBag new_wanted
                            , wc_insol = insols `unionBags` new_insols }) } }
 
@@ -1742,12 +1780,12 @@ floatEqualities skols no_given_eqs
                 , wanteds { wc_simple = remaining_simples } ) }
   where
     skol_set = mkVarSet skols
-    (float_eqs, remaining_simples) = partitionBag (usefulToFloat is_useful) simples
-    is_useful pred = tyCoVarsOfType pred `disjointVarSet` skol_set
+    (float_eqs, remaining_simples) = partitionBag (usefulToFloat skol_set) simples
 
-usefulToFloat :: (TcPredType -> Bool) -> Ct -> Bool
-usefulToFloat is_useful_pred ct   -- The constraint is un-flattened and de-canonicalised
-  = is_meta_var_eq pred && is_useful_pred pred
+usefulToFloat :: VarSet -> Ct -> Bool
+usefulToFloat skol_set ct   -- The constraint is un-flattened and de-canonicalised
+  = is_meta_var_eq pred &&
+    (tyCoVarsOfType pred `disjointVarSet` skol_set)
   where
     pred = ctPred ct
 
@@ -1959,8 +1997,7 @@ disambigGroup (default_ty:default_tys) group@(the_tv, wanteds)
       = return False
 
     the_ty   = mkTyVarTy the_tv
-    tmpl_tvs = tyCoVarsOfType the_ty
-    mb_subst = tcMatchTy tmpl_tvs the_ty default_ty
+    mb_subst = tcMatchTy the_ty default_ty
       -- Make sure the kinds match too; hence this call to tcMatchTy
       -- E.g. suppose the only constraint was (Typeable k (a::k))
       -- With the addition of polykinded defaulting we also want to reject

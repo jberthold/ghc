@@ -466,7 +466,6 @@ push( StgClosure *c, retainer c_child_r, StgClosure **first_child )
     case THUNK_SELECTOR:
         *first_child = ((StgSelector *)c)->selectee;
         return;
-    case IND_PERM:
     case BLACKHOLE:
         *first_child = ((StgInd *)c)->indirectee;
         return;
@@ -934,7 +933,6 @@ pop( StgClosure **c, StgClosure **cp, retainer *r )
         case MUT_VAR_CLEAN:
         case MUT_VAR_DIRTY:
         case THUNK_SELECTOR:
-        case IND_PERM:
         case CONSTR_1_1:
             // cannot appear
         case PAP:
@@ -1070,7 +1068,6 @@ isRetainer( StgClosure *c )
         // partial applications
     case PAP:
         // indirection
-    case IND_PERM:
     // IND_STATIC used to be an error, but at the moment it can happen
     // as isAlive doesn't look through IND_STATIC as it ignores static
     // closures. See trac #3956 for a program that hit this error.
@@ -2066,7 +2063,7 @@ retainerProfile(void)
 
 #define LOOKS_LIKE_PTR(r) ((LOOKS_LIKE_STATIC_CLOSURE(r) || \
         ((HEAP_ALLOCED(r) && ((Bdescr((P_)r)->flags & BF_FREE) == 0)))) && \
-        ((StgWord)(*(StgPtr)r)!=0xaaaaaaaa))
+        ((StgWord)(*(StgPtr)r)!=(StgWord)0xaaaaaaaaaaaaaaaaULL))
 
 static nat
 sanityCheckHeapClosure( StgClosure *c )

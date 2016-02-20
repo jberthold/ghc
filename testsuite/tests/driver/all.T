@@ -459,11 +459,15 @@ test('T365',
       compile_fail,
       [''])
 
-test('T9360a', normal, run_command, ['{compiler} --interactive -e ""'])
-test('T9360b', normal, run_command, ['{compiler} -e "" --interactive'])
+test('T9360a', normal, run_command, ['{compiler} --interactive -e "" -ignore-dot-ghci'])
+test('T9360b', normal, run_command, ['{compiler} -e "" --interactive -ignore-dot-ghci'])
 
 test('T10970', normal, compile_and_run, ['-hide-all-packages -package base -package containers'])
 test('T10970a', normal, compile_and_run, [''])
 test('T4931', normal, compile_and_run, [''])
 test('T11182', normal, compile_and_run, [''])
 test('T11381', normal, compile_fail, [''])
+test('T11429a', normal, compile, ['-Wunrecognised-warning-flags -Wfoobar'])
+test('T11429b', normal, compile, ['-Wno-unrecognised-warning-flags -Wfoobar'])
+test('T11429c', normal, compile_fail, ['-Wunrecognised-warning-flags -Werror -Wfoobar'])
+

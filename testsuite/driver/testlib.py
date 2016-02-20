@@ -211,12 +211,6 @@ def _extra_ways( name, opts, ways ):
 
 # -----
 
-def only_compiler_types( _compiler_types ):
-   # Don't delete yet. The libraries unix, stm and hpc still call this function.
-   return lambda _name, _opts: None
-
-# -----
-
 def set_stdin( file ):
    return lambda name, opts, f=file: _set_stdin(name, opts, f);
 
@@ -336,7 +330,7 @@ def unless(b, f):
 def doing_ghci():
     return 'ghci' in config.run_ways
 
-def ghci_dynamic( ):
+def ghc_dynamic():
     return config.ghc_dynamic
 
 def fast():
@@ -371,22 +365,6 @@ def have_profiling( ):
 
 def in_tree_compiler( ):
     return config.in_tree_compiler
-
-def compiler_lt( compiler, version ):
-    assert compiler == 'ghc'
-    return version_lt(config.compiler_version, version)
-
-def compiler_le( compiler, version ):
-    assert compiler == 'ghc'
-    return version_le(config.compiler_version, version)
-
-def compiler_gt( compiler, version ):
-    assert compiler == 'ghc'
-    return version_gt(config.compiler_version, version)
-
-def compiler_ge( compiler, version ):
-    assert compiler == 'ghc'
-    return version_ge(config.compiler_version, version)
 
 def unregisterised( ):
     return config.unregisterised
@@ -1689,13 +1667,17 @@ def normalise_whitespace( str ):
     # Merge contiguous whitespace characters into a single space.
     return ' '.join(w for w in str.split())
 
+callSite_re = re.compile(r', called at (.+):[\d]+:[\d]+ in [\w\-\.]+:')
+
 def normalise_callstacks(str):
     def repl(matches):
         location = matches.group(1)
         location = normalise_slashes_(location)
         return ', called at {0}:<line>:<column> in <package-id>:'.format(location)
     # Ignore line number differences in call stacks (#10834).
-    return re.sub(', called at (.+):[\\d]+:[\\d]+ in [\\w\-\.]+:', repl, str)
+    str1 = re.sub(callSite_re, repl, str)
+    # Ignore the change in how we identify implicit call-stacks
+    return str1.replace('from ImplicitParams', 'from HasCallStack')
 
 tyCon_re = re.compile(r'TyCon\s*\d+L?\#\#\s*\d+L?\#\#\s*', flags=re.MULTILINE)
 
@@ -2150,10 +2132,6 @@ def qualify( name, suff ):
 # Finding the sample output.  The filename is of the form
 #
 #   <test>.stdout[-ws-<wordsize>][-<platform>]
-#
-# and we pick the most specific version available.  The <version> is
-# the major version of the compiler (e.g. 6.8.2 would be "6.8").  For
-# more fine-grained control use compiler_lt().
 #
 def find_expected_file(name, suff):
     basename = add_suffix(name, suff)

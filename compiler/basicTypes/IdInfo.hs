@@ -81,7 +81,6 @@ import {-# SOURCE #-} PatSyn
 import ForeignCall
 import Outputable
 import Module
-import FastString
 import Demand
 
 -- infixl so you can say (id `set` a `set` b)
@@ -137,17 +136,6 @@ data IdDetails
 
   | CoVarId                    -- ^ A coercion variable
 
-  -- The rest are distinguished only for debugging reasons
-  -- e.g. to suppress them in -ddump-types
-  -- Currently we don't persist these through interface file
-  -- (see MkIface.toIfaceIdDetails), but we easily could if it mattered
-
-  | ReflectionId                -- ^ A top-level Id to support runtime reflection
-                                -- e.g. $trModule, or $tcT
-
-  | PatSynId                    -- ^ A top-level Id to support pattern synonyms;
-                                -- the builder or matcher for the pattern synonym
-
 data RecSelParent = RecSelData TyCon | RecSelPatSyn PatSyn deriving Eq
   -- Either `TyCon` or `PatSyn` depending
   -- on the origin of the record selector.
@@ -177,19 +165,17 @@ pprIdDetails VanillaId = empty
 pprIdDetails other     = brackets (pp other)
  where
    pp VanillaId         = panic "pprIdDetails"
-   pp ReflectionId      = ptext (sLit "ReflectionId")
-   pp PatSynId          = ptext (sLit "PatSynId")
-   pp (DataConWorkId _) = ptext (sLit "DataCon")
-   pp (DataConWrapId _) = ptext (sLit "DataConWrapper")
-   pp (ClassOpId {})    = ptext (sLit "ClassOp")
-   pp (PrimOpId _)      = ptext (sLit "PrimOp")
-   pp (FCallId _)       = ptext (sLit "ForeignCall")
-   pp (TickBoxOpId _)   = ptext (sLit "TickBoxOp")
-   pp (DFunId nt)       = ptext (sLit "DFunId") <> ppWhen nt (ptext (sLit "(nt)"))
+   pp (DataConWorkId _) = text "DataCon"
+   pp (DataConWrapId _) = text "DataConWrapper"
+   pp (ClassOpId {})    = text "ClassOp"
+   pp (PrimOpId _)      = text "PrimOp"
+   pp (FCallId _)       = text "ForeignCall"
+   pp (TickBoxOpId _)   = text "TickBoxOp"
+   pp (DFunId nt)       = text "DFunId" <> ppWhen nt (text "(nt)")
    pp (RecSelId { sel_naughty = is_naughty })
-                         = brackets $ ptext (sLit "RecSel")
-                            <> ppWhen is_naughty (ptext (sLit "(naughty)"))
-   pp CoVarId           = ptext (sLit "CoVarId")
+                         = brackets $ text "RecSel"
+                            <> ppWhen is_naughty (text "(naughty)")
+   pp CoVarId           = text "CoVarId"
 
 {-
 ************************************************************************
@@ -316,7 +302,7 @@ unknownArity = 0 :: Arity
 
 ppArityInfo :: Int -> SDoc
 ppArityInfo 0 = empty
-ppArityInfo n = hsep [ptext (sLit "Arity"), int n]
+ppArityInfo n = hsep [text "Arity", int n]
 
 {-
 ************************************************************************
@@ -440,7 +426,7 @@ instance Outputable CafInfo where
    ppr = ppCafInfo
 
 ppCafInfo :: CafInfo -> SDoc
-ppCafInfo NoCafRefs = ptext (sLit "NoCafRefs")
+ppCafInfo NoCafRefs = text "NoCafRefs"
 ppCafInfo MayHaveCafRefs = empty
 
 {-
@@ -506,4 +492,4 @@ data TickBoxOp
    = TickBox Module {-# UNPACK #-} !TickBoxId
 
 instance Outputable TickBoxOp where
-    ppr (TickBox mod n)         = ptext (sLit "tick") <+> ppr (mod,n)
+    ppr (TickBox mod n)         = text "tick" <+> ppr (mod,n)

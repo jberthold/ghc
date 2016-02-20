@@ -26,7 +26,7 @@ import TcBinds
 import TcUnify
 import TcHsType
 import TcMType
-import Type     ( getClassPredTys_maybe, varSetElemsWellScoped )
+import Type     ( getClassPredTys_maybe, varSetElemsWellScoped, piResultTys )
 import TcType
 import TcRnMonad
 import BuildTyCl( TcMethInfo )
@@ -211,7 +211,7 @@ tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
        ; spec_prags <- discardConstraints $
                        tcSpecPrags global_dm_id prags
        ; warnTc (not (null spec_prags))
-                (ptext (sLit "Ignoring SPECIALISE pragmas on default method")
+                (text "Ignoring SPECIALISE pragmas on default method"
                  <+> quotes (ppr sel_name))
 
        ; let hs_ty = lookupHsSig hs_sig_fn sel_name
@@ -253,7 +253,6 @@ tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
                            -- completeSigPolyId
                            , abe_mono      = completeIdSigPolyId local_dm_sig
                            , abe_wrap      = idHsWrapper
-                           , abe_inst_wrap = idHsWrapper
                            , abe_prags     = IsDefaultMethod }
               full_bind = AbsBinds { abs_tvs      = tyvars
                                    , abs_ev_vars  = [this_dict]
@@ -300,10 +299,7 @@ instantiateMethod :: Class -> Id -> [TcType] -> TcType
 instantiateMethod clas sel_id inst_tys
   = ASSERT( ok_first_pred ) local_meth_ty
   where
-    (sel_tyvars,sel_rho) = tcSplitForAllTys (idType sel_id)
-    rho_ty = ASSERT( length sel_tyvars == length inst_tys )
-             substTyWith sel_tyvars inst_tys sel_rho
-
+    rho_ty = piResultTys (idType sel_id) inst_tys
     (first_pred, local_meth_ty) = tcSplitPredFunTy_maybe rho_ty
                 `orElse` pprPanic "tcInstanceMethod" (ppr sel_id)
 
@@ -386,8 +382,8 @@ This makes the error messages right.
 -}
 
 tcMkDeclCtxt :: TyClDecl Name -> SDoc
-tcMkDeclCtxt decl = hsep [ptext (sLit "In the"), pprTyClDeclFlavour decl,
-                      ptext (sLit "declaration for"), quotes (ppr (tcdName decl))]
+tcMkDeclCtxt decl = hsep [text "In the", pprTyClDeclFlavour decl,
+                      text "declaration for", quotes (ppr (tcdName decl))]
 
 tcAddDeclCtxt :: TyClDecl Name -> TcM a -> TcM a
 tcAddDeclCtxt decl thing_inside
@@ -395,44 +391,44 @@ tcAddDeclCtxt decl thing_inside
 
 badMethodErr :: Outputable a => a -> Name -> SDoc
 badMethodErr clas op
-  = hsep [ptext (sLit "Class"), quotes (ppr clas),
-          ptext (sLit "does not have a method"), quotes (ppr op)]
+  = hsep [text "Class", quotes (ppr clas),
+          text "does not have a method", quotes (ppr op)]
 
 badGenericMethod :: Outputable a => a -> Name -> SDoc
 badGenericMethod clas op
-  = hsep [ptext (sLit "Class"), quotes (ppr clas),
-          ptext (sLit "has a generic-default signature without a binding"), quotes (ppr op)]
+  = hsep [text "Class", quotes (ppr clas),
+          text "has a generic-default signature without a binding", quotes (ppr op)]
 
 {-
 badGenericInstanceType :: LHsBinds Name -> SDoc
 badGenericInstanceType binds
-  = vcat [ptext (sLit "Illegal type pattern in the generic bindings"),
+  = vcat [text "Illegal type pattern in the generic bindings",
           nest 2 (ppr binds)]
 
 missingGenericInstances :: [Name] -> SDoc
 missingGenericInstances missing
-  = ptext (sLit "Missing type patterns for") <+> pprQuotedList missing
+  = text "Missing type patterns for" <+> pprQuotedList missing
 
 dupGenericInsts :: [(TyCon, InstInfo a)] -> SDoc
 dupGenericInsts tc_inst_infos
-  = vcat [ptext (sLit "More than one type pattern for a single generic type constructor:"),
+  = vcat [text "More than one type pattern for a single generic type constructor:",
           nest 2 (vcat (map ppr_inst_ty tc_inst_infos)),
-          ptext (sLit "All the type patterns for a generic type constructor must be identical")
+          text "All the type patterns for a generic type constructor must be identical"
     ]
   where
     ppr_inst_ty (_,inst) = ppr (simpleInstInfoTy inst)
 -}
 badDmPrag :: Id -> Sig Name -> TcM ()
 badDmPrag sel_id prag
-  = addErrTc (ptext (sLit "The") <+> hsSigDoc prag <+> ptext (sLit "for default method")
+  = addErrTc (text "The" <+> hsSigDoc prag <+> ptext (sLit "for default method")
               <+> quotes (ppr sel_id)
-              <+> ptext (sLit "lacks an accompanying binding"))
+              <+> text "lacks an accompanying binding")
 
 warningMinimalDefIncomplete :: ClassMinimalDef -> SDoc
 warningMinimalDefIncomplete mindef
-  = vcat [ ptext (sLit "The MINIMAL pragma does not require:")
+  = vcat [ text "The MINIMAL pragma does not require:"
          , nest 2 (pprBooleanFormulaNice mindef)
-         , ptext (sLit "but there is no default implementation.") ]
+         , text "but there is no default implementation." ]
 
 tcATDefault :: Bool -- If a warning should be emitted when a default instance
                     -- definition is not provided by the user
@@ -456,7 +452,7 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
   | Just (rhs_ty, _loc) <- defs
   = do { let (subst', pat_tys') = mapAccumL subst_tv inst_subst
                                             (tyConTyVars fam_tc)
-             rhs'     = substTy subst' rhs_ty
+             rhs'     = substTyUnchecked subst' rhs_ty
              tcv_set' = tyCoVarsOfTypes pat_tys'
              (tv_set', cv_set') = partitionVarSet isTyVar tcv_set'
              tvs'     = varSetElemsWellScoped tv_set'
@@ -471,8 +467,7 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
 
        ; traceTc "mk_deflt_at_instance" (vcat [ ppr fam_tc, ppr rhs_ty
                                               , pprCoAxiom axiom ])
-       ; fam_inst <- ASSERT( tyCoVarsOfType rhs' `subVarSet` tv_set' )
-                     newFamInst SynFamilyInst axiom
+       ; fam_inst <- newFamInst SynFamilyInst axiom
        ; return [fam_inst] }
 
    -- No defaults ==> generate a warning
@@ -484,15 +479,15 @@ tcATDefault emit_warn loc inst_subst defined_ats (ATI fam_tc defs)
       | Just ty <- lookupVarEnv (getTvSubstEnv subst) tc_tv
       = (subst, ty)
       | otherwise
-      = (extendTCvSubst subst tc_tv ty', ty')
+      = (extendTvSubst subst tc_tv ty', ty')
       where
-        ty' = mkTyVarTy (updateTyVarKind (substTy subst) tc_tv)
+        ty' = mkTyVarTy (updateTyVarKind (substTyUnchecked subst) tc_tv)
 
 warnMissingAT :: Name -> TcM ()
 warnMissingAT name
   = do { warn <- woptM Opt_WarnMissingMethods
        ; traceTc "warn" (ppr name <+> ppr warn)
        ; warnTc warn  -- Warn only if -Wmissing-methods
-                (ptext (sLit "No explicit") <+> text "associated type"
-                    <+> ptext (sLit "or default declaration for     ")
+                (text "No explicit" <+> text "associated type"
+                    <+> text "or default declaration for     "
                     <+> quotes (ppr name)) }

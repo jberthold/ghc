@@ -10,8 +10,8 @@ module Specialise ( specProgram, specUnfolding ) where
 #include "HsVersions.h"
 
 import Id
-import TcType hiding( substTy, extendTCvSubstList )
-import Type   hiding( substTy, extendTCvSubstList )
+import TcType hiding( substTy )
+import Type   hiding( substTy, extendTvSubstList )
 import Coercion( Coercion )
 import Module( Module, HasModule(..) )
 import CoreMonad
@@ -722,11 +722,11 @@ specImport dflags this_mod top_env done callers rb fn calls_for_fn
        ; return (rules2 ++ rules1, final_binds) }
 
   |  warnMissingSpecs dflags callers
-  = do { warnMsg (vcat [ hang (ptext (sLit "Could not specialise imported function") <+> quotes (ppr fn))
-                            2 (vcat [ ptext (sLit "when specialising") <+> quotes (ppr caller)
+  = do { warnMsg (vcat [ hang (text "Could not specialise imported function" <+> quotes (ppr fn))
+                            2 (vcat [ text "when specialising" <+> quotes (ppr caller)
                                     | caller <- callers])
-                      , ifPprDebug (ptext (sLit "calls:") <+> vcat (map (pprCallInfo fn) calls_for_fn))
-                      , ptext (sLit "Probable fix: add INLINEABLE pragma on") <+> quotes (ppr fn) ])
+                      , ifPprDebug (text "calls:" <+> vcat (map (pprCallInfo fn) calls_for_fn))
+                      , text "Probable fix: add INLINEABLE pragma on" <+> quotes (ppr fn) ])
        ; return ([], []) }
 
   | otherwise
@@ -766,7 +766,7 @@ Suppose
  * Import Lib(foo) into another module M
  * Call 'foo' at some specialised type in M
 Then you jolly well expect it to be specialised in M.  But what if
-'foo' calls another fuction 'Lib.bar'.  Then you'd like 'bar' to be
+'foo' calls another function 'Lib.bar'.  Then you'd like 'bar' to be
 specialised too.  But if 'bar' is not marked INLINEABLE it may well
 not be specialised.  The warning Opt_WarnMissedSpecs warns about this.
 
@@ -1169,7 +1169,7 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
 
   | otherwise   -- No calls or RHS doesn't fit our preconceptions
   = WARN( not (exprIsTrivial rhs) && notNull calls_for_me,
-          ptext (sLit "Missed specialisation opportunity for")
+          text "Missed specialisation opportunity for"
                                  <+> ppr fn $$ _trace_doc )
           -- Note [Specialisation shape]
     -- pprTrace "specDefn: none" (ppr fn <+> ppr calls_for_me) $
@@ -1241,7 +1241,7 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                 -- spec_tyvars = [a,c]
                 -- ty_args     = [t1,b,t3]
                 spec_tv_binds = [(tv,ty) | (tv, Just ty) <- rhs_tyvars `zip` call_ts]
-                env1          = extendTCvSubstList env spec_tv_binds
+                env1          = extendTvSubstList env spec_tv_binds
                 (rhs_env, poly_tyvars) = substBndrs env1
                                             [tv | (tv, Nothing) <- rhs_tyvars `zip` call_ts]
 
@@ -1260,7 +1260,7 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
            {    -- Figure out the type of the specialised function
              let body_ty = applyTypeToArgs rhs fn_type rule_args
                  (lam_args, app_args)           -- Add a dummy argument if body_ty is unlifted
-                   | isUnLiftedType body_ty     -- C.f. WwLib.mkWorkerArgs
+                   | isUnliftedType body_ty     -- C.f. WwLib.mkWorkerArgs
                    = (poly_tyvars ++ [voidArgId], poly_tyvars ++ [voidPrimId])
                    | otherwise = (poly_tyvars, poly_tyvars)
                  spec_id_ty = mkPiTypes lam_args body_ty
@@ -1273,9 +1273,9 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                 --      forall b, d1',d2'.  f t1 b t3 d1' d2' = f1 b
                 herald = case mb_mod of
                            Nothing        -- Specialising local fn
-                               -> ptext (sLit "SPEC")
+                               -> text "SPEC"
                            Just this_mod  -- Specialising imoprted fn
-                               -> ptext (sLit "SPEC/") <> ppr this_mod
+                               -> text "SPEC/" <> ppr this_mod
 
                 rule_name = mkFastString $ showSDocForUser dflags neverQualify $
                             herald <+> ppr fn <+> hsep (map ppr_call_key_ty call_ts)
@@ -1664,7 +1664,7 @@ have the big, un-optimised of f (albeit specialised) captured in an
 INLINABLE pragma for f_spec, we won't get that optimisation.
 
 So we simply drop INLINABLE pragmas when specialising. It's not really
-a complete solution; ignoring specalisation for now, INLINABLE functions
+a complete solution; ignoring specialisation for now, INLINABLE functions
 don't get properly strictness analysed, for example. But it works well
 for examples involving specialisation, which is the dominant use of
 INLINABLE.  See Trac #4874.
@@ -1694,9 +1694,9 @@ data UsageDetails
 
 instance Outputable UsageDetails where
   ppr (MkUD { ud_binds = dbs, ud_calls = calls })
-        = ptext (sLit "MkUD") <+> braces (sep (punctuate comma
-                [ptext (sLit "binds") <+> equals <+> ppr dbs,
-                 ptext (sLit "calls") <+> equals <+> ppr calls]))
+        = text "MkUD" <+> braces (sep (punctuate comma
+                [text "binds" <+> equals <+> ppr dbs,
+                 text "calls" <+> equals <+> ppr calls]))
 
 -- | A 'DictBind' is a binding along with a cached set containing its free
 -- variables (both type variables and dictionaries)
@@ -1724,7 +1724,7 @@ data CallInfoSet = CIS Id (Map CallKey ([DictExpr], VarSet))
 type CallInfo = (CallKey, ([DictExpr], VarSet))
 
 instance Outputable CallInfoSet where
-  ppr (CIS fn map) = hang (ptext (sLit "CIS") <+> ppr fn)
+  ppr (CIS fn map) = hang (text "CIS" <+> ppr fn)
                         2 (ppr map)
 
 pprCallInfo :: Id -> CallInfo -> SDoc
@@ -2133,9 +2133,9 @@ mapAndCombineSM f (x:xs) = do (y, uds1) <- f x
                               (ys, uds2) <- mapAndCombineSM f xs
                               return (y:ys, uds1 `plusUDs` uds2)
 
-extendTCvSubstList :: SpecEnv -> [(TyVar,Type)] -> SpecEnv
-extendTCvSubstList env tv_binds
-  = env { se_subst = CoreSubst.extendTCvSubstList (se_subst env) tv_binds }
+extendTvSubstList :: SpecEnv -> [(TyVar,Type)] -> SpecEnv
+extendTvSubstList env tv_binds
+  = env { se_subst = CoreSubst.extendTvSubstList (se_subst env) tv_binds }
 
 substTy :: SpecEnv -> Type -> Type
 substTy env ty = CoreSubst.substTy (se_subst env) ty

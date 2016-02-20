@@ -161,7 +161,7 @@ doingLDVProfiling( void )
             || RtsFlags.ProfFlags.bioSelector != NULL);
 }
 
-STATIC_INLINE rtsBool
+rtsBool
 doingRetainerProfiling( void )
 {
     return (RtsFlags.ProfFlags.doHeapProfile == HEAP_BY_RETAINER
@@ -515,7 +515,7 @@ fprint_ccs(FILE *fp, CostCentreStack *ccs, nat max_length)
         return;
     }
 
-    fprintf(fp, "(%ld)", ccs->ccsID);
+    fprintf(fp, "(%" FMT_Int ")", ccs->ccsID);
 
     p = buf;
     buf_end = buf + max_length + 1;
@@ -961,7 +961,6 @@ heapCensusChain( Census *census, bdescr *bd )
 
             case CONSTR:
             case FUN:
-            case IND_PERM:
             case BLACKHOLE:
             case BLOCKING_QUEUE:
             case FUN_1_0:

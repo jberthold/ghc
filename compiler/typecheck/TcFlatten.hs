@@ -26,7 +26,6 @@ import DynFlags( DynFlags )
 import Util
 import Bag
 import Pair
-import FastString
 import Control.Monad
 import MonadUtils ( zipWithAndUnzipM )
 import GHC.Exts ( inline )
@@ -914,9 +913,9 @@ flatten_one (TyVarTy tv)
        ; role <- getRole
        ; case mb_yes of
            FTRCasted tv' kco -> -- Done
-                       do { traceFlat "flattenTyVar1"
-                              (pprTvBndr tv' $$
-                               ppr kco <+> dcolon <+> ppr (coercionKind kco))
+                       do { -- traceFlat "flattenTyVar1"
+                            --   (pprTvBndr tv' $$
+                            --    ppr kco <+> dcolon <+> ppr (coercionKind kco))
                           ; return (ty', mkReflCo role ty
                                          `mkCoherenceLeftCo` mkSymCo kco) }
                     where
@@ -925,7 +924,7 @@ flatten_one (TyVarTy tv)
 
            FTRFollowed ty1 co1  -- Recur
                     -> do { (ty2, co2) <- flatten_one ty1
-                          ; traceFlat "flattenTyVar2" (ppr tv $$ ppr ty2)
+                          -- ; traceFlat "flattenTyVar2" (ppr tv $$ ppr ty2)
                           ; return (ty2, co2 `mkTransCo` co1) } }
 
 flatten_one (AppTy ty1 ty2)
@@ -957,7 +956,7 @@ flatten_one (TyConApp tc tys)
   -- Expand type synonyms that mention type families
   -- on the RHS; see Note [Flattening synonyms]
   | Just (tenv, rhs, tys') <- expandSynTyCon_maybe tc tys
-  , let expanded_ty = mkAppTys (substTy (mkTopTCvSubst tenv) rhs) tys'
+  , let expanded_ty = mkAppTys (substTy (mkTvSubstPrs tenv) rhs) tys'
   = do { mode <- getMode
        ; let used_tcs = tyConsOfType rhs
        ; case mode of
@@ -1036,7 +1035,7 @@ flatten_ty_con_app tc tys
        ; let role = eqRelRole eq_rel
        ; (xis, cos) <- case eq_rel of
                          NomEq  -> flatten_many_nom tys
-                         ReprEq -> flatten_many (tyConRolesX role tc) tys
+                         ReprEq -> flatten_many (tyConRolesRepresentational tc) tys
        ; return (mkTyConApp tc xis, mkTyConAppCo role tc cos) }
 
 {-
@@ -1341,10 +1340,10 @@ flatten_tyvar3 tv
            <- setMode FM_SubstOnly $
               flattenKinds $
               flatten_one kind
-       ; traceFlat "flattenTyVarFinal"
-           (vcat [ ppr tv <+> dcolon <+> ppr (tyVarKind tv)
-                 , ppr _new_kind
-                 , ppr kind_co <+> dcolon <+> ppr (coercionKind kind_co) ])
+--       ; traceFlat "flattenTyVarFinal"
+--           (vcat [ ppr tv <+> dcolon <+> ppr (tyVarKind tv)
+--                 , ppr _new_kind
+--                 , ppr kind_co <+> dcolon <+> ppr (coercionKind kind_co) ])
        ; let Pair _ orig_kind = coercionKind kind_co
              -- orig_kind might be zonked
        ; return (FTRCasted (setTyVarKind tv orig_kind) kind_co) }
@@ -1439,8 +1438,8 @@ unflatten tv_eqs funeqs
       ; tclvl    <- getTcLevel
 
       ; traceTcS "Unflattening" $ braces $
-        vcat [ ptext (sLit "Funeqs =") <+> pprCts funeqs
-             , ptext (sLit "Tv eqs =") <+> pprCts tv_eqs ]
+        vcat [ text "Funeqs =" <+> pprCts funeqs
+             , text "Tv eqs =" <+> pprCts tv_eqs ]
 
          -- Step 1: unflatten the CFunEqCans, except if that causes an occurs check
          -- Occurs check: consider  [W] alpha ~ [F alpha]

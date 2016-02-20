@@ -192,13 +192,15 @@ import GHC.Serialized   ( Serialized )
 
 import Foreign
 import Control.Monad    ( guard, liftM, when, ap )
-import Control.Concurrent
 import Data.IORef
 import Data.Time
 import Data.Typeable    ( Typeable )
 import Exception
 import System.FilePath
+#ifdef GHCI
+import Control.Concurrent
 import System.Process   ( ProcessHandle )
+#endif
 
 -- -----------------------------------------------------------------------------
 -- Compilation state
@@ -397,7 +399,7 @@ data HscEnv
         hsc_type_env_var :: Maybe (Module, IORef TypeEnv)
                 -- ^ Used for one-shot compilation only, to initialise
                 -- the 'IfGblEnv'. See 'TcRnTypes.tcg_type_env_var' for
-                -- 'TcRunTypes.TcGblEnv'
+                -- 'TcRnTypes.TcGblEnv'
 
 #ifdef GHCI
         , hsc_iserv :: MVar (Maybe IServ)
@@ -405,10 +407,6 @@ data HscEnv
                 -- time it is needed.
 #endif
  }
-
-instance ContainsDynFlags HscEnv where
-    extractDynFlags env = hsc_dflags env
-    replaceDynFlags env dflags = env {hsc_dflags = dflags}
 
 #ifdef GHCI
 data IServ = IServ
@@ -606,8 +604,8 @@ hptSomeThingsBelowUs extract include_hi_boot hsc_env deps
     , let things = case lookupUFM hpt mod of
                     Just info -> extract info
                     Nothing -> pprTrace "WARNING in hptSomeThingsBelowUs" msg []
-          msg = vcat [ptext (sLit "missing module") <+> ppr mod,
-                      ptext (sLit "Probable cause: out-of-date interface files")]
+          msg = vcat [text "missing module" <+> ppr mod,
+                      text "Probable cause: out-of-date interface files"]
                         -- This really shouldn't happen, but see Trac #962
 
         -- And get its dfuns
@@ -1227,7 +1225,7 @@ The details are a bit tricky though:
    extend the HPT.
 
  * The 'thisPackage' field of DynFlags is *not* set to 'interactive'.
-   It stays as 'main' (or whatever -this-package-key says), and is the
+   It stays as 'main' (or whatever -this-unit-id says), and is the
    package to which :load'ed modules are added to.
 
  * So how do we arrange that declarations at the command prompt get to
@@ -1236,7 +1234,7 @@ The details are a bit tricky though:
    call to initTc in initTcInteractive, which in turn get the module
    from it 'icInteractiveModule' field of the interactive context.
 
-   The 'thisPackage' field stays as 'main' (or whatever -this-package-key says.
+   The 'thisPackage' field stays as 'main' (or whatever -this-unit-id says.
 
  * The main trickiness is that the type environment (tcg_type_env) and
    fixity envt (tcg_fix_env), now contain entities from all the
@@ -1527,7 +1525,7 @@ substInteractiveContext ictxt@InteractiveContext{ ic_tythings = tts } subst
   | isEmptyTCvSubst subst = ictxt
   | otherwise             = ictxt { ic_tythings = map subst_ty tts }
   where
-    subst_ty (AnId id) = AnId $ id `setIdType` substTy subst (idType id)
+    subst_ty (AnId id) = AnId $ id `setIdType` substTyUnchecked subst (idType id)
     subst_ty tt        = tt
 
 instance Outputable InteractiveImport where
@@ -2664,20 +2662,20 @@ isNoIfaceVectInfo (IfaceVectInfo l1 l2 l3 l4 l5)
 
 instance Outputable VectInfo where
   ppr info = vcat
-             [ ptext (sLit "variables       :") <+> ppr (vectInfoVar            info)
-             , ptext (sLit "tycons          :") <+> ppr (vectInfoTyCon          info)
-             , ptext (sLit "datacons        :") <+> ppr (vectInfoDataCon        info)
-             , ptext (sLit "parallel vars   :") <+> ppr (vectInfoParallelVars   info)
-             , ptext (sLit "parallel tycons :") <+> ppr (vectInfoParallelTyCons info)
+             [ text "variables       :" <+> ppr (vectInfoVar            info)
+             , text "tycons          :" <+> ppr (vectInfoTyCon          info)
+             , text "datacons        :" <+> ppr (vectInfoDataCon        info)
+             , text "parallel vars   :" <+> ppr (vectInfoParallelVars   info)
+             , text "parallel tycons :" <+> ppr (vectInfoParallelTyCons info)
              ]
 
 instance Outputable IfaceVectInfo where
   ppr info = vcat
-             [ ptext (sLit "variables       :") <+> ppr (ifaceVectInfoVar            info)
-             , ptext (sLit "tycons          :") <+> ppr (ifaceVectInfoTyCon          info)
-             , ptext (sLit "tycons reuse    :") <+> ppr (ifaceVectInfoTyConReuse     info)
-             , ptext (sLit "parallel vars   :") <+> ppr (ifaceVectInfoParallelVars   info)
-             , ptext (sLit "parallel tycons :") <+> ppr (ifaceVectInfoParallelTyCons info)
+             [ text "variables       :" <+> ppr (ifaceVectInfoVar            info)
+             , text "tycons          :" <+> ppr (ifaceVectInfoTyCon          info)
+             , text "tycons reuse    :" <+> ppr (ifaceVectInfoTyConReuse     info)
+             , text "parallel vars   :" <+> ppr (ifaceVectInfoParallelVars   info)
+             , text "parallel tycons :" <+> ppr (ifaceVectInfoParallelTyCons info)
              ]
 
 
@@ -2742,10 +2740,10 @@ numToTrustInfo 4 = setSafeMode Sf_Safe -- retained for backwards compat, used
 numToTrustInfo n = error $ "numToTrustInfo: bad input number! (" ++ show n ++ ")"
 
 instance Outputable IfaceTrustInfo where
-    ppr (TrustInfo Sf_None)          = ptext $ sLit "none"
-    ppr (TrustInfo Sf_Unsafe)        = ptext $ sLit "unsafe"
-    ppr (TrustInfo Sf_Trustworthy)   = ptext $ sLit "trustworthy"
-    ppr (TrustInfo Sf_Safe)          = ptext $ sLit "safe"
+    ppr (TrustInfo Sf_None)          = text "none"
+    ppr (TrustInfo Sf_Unsafe)        = text "unsafe"
+    ppr (TrustInfo Sf_Trustworthy)   = text "trustworthy"
+    ppr (TrustInfo Sf_Safe)          = text "safe"
 
 instance Binary IfaceTrustInfo where
     put_ bh iftrust = putByte bh $ trustInfoToNum iftrust

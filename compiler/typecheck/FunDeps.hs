@@ -23,7 +23,7 @@ import Name
 import Var
 import Class
 import Type
-import TcType( immSuperClasses )
+import TcType( transSuperClasses )
 import Unify
 import InstEnv
 import VarSet
@@ -32,7 +32,6 @@ import Outputable
 import ErrUtils( Validity(..), allValid )
 import SrcLoc
 import Util
-import FastString
 
 import Pair             ( Pair(..) )
 import Data.List        ( nubBy )
@@ -185,8 +184,8 @@ improveFromAnother _ _ _ = []
 
 pprEquation :: FunDepEqn a -> SDoc
 pprEquation (FDEqn { fd_qtvs = qtvs, fd_eqs = pairs })
-  = vcat [ptext (sLit "forall") <+> braces (pprWithCommas ppr qtvs),
-          nest 2 (vcat [ ppr t1 <+> ptext (sLit "~") <+> ppr t2
+  = vcat [text "forall" <+> braces (pprWithCommas ppr qtvs),
+          nest 2 (vcat [ ppr t1 <+> text "~" <+> ppr t2
                        | Pair t1 t2 <- pairs])]
 
 improveFromInstEnv :: InstEnvs
@@ -258,9 +257,9 @@ improveClsFD clas_tvs fd
              length tys_inst == length clas_tvs
             , ppr tys_inst <+> ppr tys_actual )
 
-    case tcMatchTys qtv_set ltys1 ltys2 of
+    case tcMatchTys ltys1 ltys2 of
         Nothing  -> []
-        Just subst | isJust (tcMatchTysX qtv_set subst rtys1 rtys2)
+        Just subst | isJust (tcMatchTysX subst rtys1 rtys2)
                         -- Don't include any equations that already hold.
                         -- Reason: then we know if any actual improvement has happened,
                         --         in which case we need to iterate the solver
@@ -287,7 +286,7 @@ improveClsFD clas_tvs fd
                         -- executed.  What we're doing instead is recording the partial
                         -- work of the ls1/ls2 unification leaving a smaller unification problem
                   where
-                    rtys1' = map (substTy subst) rtys1
+                    rtys1' = map (substTyUnchecked subst) rtys1
 
                     fdeqs = zipAndComputeFDEqs (\_ _ -> False) rtys1' rtys2
                         -- Don't discard anything!
@@ -295,7 +294,7 @@ improveClsFD clas_tvs fd
                         -- eqType again, since we know for sure that /at least one/
                         -- equation in there is useful)
 
-                    meta_tvs = [ setVarType tv (substTy subst (varType tv))
+                    meta_tvs = [ setVarType tv (substTyUnchecked subst (varType tv))
                                | tv <- qtvs, tv `notElemTCvSubst` subst ]
                         -- meta_tvs are the quantified type variables
                         -- that have not been substituted out
@@ -314,7 +313,6 @@ improveClsFD clas_tvs fd
                         --              whose kind mentions that kind variable!
                         --          Trac #6015, #6068
   where
-    qtv_set = mkVarSet qtvs
     (ltys1, rtys1) = instFD fd clas_tvs tys_inst
     (ltys2, rtys2) = instFD fd clas_tvs tys_actual
 
@@ -390,26 +388,26 @@ checkInstCoverage be_liberal clas theta inst_taus
                       -- , text "theta" <+> ppr theta
                       -- , text "oclose" <+> ppr (oclose theta (closeOverKinds ls_tvs))
                       -- , text "rs_tvs" <+> ppr rs_tvs
-                      sep [ ptext (sLit "The")
-                            <+> ppWhen be_liberal (ptext (sLit "liberal"))
-                            <+> ptext (sLit "coverage condition fails in class")
+                      sep [ text "The"
+                            <+> ppWhen be_liberal (text "liberal")
+                            <+> text "coverage condition fails in class"
                             <+> quotes (ppr clas)
-                          , nest 2 $ ptext (sLit "for functional dependency:")
+                          , nest 2 $ text "for functional dependency:"
                             <+> quotes (pprFunDep fd) ]
-                    , sep [ ptext (sLit "Reason: lhs type")<>plural ls <+> pprQuotedList ls
+                    , sep [ text "Reason: lhs type"<>plural ls <+> pprQuotedList ls
                           , nest 2 $
                             (if isSingleton ls
-                             then ptext (sLit "does not")
-                             else ptext (sLit "do not jointly"))
-                            <+> ptext (sLit "determine rhs type")<>plural rs
+                             then text "does not"
+                             else text "do not jointly")
+                            <+> text "determine rhs type"<>plural rs
                             <+> pprQuotedList rs ]
-                    , ptext (sLit "Un-determined variable") <> plural undet_list <> colon
+                    , text "Un-determined variable" <> plural undet_list <> colon
                             <+> pprWithCommas ppr undet_list
                     , ppWhen (isEmptyVarSet $ pSnd undetermined_tvs) $
-                      ptext (sLit "(Use -fprint-explicit-kinds to see the kind variables in the types)")
+                      text "(Use -fprint-explicit-kinds to see the kind variables in the types)"
                     , ppWhen (not be_liberal &&
                               and (isEmptyVarSet <$> liberal_undet_tvs)) $
-                      ptext (sLit "Using UndecidableInstances might help") ]
+                      text "Using UndecidableInstances might help" ]
 
 {- Note [Closing over kinds in coverage]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -512,18 +510,17 @@ oclose preds fixed_tvs
     tv_fds  :: [(TyCoVarSet,TyCoVarSet)]
     tv_fds  = [ (tyCoVarsOfTypes ls, tyCoVarsOfTypes rs)
               | pred <- preds
-              , (ls, rs) <- determined pred ]
+              , pred' <- pred : transSuperClasses pred
+                   -- Look for fundeps in superclasses too
+              , (ls, rs) <- determined pred' ]
 
     determined :: PredType -> [([Type],[Type])]
     determined pred
        = case classifyPredType pred of
             EqPred NomEq t1 t2 -> [([t1],[t2]), ([t2],[t1])]
-            ClassPred cls tys -> local_fds ++ concatMap determined superclasses
-              where
-               local_fds = [ instFD fd cls_tvs tys
-                           | fd <- cls_fds ]
-               (cls_tvs, cls_fds) = classTvsFds cls
-               superclasses = immSuperClasses cls tys
+            ClassPred cls tys  -> [ instFD fd cls_tvs tys
+                                  | let (cls_tvs, cls_fds) = classTvsFds cls
+                                  , fd <- cls_fds ]
             _ -> []
 
 {-
@@ -600,7 +597,7 @@ checkFunDeps inst_envs (ClsInst { is_tvs = qtvs1, is_cls = cls
           Just subst
             -> isNothing $   -- Bogus legacy test (Trac #10675)
                              -- See Note [Bogus consistency check]
-               tcUnifyTys bind_fn (substTys subst rtys1) (substTys subst rtys2)
+               tcUnifyTys bind_fn (substTysUnchecked subst rtys1) (substTysUnchecked subst rtys2)
 
       where
         trimmed_tcs    = trimRoughMatchTcs cls_tvs fd rough_tcs1

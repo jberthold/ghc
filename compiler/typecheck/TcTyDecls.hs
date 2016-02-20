@@ -30,7 +30,6 @@ module TcTyDecls(
 
 import TcRnMonad
 import TcEnv
-import TcTypeable( mkTypeableBinds )
 import TcBinds( tcRecSelBinds )
 import TyCoRep( Type(..), TyBinder(..), delBinderVar )
 import TcType
@@ -191,12 +190,12 @@ checkClassCycles :: Class -> Maybe SDoc
 checkClassCycles cls
   = do { (definite_cycle, err) <- go (unitNameSet (getName cls))
                                      cls (mkTyVarTys (classTyVars cls))
-       ; let herald | definite_cycle = ptext (sLit "Superclass cycle for")
-                    | otherwise      = ptext (sLit "Potential superclass cycle for")
+       ; let herald | definite_cycle = text "Superclass cycle for"
+                    | otherwise      = text "Potential superclass cycle for"
        ; return (vcat [ herald <+> quotes (ppr cls)
                       , nest 2 err, hint]) }
   where
-    hint = ptext (sLit "Use UndecidableSuperClasses to accept this")
+    hint = text "Use UndecidableSuperClasses to accept this"
 
     -- Expand superclasses starting with (C a b), complaining
     -- if you find the same class a second time, or a type function
@@ -218,7 +217,7 @@ checkClassCycles cls
        | Just (tc, tys) <- tcSplitTyConApp_maybe pred
        = go_tc so_far pred tc tys
        | hasTyVarHead pred
-       = Just (False, hang (ptext (sLit "one of whose superclass constraints is headed by a type variable:"))
+       = Just (False, hang (text "one of whose superclass constraints is headed by a type variable:")
                          2 (quotes (ppr pred)))
        | otherwise
        = Nothing
@@ -226,7 +225,7 @@ checkClassCycles cls
     go_tc :: NameSet -> PredType -> TyCon -> [Type] -> Maybe (Bool, SDoc)
     go_tc so_far pred tc tys
       | isFamilyTyCon tc
-      = Just (False, hang (ptext (sLit "one of whose superclass constraints is headed by a type family:"))
+      = Just (False, hang (text "one of whose superclass constraints is headed by a type family:")
                         2 (quotes (ppr pred)))
       | Just cls <- tyConClass_maybe tc
       = go_cls so_far cls tys
@@ -236,12 +235,12 @@ checkClassCycles cls
     go_cls :: NameSet -> Class -> [Type] -> Maybe (Bool, SDoc)
     go_cls so_far cls tys
        | cls_nm `elemNameSet` so_far
-       = Just (True, ptext (sLit "one of whose superclasses is") <+> quotes (ppr cls))
+       = Just (True, text "one of whose superclasses is" <+> quotes (ppr cls))
        | isCTupleClass cls
        = go so_far cls tys
        | otherwise
        = do { (b,err) <- go  (so_far `extendNameSet` cls_nm) cls tys
-          ; return (b, ptext (sLit "one of whose superclasses is") <+> quotes (ppr cls)
+          ; return (b, text "one of whose superclasses is" <+> quotes (ppr cls)
                        $$ err) }
        where
          cls_nm = getName cls
@@ -863,10 +862,7 @@ tcAddImplicits tycons
     do { traceTc "tcAddImplicits" $ vcat
             [ text "tycons" <+> ppr tycons
             , text "implicits" <+> ppr implicit_things ]
-       ; gbl_env <- mkTypeableBinds tycons
-       ; gbl_env <- setGblEnv gbl_env $
-                    tcRecSelBinds (mkRecSelBinds tycons)
-       ; return gbl_env }
+       ; tcRecSelBinds (mkRecSelBinds tycons) }
  where
    implicit_things = concatMap implicitTyConThings tycons
    def_meth_ids    = mkDefaultMethodIds tycons
@@ -877,7 +873,7 @@ mkDefaultMethodIds :: [TyCon] -> [Id]
 -- the filled-in default methods of each instance declaration
 -- See Note [Default method Ids and Template Haskell]
 mkDefaultMethodIds tycons
-  = [ mkExportedLocalId VanillaId dm_name (mk_dm_ty cls sel_id dm_spec)
+  = [ mkExportedVanillaId dm_name (mk_dm_ty cls sel_id dm_spec)
     | tc <- tycons
     , Just cls <- [tyConClass_maybe tc]
     , (sel_id, Just (dm_name, dm_spec)) <- classOpItems cls ]
@@ -1017,7 +1013,7 @@ mkOneRecordSelector all_cons idDetails fl
 
     (univ_tvs, _, eq_spec, _, req_theta, _, data_ty) = conLikeFullSig con1
 
-    eq_subst = mkTopTCvSubst (map eqSpecPair eq_spec)
+    eq_subst = mkTvSubstPrs (map eqSpecPair eq_spec)
     inst_tys = substTyVars eq_subst univ_tvs
 
     unit_rhs = mkLHsTupleExpr []

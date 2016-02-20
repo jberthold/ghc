@@ -69,10 +69,9 @@ import BasicTypes
 import Binary
 import Maybes           ( orElse )
 
-import Type            ( Type, isUnLiftedType )
+import Type            ( Type, isUnliftedType )
 import TyCon           ( isNewTyCon, isClassTyCon )
 import DataCon         ( splitDataProductType_maybe )
-import FastString
 
 {-
 ************************************************************************
@@ -787,8 +786,8 @@ data TypeShape = TsFun TypeShape
                | TsUnk
 
 instance Outputable TypeShape where
-  ppr TsUnk        = ptext (sLit "TsUnk")
-  ppr (TsFun ts)   = ptext (sLit "TsFun") <> parens (ppr ts)
+  ppr TsUnk        = text "TsUnk"
+  ppr (TsFun ts)   = text "TsFun" <> parens (ppr ts)
   ppr (TsProd tss) = parens (hsep $ punctuate comma $ map ppr tss)
 
 trimToType :: Demand -> TypeShape -> Demand
@@ -1334,7 +1333,7 @@ strictenDmd (JD { sd = s, ud = u})
     poke_u Abs       = UHead
     poke_u (Use _ u) = u
 
--- Deferring and peeeling
+-- Deferring and peeling
 
 type DmdShell   -- Describes the "outer shell"
                 -- of a Demand
@@ -1356,7 +1355,7 @@ toCleanDmd (JD { sd = s, ud = u }) expr_ty
                  Abs | is_unlifted -> (Use One (), Used)
                      | otherwise   -> (Abs,        Used)
 
-    is_unlifted = isUnLiftedType expr_ty
+    is_unlifted = isUnliftedType expr_ty
     -- See Note [Analysing with absent demand]
 
 

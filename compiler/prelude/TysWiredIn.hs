@@ -93,12 +93,10 @@ module TysWiredIn (
         liftedPromDataCon, unliftedPromDataCon,
         liftedDataConTy, unliftedDataConTy,
         liftedDataConName, unliftedDataConName,
-
-        -- * Helpers for building type representations
-        tyConRepModOcc
     ) where
 
 #include "HsVersions.h"
+#include "MachDeps.h"
 
 import {-# SOURCE #-} MkId( mkDataConWorkId, mkDictSelId )
 
@@ -120,7 +118,7 @@ import RdrName
 import Name
 import NameSet          ( NameSet, mkNameSet, elemNameSet )
 import BasicTypes       ( Arity, RecFlag(..), Boxity(..),
-                           TupleSort(..) )
+                          TupleSort(..) )
 import ForeignCall
 import SrcLoc           ( noSrcSpan )
 import Unique
@@ -135,48 +133,6 @@ alpha_tyvar = [alphaTyVar]
 
 alpha_ty :: [Type]
 alpha_ty = [alphaTy]
-
--- * Some helpers for generating type representations
-
--- | Make a 'Name' for the 'Typeable' representation of the given wired-in type
-mkPrelTyConRepName :: Name -> Name
--- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
--- This doesn't really belong here but a refactoring of this code eliminating
--- these manually-defined representations is imminent
-mkPrelTyConRepName tc_name  -- Prelude tc_name is always External,
-                            -- so nameModule will work
-  = mkExternalName rep_uniq rep_mod rep_occ (nameSrcSpan tc_name)
-  where
-    name_occ  = nameOccName tc_name
-    name_mod  = nameModule  tc_name
-    name_uniq = nameUnique  tc_name
-    rep_uniq | isTcOcc name_occ = tyConRepNameUnique   name_uniq
-             | otherwise        = dataConRepNameUnique name_uniq
-    (rep_mod, rep_occ) = tyConRepModOcc name_mod name_occ
-
--- | The name (and defining module) for the Typeable representation (TyCon) of a
--- type constructor.
---
--- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
-tyConRepModOcc :: Module -> OccName -> (Module, OccName)
-tyConRepModOcc tc_module tc_occ
-  -- The list type is defined in GHC.Types and therefore must have its
-  -- representations defined manually in Data.Typeable.Internal.
-  -- However, $tc': isn't a valid Haskell identifier, so we override the derived
-  -- name here.
-  | is_wired_in promotedConsDataCon
-  = (tYPEABLE_INTERNAL, mkOccName varName "tc'Cons")
-  | is_wired_in promotedNilDataCon
-  = (tYPEABLE_INTERNAL, mkOccName varName "tc'Nil")
-
-  | tc_module == gHC_TYPES
-  = (tYPEABLE_INTERNAL, mkTyConRepUserOcc tc_occ)
-  | otherwise
-  = (tc_module,         mkTyConRepSysOcc tc_occ)
-  where
-    is_wired_in :: TyCon -> Bool
-    is_wired_in tc =
-      tc_module == gHC_TYPES && tc_occ == nameOccName (tyConName tc)
 
 {-
 ************************************************************************
@@ -482,7 +438,7 @@ Note [How tuples work]  See also Note [Known-key names] in PrelNames
 * When looking up an OccName in the original-name cache
   (IfaceEnv.lookupOrigNameCache), we spot the tuple OccName to make sure
   we get the right wired-in name.  This guy can't tell the difference
-  betweeen BoxedTuple and ConstraintTuple (same OccName!), so tuples
+  between BoxedTuple and ConstraintTuple (same OccName!), so tuples
   are not serialised into interface files using OccNames at all.
 -}
 
@@ -651,6 +607,7 @@ unboxedUnitDataCon = tupleDataCon   Unboxed 0
 ********************************************************************* -}
 
 -- See Note [The equality types story] in TysPrim
+-- (:~~: :: forall k1 k2 (a :: k1) (b :: k2). a -> b -> Constraint)
 heqTyCon, coercibleTyCon :: TyCon
 heqClass, coercibleClass :: Class
 heqDataCon, coercibleDataCon :: DataCon
@@ -661,7 +618,7 @@ heqSCSelId, coercibleSCSelId :: Id
   where
     tycon     = mkClassTyCon heqTyConName kind tvs roles
                              rhs klass NonRecursive
-                             (mkSpecialTyConRepName (fsLit "tcHEq") heqTyConName)
+                             (mkPrelTyConRepName heqTyConName)
     klass     = mkClass tvs [] [sc_pred] [sc_sel_id] [] [] (mkAnd []) tycon
     datacon   = pcDataCon heqDataConName tvs [sc_pred] tycon
 
@@ -912,7 +869,7 @@ listTyCon = buildAlgTyCon listTyConName alpha_tyvar [Representational]
                           Nothing []
                           (DataTyCon [nilDataCon, consDataCon] False )
                           Recursive False
-                          (VanillaAlgTyCon (mkSpecialTyConRepName (fsLit "tcList") listTyConName))
+                          (VanillaAlgTyCon $ mkPrelTyConRepName listTyConName)
 
 nilDataCon :: DataCon
 nilDataCon  = pcDataCon nilDataConName alpha_tyvar [] listTyCon

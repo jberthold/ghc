@@ -101,6 +101,7 @@ import VarEnv           ( emptyTidyEnv )
 import THNames          ( templateHaskellNames )
 import Panic
 import ConLike
+import Control.Concurrent
 #endif
 
 import Module
@@ -162,7 +163,6 @@ import Stream (Stream)
 import Util
 
 import Data.List
-import Control.Concurrent
 import Control.Monad
 import Data.IORef
 import System.FilePath as FilePath
@@ -184,7 +184,9 @@ newHscEnv dflags = do
     us      <- mkSplitUniqSupply 'r'
     nc_var  <- newIORef (initNameCache us allKnownKeyNames)
     fc_var  <- newIORef emptyModuleEnv
+#ifdef GHCI
     iserv_mvar <- newMVar Nothing
+#endif
     return HscEnv {  hsc_dflags       = dflags
                   ,  hsc_targets      = []
                   ,  hsc_mod_graph    = []
@@ -1434,8 +1436,8 @@ myCoreToStg :: DynFlags -> Module -> CoreProgram
             -> IO ( [StgBinding] -- output program
                   , CollectedCCs) -- cost centre info (declared and used)
 myCoreToStg dflags this_mod prepd_binds = do
-    stg_binds
-        <- {-# SCC "Core2Stg" #-}
+    let stg_binds
+         = {-# SCC "Core2Stg" #-}
            coreToStg dflags this_mod prepd_binds
 
     (stg_binds2, cost_centre_info)
@@ -1621,7 +1623,7 @@ hscImport hsc_env str = runInteractiveHsc hsc_env $ do
         [L _ i] -> return i
         _ -> liftIO $ throwOneError $
                  mkPlainErrMsg (hsc_dflags hsc_env) noSrcSpan $
-                     ptext (sLit "parse error in import declaration")
+                     text "parse error in import declaration"
 
 -- | Typecheck an expression (but don't run it)
 -- Returns its most general type

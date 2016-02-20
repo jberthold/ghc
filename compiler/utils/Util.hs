@@ -14,7 +14,7 @@ module Util (
         zipEqual, zipWithEqual, zipWith3Equal, zipWith4Equal,
         zipLazy, stretchZipWith, zipWithAndUnzip,
 
-        filterByList, partitionByList,
+        filterByList, filterByLists, partitionByList,
 
         unzipWith,
 
@@ -34,6 +34,8 @@ module Util (
         notNull, snocView,
 
         isIn, isn'tIn,
+
+        chunkList,
 
         -- * Tuples
         fstOf3, sndOf3, thdOf3,
@@ -329,6 +331,23 @@ filterByList (True:bs)  (x:xs) = x : filterByList bs xs
 filterByList (False:bs) (_:xs) =     filterByList bs xs
 filterByList _          _      = []
 
+-- | 'filterByLists' takes a list of Bools and two lists as input, and
+-- outputs a new list consisting of elements from the last two input lists. For
+-- each Bool in the list, if it is 'True', then it takes an element from the
+-- former list. If it is 'False', it takes an element from the latter list.
+-- The elements taken correspond to the index of the Bool in its list.
+-- For example:
+--
+-- @
+-- filterByLists [True, False, True, False] \"abcd\" \"wxyz\" = \"axcz\"
+-- @
+--
+-- This function does not check whether the lists have equal length.
+filterByLists :: [Bool] -> [a] -> [a] -> [a]
+filterByLists (True:bs)  (x:xs) (_:ys) = x : filterByLists bs xs ys
+filterByLists (False:bs) (_:xs) (y:ys) = y : filterByLists bs xs ys
+filterByLists _          _      _      = []
+
 -- | 'partitionByList' takes a list of Bools and a list of some elements and
 -- partitions the list according to the list of Bools. Elements corresponding
 -- to 'True' go to the left; elements corresponding to 'False' go to the right.
@@ -502,6 +521,12 @@ isn'tIn msg x ys
       | i > 100 = trace ("Over-long notElem in " ++ msg) (x `notElem` (y:ys))
       | otherwise = x /= y && notElem100 (i + 1) x ys
 # endif /* DEBUG */
+
+
+-- | Split a list into chunks of /n/ elements
+chunkList :: Int -> [a] -> [[a]]
+chunkList _ [] = []
+chunkList n xs = as : chunkList n bs where (as,bs) = splitAt n xs
 
 {-
 ************************************************************************

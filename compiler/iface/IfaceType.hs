@@ -505,7 +505,7 @@ toIfaceTcArgs tc ty_args
       | otherwise            = ITC_Invis t' ts'
       where
         t'  = toIfaceType t
-        ts' = go (extendTCvSubstBinder env bndr t) res ts
+        ts' = go (extendTvSubstBinder env bndr t) res ts
 
     go env (TyVarTy tv) ts
       | Just ki <- lookupTyVar env tv = go env ki ts
@@ -637,7 +637,7 @@ ppr_ty ctxt_prec (IfaceAppTy ty1 ty2)
 
 ppr_ty ctxt_prec (IfaceCastTy ty co)
   = maybeParen ctxt_prec FunPrec $
-    sep [ppr_ty FunPrec ty, ptext (sLit "`cast`"), ppr_co FunPrec co]
+    sep [ppr_ty FunPrec ty, text "`cast`", ppr_co FunPrec co]
 
 ppr_ty ctxt_prec (IfaceCoercionTy co)
   = ppr_co ctxt_prec co
@@ -778,7 +778,7 @@ pprTyTcApp :: TyPrec -> IfaceTyCon -> IfaceTcArgs -> DynFlags -> SDoc
 pprTyTcApp ctxt_prec tc tys dflags
   | ifaceTyConName tc `hasKey` ipClassKey
   , ITC_Vis (IfaceLitTy (IfaceStrTyLit n)) (ITC_Vis ty ITC_Nil) <- tys
-  = char '?' <> ftext n <> ptext (sLit "::") <> ppr_ty TopPrec ty
+  = char '?' <> ftext n <> text "::" <> ppr_ty TopPrec ty
 
   | ifaceTyConName tc == consDataConName
   , not (gopt Opt_PrintExplicitKinds dflags)
@@ -873,7 +873,7 @@ ppr_co _         (IfaceCoVarCo covar)       = ppr covar
 
 ppr_co ctxt_prec (IfaceUnivCo IfaceUnsafeCoerceProv r ty1 ty2)
   = maybeParen ctxt_prec TyConPrec $
-    ptext (sLit "UnsafeCo") <+> ppr r <+>
+    text "UnsafeCo" <+> ppr r <+>
     pprParendIfaceType ty1 <+> pprParendIfaceType ty2
 
 ppr_co _         (IfaceUnivCo _ _ ty1 ty2)
@@ -881,7 +881,7 @@ ppr_co _         (IfaceUnivCo _ _ ty1 ty2)
 
 ppr_co ctxt_prec (IfaceInstCo co ty)
   = maybeParen ctxt_prec TyConPrec $
-    ptext (sLit "Inst") <+> pprParendIfaceCoercion co
+    text "Inst" <+> pprParendIfaceCoercion co
                         <+> pprParendIfaceCoercion ty
 
 ppr_co ctxt_prec (IfaceAxiomRuleCo tc cos)
@@ -891,12 +891,12 @@ ppr_co ctxt_prec co
   = ppr_special_co ctxt_prec doc cos
   where (doc, cos) = case co of
                      { IfaceAxiomInstCo n i cos -> (ppr n <> brackets (ppr i), cos)
-                     ; IfaceSymCo co            -> (ptext (sLit "Sym"), [co])
-                     ; IfaceTransCo co1 co2     -> (ptext (sLit "Trans"), [co1,co2])
-                     ; IfaceNthCo d co          -> (ptext (sLit "Nth:") <> int d,
+                     ; IfaceSymCo co            -> (text "Sym", [co])
+                     ; IfaceTransCo co1 co2     -> (text "Trans", [co1,co2])
+                     ; IfaceNthCo d co          -> (text "Nth:" <> int d,
                                                     [co])
                      ; IfaceLRCo lr co          -> (ppr lr, [co])
-                     ; IfaceSubCo co            -> (ptext (sLit "Sub"), [co])
+                     ; IfaceSubCo co            -> (text "Sub", [co])
                      ; _                        -> panic "pprIfaceCo" }
 
 ppr_special_co :: TyPrec -> SDoc -> [IfaceCoercion] -> SDoc

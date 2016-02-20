@@ -55,8 +55,7 @@ test('divbyzero',
 
 test('outofmem', when(opsys('darwin'), skip),
                  run_command, ['$MAKE -s --no-print-directory outofmem'])
-test('outofmem2', extra_run_opts('+RTS -M5m -RTS'),
-                  run_command, ['$MAKE -s --no-print-directory outofmem2'])
+test('outofmem2', normal, run_command, ['$MAKE -s --no-print-directory outofmem2'])
 
 test('T2047', [ignore_output, extra_run_opts('+RTS -c -RTS')],
               compile_and_run, ['-package containers'])
@@ -267,15 +266,9 @@ test('rdynamic', [ unless(opsys('linux') or opsys('mingw32'), skip)
                  ],
      compile_and_run, ['-rdynamic -package ghc'])
 
-test('GcStaticPointers',
-     [ when(compiler_lt('ghc', '7.9'), skip)
-     , when(doing_ghci(), extra_hc_opts('-fobject-code'))
-     ],
+test('GcStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, [''])
-test('ListStaticPointers',
-     [ when(compiler_lt('ghc', '7.9'), skip)
-     , when(doing_ghci(), extra_hc_opts('-fobject-code'))
-     ],
+test('ListStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, [''])
 
 # 251 = RTS exit code for "out of memory"
@@ -334,5 +327,5 @@ test('T10590', [ignore_output, when(opsys('mingw32'),skip)], compile_and_run, ['
 test('T10904', [ omit_ways(['ghci']), extra_run_opts('20000') ],
                compile_and_run, ['T10904lib.c'])
 
-test('T10728', [extra_run_opts('+RTS -maxN3 -RTS'), req_smp],
-           compile_and_run, ['-threaded'])
+test('T10728', [extra_run_opts('+RTS -maxN3 -RTS'), only_ways(['threaded2'])],
+               compile_and_run, [''])

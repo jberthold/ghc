@@ -2,9 +2,7 @@
 
 {-# LANGUAGE CPP #-}
  -- This module used to take 10GB of memory to compile with the new
- -- (Nov '15) pattern-match check. In order to be able to compile it,
- -- do not enable -ffull-guard-reasoning. Instead, simplify the guards
- -- (default behaviour when guards are too many).
+ -- (Nov '15) pattern-match checker.
 
 module OptCoercion ( optCoercion, checkAxInstCo ) where
 
@@ -12,7 +10,7 @@ module OptCoercion ( optCoercion, checkAxInstCo ) where
 
 import TyCoRep
 import Coercion
-import Type hiding( substTyVarBndr, substTy, extendTCvSubst )
+import Type hiding( substTyVarBndr, substTy )
 import TcType       ( exactTyCoVarsOfType )
 import TyCon
 import CoAxiom
@@ -23,7 +21,6 @@ import Outputable
 import FamInstEnv ( flattenTys )
 import Pair
 import ListSetOps ( getNth )
-import FastString
 import Util
 import Unify
 import InstEnv
@@ -92,8 +89,8 @@ optCoercion env co
         (Pair in_ty1  in_ty2,  in_role)  = coercionKindRole co
         (Pair out_ty1 out_ty2, out_role) = coercionKindRole out_co
     in
-    ASSERT2( substTy env in_ty1 `eqType` out_ty1 &&
-             substTy env in_ty2 `eqType` out_ty2 &&
+    ASSERT2( substTyUnchecked env in_ty1 `eqType` out_ty1 &&
+             substTyUnchecked env in_ty2 `eqType` out_ty2 &&
              in_role == out_role
            , text "optCoercion changed types!"
              $$ hang (text "in_co:") 2 (ppr co)
@@ -183,7 +180,7 @@ opt_co4 env sym rep r g@(TyConAppCo _r tc cos)
       (True, Nominal) ->
         mkTyConAppCo Representational tc
                      (zipWith3 (opt_co3 env sym)
-                               (map Just (tyConRolesX Representational tc))
+                               (map Just (tyConRolesRepresentational tc))
                                (repeat Nominal)
                                cos)
       (False, Nominal) ->
@@ -192,7 +189,7 @@ opt_co4 env sym rep r g@(TyConAppCo _r tc cos)
                       -- must use opt_co2 here, because some roles may be P
                       -- See Note [Optimising coercion optimisation]
         mkTyConAppCo r tc (zipWith (opt_co2 env sym)
-                                   (tyConRolesX r tc)  -- the current roles
+                                   (tyConRolesRepresentational tc)  -- the current roles
                                    cos)
       (_, Phantom) -> pprPanic "opt_co4 sees a phantom!" (ppr g)
 
@@ -214,7 +211,7 @@ opt_co4 env sym rep r (CoVarCo cv)
   = ASSERT( isCoVar cv1 ) wrapRole rep r $ wrapSym sym (CoVarCo cv1)
                 -- cv1 might have a substituted kind!
 
-  | otherwise = WARN( True, ptext (sLit "opt_co: not in scope:") <+> ppr cv $$ ppr env)
+  | otherwise = WARN( True, text "opt_co: not in scope:" <+> ppr cv $$ ppr env)
                 ASSERT( isCoVar cv )
                 wrapRole rep r $ wrapSym sym (CoVarCo cv)
 
@@ -372,8 +369,8 @@ opt_univ env sym prov role oty1 oty2
     mkForAllCo tv1' eta' (opt_univ env' sym prov role ty1 ty2')
 
   | otherwise
-  = let ty1 = substTy (lcSubstLeft  env) oty1
-        ty2 = substTy (lcSubstRight env) oty2
+  = let ty1 = substTyUnchecked (lcSubstLeft  env) oty1
+        ty2 = substTyUnchecked (lcSubstRight env) oty2
         (a, b) | sym       = (ty2, ty1)
                | otherwise = (ty1, ty2)
     in
@@ -571,7 +568,7 @@ opt_trans_rule is co1 co2
       mkForAllCo tv1 (opt_trans is eta1 eta2) (opt_trans is' r1 r2')
     where
       is' = is `extendInScopeSet` tv1
-      r2' = substCoWith [tv2] [TyVarTy tv1] r2
+      r2' = substCoWithUnchecked [tv2] [TyVarTy tv1] r2
 
 -- Push transitivity inside axioms
 opt_trans_rule is co1 co2
@@ -723,8 +720,8 @@ checkAxInstCo (AxiomInstCo ax ind cos)
         incomps      = coAxBranchIncomps branch
         (tys, cotys) = splitAtList tvs (map (pFst . coercionKind) cos)
         co_args      = map stripCoercionTy cotys
-        subst        = zipOpenTCvSubst tvs tys `composeTCvSubst`
-                       zipOpenTCvSubstCoVars cvs co_args
+        subst        = zipTvSubst tvs tys `composeTCvSubst`
+                       zipCvSubst cvs co_args
         target   = Type.substTys subst (coAxBranchLHS branch)
         in_scope = mkInScopeSet $
                    unionVarSets (map (tyCoVarsOfTypes . coAxBranchLHS) incomps)

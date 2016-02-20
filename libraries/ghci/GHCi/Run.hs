@@ -23,6 +23,8 @@ import Control.Concurrent
 import Control.DeepSeq
 import Control.Exception
 import Control.Monad
+import Data.Binary
+import Data.Binary.Get
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Unsafe as B
 import GHC.Exts
@@ -51,7 +53,7 @@ run m = case m of
   RemoveLibrarySearchPath ptr -> removeLibrarySearchPath (fromRemotePtr ptr)
   ResolveObjs -> resolveObjs
   FindSystemLibrary str -> findSystemLibrary str
-  CreateBCOs bco -> createBCOs bco
+  CreateBCOs bcos -> createBCOs (concatMap (runGet get) bcos)
   FreeHValueRefs rs -> mapM_ freeRemoteRef rs
   EvalStmt opts r -> evalStmt opts r
   ResumeStmt opts r -> resumeStmt opts r
@@ -59,8 +61,7 @@ run m = case m of
   EvalString r -> evalString r
   EvalStringToString r s -> evalStringToString r s
   EvalIO r -> evalIO r
-  MkCostCentre mod name src ->
-    toRemotePtr <$> mkCostCentre (fromRemotePtr mod) name src
+  MkCostCentres mod ccs -> mkCostCentres mod ccs
   CostCentreStackInfo ptr -> ccsToStrings (fromRemotePtr ptr)
   NewBreakArray sz -> mkRemoteRef =<< newBreakArray sz
   EnableBreakpoint ref ix b -> do
@@ -76,6 +77,7 @@ run m = case m of
     aps <- localRef ref
     mapM mkRemoteRef =<< getIdValFromApStack aps ix
   MallocData bs -> mkString bs
+  MallocStrings bss -> mapM mkString0 bss
   PrepFFI conv args res -> toRemotePtr <$> prepForeignCall conv args res
   FreeFFI p -> freeForeignCallInfo (fromRemotePtr p)
   MkConInfoTable ptrs nptrs tag desc ->
@@ -324,17 +326,28 @@ mkString bs = B.unsafeUseAsCStringLen bs $ \(cstr,len) -> do
   copyBytes ptr cstr len
   return (castRemotePtr (toRemotePtr ptr))
 
-mkCostCentre :: Ptr CChar -> String -> String -> IO (Ptr CostCentre)
+mkString0 :: ByteString -> IO (RemotePtr ())
+mkString0 bs = B.unsafeUseAsCStringLen bs $ \(cstr,len) -> do
+  ptr <- mallocBytes (len+1)
+  copyBytes ptr cstr len
+  pokeElemOff (ptr :: Ptr CChar) len 0
+  return (castRemotePtr (toRemotePtr ptr))
+
+mkCostCentres :: String -> [(String,String)] -> IO [RemotePtr CostCentre]
 #if defined(PROFILING)
-mkCostCentre c_module decl_path srcspan = do
-  c_name <- newCString decl_path
-  c_srcspan <- newCString srcspan
-  c_mkCostCentre c_name c_module c_srcspan
+mkCostCentres mod ccs = do
+  c_module <- newCString mod
+  mapM (mk_one c_module) ccs
+ where
+  mk_one c_module (decl_path,srcspan) = do
+    c_name <- newCString decl_path
+    c_srcspan <- newCString srcspan
+    toRemotePtr <$> c_mkCostCentre c_name c_module c_srcspan
 
 foreign import ccall unsafe "mkCostCentre"
   c_mkCostCentre :: Ptr CChar -> Ptr CChar -> Ptr CChar -> IO (Ptr CostCentre)
 #else
-mkCostCentre _ _ _ = return nullPtr
+mkCostCentres _ _ = return []
 #endif
 
 getIdValFromApStack :: HValue -> Int -> IO (Maybe HValue)

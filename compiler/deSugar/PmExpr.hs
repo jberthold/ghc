@@ -7,7 +7,7 @@ Haskell expressions (as used by the pattern matching checker) and utilities.
 {-# LANGUAGE CPP #-}
 
 module PmExpr (
-        PmExpr(..), PmLit(..), SimpleEq, ComplexEq, eqPmLit,
+        PmExpr(..), PmLit(..), SimpleEq, ComplexEq, toComplex, eqPmLit,
         truePmExpr, falsePmExpr, isTruePmExpr, isFalsePmExpr, isNotPmExprOther,
         lhsExprToPmExpr, hsExprToPmExpr, substComplexEq, filterComplex,
         pprPmExprWithParens, runPmPprM
@@ -17,13 +17,13 @@ module PmExpr (
 
 import HsSyn
 import Id
+import Name
+import NameSet
 import DataCon
 import TysWiredIn
 import Outputable
 import Util
 import SrcLoc
-import FastString -- sLit
-import VarSet
 
 import Data.Maybe (mapMaybe)
 import Data.List (groupBy, sortBy, nubBy)
@@ -51,7 +51,7 @@ refer to variables that are otherwise substituted away.
 -- ** Types
 
 -- | Lifted expressions for pattern match checking.
-data PmExpr = PmExprVar   Id
+data PmExpr = PmExprVar   Name
             | PmExprCon   DataCon [PmExpr]
             | PmExprLit   PmLit
             | PmExprEq    PmExpr PmExpr  -- Syntactic equality
@@ -141,6 +141,10 @@ nubPmLit = nubBy eqPmLit
 type SimpleEq  = (Id, PmExpr) -- We always use this orientation
 type ComplexEq = (PmExpr, PmExpr)
 
+-- | Lift a `SimpleEq` to a `ComplexEq`
+toComplex :: SimpleEq -> ComplexEq
+toComplex (x,e) = (PmExprVar (idName x), e)
+
 -- | Expression `True'
 truePmExpr :: PmExpr
 truePmExpr = PmExprCon trueDataCon []
@@ -194,7 +198,7 @@ isConsDataCon con = consDataCon == con
 
 -- | We return a boolean along with the expression. Hence, if substitution was
 -- a no-op, we know that the expression still cannot progress.
-substPmExpr :: Id -> PmExpr -> PmExpr -> (PmExpr, Bool)
+substPmExpr :: Name -> PmExpr -> PmExpr -> (PmExpr, Bool)
 substPmExpr x e1 e =
   case e of
     PmExprVar z | x == z    -> (e1, True)
@@ -209,7 +213,7 @@ substPmExpr x e1 e =
 
 -- | Substitute in a complex equality. We return (Left eq) if the substitution
 -- affected the equality or (Right eq) if nothing happened.
-substComplexEq :: Id -> PmExpr -> ComplexEq -> Either ComplexEq ComplexEq
+substComplexEq :: Name -> PmExpr -> ComplexEq -> Either ComplexEq ComplexEq
 substComplexEq x e (ex, ey)
   | bx || by  = Left  (ex', ey')
   | otherwise = Right (ex', ey')
@@ -225,12 +229,12 @@ lhsExprToPmExpr (L _ e) = hsExprToPmExpr e
 
 hsExprToPmExpr :: HsExpr Id -> PmExpr
 
-hsExprToPmExpr (HsVar         x) = PmExprVar (unLoc x)
+hsExprToPmExpr (HsVar         x) = PmExprVar (idName (unLoc x))
 hsExprToPmExpr (HsOverLit  olit) = PmExprLit (PmOLit False olit)
 hsExprToPmExpr (HsLit       lit) = PmExprLit (PmSLit lit)
 
 hsExprToPmExpr e@(NegApp _ neg_e)
-  | PmExprLit (PmOLit False ol) <- hsExprToPmExpr neg_e
+  | PmExprLit (PmOLit False ol) <- synExprToPmExpr neg_e
   = PmExprLit (PmOLit True ol)
   | otherwise = PmExprOther e
 hsExprToPmExpr (HsPar (L _ e)) = hsExprToPmExpr e
@@ -271,6 +275,9 @@ hsExprToPmExpr (ExprWithTySigOut  e _) = lhsExprToPmExpr e
 hsExprToPmExpr (HsWrap            _ e) =  hsExprToPmExpr e
 hsExprToPmExpr e = PmExprOther e -- the rest are not handled by the oracle
 
+synExprToPmExpr :: SyntaxExpr Id -> PmExpr
+synExprToPmExpr = hsExprToPmExpr . syn_expr  -- ignore the wrappers
+
 {-
 %************************************************************************
 %*                                                                      *
@@ -310,7 +317,7 @@ Check.hs) to be more precice.
 -- -----------------------------------------------------------------------------
 -- ** Transform residual constraints in appropriate form for pretty printing
 
-type PmNegLitCt = (Id, (SDoc, [PmLit]))
+type PmNegLitCt = (Name, (SDoc, [PmLit]))
 
 filterComplex :: [ComplexEq] -> [PmNegLitCt]
 filterComplex = zipWith rename nameList . map mkGroup
@@ -332,27 +339,27 @@ filterComplex = zipWith rename nameList . map mkGroup
 
     -- Try nice names p,q,r,s,t before using the (ugly) t_i
     nameList :: [SDoc]
-    nameList = map (ptext . sLit) ["p","q","r","s","t"] ++
-                 [ ptext (sLit ('t':show u)) | u <- [(0 :: Int)..] ]
+    nameList = map text ["p","q","r","s","t"] ++
+                 [ text ('t':show u) | u <- [(0 :: Int)..] ]
 
 -- ----------------------------------------------------------------------------
 
 runPmPprM :: PmPprM a -> [PmNegLitCt] -> (a, [(SDoc,[PmLit])])
 runPmPprM m lit_env = (result, mapMaybe is_used lit_env)
   where
-    (result, (_lit_env, used)) = runState m (lit_env, emptyVarSet)
+    (result, (_lit_env, used)) = runState m (lit_env, emptyNameSet)
 
     is_used (x,(name, lits))
-      | elemVarSet x used = Just (name, lits)
+      | elemNameSet x used = Just (name, lits)
       | otherwise         = Nothing
 
-type PmPprM a = State ([PmNegLitCt], IdSet) a
+type PmPprM a = State ([PmNegLitCt], NameSet) a
 -- (the first part of the state is read only. make it a reader?)
 
-addUsed :: Id -> PmPprM ()
-addUsed x = modify (\(negated, used) -> (negated, extendVarSet used x))
+addUsed :: Name -> PmPprM ()
+addUsed x = modify (\(negated, used) -> (negated, extendNameSet used x))
 
-checkNegation :: Id -> PmPprM (Maybe SDoc) -- the clean name if it is negated
+checkNegation :: Name -> PmPprM (Maybe SDoc) -- the clean name if it is negated
 checkNegation x = do
   negated <- gets fst
   return $ case lookup x negated of

@@ -45,10 +45,11 @@ import TcType
 import Outputable
 import TcExpr
 import SrcLoc
-import FastString
 import THNames
 import TcUnify
 import TcEnv
+
+import Control.Monad
 
 #ifdef GHCI
 import GHCi.Message
@@ -100,9 +101,10 @@ import GHC.Serialized
 import ErrUtils
 import Util
 import Unique
-import VarSet           ( isEmptyVarSet, filterVarSet )
+import VarSet           ( isEmptyVarSet, filterVarSet, mkVarSet, elemVarSet )
 import Data.List        ( find )
 import Data.Maybe
+import FastString
 import BasicTypes hiding( SuccessFlag(..) )
 import Maybes( MaybeErr(..) )
 import DynFlags
@@ -138,9 +140,9 @@ import GHC.Exts         ( unsafeCoerce# )
 ************************************************************************
 -}
 
-tcTypedBracket   :: HsBracket Name -> TcRhoType -> TcM (HsExpr TcId)
-tcUntypedBracket :: HsBracket Name -> [PendingRnSplice] -> TcRhoType -> TcM (HsExpr TcId)
-tcSpliceExpr     :: HsSplice Name  -> TcRhoType -> TcM (HsExpr TcId)
+tcTypedBracket   :: HsBracket Name -> ExpRhoType -> TcM (HsExpr TcId)
+tcUntypedBracket :: HsBracket Name -> [PendingRnSplice] -> ExpRhoType -> TcM (HsExpr TcId)
+tcSpliceExpr     :: HsSplice Name  -> ExpRhoType -> TcM (HsExpr TcId)
         -- None of these functions add constraints to the LIE
 
 -- runQuasiQuoteExpr :: HsQuasiQuote RdrName -> RnM (LHsExpr RdrName)
@@ -184,7 +186,7 @@ tcTypedBracket brack@(TExpBr expr) res_ty
 tcTypedBracket other_brack _
   = pprPanic "tcTypedBracket" (ppr other_brack)
 
--- tcUntypedBracket :: HsBracket Name -> [PendingRnSplice] -> TcRhoType -> TcM (HsExpr TcId)
+-- tcUntypedBracket :: HsBracket Name -> [PendingRnSplice] -> ExpRhoType -> TcM (HsExpr TcId)
 tcUntypedBracket brack ps res_ty
   = do { traceTc "tc_bracket untyped" (ppr brack $$ ppr ps)
        ; ps' <- mapM tcPendingSplice ps
@@ -207,7 +209,7 @@ tcBrackTy (TExpBr _)  = panic "tcUntypedBracket: Unexpected TExpBr"
 tcPendingSplice :: PendingRnSplice -> TcM PendingTcSplice
 tcPendingSplice (PendingRnSplice flavour splice_name expr)
   = do { res_ty <- tcMetaTy meta_ty_name
-       ; expr' <- tcMonoExpr expr res_ty
+       ; expr' <- tcMonoExpr expr (mkCheckExpType res_ty)
        ; return (PendingTcSplice splice_name expr') }
   where
      meta_ty_name = case flavour of
@@ -217,16 +219,22 @@ tcPendingSplice (PendingRnSplice flavour splice_name expr)
                        UntypedDeclSplice -> decsQTyConName
 
 ---------------
--- Takes a type tau and returns the type Q (TExp tau)
+-- Takes a tau and returns the type Q (TExp tau)
 tcTExpTy :: TcType -> TcM TcType
-tcTExpTy tau
-  = do { q    <- tcLookupTyCon qTyConName
+tcTExpTy exp_ty
+  = do { unless (isTauTy exp_ty) $ addErr (err_msg exp_ty)
+       ; q    <- tcLookupTyCon qTyConName
        ; texp <- tcLookupTyCon tExpTyConName
-       ; return (mkTyConApp q [mkTyConApp texp [tau]]) }
+       ; return (mkTyConApp q [mkTyConApp texp [exp_ty]]) }
+  where
+    err_msg ty
+      = vcat [ text "Illegal polytype:" <+> ppr ty
+             , text "The type of a Typed Template Haskell expression must" <+>
+               text "not have any quantification." ]
 
 quotationCtxtDoc :: HsBracket Name -> SDoc
 quotationCtxtDoc br_body
-  = hang (ptext (sLit "In the Template Haskell quotation"))
+  = hang (text "In the Template Haskell quotation")
          2 (ppr br_body)
 
 
@@ -445,14 +453,15 @@ tcSpliceExpr splice _
   = pprPanic "tcSpliceExpr" (ppr splice)
 
 tcNestedSplice :: ThStage -> PendingStuff -> Name
-                -> LHsExpr Name -> TcRhoType -> TcM (HsExpr Id)
+                -> LHsExpr Name -> ExpRhoType -> TcM (HsExpr Id)
     -- See Note [How brackets and nested splices are handled]
     -- A splice inside brackets
 tcNestedSplice pop_stage (TcPending ps_var lie_var) splice_name expr res_ty
-  = do { meta_exp_ty <- tcTExpTy res_ty
+  = do { res_ty <- expTypeToType res_ty
+       ; meta_exp_ty <- tcTExpTy res_ty
        ; expr' <- setStage pop_stage $
                   setConstraintVar lie_var $
-                  tcMonoExpr expr meta_exp_ty
+                  tcMonoExpr expr (mkCheckExpType meta_exp_ty)
        ; untypeq <- tcLookupId unTypeQName
        ; let expr'' = mkHsApp (nlHsTyApp untypeq [res_ty]) expr'
        ; ps <- readMutVar ps_var
@@ -464,13 +473,14 @@ tcNestedSplice pop_stage (TcPending ps_var lie_var) splice_name expr res_ty
 tcNestedSplice _ _ splice_name _ _
   = pprPanic "tcNestedSplice: rename stage found" (ppr splice_name)
 
-tcTopSplice :: LHsExpr Name -> TcRhoType -> TcM (HsExpr Id)
+tcTopSplice :: LHsExpr Name -> ExpRhoType -> TcM (HsExpr Id)
 tcTopSplice expr res_ty
   = do { -- Typecheck the expression,
          -- making sure it has type Q (T res_ty)
-         meta_exp_ty <- tcTExpTy res_ty
+         res_ty <- expTypeToType res_ty
+       ; meta_exp_ty <- tcTExpTy res_ty
        ; zonked_q_expr <- tcTopSpliceExpr Typed $
-                          tcMonoExpr expr meta_exp_ty
+                          tcMonoExpr expr (mkCheckExpType meta_exp_ty)
 
          -- Run the expression
        ; expr2 <- runMetaE zonked_q_expr
@@ -484,7 +494,7 @@ tcTopSplice expr res_ty
          -- These steps should never fail; this is a *typed* splice
        ; addErrCtxt (spliceResultDoc expr) $ do
        { (exp3, _fvs) <- rnLExpr expr2
-       ; exp4 <- tcMonoExpr exp3 res_ty
+       ; exp4 <- tcMonoExpr exp3 (mkCheckExpType res_ty)
        ; return (unLoc exp4) } }
 
 {-
@@ -497,14 +507,14 @@ tcTopSplice expr res_ty
 
 spliceCtxtDoc :: HsSplice Name -> SDoc
 spliceCtxtDoc splice
-  = hang (ptext (sLit "In the Template Haskell splice"))
+  = hang (text "In the Template Haskell splice")
          2 (pprSplice splice)
 
 spliceResultDoc :: LHsExpr Name -> SDoc
 spliceResultDoc expr
-  = sep [ ptext (sLit "In the result of the splice:")
-        , nest 2 (char '$' <> pprParendExpr expr)
-        , ptext (sLit "To see what the splice expanded to, use -ddump-splices")]
+  = sep [ text "In the result of the splice:"
+        , nest 2 (char '$' <> pprParendLExpr expr)
+        , text "To see what the splice expanded to, use -ddump-splices"]
 
 -------------------
 tcTopSpliceExpr :: SpliceType -> TcM (LHsExpr Id) -> TcM (LHsExpr Id)
@@ -870,7 +880,7 @@ instance TH.Quasi TcM where
 
       bindName name =
           addErr $
-          hang (ptext (sLit "The binder") <+> quotes (ppr name) <+> ptext (sLit "is not a NameU."))
+          hang (text "The binder" <+> quotes (ppr name) <+> ptext (sLit "is not a NameU."))
              2 (text "Probable cause: you used mkName instead of newName to generate a binding.")
 
   qAddModFinalizer fin = do
@@ -1069,7 +1079,7 @@ getAnnotationsByTypeRep th_name tyrep
 
 reifyInstances :: TH.Name -> [TH.Type] -> TcM [TH.Dec]
 reifyInstances th_nm th_tys
-   = addErrCtxt (ptext (sLit "In the argument of reifyInstances:")
+   = addErrCtxt (text "In the argument of reifyInstances:"
                  <+> ppr_th th_nm <+> sep (map ppr_th th_tys)) $
      do { loc <- getSrcSpanM
         ; rdr_ty <- cvt loc (mkThAppTs (TH.ConT th_nm) th_tys)
@@ -1104,8 +1114,8 @@ reifyInstances th_nm th_tys
                      ; let matches = lookupFamInstEnv inst_envs tc tys
                      ; traceTc "reifyInstances2" (ppr matches)
                      ; reifyFamilyInstances tc (map fim_instance matches) }
-            _  -> bale_out (hang (ptext (sLit "reifyInstances:") <+> quotes (ppr ty))
-                               2 (ptext (sLit "is not a class constraint or type family application"))) }
+            _  -> bale_out (hang (text "reifyInstances:" <+> quotes (ppr ty))
+                               2 (text "is not a class constraint or type family application")) }
   where
     doc = ClassInstanceCtx
     bale_out msg = failWithTc msg
@@ -1219,12 +1229,12 @@ tcLookupTh name
 
 notInScope :: TH.Name -> SDoc
 notInScope th_name = quotes (text (TH.pprint th_name)) <+>
-                     ptext (sLit "is not in scope at a reify")
+                     text "is not in scope at a reify"
         -- Ugh! Rather an indirect way to display the name
 
 notInEnv :: Name -> SDoc
 notInEnv name = quotes (ppr name) <+>
-                     ptext (sLit "is not in the type environment at a reify")
+                     text "is not in the type environment at a reify"
 
 ------------------------------
 reifyRoles :: TH.Name -> TcM [TH.Role]
@@ -1232,7 +1242,7 @@ reifyRoles th_name
   = do { thing <- getThing th_name
        ; case thing of
            AGlobal (ATyCon tc) -> return (map reify_role (tyConRoles tc))
-           _ -> failWithTc (ptext (sLit "No roles associated with") <+> (ppr thing))
+           _ -> failWithTc (text "No roles associated with" <+> (ppr thing))
        }
   where
     reify_role Nominal          = TH.NominalR
@@ -1295,7 +1305,7 @@ reifyTyCon tc
   = return (TH.PrimTyConI (reifyName tc) 2                False)
 
   | isPrimTyCon tc
-  = return (TH.PrimTyConI (reifyName tc) (tyConArity tc) (isUnLiftedTyCon tc))
+  = return (TH.PrimTyConI (reifyName tc) (tyConArity tc) (isUnliftedTyCon tc))
 
   | isTypeFamilyTyCon tc
   = do { let tvs      = tyConTyVars tc
@@ -1395,8 +1405,8 @@ reifyDataCon isGadtDataCon tys dc
              name      = reifyName dc
              -- Universal tvs present in eq_spec need to be filtered out, as
              -- they will not appear anywhere in the type.
-             subst     = mkTopTCvSubst (map eqSpecPair g_eq_spec)
-             g_unsbst_univ_tvs = filter (`notElemTCvSubst` subst) g_univ_tvs
+             eq_spec_tvs = mkVarSet (map eqSpecTyVar g_eq_spec)
+             g_unsbst_univ_tvs = filterOut (`elemVarSet` eq_spec_tvs) g_univ_tvs
 
        ; r_arg_tys <- reifyTypes (if isGadtDataCon then g_arg_tys else arg_tys)
 
@@ -1869,7 +1879,7 @@ reifyModule (TH.Module (TH.PkgName pkgString) (TH.ModName mString)) = do
         return $ TH.ModuleInfo usages
 
       reifyFromIface reifMod = do
-        iface <- loadInterfaceForModule (ptext (sLit "reifying module from TH for") <+> ppr reifMod) reifMod
+        iface <- loadInterfaceForModule (text "reifying module from TH for" <+> ppr reifMod) reifMod
         let usages = [modToTHMod m | usage <- mi_usages iface,
                                      Just m <- [usageToModule (moduleUnitId reifMod) usage] ]
         return $ TH.ModuleInfo usages
@@ -1884,8 +1894,8 @@ mkThAppTs :: TH.Type -> [TH.Type] -> TH.Type
 mkThAppTs fun_ty arg_tys = foldl TH.AppT fun_ty arg_tys
 
 noTH :: LitString -> SDoc -> TcM a
-noTH s d = failWithTc (hsep [ptext (sLit "Can't represent") <+> ptext s <+>
-                                ptext (sLit "in Template Haskell:"),
+noTH s d = failWithTc (hsep [text "Can't represent" <+> ptext s <+>
+                                text "in Template Haskell:",
                              nest 2 d])
 
 ppr_th :: TH.Ppr a => a -> SDoc

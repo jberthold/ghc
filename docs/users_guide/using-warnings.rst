@@ -19,7 +19,6 @@ generally likely to indicate bugs in your program. These are:
     * :ghc-flag:`-Wwarnings-deprecations`
     * :ghc-flag:`-Wdeprecated-flags`
     * :ghc-flag:`-Wunrecognised-pragmas`
-    * :ghc-flag:`-Wmissed-specialisations`
     * :ghc-flag:`-Wduplicate-constraints`
     * :ghc-flag:`-Wduplicate-exports`
     * :ghc-flag:`-Woverflowed-literals`
@@ -32,26 +31,41 @@ generally likely to indicate bugs in your program. These are:
     * :ghc-flag:`-Winline-rule-shadowing`
     * :ghc-flag:`-Wunsupported-llvm-version`
     * :ghc-flag:`-Wtabs`
+    * :ghc-flag:`-Wunrecognised-warning-flags`
 
 The following flags are simple ways to select standard "packages" of warnings:
 
 .. ghc-flag:: -W
 
-    Provides the standard warnings plus :ghc-flag:`-Wunused-binds`,
-    :ghc-flag:`-Wunused-matches`, :ghc-flag:`-Wunused-imports`,
-    :ghc-flag:`-Wincomplete-patterns`, :ghc-flag:`-Wdodgy-exports`, and
-    :ghc-flag:`-Wdodgy-imports`.
+    Provides the standard warnings plus
+
+    .. hlist::
+        :columns: 3
+
+        * :ghc-flag:`-Wunused-binds`
+        * :ghc-flag:`-Wunused-matches`
+        * :ghc-flag:`-Wunused-foralls`
+        * :ghc-flag:`-Wunused-imports`
+        * :ghc-flag:`-Wincomplete-patterns`
+        * :ghc-flag:`-Wdodgy-exports`
+        * :ghc-flag:`-Wdodgy-imports`
 
 .. ghc-flag:: -Wall
 
     Turns on all warning options that indicate potentially suspicious
     code. The warnings that are *not* enabled by :ghc-flag:`-Wall` are
-    :ghc-flag:`-Wincomplete-uni-patterns`,
-    :ghc-flag:`-Wincomplete-record-updates`,
-    :ghc-flag:`-Wmonomorphism-restriction`,
-    :ghc-flag:`-Wimplicit-prelude`, :ghc-flag:`-Wmissing-local-sigs`,
-    :ghc-flag:`-Wmissing-exported-sigs`, :ghc-flag:`-Wmissing-import-lists`
-    and :ghc-flag:`-Widentities`.
+
+    .. hlist::
+        :columns: 3
+
+        * :ghc-flag:`-Wincomplete-uni-patterns`
+        * :ghc-flag:`-Wincomplete-record-updates`
+        * :ghc-flag:`-Wmonomorphism-restriction`
+        * :ghc-flag:`-Wimplicit-prelude`
+        * :ghc-flag:`-Wmissing-local-sigs`
+        * :ghc-flag:`-Wmissing-exported-sigs`
+        * :ghc-flag:`-Wmissing-import-lists`
+        * :ghc-flag:`-Widentities`
 
 .. ghc-flag:: -Wcompat
 
@@ -60,8 +74,14 @@ The following flags are simple ways to select standard "packages" of warnings:
     eager to make their code future compatible to adapt to new features before
     they even generate warnings.
 
-    This currently enables :ghc-flag:`-Wmissing-monadfail-instance`,
-    :ghc-flag:`-Wsemigroup`, and :ghc-flag:`-Wnoncanonical-monoid-instances`.
+    This currently enables
+
+    .. hlist::
+        :columns: 3
+
+        * :ghc-flag:`-Wmissing-monadfail-instances`
+        * :ghc-flag:`-Wsemigroup`
+        * :ghc-flag:`-Wnoncanonical-monoid-instances`
 
 .. ghc-flag:: -Wno-compat
 
@@ -87,6 +107,13 @@ warning, simply give the corresponding ``-Wno-...`` option on the
 command line. For backwards compatibility with GHC versions prior to 8.0,
 all these warnings can still be controlled with ``-f(no-)warn-*`` instead
 of ``-W(no-)*``.
+
+.. ghc-flag:: -Wunrecognised-warning-flags
+
+    Enables warnings when the compiler encounters a ``-W...`` flag that is not
+    recognised.
+
+    This warning is on by default.
 
 .. ghc-flag:: -Wtyped-holes
 
@@ -161,6 +188,8 @@ of ``-W(no-)*``.
     that is marked as ``INLINEABLE`` (presumably to enable specialisation) cannot
     be specialised as it calls other functions that are themselves not specialised.
 
+    Note that these warnings will not throw errors if used with :ghc-flag:`-Werror`.
+
     These options are both off by default.
 
 .. ghc-flag:: -Wwarnings-deprecations
@@ -198,10 +227,32 @@ of ``-W(no-)*``.
      * If ``return`` is defined it must be canonical (i.e. ``return = pure``).
      * If ``(>>)`` is defined it must be canonical (i.e. ``(>>) = (*>)``).
 
-    Moreover, in 'Applicative' instance declarations:
+    Moreover, in ``Applicative`` instance declarations:
 
      * Warn if ``pure`` is defined backwards (i.e. ``pure = return``).
      * Warn if ``(*>)`` is defined backwards (i.e. ``(*>) = (>>)``).
+
+    This option is off by default.
+
+.. ghc-flag:: -Wnoncanonical-monadfail-instances
+
+    Warn if noncanonical ``Monad`` or ``MonadFail`` instances
+    declarations are detected.
+
+    When this warning is enabled, the following conditions are verified:
+
+    In ``Monad`` instances declarations warn if any of the following
+    conditions does not hold:
+
+     * If ``fail`` is defined it must be canonical
+       (i.e. ``fail = Control.Monad.Fail.fail``).
+
+    Moreover, in ``MonadFail`` instance declarations:
+
+     * Warn if ``fail`` is defined backwards
+       (i.e. ``fail = Control.Monad.fail``).
+
+    See also :ghc-flag:`-Wmissing-monadfail-instances`.
 
     This option is off by default.
 
@@ -218,14 +269,14 @@ of ``-W(no-)*``.
      * If ``mappend`` is defined it must be canonical
        (i.e. ``mappend = (Data.Semigroup.<>)``).
 
-    Moreover, in 'Semigroup' instance declarations:
+    Moreover, in ``Semigroup`` instance declarations:
 
      * Warn if ``(<>)`` is defined backwards (i.e. ``(<>) = mappend``).
 
     This warning is off by default. However, it is part of the
     :ghc-flag:`-Wcompat` option group.
 
-.. ghc-flag:: -Wmissing-monadfail-instance
+.. ghc-flag:: -Wmissing-monadfail-instances
 
     .. index::
        single: MFP
@@ -233,6 +284,8 @@ of ``-W(no-)*``.
 
     Warn when a failable pattern is used in a do-block that does not have a
     ``MonadFail`` instance.
+
+    See also :ghc-flag:`-Wnoncanonical-monadfail-instances`.
 
     Being part of the :ghc-flag:`-Wcompat` option group, this warning is off by
     default, but will be switched on in a future GHC release, as part of
@@ -317,10 +370,6 @@ of ``-W(no-)*``.
 
     Causes a warning to be emitted if an enumeration is empty, e.g.
     ``[5 .. 3]``.
-
-.. ghc-flag:: -Wlazy-unlifted-bindings
-
-    This flag is a no-op, and will be removed in GHC 7.10.
 
 .. ghc-flag:: -Wduplicate-constraints
 
@@ -474,40 +523,6 @@ of ``-W(no-)*``.
     This option isn't enabled by default because it can be very noisy,
     and it often doesn't indicate a bug in the program.
 
-.. ghc-flag:: -Wtoo-many-guards
-              -Wno-too-many-guards
-
-    .. index::
-       single: too many guards, warning
-
-    The option :ghc-flag:`-Wtoo-many-guards` warns about places where a
-    pattern match contains too many guards (over 20 at the moment).
-    It has an effect only if any form of exhaustivness/overlapping
-    checking is enabled (one of
-    :ghc-flag:`-Wincomplete-patterns`,
-    :ghc-flag:`-Wincomplete-uni-patterns`,
-    :ghc-flag:`-Wincomplete-record-updates`,
-    :ghc-flag:`-Woverlapping-patterns`). When enabled, the warning can be
-    suppressed by enabling either :ghc-flag:`-Wno-too-many-guards`, which just
-    hides the warning, or :ghc-flag:`-ffull-guard-reasoning` which runs the
-    full check, independently of the number of guards.
-
-.. ghc-flag:: -ffull-guard-reasoning
-
-    :implies: :ghc-flag:`-Wno-too-many-guards`
-
-    .. index::
-       single: guard reasoning, warning
-
-    The option :ghc-flag:`-ffull-guard-reasoning` forces pattern match checking
-    to run in full. This gives more precise warnings concerning pattern
-    guards but in most cases increases memory consumption and
-    compilation time. Hence, it is off by default. Enabling
-    :ghc-flag:`-ffull-guard-reasoning` also implies :ghc-flag:`-Wno-too-many-guards`.
-    Note that (like :ghc-flag:`-Wtoo-many-guards`) :ghc-flag:`-ffull-guard-reasoning`
-    makes a difference only if pattern match checking is already
-    enabled.
-
 .. ghc-flag:: -Wmissing-fields
 
     .. index::
@@ -599,13 +614,13 @@ of ``-W(no-)*``.
     about any polymorphic local bindings. As part of the warning GHC
     also reports the inferred type. The option is off by default.
 
-.. ghc-flag:: -Wmissing-pat-syn-sigs
+.. ghc-flag:: -Wmissing-pat-syn-signatures
 
     .. index::
          single: type signatures, missing, pattern synonyms
 
     If you would like GHC to check that every pattern synonym has a type
-    signature, use the :ghc-flag:`-Wmissing-pat-syn-sigs` option. If this option is
+    signature, use the :ghc-flag:`-Wmissing-pat-syn-signatures` option. If this option is
     used in conjunction with :ghc-flag:`-Wmissing-exported-sigs` then only
     exported pattern synonyms must have a type signature. GHC also reports the
     inferred type. This option is off by default.
@@ -819,13 +834,17 @@ of ``-W(no-)*``.
        single: unused matches, warning
        single: matches, unused
 
-    Report all unused variables which arise from pattern matches,
-    including patterns consisting of a single variable. This includes
-    unused type variables in type family instances. For instance
+    Report all unused variables which arise from term-level pattern matches,
+    including patterns consisting of a single variable. For instance
     ``f x y = []`` would report ``x`` and ``y`` as unused. The warning
     is suppressed if the variable name begins with an underscore, thus: ::
 
         f _x = True
+
+    Note that :ghc-flag:`-Wunused-matches` does not warn about variables which
+    arise from type-level patterns, as found in type family and data family
+    instances. This must be enabled separately through the
+    :ghc-flag:`-Wunused-type-patterns` flag.
 
 .. ghc-flag:: -Wunused-do-bind
 
@@ -847,6 +866,41 @@ of ``-W(no-)*``.
     Of course, in this particular situation you can do even better: ::
 
         do { mapM_ popInt xs ; return 10 }
+
+.. ghc-flag:: -Wunused-type-patterns
+
+    .. index::
+       single: unused type patterns, warning
+       single: type patterns, unused
+
+    Report all unused type variables which arise from patterns in type family
+    and data family instances. For instance: ::
+
+        type instance F x y = []
+
+    would report ``x`` and ``y`` as unused. The warning is suppressed if the
+    type variable name begins with an underscore, like so: ::
+
+        type instance F _x _y = []
+
+    Unlike :ghc-flag:`-Wunused-matches`, :ghc-flag:`-Wunused-type-variables` is
+    not implied by :ghc-flag:`-Wall`. The rationale for this decision is that
+    unlike term-level pattern names, type names are often chosen expressly for
+    documentation purposes, so using underscores in type names can make the
+    documentation harder to read.
+
+.. ghc-flag:: -Wunused-foralls
+
+    .. index::
+       single: unused foralls, warning
+       single: foralls, unused
+
+    Report all unused type variables which arise from explicit, user-written
+    ``forall`` statements. For instance: ::
+
+        g :: forall a b c. (b -> b)
+
+    would report ``a`` and ``c`` as unused.
 
 .. ghc-flag:: -Wwrong-do-bind
 

@@ -12,8 +12,8 @@ test('tcrun003', normal, compile_and_run, [''])
 test('tcrun004', normal, compile_and_run, [''])
 test('tcrun005', normal, compile_and_run, [''])
 test('Defer01', normal, compile_and_run, [''])
-test('TcNullaryTC', when(compiler_lt('ghc', '7.7'), skip), compile_and_run, [''])
-test('TcCoercible', when(compiler_lt('ghc', '7.7'), skip), compile_and_run, [''])
+test('TcNullaryTC', [], compile_and_run, [''])
+test('TcCoercible', [], compile_and_run, [''])
 
 # -----------------------------------------------------------------------------
 # Skip everything else if fast is on
@@ -114,3 +114,5 @@ test('T10284', exit_code(1), compile_and_run, [''])
 test('T11049', exit_code(1), compile_and_run, [''])
 test('T11230', normal, compile_and_run, [''])
 test('TypeOf', normal, compile_and_run, [''])
+test('T11120', normal, compile_and_run, [''])
+test('KindInvariant', normal, ghci_script, ['KindInvariant.script'])

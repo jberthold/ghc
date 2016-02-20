@@ -97,7 +97,7 @@ exprType (Lit lit)           = literalType lit
 exprType (Coercion co)       = coercionType co
 exprType (Let bind body)
   | NonRec tv rhs <- bind    -- See Note [Type bindings]
-  , Type ty <- rhs           = substTyWith [tv] [ty] (exprType body)
+  , Type ty <- rhs           = substTyWithUnchecked [tv] [ty] (exprType body)
   | otherwise                = exprType body
 exprType (Case _ _ ty _)     = ty
 exprType (Cast _ co)         = pSnd (coercionKind co)
@@ -175,18 +175,18 @@ applyTypeToArgs e op_ty args
                                   = go res_ty args
     go _ _ = pprPanic "applyTypeToArgs" panic_msg
 
-    -- go_ty_args: accumulate type arguments so we can instantiate all at once
+    -- go_ty_args: accumulate type arguments so we can
+    -- instantiate all at once with piResultTys
     go_ty_args op_ty rev_tys (Type ty : args)
        = go_ty_args op_ty (ty:rev_tys) args
     go_ty_args op_ty rev_tys (Coercion co : args)
        = go_ty_args op_ty (mkCoercionTy co : rev_tys) args
     go_ty_args op_ty rev_tys args
-       = go (applyTysD panic_msg_w_hdr op_ty (reverse rev_tys)) args
+       = go (piResultTys op_ty (reverse rev_tys)) args
 
-    panic_msg_w_hdr = hang (ptext (sLit "applyTypeToArgs")) 2 panic_msg
-    panic_msg = vcat [ ptext (sLit "Expression:") <+> pprCoreExpr e
-                     , ptext (sLit "Type:") <+> ppr op_ty
-                     , ptext (sLit "Args:") <+> ppr args ]
+    panic_msg = vcat [ text "Expression:" <+> pprCoreExpr e
+                     , text "Type:" <+> ppr op_ty
+                     , text "Args:" <+> ppr args ]
 
 
 {-
@@ -202,8 +202,8 @@ applyTypeToArgs e op_ty args
 mkCast :: CoreExpr -> Coercion -> CoreExpr
 mkCast e co
   | ASSERT2( coercionRole co == Representational
-           , ptext (sLit "coercion") <+> ppr co <+> ptext (sLit "passed to mkCast")
-             <+> ppr e <+> ptext (sLit "has wrong role") <+> ppr (coercionRole co) )
+           , text "coercion" <+> ppr co <+> ptext (sLit "passed to mkCast")
+             <+> ppr e <+> text "has wrong role" <+> ppr (coercionRole co) )
     isReflCo co
   = e
 
@@ -218,9 +218,9 @@ mkCast (Cast expr co2) co
   = WARN(let { Pair  from_ty  _to_ty  = coercionKind co;
                Pair _from_ty2  to_ty2 = coercionKind co2} in
             not (from_ty `eqType` to_ty2),
-             vcat ([ ptext (sLit "expr:") <+> ppr expr
-                   , ptext (sLit "co2:") <+> ppr co2
-                   , ptext (sLit "co:") <+> ppr co ]) )
+             vcat ([ text "expr:" <+> ppr expr
+                   , text "co2:" <+> ppr co2
+                   , text "co:" <+> ppr co ]) )
     mkCast expr (mkTransCo co2 co)
 
 mkCast (Tick t expr) co
@@ -429,7 +429,7 @@ bindNonRec bndr rhs body
 -- | Tests whether we have to use a @case@ rather than @let@ binding for this expression
 -- as per the invariants of 'CoreExpr': see "CoreSyn#let_app_invariant"
 needsCaseBinding :: Type -> CoreExpr -> Bool
-needsCaseBinding ty rhs = isUnLiftedType ty && not (exprOkForSpeculation rhs)
+needsCaseBinding ty rhs = isUnliftedType ty && not (exprOkForSpeculation rhs)
         -- Make a case expression instead of a let
         -- These can arise either from the desugarer,
         -- or from beta reductions: (\x.e) (x +# y)
@@ -585,7 +585,10 @@ filterAlts _tycon inst_tys imposs_cons alts
     impossible_alt inst_tys (DataAlt con, _, _) = dataConCannotMatch inst_tys con
     impossible_alt _  _                         = False
 
-refineDefaultAlt :: [Unique] -> TyCon -> [Type] -> [AltCon] -> [CoreAlt] -> (Bool, [CoreAlt])
+refineDefaultAlt :: [Unique] -> TyCon -> [Type]
+                 -> [AltCon]  -- Constructors tha cannot match the DEFAULT (if any)
+                 -> [CoreAlt]
+                 -> (Bool, [CoreAlt])
 -- Refine the default alterantive to a DataAlt,
 -- if there is a unique way to do so
 refineDefaultAlt us tycon tys imposs_deflt_cons all_alts
@@ -667,42 +670,72 @@ defeats combineIdenticalAlts (see Trac #7360).
 Note [Care with impossible-constructors when combining alternatives]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose we have (Trac #10538)
-   data T = A | B | C
+   data T = A | B | C | D
 
-   ... case x::T of
+      case x::T of   (Imposs-default-cons {A,B})
          DEFAULT -> e1
          A -> e2
          B -> e1
 
-When calling combineIdentialAlts, we'll have computed that the "impossible
-constructors" for the DEFAULT alt is {A,B}, since if x is A or B we'll
-take the other alternatives.  But suppose we combine B into the DEFAULT,
-to get
-   ... case x::T of
+When calling combineIdentialAlts, we'll have computed that the
+"impossible constructors" for the DEFAULT alt is {A,B}, since if x is
+A or B we'll take the other alternatives.  But suppose we combine B
+into the DEFAULT, to get
+
+      case x::T of   (Imposs-default-cons {A})
          DEFAULT -> e1
          A -> e2
+
 Then we must be careful to trim the impossible constructors to just {A},
 else we risk compiling 'e1' wrong!
+
+Not only that, but we take care when there is no DEFAULT beforehand,
+because we are introducing one.  Consider
+
+   case x of   (Imposs-default-cons {A,B,C})
+     A -> e1
+     B -> e2
+     C -> e1
+
+Then when combining the A and C alternatives we get
+
+   case x of   (Imposs-default-cons {B})
+     DEFAULT -> e1
+     B -> e2
+
+Note that we have a new DEFAULT branch that we didn't have before.  So
+we need delete from the "impossible-default-constructors" all the
+known-con alternatives that we have eliminated. (In Trac #11172 we
+missed the first one.)
+
 -}
 
-
-combineIdenticalAlts :: [AltCon] -> [CoreAlt] -> (Bool, [AltCon], [CoreAlt])
+combineIdenticalAlts :: [AltCon]    -- Constructors that cannot match DEFAULT
+                     -> [CoreAlt]
+                     -> (Bool,      -- True <=> something happened
+                         [AltCon],  -- New contructors that cannot match DEFAULT
+                         [CoreAlt]) -- New alternatives
 -- See Note [Combine identical alternatives]
--- See Note [Care with impossible-constructors when combining alternatives]
 -- True <=> we did some combining, result is a single DEFAULT alternative
-combineIdenticalAlts imposs_cons ((_con1,bndrs1,rhs1) : con_alts)
+combineIdenticalAlts imposs_deflt_cons ((con1,bndrs1,rhs1) : rest_alts)
   | all isDeadBinder bndrs1    -- Remember the default
-  , not (null eliminated_alts) -- alternative comes first
-  = (True, imposs_cons', deflt_alt : filtered_alts)
+  , not (null elim_rest) -- alternative comes first
+  = (True, imposs_deflt_cons', deflt_alt : filtered_rest)
   where
-    (eliminated_alts, filtered_alts) = partition identical_to_alt1 con_alts
+    (elim_rest, filtered_rest) = partition identical_to_alt1 rest_alts
     deflt_alt = (DEFAULT, [], mkTicks (concat tickss) rhs1)
-    imposs_cons' = imposs_cons `minusList` map fstOf3 eliminated_alts
+
+     -- See Note [Care with impossible-constructors when combining alternatives]
+    imposs_deflt_cons' = imposs_deflt_cons `minusList` elim_cons
+    elim_cons = elim_con1 ++ map fstOf3 elim_rest
+    elim_con1 = case con1 of     -- Don't forget con1!
+                  DEFAULT -> []  -- See Note [
+                  _       -> [con1]
 
     cheapEqTicked e1 e2 = cheapEqExpr' tickishFloatable e1 e2
     identical_to_alt1 (_con,bndrs,rhs)
       = all isDeadBinder bndrs && rhs `cheapEqTicked` rhs1
-    tickss = map (stripTicksT tickishFloatable . thdOf3) eliminated_alts
+    tickss = map (stripTicksT tickishFloatable . thdOf3) elim_rest
 
 combineIdenticalAlts imposs_cons alts
   = (False, imposs_cons, alts)
@@ -1245,7 +1278,7 @@ app_ok primop_ok fun args
         -> primop_ok op                   -- A bit conservative: we don't really need
         && all (expr_ok primop_ok) args   -- to care about lazy arguments, but this is easy
 
-      _other -> isUnLiftedType (idType fun)          -- c.f. the Var case of exprIsHNF
+      _other -> isUnliftedType (idType fun)          -- c.f. the Var case of exprIsHNF
              || idArity fun > n_val_args             -- Partial apps
              || (n_val_args == 0 &&
                  isEvaldUnfolding (idUnfolding fun)) -- Let-bound values
@@ -1426,22 +1459,25 @@ exprIsHNFlike is_con is_con_unf = is_hnf_like
     is_hnf_like (Tick tickish e) = not (tickishCounts tickish)
                                       && is_hnf_like e
                                       -- See Note [exprIsHNF Tick]
-    is_hnf_like (Cast e _)           = is_hnf_like e
-    is_hnf_like (App e (Type _))     = is_hnf_like e
-    is_hnf_like (App e (Coercion _)) = is_hnf_like e
-    is_hnf_like (App e a)            = app_is_value e [a]
-    is_hnf_like (Let _ e)            = is_hnf_like e  -- Lazy let(rec)s don't affect us
-    is_hnf_like _                    = False
+    is_hnf_like (Cast e _)       = is_hnf_like e
+    is_hnf_like (App e a)
+      | isValArg a               = app_is_value e 1
+      | otherwise                = is_hnf_like e
+    is_hnf_like (Let _ e)        = is_hnf_like e  -- Lazy let(rec)s don't affect us
+    is_hnf_like _                = False
 
     -- There is at least one value argument
-    app_is_value :: CoreExpr -> [CoreArg] -> Bool
-    app_is_value (Var fun) args
-      = idArity fun > valArgCount args    -- Under-applied function
-        || is_con fun                     --  or constructor-like
-    app_is_value (Tick _ f) as = app_is_value f as
-    app_is_value (Cast f _) as = app_is_value f as
-    app_is_value (App f a)  as = app_is_value f (a:as)
-    app_is_value _          _  = False
+    -- 'n' is number of value args to which the expression is applied
+    app_is_value :: CoreExpr -> Int -> Bool
+    app_is_value (Var fun) n_val_args
+      = idArity fun > n_val_args    -- Under-applied function
+        || is_con fun               --  or constructor-like
+    app_is_value (Tick _ f) nva = app_is_value f nva
+    app_is_value (Cast f _) nva = app_is_value f nva
+    app_is_value (App f a)  nva
+      | isValArg a              = app_is_value f (nva + 1)
+      | otherwise               = app_is_value f nva
+    app_is_value _ _ = False
 
 {-
 Note [exprIsHNF Tick]
@@ -1521,24 +1557,24 @@ dataConInstPat fss uniqs con inst_tys
     (ex_fss,   id_fss)   = splitAt n_ex fss
 
       -- Make the instantiating substitution for universals
-    univ_subst = zipOpenTCvSubst univ_tvs inst_tys
+    univ_subst = zipTvSubst univ_tvs inst_tys
 
       -- Make existential type variables, applyingn and extending the substitution
     (full_subst, ex_bndrs) = mapAccumL mk_ex_var univ_subst
                                        (zip3 ex_tvs ex_fss ex_uniqs)
 
     mk_ex_var :: TCvSubst -> (TyVar, FastString, Unique) -> (TCvSubst, TyVar)
-    mk_ex_var subst (tv, fs, uniq) = (Type.extendTCvSubst subst tv
+    mk_ex_var subst (tv, fs, uniq) = (Type.extendTvSubst subst tv
                                        (mkTyVarTy new_tv)
                                      , new_tv)
       where
         new_tv = mkTyVar (mkSysTvName uniq fs) kind
-        kind   = Type.substTy subst (tyVarKind tv)
+        kind   = Type.substTyUnchecked subst (tyVarKind tv)
 
       -- Make value vars, instantiating types
     arg_ids = zipWith4 mk_id_var id_uniqs id_fss arg_tys arg_strs
     mk_id_var uniq fs ty str
-      = mkLocalIdOrCoVarWithInfo name (Type.substTy full_subst ty) info
+      = mkLocalIdOrCoVarWithInfo name (Type.substTyUnchecked full_subst ty) info
       where
         name = mkInternalName uniq (mkVarOccFS fs) noSrcSpan
         info | isMarkedStrict str = vanillaIdInfo `setUnfoldingInfo` evaldUnfolding

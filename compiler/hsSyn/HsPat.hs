@@ -56,8 +56,8 @@ import TyCon
 import Outputable
 import Type
 import SrcLoc
-import FastString
 import Bag -- collect ev vars from pats
+import DynFlags( gopt, GeneralFlag(..) )
 import Maybes
 -- libraries:
 import Data.Data hiding (TyCon,Fixity)
@@ -191,14 +191,22 @@ data Pat id
                     (Maybe (SyntaxExpr id))     -- Just (Name of 'negate') for negative
                                                 -- patterns, Nothing otherwise
                     (SyntaxExpr id)             -- Equality checker, of type t->t->Bool
+                    (PostTc id Type)            -- Overall type of pattern. Might be
+                                                -- different than the literal's type
+                                                -- if (==) or negate changes the type
 
   -- | - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnVal' @'+'@
 
   -- For details on above see note [Api annotations] in ApiAnnotation
   | NPlusKPat       (Located id)        -- n+k pattern
                     (Located (HsOverLit id)) -- It'll always be an HsIntegral
-                    (SyntaxExpr id)     -- (>=) function, of type t->t->Bool
+                    (HsOverLit id)      -- See Note [NPlusK patterns] in TcPat
+                     -- NB: This could be (PostTc ...), but that induced a
+                     -- a new hs-boot file. Not worth it.
+
+                    (SyntaxExpr id)     -- (>=) function, of type t1->t2->Bool
                     (SyntaxExpr id)     -- Name of '-' (see RnEnv.lookupSyntaxName)
+                    (PostTc id Type)    -- Type of overall pattern
 
         ------------ Pattern type signatures ---------------
   -- | - 'ApiAnnotation.AnnKeywordId' : 'ApiAnnotation.AnnDcolon'
@@ -371,17 +379,18 @@ pprParendLPat :: (OutputableBndr name) => LPat name -> SDoc
 pprParendLPat (L _ p) = pprParendPat p
 
 pprParendPat :: (OutputableBndr name) => Pat name -> SDoc
-pprParendPat p = getPprStyle $ \ sty ->
-                 if need_parens sty p
+pprParendPat p = sdocWithDynFlags $ \ dflags ->
+                 if need_parens dflags p
                  then parens (pprPat p)
                  else  pprPat p
   where
-    need_parens sty p
-      | CoPat {} <- p          -- In debug style we print the cast
-      , debugStyle sty = True  -- (see pprHsWrapper) so parens are needed
-      | otherwise      = hsPatNeedsParens p
-                         -- But otherwise the CoPat is discarded, so it
-                         -- is the pattern inside that matters.  Sigh.
+    need_parens dflags p
+      | CoPat {} <- p = gopt Opt_PrintTypecheckerElaboration dflags
+      | otherwise     = hsPatNeedsParens p
+      -- For a CoPat we need parens if we are going to show it, which
+      -- we do if -fprint-typechecker-elaboration is on (c.f. pprHsWrapper)
+      -- But otherwise the CoPat is discarded, so it
+      -- is the pattern inside that matters.  Sigh.
 
 pprPat :: (OutputableBndr name) => Pat name -> SDoc
 pprPat (VarPat (L _ var))     = pprPatBndr var
@@ -392,11 +401,13 @@ pprPat (AsPat name pat)       = hcat [pprPrefixOcc (unLoc name), char '@', pprPa
 pprPat (ViewPat expr pat _)   = hcat [pprLExpr expr, text " -> ", ppr pat]
 pprPat (ParPat pat)           = parens (ppr pat)
 pprPat (LitPat s)             = ppr s
-pprPat (NPat l Nothing  _)    = ppr l
-pprPat (NPat l (Just _) _)    = char '-' <> ppr l
-pprPat (NPlusKPat n k _ _)    = hcat [ppr n, char '+', ppr k]
+pprPat (NPat l Nothing  _ _)  = ppr l
+pprPat (NPat l (Just _) _ _)  = char '-' <> ppr l
+pprPat (NPlusKPat n k _ _ _ _)= hcat [ppr n, char '+', ppr k]
 pprPat (SplicePat splice)     = pprSplice splice
-pprPat (CoPat co pat _)       = pprHsWrapper (ppr pat) co
+pprPat (CoPat co pat _)       = pprHsWrapper co (\parens -> if parens
+                                                            then pprParendPat pat
+                                                            else pprPat pat)
 pprPat (SigPatIn pat ty)      = ppr pat <+> dcolon <+> ppr ty
 pprPat (SigPatOut pat ty)     = ppr pat <+> dcolon <+> ppr ty
 pprPat (ListPat pats _ _)     = brackets (interpp'SP pats)
@@ -431,7 +442,7 @@ instance (Outputable arg)
   ppr (HsRecFields { rec_flds = flds, rec_dotdot = Just n })
         = braces (fsep (punctuate comma (map ppr (take n flds) ++ [dotdot])))
         where
-          dotdot = ptext (sLit "..") <+> ifPprDebug (ppr (drop n flds))
+          dotdot = text ".." <+> ifPprDebug (ppr (drop n flds))
 
 instance (Outputable id, Outputable arg)
       => Outputable (HsRecField' id arg) where

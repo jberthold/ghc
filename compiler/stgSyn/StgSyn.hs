@@ -31,11 +31,8 @@ module StgSyn (
         -- StgOp
         StgOp(..),
 
-        -- SRTs
-        SRT(..),
-
         -- utils
-        stgBindHasCafRefs, stgArgHasCafRefs, stgRhsArity,
+        topStgBindHasCafRefs, stgArgHasCafRefs, stgRhsArity,
         isDllConApp,
         stgArgType,
         stripStgTicksTop,
@@ -69,7 +66,6 @@ import Type        ( typePrimRep )
 import UniqSet
 import Unique      ( Unique )
 import Util
-import VarSet      ( IdSet, isEmptyVarSet )
 
 {-
 ************************************************************************
@@ -82,8 +78,6 @@ As usual, expressions are interesting; other things are boring. Here
 are the boring things [except note the @GenStgRhs@], parameterised
 with respect to binder and occurrence information (just as in
 @CoreSyn@):
-
-There is one SRT for each group of bindings.
 -}
 
 data GenStgBinding bndr occ
@@ -237,22 +231,7 @@ This has the same boxed/unboxed business as Core case expressions.
         (GenStgExpr bndr occ)
                     -- the thing to examine
 
-        (GenStgLiveVars occ)
-                    -- Live vars of whole case expression,
-                    -- plus everything that happens after the case
-                    -- i.e., those which mustn't be overwritten
-
-        (GenStgLiveVars occ)
-                    -- Live vars of RHSs (plus what happens afterwards)
-                    -- i.e., those which must be saved before eval.
-                    --
-                    -- note that an alt's constructor's
-                    -- binder-variables are NOT counted in the
-                    -- free vars for the alt's RHS
-
         bndr        -- binds the result of evaluating the scrutinee
-
-        SRT         -- The SRT for the continuation
 
         AltType
 
@@ -358,16 +337,7 @@ And so the code for let(rec)-things:
         (GenStgBinding bndr occ)    -- right hand sides (see below)
         (GenStgExpr bndr occ)       -- body
 
-  | StgLetNoEscape                  -- remember: ``advanced stuff''
-        (GenStgLiveVars occ)        -- Live in the whole let-expression
-                                    -- Mustn't overwrite these stack slots
-                                    -- _Doesn't_ include binders of the let(rec).
-
-        (GenStgLiveVars occ)        -- Live in the right hand sides (only)
-                                    -- These are the ones which must be saved on
-                                    -- the stack if they aren't there already
-                                    -- _Does_ include binders of the let(rec) if recursive.
-
+  | StgLetNoEscape
         (GenStgBinding bndr occ)    -- right hand sides (see below)
         (GenStgExpr bndr occ)       -- body
 
@@ -405,7 +375,6 @@ data GenStgRhs bndr occ
         [occ]                   -- non-global free vars; a list, rather than
                                 -- a set, because order is important
         !UpdateFlag             -- ReEntrant | Updatable | SingleEntry
-        SRT                     -- The SRT reference
         [bndr]                  -- arguments; if empty, then not a function;
                                 -- as above, order is important.
         (GenStgExpr bndr occ)   -- body
@@ -436,24 +405,84 @@ The second flavour of right-hand-side is for constructors (simple but important)
         [GenStgArg occ]  -- args
 
 stgRhsArity :: StgRhs -> Int
-stgRhsArity (StgRhsClosure _ _ _ _ _ bndrs _)
+stgRhsArity (StgRhsClosure _ _ _ _ bndrs _)
   = ASSERT( all isId bndrs ) length bndrs
   -- The arity never includes type parameters, but they should have gone by now
 stgRhsArity (StgRhsCon _ _ _) = 0
 
-stgBindHasCafRefs :: GenStgBinding bndr Id -> Bool
-stgBindHasCafRefs (StgNonRec _ rhs) = rhsHasCafRefs rhs
-stgBindHasCafRefs (StgRec binds)    = any rhsHasCafRefs (map snd binds)
+-- Note [CAF consistency]
+-- ~~~~~~~~~~~~~~~~~~~~~~
+--
+-- `topStgBindHasCafRefs` is only used by an assert (`consistentCafInfo` in
+-- `CoreToStg`) to make sure CAF-ness predicted by `TidyPgm` is consistent with
+-- reality.
+--
+-- Specifically, if the RHS mentions any Id that itself is marked
+-- `MayHaveCafRefs`; or if the binding is a top-level updateable thunk; then the
+-- `Id` for the binding should be marked `MayHaveCafRefs`. The potential trouble
+-- is that `TidyPgm` computed the CAF info on the `Id` but some transformations
+-- have taken place since then.
+
+topStgBindHasCafRefs :: GenStgBinding bndr Id -> Bool
+topStgBindHasCafRefs (StgNonRec _ rhs)
+  = topRhsHasCafRefs rhs
+topStgBindHasCafRefs (StgRec binds)
+  = any topRhsHasCafRefs (map snd binds)
+
+topRhsHasCafRefs :: GenStgRhs bndr Id -> Bool
+topRhsHasCafRefs (StgRhsClosure _ _ _ upd _ body)
+  = -- See Note [CAF consistency]
+    isUpdatable upd || exprHasCafRefs body
+topRhsHasCafRefs (StgRhsCon _ _ args)
+  = any stgArgHasCafRefs args
+
+exprHasCafRefs :: GenStgExpr bndr Id -> Bool
+exprHasCafRefs (StgApp f args)
+  = stgIdHasCafRefs f || any stgArgHasCafRefs args
+exprHasCafRefs StgLit{}
+  = False
+exprHasCafRefs (StgConApp _ args)
+  = any stgArgHasCafRefs args
+exprHasCafRefs (StgOpApp _ args _)
+  = any stgArgHasCafRefs args
+exprHasCafRefs (StgLam _ body)
+  = exprHasCafRefs body
+exprHasCafRefs (StgCase scrt _ _ alts)
+  = exprHasCafRefs scrt || any altHasCafRefs alts
+exprHasCafRefs (StgLet bind body)
+  = bindHasCafRefs bind || exprHasCafRefs body
+exprHasCafRefs (StgLetNoEscape bind body)
+  = bindHasCafRefs bind || exprHasCafRefs body
+exprHasCafRefs (StgTick _ expr)
+  = exprHasCafRefs expr
+
+bindHasCafRefs :: GenStgBinding bndr Id -> Bool
+bindHasCafRefs (StgNonRec _ rhs)
+  = rhsHasCafRefs rhs
+bindHasCafRefs (StgRec binds)
+  = any rhsHasCafRefs (map snd binds)
 
 rhsHasCafRefs :: GenStgRhs bndr Id -> Bool
-rhsHasCafRefs (StgRhsClosure _ _ _ upd srt _ _)
-  = isUpdatable upd || nonEmptySRT srt
+rhsHasCafRefs (StgRhsClosure _ _ _ _ _ body)
+  = exprHasCafRefs body
 rhsHasCafRefs (StgRhsCon _ _ args)
   = any stgArgHasCafRefs args
 
+altHasCafRefs :: GenStgAlt bndr Id -> Bool
+altHasCafRefs (_, _, _, rhs) = exprHasCafRefs rhs
+
 stgArgHasCafRefs :: GenStgArg Id -> Bool
-stgArgHasCafRefs (StgVarArg id) = mayHaveCafRefs (idCafInfo id)
-stgArgHasCafRefs _ = False
+stgArgHasCafRefs (StgVarArg id)
+  = stgIdHasCafRefs id
+stgArgHasCafRefs _
+  = False
+
+stgIdHasCafRefs :: Id -> Bool
+stgIdHasCafRefs id =
+  -- We are looking for occurrences of an Id that is bound at top level, and may
+  -- have CAF refs. At this point (after TidyPgm) top-level Ids (whether
+  -- imported or defined in this module) are GlobalIds, so the test is easy.
+  isGlobalId id && mayHaveCafRefs (idCafInfo id)
 
 -- Here's the @StgBinderInfo@ type, and its combining op:
 
@@ -480,7 +509,7 @@ combineStgBinderInfo _            _            = NoStgBinderInfo
 --------------
 pp_binder_info :: StgBinderInfo -> SDoc
 pp_binder_info NoStgBinderInfo = empty
-pp_binder_info SatCallsOnly    = ptext (sLit "sat-only")
+pp_binder_info SatCallsOnly    = text "sat-only"
 
 {-
 ************************************************************************
@@ -494,7 +523,7 @@ Very like in @CoreSyntax@ (except no type-world stuff).
 The type constructor is guaranteed not to be abstract; that is, we can
 see its representation. This is important because the code generator
 uses it to determine return conventions etc. But it's not trivial
-where there's a moduule loop involved, because some versions of a type
+where there's a module loop involved, because some versions of a type
 constructor might not have all the constructors visible. So
 mkStgAlgAlts (in CoreToStg) ensures that it gets the TyCon from the
 constructors or literals (which are guaranteed to have the Real McCoy)
@@ -587,34 +616,6 @@ data StgOp
 {-
 ************************************************************************
 *                                                                      *
-\subsubsection[Static Reference Tables]{@SRT@}
-*                                                                      *
-************************************************************************
-
-There is one SRT per top-level function group. Each local binding and
-case expression within this binding group has a subrange of the whole
-SRT, expressed as an offset and length.
-
-In CoreToStg we collect the list of CafRefs at each SRT site, which is later
-converted into the length and offset form by the SRT pass.
--}
-
-data SRT
-  = NoSRT
-  | SRTEntries IdSet
-        -- generated by CoreToStg
-
-nonEmptySRT :: SRT -> Bool
-nonEmptySRT NoSRT           = False
-nonEmptySRT (SRTEntries vs) = not (isEmptyVarSet vs)
-
-pprSRT :: SRT -> SDoc
-pprSRT (NoSRT)          = ptext (sLit "_no_srt_")
-pprSRT (SRTEntries ids) = text "SRT:" <> ppr ids
-
-{-
-************************************************************************
-*                                                                      *
 \subsection[Stg-pretty-printing]{Pretty-printing}
 *                                                                      *
 ************************************************************************
@@ -631,8 +632,8 @@ pprGenStgBinding (StgNonRec bndr rhs)
         4 (ppr rhs <> semi)
 
 pprGenStgBinding (StgRec pairs)
-  = vcat $ ifPprDebug (ptext $ sLit "{- StgRec (begin) -}") :
-           map (ppr_bind) pairs ++ [ifPprDebug $ ptext $ sLit "{- StgRec (end) -}"]
+  = vcat $ ifPprDebug (text "{- StgRec (begin) -}") :
+           map (ppr_bind) pairs ++ [ifPprDebug (text "{- StgRec (end) -}")]
   where
     ppr_bind (bndr, expr)
       = hang (hsep [pprBndr LetBind bndr, equals])
@@ -680,7 +681,7 @@ pprStgExpr (StgOpApp op args _)
 
 pprStgExpr (StgLam bndrs body)
   = sep [ char '\\' <+> ppr_list (map (pprBndr LambdaBind) bndrs)
-            <+> ptext (sLit "->"),
+            <+> text "->",
          pprStgExpr body ]
   where ppr_list = brackets . fsep . punctuate comma
 
@@ -696,13 +697,13 @@ pprStgExpr (StgLam bndrs body)
 pprStgExpr (StgLet srt (StgNonRec bndr (StgRhsClosure cc bi free_vars upd_flag args rhs))
                         expr@(StgLet _ _))
   = ($$)
-      (hang (hcat [ptext (sLit "let { "), ppr bndr, ptext (sLit " = "),
+      (hang (hcat [text "let { ", ppr bndr, ptext (sLit " = "),
                           ppr cc,
                           pp_binder_info bi,
-                          ptext (sLit " ["), ifPprDebug (interppSP free_vars), ptext (sLit "] \\"),
-                          ppr upd_flag, ptext (sLit " ["),
+                          text " [", ifPprDebug (interppSP free_vars), ptext (sLit "] \\"),
+                          ppr upd_flag, text " [",
                           interppSP args, char ']'])
-            8 (sep [hsep [ppr rhs, ptext (sLit "} in")]]))
+            8 (sep [hsep [ppr rhs, text "} in"]]))
       (ppr expr)
 -}
 
@@ -710,24 +711,19 @@ pprStgExpr (StgLet srt (StgNonRec bndr (StgRhsClosure cc bi free_vars upd_flag a
 
 pprStgExpr (StgLet bind expr@(StgLet _ _))
   = ($$)
-      (sep [hang (ptext (sLit "let {"))
-                2 (hsep [pprGenStgBinding bind, ptext (sLit "} in")])])
+      (sep [hang (text "let {")
+                2 (hsep [pprGenStgBinding bind, text "} in"])])
       (ppr expr)
 
 -- general case
 pprStgExpr (StgLet bind expr)
-  = sep [hang (ptext (sLit "let {")) 2 (pprGenStgBinding bind),
-           hang (ptext (sLit "} in ")) 2 (ppr expr)]
+  = sep [hang (text "let {") 2 (pprGenStgBinding bind),
+           hang (text "} in ") 2 (ppr expr)]
 
-pprStgExpr (StgLetNoEscape lvs_whole lvs_rhss bind expr)
-  = sep [hang (ptext (sLit "let-no-escape {"))
+pprStgExpr (StgLetNoEscape bind expr)
+  = sep [hang (text "let-no-escape {")
                 2 (pprGenStgBinding bind),
-           hang (ptext (sLit "} in ") <>
-                   ifPprDebug (
-                    nest 4 (
-                      hcat [ptext  (sLit "-- lvs: ["), interppSP (uniqSetToList lvs_whole),
-                             ptext (sLit "]; rhs lvs: ["), interppSP (uniqSetToList lvs_rhss),
-                             char ']'])))
+           hang (text "} in ")
                 2 (ppr expr)]
 
 pprStgExpr (StgTick tickish expr)
@@ -737,24 +733,18 @@ pprStgExpr (StgTick tickish expr)
     else pprStgExpr expr
 
 
-pprStgExpr (StgCase expr lvs_whole lvs_rhss bndr srt alt_type alts)
-  = sep [sep [ptext (sLit "case"),
+pprStgExpr (StgCase expr bndr alt_type alts)
+  = sep [sep [text "case",
            nest 4 (hsep [pprStgExpr expr,
              ifPprDebug (dcolon <+> ppr alt_type)]),
-           ptext (sLit "of"), pprBndr CaseBind bndr, char '{'],
-           ifPprDebug (
-           nest 4 (
-             hcat [ptext  (sLit "-- lvs: ["), interppSP (uniqSetToList lvs_whole),
-                    ptext (sLit "]; rhs lvs: ["), interppSP (uniqSetToList lvs_rhss),
-                    ptext (sLit "]; "),
-                    pprMaybeSRT srt])),
+           text "of", pprBndr CaseBind bndr, char '{'],
            nest 2 (vcat (map pprStgAlt alts)),
            char '}']
 
 pprStgAlt :: (OutputableBndr bndr, Outputable occ, Ord occ)
           => GenStgAlt bndr occ -> SDoc
 pprStgAlt (con, params, _use_mask, expr)
-  = hang (hsep [ppr con, sep (map (pprBndr CaseBind) params), ptext (sLit "->")])
+  = hang (hsep [ppr con, sep (map (pprBndr CaseBind) params), text "->"])
          4 (ppr expr <> semi)
 
 pprStgOp :: StgOp -> SDoc
@@ -763,10 +753,10 @@ pprStgOp (StgPrimCallOp op)= ppr op
 pprStgOp (StgFCallOp op _) = ppr op
 
 instance Outputable AltType where
-  ppr PolyAlt        = ptext (sLit "Polymorphic")
-  ppr (UbxTupAlt n)  = ptext (sLit "UbxTup") <+> ppr n
-  ppr (AlgAlt tc)    = ptext (sLit "Alg")    <+> ppr tc
-  ppr (PrimAlt tc)   = ptext (sLit "Prim")   <+> ppr tc
+  ppr PolyAlt        = text "Polymorphic"
+  ppr (UbxTupAlt n)  = text "UbxTup" <+> ppr n
+  ppr (AlgAlt tc)    = text "Alg"    <+> ppr tc
+  ppr (PrimAlt tc)   = text "Prim"   <+> ppr tc
 
 pprStgLVs :: Outputable occ => GenStgLiveVars occ -> SDoc
 pprStgLVs lvs
@@ -780,25 +770,21 @@ pprStgRhs :: (OutputableBndr bndr, Outputable bdee, Ord bdee)
           => GenStgRhs bndr bdee -> SDoc
 
 -- special case
-pprStgRhs (StgRhsClosure cc bi [free_var] upd_flag srt [{-no args-}] (StgApp func []))
+pprStgRhs (StgRhsClosure cc bi [free_var] upd_flag [{-no args-}] (StgApp func []))
   = hcat [ ppr cc,
            pp_binder_info bi,
            brackets (ifPprDebug (ppr free_var)),
-           ptext (sLit " \\"), ppr upd_flag, pprMaybeSRT srt, ptext (sLit " [] "), ppr func ]
+           text " \\", ppr upd_flag, ptext (sLit " [] "), ppr func ]
 
 -- general case
-pprStgRhs (StgRhsClosure cc bi free_vars upd_flag srt args body)
+pprStgRhs (StgRhsClosure cc bi free_vars upd_flag args body)
   = sdocWithDynFlags $ \dflags ->
     hang (hsep [if gopt Opt_SccProfilingOn dflags then ppr cc else empty,
                 pp_binder_info bi,
                 ifPprDebug (brackets (interppSP free_vars)),
-                char '\\' <> ppr upd_flag, pprMaybeSRT srt, brackets (interppSP args)])
+                char '\\' <> ppr upd_flag, brackets (interppSP args)])
          4 (ppr body)
 
 pprStgRhs (StgRhsCon cc con args)
   = hcat [ ppr cc,
-           space, ppr con, ptext (sLit "! "), brackets (interppSP args)]
-
-pprMaybeSRT :: SRT -> SDoc
-pprMaybeSRT (NoSRT) = empty
-pprMaybeSRT srt     = ptext (sLit "srt:") <> pprSRT srt
+           space, ppr con, text "! ", brackets (interppSP args)]

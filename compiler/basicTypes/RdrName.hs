@@ -330,9 +330,9 @@ data LocalRdrEnv = LRE { lre_env      :: OccEnv Name
 
 instance Outputable LocalRdrEnv where
   ppr (LRE {lre_env = env, lre_in_scope = ns})
-    = hang (ptext (sLit "LocalRdrEnv {"))
-         2 (vcat [ ptext (sLit "env =") <+> pprOccEnv ppr_elt env
-                 , ptext (sLit "in_scope =")
+    = hang (text "LocalRdrEnv {")
+         2 (vcat [ text "env =" <+> pprOccEnv ppr_elt env
+                 , text "in_scope ="
                     <+> braces (pprWithCommas ppr (nameSetElems ns))
                  ] <+> char '}')
     where
@@ -416,6 +416,13 @@ type GlobalRdrEnv = OccEnv [GlobalRdrElt]
 --              happens only when type-checking a [d| ... |] Template
 --              Haskell quotation; see this note in RnNames
 --              Note [Top-level Names in Template Haskell decl quotes]
+--
+-- INVARIANT 3: If the GlobalRdrEnv maps [occ -> gre], then
+--                 greOccName gre = occ
+--
+--              NB: greOccName gre is usually the same as
+--                  nameOccName (gre_name gre), but not always in the
+--                  case of record seectors; see greOccName
 
 -- | An element of the 'GlobalRdrEnv'
 data GlobalRdrElt
@@ -437,10 +444,10 @@ data Parent = NoParent
 
 instance Outputable Parent where
    ppr NoParent        = empty
-   ppr (ParentIs n)    = ptext (sLit "parent:") <> ppr n
-   ppr (FldParent n f) = ptext (sLit "fldparent:")
+   ppr (ParentIs n)    = text "parent:" <> ppr n
+   ppr (FldParent n f) = text "fldparent:"
                              <> ppr n <> colon <> ppr f
-   ppr (PatternSynonym) = ptext (sLit "pattern synonym")
+   ppr (PatternSynonym) = text "pattern synonym"
 
 plusParent :: Parent -> Parent -> Parent
 -- See Note [Combining parents]
@@ -629,10 +636,10 @@ greUsedRdrName gre@GRE{ gre_name = name, gre_lcl = lcl, gre_imp = iss }
     occ = greOccName gre
 
 greRdrNames :: GlobalRdrElt -> [RdrName]
-greRdrNames GRE{ gre_name = name, gre_lcl = lcl, gre_imp = iss }
+greRdrNames gre@GRE{ gre_lcl = lcl, gre_imp = iss }
   = (if lcl then [unqual] else []) ++ concatMap do_spec (map is_decl iss)
   where
-    occ    = nameOccName name
+    occ    = greOccName gre
     unqual = Unqual occ
     do_spec decl_spec
         | is_qual decl_spec = [qual]
@@ -678,7 +685,7 @@ instance Outputable GlobalRdrElt where
 
 pprGlobalRdrEnv :: Bool -> GlobalRdrEnv -> SDoc
 pprGlobalRdrEnv locals_only env
-  = vcat [ ptext (sLit "GlobalRdrEnv") <+> ppWhen locals_only (ptext (sLit "(locals only)"))
+  = vcat [ text "GlobalRdrEnv" <+> ppWhen locals_only (ptext (sLit "(locals only)"))
              <+> lbrace
          , nest 2 (vcat [ pp (remove_locals gre_list) | gre_list <- occEnvElts env ]
              <+> rbrace) ]
@@ -687,7 +694,7 @@ pprGlobalRdrEnv locals_only env
                        | otherwise   = gres
     pp []   = empty
     pp gres = hang (ppr occ
-                     <+> parens (ptext (sLit "unique") <+> ppr (getUnique occ))
+                     <+> parens (text "unique" <+> ppr (getUnique occ))
                      <> colon)
                  2 (vcat (map ppr gres))
       where
@@ -1094,7 +1101,7 @@ pprNameProvenance (GRE { gre_name = name, gre_lcl = lcl, gre_imp = iss })
   | otherwise          = head pp_provs
   where
     pp_provs = pp_lcl ++ map pp_is iss
-    pp_lcl = if lcl then [ptext (sLit "defined at") <+> ppr (nameSrcLoc name)]
+    pp_lcl = if lcl then [text "defined at" <+> ppr (nameSrcLoc name)]
                     else []
     pp_is is = sep [ppr is, ppr_defn_site is name]
 
@@ -1105,25 +1112,25 @@ ppr_defn_site imp_spec name
   | same_module && not (isGoodSrcSpan loc)
   = empty              -- Nothing interesting to say
   | otherwise
-  = parens $ hang (ptext (sLit "and originally defined") <+> pp_mod)
+  = parens $ hang (text "and originally defined" <+> pp_mod)
                 2 (pprLoc loc)
   where
     loc = nameSrcSpan name
     defining_mod = nameModule name
     same_module = importSpecModule imp_spec == moduleName defining_mod
     pp_mod | same_module = empty
-           | otherwise   = ptext (sLit "in") <+> quotes (ppr defining_mod)
+           | otherwise   = text "in" <+> quotes (ppr defining_mod)
 
 
 instance Outputable ImportSpec where
    ppr imp_spec
-     = ptext (sLit "imported") <+> qual
-        <+> ptext (sLit "from") <+> quotes (ppr (importSpecModule imp_spec))
+     = text "imported" <+> qual
+        <+> text "from" <+> quotes (ppr (importSpecModule imp_spec))
         <+> pprLoc (importSpecLoc imp_spec)
      where
-       qual | is_qual (is_decl imp_spec) = ptext (sLit "qualified")
+       qual | is_qual (is_decl imp_spec) = text "qualified"
             | otherwise                  = empty
 
 pprLoc :: SrcSpan -> SDoc
-pprLoc (RealSrcSpan s)    = ptext (sLit "at") <+> ppr s
+pprLoc (RealSrcSpan s)    = text "at" <+> ppr s
 pprLoc (UnhelpfulSpan {}) = empty

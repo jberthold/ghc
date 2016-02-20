@@ -16,7 +16,8 @@ module SimplEnv (
 
         -- Environments
         SimplEnv(..), StaticEnv, pprSimplEnv,   -- Temp not abstract
-        mkSimplEnv, extendIdSubst, SimplEnv.extendTCvSubst,
+        mkSimplEnv, extendIdSubst,
+        SimplEnv.extendTvSubst, SimplEnv.extendCvSubst,
         zapSubstEnv, setSubstEnv,
         getInScope, setInScope, setInScopeSet, modifyInScope, addNewInScopeIds,
         getSimplRules,
@@ -54,7 +55,6 @@ import Coercion hiding          ( substCo, substCoVar, substCoVarBndr )
 import BasicTypes
 import MonadUtils
 import Outputable
-import FastString
 import Util
 
 import Data.List
@@ -126,10 +126,10 @@ type StaticEnv = SimplEnv       -- Just the static part is relevant
 pprSimplEnv :: SimplEnv -> SDoc
 -- Used for debugging; selective
 pprSimplEnv env
-  = vcat [ptext (sLit "TvSubst:") <+> ppr (seTvSubst env),
-          ptext (sLit "CvSubst:") <+> ppr (seCvSubst env),
-          ptext (sLit "IdSubst:") <+> ppr (seIdSubst env),
-          ptext (sLit "InScope:") <+> vcat (map ppr_one in_scope_vars)
+  = vcat [text "TvSubst:" <+> ppr (seTvSubst env),
+          text "CvSubst:" <+> ppr (seCvSubst env),
+          text "IdSubst:" <+> ppr (seIdSubst env),
+          text "InScope:" <+> vcat (map ppr_one in_scope_vars)
     ]
   where
    in_scope_vars = varEnvElts (getInScopeVars (seInScope env))
@@ -148,9 +148,9 @@ data SimplSR
            InExpr
 
 instance Outputable SimplSR where
-  ppr (DoneEx e) = ptext (sLit "DoneEx") <+> ppr e
-  ppr (DoneId v) = ptext (sLit "DoneId") <+> ppr v
-  ppr (ContEx _tv _cv _id e) = vcat [ptext (sLit "ContEx") <+> ppr e {-,
+  ppr (DoneEx e) = text "DoneEx" <+> ppr e
+  ppr (DoneId v) = text "DoneId" <+> ppr v
+  ppr (ContEx _tv _cv _id e) = vcat [text "ContEx" <+> ppr e {-,
                                 ppr (filter_env tv), ppr (filter_env id) -}]
         -- where
         -- fvs = exprFreeVars e
@@ -272,14 +272,15 @@ extendIdSubst env@(SimplEnv {seIdSubst = subst}) var res
   = ASSERT2( isId var && not (isCoVar var), ppr var )
     env {seIdSubst = extendVarEnv subst var res}
 
-extendTCvSubst :: SimplEnv -> TyVar -> Type -> SimplEnv
-extendTCvSubst env@(SimplEnv {seTvSubst = tsubst, seCvSubst = csubst}) var res
-  | isTyVar var
-  = env {seTvSubst = extendVarEnv tsubst var res}
-  | Just co <- isCoercionTy_maybe res
-  = env {seCvSubst = extendVarEnv csubst var co}
-  | otherwise
-  = pprPanic "SimplEnv.extendTCvSubst" (ppr res)
+extendTvSubst :: SimplEnv -> TyVar -> Type -> SimplEnv
+extendTvSubst env@(SimplEnv {seTvSubst = tsubst}) var res
+  = ASSERT( isTyVar var )
+    env {seTvSubst = extendVarEnv tsubst var res}
+
+extendCvSubst :: SimplEnv -> CoVar -> Coercion -> SimplEnv
+extendCvSubst env@(SimplEnv {seCvSubst = csubst}) var co
+  = ASSERT( isCoVar var )
+    env {seCvSubst = extendVarEnv csubst var co}
 
 ---------------------
 getInScope :: SimplEnv -> InScopeSet
@@ -379,9 +380,9 @@ instance Outputable Floats where
   ppr (Floats binds ff) = ppr ff $$ ppr (fromOL binds)
 
 instance Outputable FloatFlag where
-  ppr FltLifted = ptext (sLit "FltLifted")
-  ppr FltOkSpec = ptext (sLit "FltOkSpec")
-  ppr FltCareful = ptext (sLit "FltCareful")
+  ppr FltLifted = text "FltLifted"
+  ppr FltOkSpec = text "FltOkSpec"
+  ppr FltCareful = text "FltCareful"
 
 andFF :: FloatFlag -> FloatFlag -> FloatFlag
 andFF FltCareful _          = FltCareful
@@ -424,7 +425,7 @@ unitFloat bind = Floats (unitOL bind) (flag bind)
     flag (NonRec bndr rhs)
       | not (isStrictId bndr)    = FltLifted
       | exprOkForSpeculation rhs = FltOkSpec  -- Unlifted, and lifted but ok-for-spec (eg HNF)
-      | otherwise                = ASSERT2( not (isUnLiftedType (idType bndr)), ppr bndr )
+      | otherwise                = ASSERT2( not (isUnliftedType (idType bndr)), ppr bndr )
                                    FltCareful
       -- Unlifted binders can only be let-bound if exprOkForSpeculation holds
 

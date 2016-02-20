@@ -14,7 +14,7 @@ module Inst (
        instCall, instDFunType, instStupidTheta,
        newWanted, newWanteds,
 
-       newOverloadedLit, newNonTrivialOverloadedLit, mkOverLit,
+       newOverloadedLit, mkOverLit,
 
        newClsInst,
        tcGetInsts, tcGetInstEnvs, getOverlapFlag,
@@ -136,8 +136,9 @@ deeplySkolemise ty
   | Just (arg_tys, tvs, theta, ty') <- tcDeepSplitSigmaTy_maybe ty
   = do { ids1 <- newSysLocalIds (fsLit "dk") arg_tys
        ; (subst, tvs1) <- tcInstSkolTyVars tvs
-       ; ev_vars1 <- newEvVars (substTheta subst theta)
-       ; (wrap, tvs2, ev_vars2, rho) <- deeplySkolemise (substTy subst ty')
+       ; ev_vars1 <- newEvVars (substThetaUnchecked subst theta)
+       ; (wrap, tvs2, ev_vars2, rho) <-
+           deeplySkolemise (substTyAddInScope subst ty')
        ; return ( mkWpLams ids1
                    <.> mkWpTyLams tvs1
                    <.> mkWpLams ev_vars1
@@ -155,7 +156,7 @@ deeplySkolemise ty
 topInstantiate :: CtOrigin -> TcSigmaType -> TcM (HsWrapper, TcRhoType)
 -- if    topInstantiate ty = (wrap, rho)
 -- and   e :: ty
--- then  wrap e :: rho
+-- then  wrap e :: rho  (that is, wrap :: ty "->" rho)
 topInstantiate = top_instantiate True
 
 -- | Instantiate all outer 'Invisible' binders
@@ -177,9 +178,9 @@ top_instantiate inst_all orig ty
                | null leave_bndrs = (theta, [])
                | otherwise        = ([], theta)
        ; (subst, inst_tvs') <- newMetaTyVars (map (binderVar "top_inst") inst_bndrs)
-       ; let inst_theta' = substTheta subst inst_theta
-             sigma'      = substTy    subst (mkForAllTys leave_bndrs $
-                                             mkFunTys leave_theta rho)
+       ; let inst_theta' = substThetaUnchecked subst inst_theta
+             sigma'      = substTyAddInScope subst (mkForAllTys leave_bndrs $
+                                                    mkFunTys leave_theta rho)
 
        ; wrap1 <- instCall orig (mkTyVarTys inst_tvs') inst_theta'
        ; traceTc "Instantiating"
@@ -215,19 +216,21 @@ deeplyInstantiate :: CtOrigin -> TcSigmaType -> TcM (HsWrapper, TcRhoType)
 -- if    deeplyInstantiate ty = (wrap, rho)
 -- and   e :: ty
 -- then  wrap e :: rho
+-- That is, wrap :: ty "->" rho
 
 deeplyInstantiate orig ty
   | Just (arg_tys, tvs, theta, rho) <- tcDeepSplitSigmaTy_maybe ty
   = do { (subst, tvs') <- newMetaTyVars tvs
-       ; ids1  <- newSysLocalIds (fsLit "di") (substTys subst arg_tys)
-       ; let theta' = substTheta subst theta
+       ; ids1  <- newSysLocalIds (fsLit "di") (substTysUnchecked subst arg_tys)
+       ; let theta' = substThetaUnchecked subst theta
        ; wrap1 <- instCall orig (mkTyVarTys tvs') theta'
        ; traceTc "Instantiating (deeply)" (vcat [ text "origin" <+> pprCtOrigin orig
                                                 , text "type" <+> ppr ty
                                                 , text "with" <+> ppr tvs'
                                                 , text "args:" <+> ppr ids1
-                                                , text "theta:" <+>  ppr theta' ])
-       ; (wrap2, rho2) <- deeplyInstantiate orig (substTy subst rho)
+                                                , text "theta:" <+>  ppr theta'
+                                                , text "subst:" <+> ppr subst ])
+       ; (wrap2, rho2) <- deeplyInstantiate orig (substTyUnchecked subst rho)
        ; return (mkWpLams ids1
                     <.> wrap2
                     <.> wrap1
@@ -300,14 +303,14 @@ instDFunType :: DFunId -> [DFunInstType]
 -- See Note [DFunInstType: instantiating types] in InstEnv
 instDFunType dfun_id dfun_inst_tys
   = do { (subst, inst_tys) <- go emptyTCvSubst dfun_tvs dfun_inst_tys
-       ; return (inst_tys, substTheta subst dfun_theta) }
+       ; return (inst_tys, substThetaUnchecked subst dfun_theta) }
   where
     (dfun_tvs, dfun_theta, _) = tcSplitSigmaTy (idType dfun_id)
 
     go :: TCvSubst -> [TyVar] -> [DFunInstType] -> TcM (TCvSubst, [TcType])
     go subst [] [] = return (subst, [])
     go subst (tv:tvs) (Just ty : mb_tys)
-      = do { (subst', tys) <- go (extendTCvSubst subst tv ty) tvs mb_tys
+      = do { (subst', tys) <- go (extendTvSubst subst tv ty) tvs mb_tys
            ; return (subst', ty : tys) }
     go subst (tv:tvs) (Nothing : mb_tys)
       = do { (subst', tv') <- newMetaTyVarX subst tv
@@ -341,31 +344,27 @@ cases (the rest are caught in lookupInst).
 -}
 
 newOverloadedLit :: HsOverLit Name
-                 -> TcSigmaType  -- if nec'y, this type is instantiated...
-                 -> CtOrigin     -- ... using this CtOrigin
-                 -> TcM (HsWrapper, HsOverLit TcId)
-                   -- wrapper :: input type "->" type of result
+                 -> ExpRhoType
+                 -> TcM (HsOverLit TcId)
 newOverloadedLit
-  lit@(OverLit { ol_val = val, ol_rebindable = rebindable }) res_ty res_orig
+  lit@(OverLit { ol_val = val, ol_rebindable = rebindable }) res_ty
   | not rebindable
-    -- all built-in overloaded lits are not higher-rank, so skolemise.
-    -- this is necessary for shortCutLit.
-  = do { (wrap, insted_ty) <- deeplyInstantiate res_orig res_ty
+    -- all built-in overloaded lits are tau-types, so we can just
+    -- tauify the ExpType
+  = do { res_ty <- expTypeToType res_ty
        ; dflags <- getDynFlags
-       ; case shortCutLit dflags val insted_ty of
+       ; case shortCutLit dflags val res_ty of
         -- Do not generate a LitInst for rebindable syntax.
         -- Reason: If we do, tcSimplify will call lookupInst, which
         --         will call tcSyntaxName, which does unification,
         --         which tcSimplify doesn't like
-           Just expr -> return ( wrap
-                               , lit { ol_witness = expr, ol_type = insted_ty
-                                     , ol_rebindable = False } )
-           Nothing   -> (wrap, ) <$>
-                        newNonTrivialOverloadedLit orig lit insted_ty }
+           Just expr -> return (lit { ol_witness = expr, ol_type = res_ty
+                                    , ol_rebindable = False })
+           Nothing   -> newNonTrivialOverloadedLit orig lit
+                                                   (mkCheckExpType res_ty) }
 
   | otherwise
-  = do { lit' <- newNonTrivialOverloadedLit orig lit res_ty
-       ; return (idHsWrapper, lit') }
+  = newNonTrivialOverloadedLit orig lit res_ty
   where
     orig = LiteralOrigin lit
 
@@ -373,21 +372,23 @@ newOverloadedLit
 -- newOverloadedLit in TcUnify
 newNonTrivialOverloadedLit :: CtOrigin
                            -> HsOverLit Name
-                           -> TcSigmaType
+                           -> ExpRhoType
                            -> TcM (HsOverLit TcId)
 newNonTrivialOverloadedLit orig
-  lit@(OverLit { ol_val = val, ol_witness = meth_name
+  lit@(OverLit { ol_val = val, ol_witness = HsVar (L _ meth_name)
                , ol_rebindable = rebindable }) res_ty
   = do  { hs_lit <- mkOverLit val
         ; let lit_ty = hsLitType hs_lit
-        ; fi' <- tcSyntaxOp orig meth_name (mkFunTy lit_ty res_ty)
-                -- Overloaded literals must have liftedTypeKind, because
-                -- we're instantiating an overloaded function here,
-                -- whereas res_ty might be openTypeKind. This was a bug in 6.2.2
-                -- However this'll be picked up by tcSyntaxOp if necessary
-        ; let witness = HsApp (noLoc fi') (noLoc (HsLit hs_lit))
-        ; return (lit { ol_witness = witness, ol_type = res_ty,
-                        ol_rebindable = rebindable }) }
+        ; (_, fi') <- tcSyntaxOp orig (mkRnSyntaxExpr meth_name)
+                                      [synKnownType lit_ty] res_ty $
+                      \_ -> return ()
+        ; let L _ witness = nlHsSyntaxApps fi' [nlHsLit hs_lit]
+        ; res_ty <- readExpType res_ty
+        ; return (lit { ol_witness = witness
+                      , ol_type = res_ty
+                      , ol_rebindable = rebindable }) }
+newNonTrivialOverloadedLit _ lit _
+  = pprPanic "newNonTrivialOverloadedLit" (ppr lit)
 
 ------------
 mkOverLit :: OverLitVal -> TcM HsLit
@@ -467,9 +468,9 @@ syntaxNameCtxt :: HsExpr Name -> CtOrigin -> Type -> TidyEnv
                -> TcRn (TidyEnv, SDoc)
 syntaxNameCtxt name orig ty tidy_env
   = do { inst_loc <- getCtLocM orig (Just TypeLevel)
-       ; let msg = vcat [ ptext (sLit "When checking that") <+> quotes (ppr name)
-                          <+> ptext (sLit "(needed by a syntactic construct)")
-                        , nest 2 (ptext (sLit "has the required type:")
+       ; let msg = vcat [ text "When checking that" <+> quotes (ppr name)
+                          <+> text "(needed by a syntactic construct)"
+                        , nest 2 (text "has the required type:"
                                   <+> ppr (tidyType tidy_env ty))
                         , nest 2 (pprCtLoc inst_loc) ]
        ; return (tidy_env, msg) }
@@ -524,7 +525,7 @@ newClsInst overlap_mode dfun_name tvs theta clas tys
 
 instOrphWarn :: ClsInst -> SDoc
 instOrphWarn inst
-  = hang (ptext (sLit "Orphan instance:")) 2 (pprInstanceHdr inst)
+  = hang (text "Orphan instance:") 2 (pprInstanceHdr inst)
     $$ text "To avoid this"
     $$ nest 4 (vcat possibilities)
   where
@@ -656,12 +657,12 @@ traceDFuns ispecs
 
 funDepErr :: ClsInst -> [ClsInst] -> TcRn ()
 funDepErr ispec ispecs
-  = addClsInstsErr (ptext (sLit "Functional dependencies conflict between instance declarations:"))
+  = addClsInstsErr (text "Functional dependencies conflict between instance declarations:")
                     (ispec : ispecs)
 
 dupInstErr :: ClsInst -> ClsInst -> TcRn ()
 dupInstErr ispec dup_ispec
-  = addClsInstsErr (ptext (sLit "Duplicate instance declarations:"))
+  = addClsInstsErr (text "Duplicate instance declarations:")
                     [ispec, dup_ispec]
 
 addClsInstsErr :: SDoc -> [ClsInst] -> TcRn ()

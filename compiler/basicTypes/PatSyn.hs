@@ -31,7 +31,6 @@ import Outputable
 import Unique
 import Util
 import BasicTypes
-import FastString
 import Var
 import FieldLabel
 
@@ -50,7 +49,7 @@ import Data.List
 
 -- | A pattern synonym
 -- See Note [Pattern synonym representation]
--- See Note [Patten synonym signatures]
+-- See Note [Pattern synonym signatures]
 data PatSyn
   = MkPatSyn {
         psName        :: Name,
@@ -99,13 +98,13 @@ data PatSyn
              -- Nothing  => uni-directional pattern synonym
              -- Just (builder, is_unlifted) => bi-directional
              -- Builder function, of type
-             --  forall univ_tvs, ex_tvs. (prov_theta, req_theta)
+             --  forall univ_tvs, ex_tvs. (req_theta, prov_theta)
              --                       =>  arg_tys -> res_ty
              -- See Note [Builder for pattern synonyms with unboxed type]
   }
   deriving Data.Typeable.Typeable
 
-{- Note [Patten synonym signatures]
+{- Note [Pattern synonym signatures]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 In a pattern synonym signature we write
    pattern P :: req => prov => t1 -> ... tn -> res_ty
@@ -129,7 +128,7 @@ Example 2:
       data T2 where
         MkT2 :: (Num a, Eq a) => a -> a -> T2
 
-      patttern P2 :: () => (Num a, Eq a) => a -> T2
+      pattern P2 :: () => (Num a, Eq a) => a -> T2
       pattern P2 x = MkT2 3 x
 
   When we match against P2 we get a Num dictionary provided.
@@ -213,7 +212,7 @@ For *bidirectional* pattern synonyms, we also generate a "builder"
 function which implements the pattern synonym in an expression
 context. For our running example, it will be:
 
-        $bP :: forall t b. (Show (Maybe t), Ord b, Eq t, Num t)
+        $bP :: forall t b. (Eq t, Num t, Show (Maybe t), Ord b)
             => b -> T (Maybe t)
         $bP x = MkT [x] (Just 42)
 
@@ -324,7 +323,7 @@ patSynName = psName
 
 patSynType :: PatSyn -> Type
 -- The full pattern type, used only in error messages
--- See Note [Patten synonym signatures]
+-- See Note [Pattern synonym signatures]
 patSynType (MkPatSyn { psUnivTyVars = univ_tvs, psReqTheta = req_theta
                      , psExTyVars   = ex_tvs,   psProvTheta = prov_theta
                      , psArgs = orig_args, psOrigResTy = orig_res_ty })
@@ -386,7 +385,7 @@ patSynInstArgTys (MkPatSyn { psName = name, psUnivTyVars = univ_tvs
                            , psExTyVars = ex_tvs, psArgs = arg_tys })
                  inst_tys
   = ASSERT2( length tyvars == length inst_tys
-          , ptext (sLit "patSynInstArgTys") <+> ppr name $$ ppr tyvars $$ ppr inst_tys )
+          , text "patSynInstArgTys" <+> ppr name $$ ppr tyvars $$ ppr inst_tys )
     map (substTyWith tyvars inst_tys) arg_tys
   where
     tyvars = univ_tvs ++ ex_tvs
@@ -401,5 +400,5 @@ patSynInstResTy (MkPatSyn { psName = name, psUnivTyVars = univ_tvs
                           , psOrigResTy = res_ty })
                 inst_tys
   = ASSERT2( length univ_tvs == length inst_tys
-           , ptext (sLit "patSynInstResTy") <+> ppr name $$ ppr univ_tvs $$ ppr inst_tys )
+           , text "patSynInstResTy" <+> ppr name $$ ppr univ_tvs $$ ppr inst_tys )
     substTyWith univ_tvs inst_tys res_ty

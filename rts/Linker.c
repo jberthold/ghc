@@ -199,6 +199,21 @@ static pathchar* pathdup(pathchar *path)
     return ret;
 }
 
+static pathchar* mkPath(char* path)
+{
+#if defined(mingw32_HOST_OS)
+    size_t required = mbstowcs(NULL, path, 0);
+    pathchar *ret = stgMallocBytes(sizeof(pathchar) * (required + 1), "mkPath");
+    if (mbstowcs(ret, path, required) == (size_t)-1)
+    {
+        barf("mkPath failed converting char* to wchar_t*");
+    }
+
+    return ret;
+#else
+    return pathdup(path);
+#endif
+}
 
 #if defined(OBJFORMAT_ELF)
 static int ocVerifyImage_ELF    ( ObjectCode* oc );
@@ -425,10 +440,13 @@ static int ghciInsertSymbolTable(
       pinfo->weak = HS_BOOL_FALSE;
       return 1;
    }
+   pathchar* archiveName = NULL;
    debugBelch(
       "GHC runtime linker: fatal error: I found a duplicate definition for symbol\n"
       "   %s\n"
       "whilst processing object file\n"
+      "   %" PATH_FMT "\n"
+      "The symbol was previously defined in\n"
       "   %" PATH_FMT "\n"
       "This could be caused by:\n"
       "   * Loading two different object files which export the same symbol\n"
@@ -436,8 +454,17 @@ static int ghciInsertSymbolTable(
       "   * An incorrect `package.conf' entry, causing some object to be\n"
       "     loaded twice.\n",
       (char*)key,
-      obj_name
+      obj_name,
+      pinfo->owner == NULL ? WSTR("(GHCi built-in symbols)") :
+      pinfo->owner->archiveMemberName ? archiveName = mkPath(pinfo->owner->archiveMemberName)
+      : pinfo->owner->fileName
    );
+
+   if (archiveName)
+   {
+       stgFree(archiveName);
+       archiveName = NULL;
+   }
    return 0;
 }
 
@@ -5009,7 +5036,6 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
          } else {
             symbol = strtab + sym.st_name;
             S_tmp = lookupSymbol_( symbol );
-            if (S_tmp == NULL) return 0;
             S = (Elf_Addr)S_tmp;
          }
          if (!S) {

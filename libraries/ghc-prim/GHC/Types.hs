@@ -344,7 +344,7 @@ data Levity = Lifted | Unlifted
 
 {- *********************************************************************
 *                                                                      *
-             Runtime represntation of TyCon
+             Runtime representation of TyCon
 *                                                                      *
 ********************************************************************* -}
 
@@ -358,23 +358,11 @@ data type T.  Things to think about
   - We do this for every module (except this module GHC.Types), so we can't
     depend on anything else (eg string unpacking code)
 
-That's why we have these terribly low-level repesentations.  The TrName
+That's why we have these terribly low-level representations.  The TrName
 type lets us use the TrNameS constructor when allocating static data;
 but we also need TrNameD for the case where we are deserialising a TyCon
 or Module (for example when deserialising a TypeRep), in which case we
 can't conveniently come up with an Addr#.
-
-
-Note [Representations of types defined in GHC.Types]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The representations for the types defined in GHC.Types are
-defined in GHC.Typeable.Internal.
-
-Any types defined here must also have a corresponding TyCon representation
-defined in Data.Typeable.Internal. Also, if the type is promotable it must also
-have a TyCon for each promoted data constructor.
-
 -}
 
 #include "MachDeps.h"

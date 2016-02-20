@@ -1,7 +1,4 @@
 {-# LANGUAGE CPP, ScopedTypeVariables, MagicHash, UnboxedTuples #-}
-#if __GLASGOW_HASKELL__ > 710
-{-# OPTIONS_GHC -ffull-guard-reasoning #-}
-#endif
 
 -----------------------------------------------------------------------------
 --
@@ -804,7 +801,7 @@ extractSubTerms recurse clos = liftM thdOf3 . go 0 (nonPtrs clos)
       | Just (tc, elem_tys) <- tcSplitTyConApp_maybe ty
       , isUnboxedTupleTyCon tc
                 -- See Note [Unboxed tuple levity vars] in TyCon
-      = do (ptr_i, ws, terms0) <- go ptr_i ws (drop (length elem_tys `div` 2) elem_tys)
+      = do (ptr_i, ws, terms0) <- go ptr_i ws (dropLevityArgs elem_tys)
            (ptr_i, ws, terms1) <- go ptr_i ws tys
            return (ptr_i, ws, unboxedTupleTerm ty terms0 : terms1)
       | otherwise
@@ -1274,10 +1271,6 @@ quantifyType ty = ( filter isTyVar $
                   , rho)
   where
     (_tvs, rho) = tcSplitForAllTys ty
-
-unlessM :: Monad m => m Bool -> m () -> m ()
-unlessM condM acc = condM >>= \c -> unless c acc
-
 
 -- Strict application of f at index i
 appArr :: Ix i => (e -> a) -> Array i e -> Int -> a

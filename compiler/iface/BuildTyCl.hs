@@ -18,7 +18,7 @@ module BuildTyCl (
 
 import IfaceEnv
 import FamInstEnv( FamInstEnvs, mkNewTypeCoAxiom )
-import TysWiredIn( isCTupleTyConName, tyConRepModOcc )
+import TysWiredIn( isCTupleTyConName )
 import DataCon
 import PatSyn
 import Var
@@ -74,7 +74,7 @@ mkNewTyConRhs tycon_name tycon con
   where
     tvs    = tyConTyVars tycon
     roles  = tyConRoles tycon
-    inst_con_ty = applyTys (dataConUserType con) (mkTyVarTys tvs)
+    inst_con_ty = piResultTys (dataConUserType con) (mkTyVarTys tvs)
     rhs_ty = ASSERT( isFunTy inst_con_ty ) funArgTy inst_con_ty
         -- Instantiate the data con with the
         -- type variables from the tycon
@@ -157,7 +157,7 @@ mkDataConStupidTheta tycon arg_tys univ_tvs
   | null stupid_theta = []      -- The common case
   | otherwise         = filter in_arg_tys stupid_theta
   where
-    tc_subst     = zipTopTCvSubst (tyConTyVars tycon) (mkTyVarTys univ_tvs)
+    tc_subst     = zipTvSubst (tyConTyVars tycon) (mkTyVarTys univ_tvs)
     stupid_theta = substTheta tc_subst (tyConStupidTheta tycon)
         -- Start by instantiating the master copy of the
         -- stupid theta, taken from the TyCon
@@ -205,8 +205,8 @@ buildPatSyn src_name declared_infix matcher@(matcher_id,_) builder
     (ex_tvs1, prov_theta1, cont_tau) = tcSplitSigmaTy cont_sigma
     (arg_tys1, _) = tcSplitFunTys cont_tau
     twiddle = char '~'
-    subst = zipTopTCvSubst (univ_tvs1 ++ ex_tvs1)
-                           (mkTyVarTys (univ_tvs ++ ex_tvs))
+    subst = zipTvSubst (univ_tvs1 ++ ex_tvs1)
+                       (mkTyVarTys (univ_tvs ++ ex_tvs))
 
 ------------------------------------------------------
 type TcMethInfo = (Name, Type, Maybe (DefMethSpec Type))
@@ -357,4 +357,4 @@ newTyConRepName tc_name
   , (mod, occ) <- tyConRepModOcc mod (nameOccName tc_name)
   = newGlobalBinder mod occ noSrcSpan
   | otherwise
-  = newImplicitBinder tc_name mkTyConRepUserOcc
+  = newImplicitBinder tc_name mkTyConRepOcc
