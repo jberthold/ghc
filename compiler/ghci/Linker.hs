@@ -499,7 +499,7 @@ linkExpr hsc_env span root_ul_bco
    ; let nobreakarray = error "no break array"
          bco_ix = mkNameEnv [(unlinkedBCOName root_ul_bco, 0)]
    ; resolved <- linkBCO hsc_env ie ce bco_ix nobreakarray root_ul_bco
-   ; [root_hvref] <- iservCmd hsc_env (CreateBCOs [resolved])
+   ; [root_hvref] <- createBCOs hsc_env [resolved]
    ; fhv <- mkFinalizedHValue hsc_env root_hvref
    ; return (pls, fhv)
    }}}
@@ -546,22 +546,22 @@ normalObjectSuffix = phaseInputExt StopLn
 
 failNonStd :: DynFlags -> SrcSpan -> IO (Maybe FilePath)
 failNonStd dflags srcspan = dieWith dflags srcspan $
-  ptext (sLit "Cannot load") <+> compWay <+>
-     ptext (sLit "objects when GHC is built") <+> ghciWay $$
-  ptext (sLit "To fix this, either:") $$
-  ptext (sLit "  (1) Use -fexternal-interprter, or") $$
-  ptext (sLit "  (2) Build the program twice: once") <+>
-                       ghciWay <> ptext (sLit ", and then") $$
-  ptext (sLit "      with") <+> compWay <+>
-     ptext (sLit "using -osuf to set a different object file suffix.")
+  text "Cannot load" <+> compWay <+>
+     text "objects when GHC is built" <+> ghciWay $$
+  text "To fix this, either:" $$
+  text "  (1) Use -fexternal-interprter, or" $$
+  text "  (2) Build the program twice: once" <+>
+                       ghciWay <> text ", and then" $$
+  text "      with" <+> compWay <+>
+     text "using -osuf to set a different object file suffix."
     where compWay
-            | WayDyn `elem` ways dflags = ptext (sLit "-dynamic")
-            | WayProf `elem` ways dflags = ptext (sLit "-prof")
-            | otherwise = ptext (sLit "normal")
+            | WayDyn `elem` ways dflags = text "-dynamic"
+            | WayProf `elem` ways dflags = text "-prof"
+            | otherwise = text "normal"
           ghciWay
-            | dynamicGhc = ptext (sLit "with -dynamic")
-            | rtsIsProfiled = ptext (sLit "with -prof")
-            | otherwise = ptext (sLit "the normal way")
+            | dynamicGhc = text "with -dynamic"
+            | rtsIsProfiled = text "with -prof"
+            | otherwise = text "the normal way"
 
 getLinkDeps :: HscEnv -> HomePackageTable
             -> PersistentLinkerState
@@ -649,11 +649,11 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
 
     no_obj :: Outputable a => a -> IO b
     no_obj mod = dieWith dflags span $
-                     ptext (sLit "cannot find object file for module ") <>
+                     text "cannot find object file for module " <>
                         quotes (ppr mod) $$
                      while_linking_expr
 
-    while_linking_expr = ptext (sLit "while linking an interpreted expression")
+    while_linking_expr = text "while linking an interpreted expression"
 
         -- This one is a build-system bug
 
@@ -691,7 +691,7 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
                 ok <- doesFileExist new_file
                 if (not ok)
                    then dieWith dflags span $
-                          ptext (sLit "cannot find object file ")
+                          text "cannot find object file "
                                 <> quotes (text new_file) $$ while_linking_expr
                    else return (DotO new_file)
             adjust_ul _ (DotA fp) = panic ("adjust_ul DotA " ++ show fp)
@@ -971,7 +971,7 @@ linkSomeBCOs hsc_env ie ce mods = foldr fun do_link mods []
         bco_ix = mkNameEnv (zip names [0..])
     resolved <- sequence [ linkBCO hsc_env ie ce bco_ix breakarray bco
                          | (breakarray, bco) <- flat ]
-    hvrefs <- iservCmd hsc_env (CreateBCOs resolved)
+    hvrefs <- createBCOs hsc_env resolved
     return (zip names hvrefs)
 
 -- | Useful to apply to the result of 'linkSomeBCOs'

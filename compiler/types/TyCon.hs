@@ -51,7 +51,7 @@ module TyCon(
         isOpenTypeFamilyTyCon, isClosedSynFamilyTyConWithAxiom_maybe,
         familyTyConInjectivityInfo,
         isBuiltInSynFamTyCon_maybe,
-        isUnLiftedTyCon,
+        isUnliftedTyCon,
         isGadtSyntaxTyCon, isInjectiveTyCon, isGenerativeTyCon, isGenInjAlgRhs,
         isTyConAssoc, tyConAssoc_maybe,
         isRecursiveTyCon,
@@ -91,6 +91,8 @@ module TyCon(
 
         -- * Runtime type representation
         TyConRepName, tyConRepName_maybe,
+        mkPrelTyConRepName,
+        tyConRepModOcc,
 
         -- * Primitive representations of Types
         PrimRep(..), PrimElemRep(..),
@@ -124,6 +126,8 @@ import FastStringEnv
 import FieldLabel
 import Constants
 import Util
+import Unique( tyConRepNameUnique, dataConRepNameUnique )
+import Module
 
 import qualified Data.Data as Data
 import Data.Typeable (Typeable)
@@ -570,7 +574,7 @@ data TyCon
                                  -- pointers). This 'PrimRep' holds that
                                  -- information.  Only relevant if tyConKind = #
 
-        isUnLifted   :: Bool,    -- ^ Most primitive tycons are unlifted (may
+        isUnlifted   :: Bool,    -- ^ Most primitive tycons are unlifted (may
                                  -- not contain bottom) but other are lifted,
                                  -- e.g. @RealWorld@
                                  -- Only relevant if tyConKind = *
@@ -594,6 +598,8 @@ data TyCon
   | TcTyCon {
       tyConUnique :: Unique,
       tyConName   :: Name,
+      tyConUnsat  :: Bool,  -- ^ can this tycon be unsaturated?
+      tyConArity  :: Arity,
       tyConKind   :: Kind
       }
   deriving Typeable
@@ -914,6 +920,31 @@ tyConRepName_maybe (PromotedDataCon { tcRepName = rep_nm })
   = Just rep_nm
 tyConRepName_maybe _ = Nothing
 
+-- | Make a 'Name' for the 'Typeable' representation of the given wired-in type
+mkPrelTyConRepName :: Name -> TyConRepName
+-- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
+mkPrelTyConRepName tc_name  -- Prelude tc_name is always External,
+                            -- so nameModule will work
+  = mkExternalName rep_uniq rep_mod rep_occ (nameSrcSpan tc_name)
+  where
+    name_occ  = nameOccName tc_name
+    name_mod  = nameModule  tc_name
+    name_uniq = nameUnique  tc_name
+    rep_uniq | isTcOcc name_occ = tyConRepNameUnique   name_uniq
+             | otherwise        = dataConRepNameUnique name_uniq
+    (rep_mod, rep_occ) = tyConRepModOcc name_mod name_occ
+
+-- | The name (and defining module) for the Typeable representation (TyCon) of a
+-- type constructor.
+--
+-- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
+tyConRepModOcc :: Module -> OccName -> (Module, OccName)
+tyConRepModOcc tc_module tc_occ = (rep_module, mkTyConRepOcc tc_occ)
+  where
+    rep_module
+      | tc_module == gHC_PRIM = gHC_TYPES
+      | otherwise             = tc_module
+
 
 {- *********************************************************************
 *                                                                      *
@@ -1187,16 +1218,20 @@ mkTupleTyCon name kind arity tyvars con sort parent
 -- TcErrors sometimes calls typeKind.
 -- See also Note [Kind checking recursive type and class declarations]
 -- in TcTyClsDecls.
-mkTcTyCon :: Name -> Kind -> TyCon
-mkTcTyCon name kind
+mkTcTyCon :: Name -> Kind -> Bool -- ^ Can this be unsaturated?
+          -> Arity
+          -> TyCon
+mkTcTyCon name kind unsat arity
   = TcTyCon { tyConUnique  = getUnique name
             , tyConName    = name
-            , tyConKind    = kind }
+            , tyConKind    = kind
+            , tyConUnsat   = unsat
+            , tyConArity   = arity }
 
 -- | Create an unlifted primitive 'TyCon', such as @Int#@
 mkPrimTyCon :: Name  -> Kind -> [Role] -> PrimRep -> TyCon
 mkPrimTyCon name kind roles rep
-  = mkPrimTyCon' name kind roles rep True Nothing
+  = mkPrimTyCon' name kind roles rep True (Just $ mkPrelTyConRepName name)
 
 -- | Kind constructors
 mkKindTyCon :: Name -> Kind -> [Role] -> Name -> TyCon
@@ -1221,7 +1256,7 @@ mkPrimTyCon' name kind roles rep is_unlifted rep_nm
         tyConArity   = length roles,
         tcRoles      = roles,
         primTyConRep = rep,
-        isUnLifted   = is_unlifted,
+        isUnlifted   = is_unlifted,
         primRepName  = rep_nm
     }
 
@@ -1292,7 +1327,7 @@ makeTyConAbstract tc
                 tyConArity       = tyConArity tc,
                 tcRoles          = tyConRoles tc,
                 primTyConRep     = PtrRep,
-                isUnLifted       = False,
+                isUnlifted       = False,
                 primRepName      = Nothing }
   where
     name = tyConName tc
@@ -1304,13 +1339,13 @@ isPrimTyCon _              = False
 
 -- | Is this 'TyCon' unlifted (i.e. cannot contain bottom)? Note that this can
 -- only be true for primitive and unboxed-tuple 'TyCon's
-isUnLiftedTyCon :: TyCon -> Bool
-isUnLiftedTyCon (PrimTyCon  {isUnLifted = is_unlifted})
+isUnliftedTyCon :: TyCon -> Bool
+isUnliftedTyCon (PrimTyCon  {isUnlifted = is_unlifted})
   = is_unlifted
-isUnLiftedTyCon (AlgTyCon { algTcRhs = rhs } )
+isUnliftedTyCon (AlgTyCon { algTcRhs = rhs } )
   | TupleTyCon { tup_sort = sort } <- rhs
   = not (isBoxed (tupleSortBoxity sort))
-isUnLiftedTyCon _ = False
+isUnliftedTyCon _ = False
 
 -- | Returns @True@ if the supplied 'TyCon' resulted from either a
 -- @data@ or @newtype@ declaration
@@ -1480,6 +1515,7 @@ isTypeSynonymTyCon _                 = False
 mightBeUnsaturatedTyCon :: TyCon -> Bool
 mightBeUnsaturatedTyCon (SynonymTyCon {}) = False
 mightBeUnsaturatedTyCon (FamilyTyCon  { famTcFlav = flav}) = isDataFamFlav flav
+mightBeUnsaturatedTyCon (TcTyCon { tyConUnsat = unsat })   = unsat
 mightBeUnsaturatedTyCon _other            = True
 
 -- | Is this an algebraic 'TyCon' declared with the GADT syntax?

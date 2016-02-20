@@ -45,7 +45,7 @@ test('TH_NestedSplices',
 # normal way first, which is why the work is done by a Makefile rule.
 test('TH_spliceE5_prof',
      [req_profiling,
-      omit_ways(['ghci']),
+      when(ghc_dynamic(), expect_broken(11495)),
       extra_clean(['TH_spliceE5_prof_Lib.p.o', 'TH_spliceE5_prof_Lib.hi',
                    'TH_spliceE5_prof_Lib.dyn_o', 'TH_spliceE5_prof_Lib.dyn_hi',
                    'TH_spliceE5_prof.dyn_o', 'TH_spliceE5_prof.dyn_hi',
@@ -398,3 +398,4 @@ test('T11345', normal, compile_and_run, ['-v0 -dsuppress-uniques'])
 
 test('TH_finalizer', normal, compile, ['-v0'])
 test('T10603', normal, compile, ['-ddump-splices -dsuppress-uniques'])
+test('T11452', normal, compile_fail, ['-v0'])

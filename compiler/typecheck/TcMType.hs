@@ -20,15 +20,19 @@ module TcMType (
   newFlexiTyVarTy,              -- Kind -> TcM TcType
   newFlexiTyVarTys,             -- Int -> Kind -> TcM [TcType]
   newOpenFlexiTyVarTy,
-  newReturnTyVar, newReturnTyVarTy,
-  newOpenReturnTyVar,
   newMetaKindVar, newMetaKindVars,
   cloneMetaTyVar,
   newFmvTyVar, newFskTyVar,
-  tauTvForReturnTv,
 
   readMetaTyVar, writeMetaTyVar, writeMetaTyVarRef,
   newMetaDetails, isFilledMetaTyVar, isUnfilledMetaTyVar,
+
+  --------------------------------
+  -- Expected types
+  ExpType(..), ExpSigmaType, ExpRhoType,
+  mkCheckExpType, newOpenInferExpType, readExpType, readExpType_maybe,
+  writeExpType, expTypeToType, checkingExpType_maybe, checkingExpType,
+  tauifyExpType,
 
   --------------------------------
   -- Creating fresh type variables for pm checking
@@ -105,6 +109,7 @@ import qualified GHC.LanguageExtensions as LangExt
 import Control.Monad
 import Maybes
 import Data.List        ( mapAccumL, partition )
+import Control.Arrow    ( second )
 
 {-
 ************************************************************************
@@ -271,6 +276,143 @@ checkCoercionHole co h r t1 t2
   | otherwise
   = return co
 
+{-
+************************************************************************
+*
+    Expected types
+*
+************************************************************************
+
+Note [ExpType]
+~~~~~~~~~~~~~~
+
+An ExpType is used as the "expected type" when type-checking an expression.
+An ExpType can hold a "hole" that can be filled in by the type-checker.
+This allows us to have one tcExpr that works in both checking mode and
+synthesis mode (that is, bidirectional type-checking). Previously, this
+was achieved by using ordinary unification variables, but we don't need
+or want that generality. (For example, #11397 was caused by doing the
+wrong thing with unification variables.) Instead, we observe that these
+holes should
+
+1. never be nested
+2. never appear as the type of a variable
+3. be used linearly (never be duplicated)
+
+By defining ExpType, separately from Type, we can achieve goals 1 and 2
+statically.
+
+See also [wiki:Typechecking]
+
+Note [TcLevel of ExpType]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+
+  data G a where
+    MkG :: G Bool
+
+  foo MkG = True
+
+This is a classic untouchable-variable / ambiguous GADT return type
+scenario. But, with ExpTypes, we'll be inferring the type of the RHS.
+And, because there is only one branch of the case, we won't trigger
+Note [Case branches must never infer a non-tau type] of TcMatches.
+We thus must track a TcLevel in an Inferring ExpType. If we try to
+fill the ExpType and find that the TcLevels don't work out, we
+fill the ExpType with a tau-tv at the low TcLevel, hopefully to
+be worked out later by some means. This is triggered in
+test gadt/gadt-escape1.
+
+-}
+
+-- actual data definition is in TcType
+
+-- | Make an 'ExpType' suitable for inferring a type of kind * or #.
+newOpenInferExpType :: TcM ExpType
+newOpenInferExpType
+  = do { lev <- newFlexiTyVarTy levityTy
+       ; u <- newUnique
+       ; tclvl <- getTcLevel
+       ; let ki = tYPE lev
+       ; traceTc "newOpenInferExpType" (ppr u <+> dcolon <+> ppr ki)
+       ; ref <- newMutVar Nothing
+       ; return (Infer u tclvl ki ref) }
+
+-- | Extract a type out of an ExpType, if one exists. But one should always
+-- exist. Unless you're quite sure you know what you're doing.
+readExpType_maybe :: ExpType -> TcM (Maybe TcType)
+readExpType_maybe (Check ty)        = return (Just ty)
+readExpType_maybe (Infer _ _ _ ref) = readMutVar ref
+
+-- | Extract a type out of an ExpType. Otherwise, panics.
+readExpType :: ExpType -> TcM TcType
+readExpType exp_ty
+  = do { mb_ty <- readExpType_maybe exp_ty
+       ; case mb_ty of
+           Just ty -> return ty
+           Nothing -> pprPanic "Unknown expected type" (ppr exp_ty) }
+
+-- | Write into an 'ExpType'. It must be an 'Infer'.
+writeExpType :: ExpType -> TcType -> TcM ()
+writeExpType (Infer u tc_lvl ki ref) ty
+  | debugIsOn
+  = do { ki1 <- zonkTcType (typeKind ty)
+       ; ki2 <- zonkTcType ki
+       ; MASSERT2( ki1 `eqType` ki2, ppr ki1 $$ ppr ki2 $$ ppr u )
+       ; lvl_now <- getTcLevel
+       ; MASSERT2( tc_lvl == lvl_now, ppr u $$ ppr tc_lvl $$ ppr lvl_now )
+       ; cts <- readTcRef ref
+       ; case cts of
+           Just already_there -> pprPanic "writeExpType"
+                                   (vcat [ ppr u
+                                         , ppr ty
+                                         , ppr already_there ])
+           Nothing -> write }
+  | otherwise
+  = write
+  where
+    write = do { traceTc "Filling ExpType" $
+                   ppr u <+> text ":=" <+> ppr ty
+               ; writeTcRef ref (Just ty) }
+writeExpType (Check ty1) ty2 = pprPanic "writeExpType" (ppr ty1 $$ ppr ty2)
+
+-- | Returns the expected type when in checking mode.
+checkingExpType_maybe :: ExpType -> Maybe TcType
+checkingExpType_maybe (Check ty) = Just ty
+checkingExpType_maybe _          = Nothing
+
+-- | Returns the expected type when in checking mode. Panics if in inference
+-- mode.
+checkingExpType :: String -> ExpType -> TcType
+checkingExpType _   (Check ty) = ty
+checkingExpType err et         = pprPanic "checkingExpType" (text err $$ ppr et)
+
+tauifyExpType :: ExpType -> TcM ExpType
+-- ^ Turn a (Infer hole) type into a (Check alpha),
+-- where alpha is a fresh unificaiton variable
+tauifyExpType exp_ty = do { ty <- expTypeToType exp_ty
+                          ; return (Check ty) }
+
+-- | Extracts the expected type if there is one, or generates a new
+-- TauTv if there isn't.
+expTypeToType :: ExpType -> TcM TcType
+expTypeToType (Check ty) = return ty
+expTypeToType (Infer u tc_lvl ki ref)
+  = do { uniq <- newUnique
+       ; tv_ref <- newMutVar Flexi
+       ; let details = MetaTv { mtv_info = TauTv
+                              , mtv_ref  = tv_ref
+                              , mtv_tclvl = tc_lvl }
+             name   = mkMetaTyVarName uniq (fsLit "t")
+             tau_tv = mkTcTyVar name ki details
+             tau    = mkTyVarTy tau_tv
+             -- can't use newFlexiTyVarTy because we need to set the tc_lvl
+             -- See also Note [TcLevel of ExpType]
+
+       ; writeMutVar ref (Just tau)
+       ; traceTc "Forcing ExpType to be monomorphic:"
+                 (ppr u <+> dcolon <+> ppr ki <+> text ":=" <+> ppr tau)
+       ; return tau }
 
 {-
 ************************************************************************
@@ -294,7 +436,7 @@ tcInstType inst_tyvars ty
                             return ([], theta, tau)
 
         (tyvars, rho) -> do { (subst, tyvars') <- inst_tyvars tyvars
-                            ; let (theta, tau) = tcSplitPhiTy (substTy subst rho)
+                            ; let (theta, tau) = tcSplitPhiTy (substTyUnchecked subst rho)
                             ; return (tyvars', theta, tau) }
 
 tcSkolDFunType :: Type -> TcM ([TcTyVar], TcThetaType, TcType)
@@ -307,13 +449,14 @@ tcSuperSkolTyVars :: [TyVar] -> (TCvSubst, [TcTyVar])
 -- Moreover, make them "super skolems"; see comments with superSkolemTv
 -- see Note [Kind substitution when instantiating]
 -- Precondition: tyvars should be ordered by scoping
-tcSuperSkolTyVars = mapAccumL tcSuperSkolTyVar (mkTopTCvSubst [])
+tcSuperSkolTyVars = mapAccumL tcSuperSkolTyVar emptyTCvSubst
 
 tcSuperSkolTyVar :: TCvSubst -> TyVar -> (TCvSubst, TcTyVar)
 tcSuperSkolTyVar subst tv
-  = (extendTCvSubst subst tv (mkTyVarTy new_tv), new_tv)
+  = (extendTCvSubst (extendTCvInScope subst new_tv) tv (mkTyVarTy new_tv)
+    , new_tv)
   where
-    kind   = substTy subst (tyVarKind tv)
+    kind   = substTyUnchecked subst (tyVarKind tv)
     new_tv = mkTcTyVar (tyVarName tv) kind superSkolemTv
 
 -- Wrappers
@@ -390,12 +533,16 @@ instSkolTyCoVarsX mk_tcv = mapAccumLM (instSkolTyCoVarX mk_tcv)
 instSkolTyCoVarX :: (Unique -> Name -> Kind -> TyCoVar)
                  -> TCvSubst -> TyCoVar -> TcRnIf gbl lcl (TCvSubst, TyCoVar)
 instSkolTyCoVarX mk_tcv subst tycovar
-  = do  { uniq <- newUnique
+  = do  { uniq <- newUnique  -- using a new unique is critical. See
+                             -- Note [Skolems in zonkSyntaxExpr] in TcHsSyn
         ; let new_tv = mk_tcv uniq old_name kind
-        ; return (extendTCvSubst subst tycovar (mk_ty_co new_tv), new_tv) }
+        ; return (extendTCvSubst (extendTCvInScope subst new_tv) tycovar
+                   (mk_ty_co new_tv)
+                 , new_tv)
+        }
   where
     old_name = tyVarName tycovar
-    kind     = substTy subst (tyVarKind tycovar)
+    kind     = substTyUnchecked subst (tyVarKind tycovar)
 
     mk_ty_co v
       | isTyVar v = mkTyVarTy v
@@ -571,23 +718,6 @@ genInstSkolTyVarsX loc subst tvs = instSkolTyCoVarsX (mkTcSkolTyVar loc False) s
 *                                                                      *
 ************************************************************************
 
-Note [Sort-polymorphic tyvars accept foralls]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Here is a common paradigm:
-   foo :: (forall a. a -> a) -> Int
-   foo = error "urk"
-To make this work we need to instantiate 'error' with a polytype.
-A similar case is
-   bar :: Bool -> (forall a. a->a) -> Int
-   bar True = \x. (x 3)
-   bar False = error "urk"
-Here we need to instantiate 'error' with a polytype.
-
-But 'error' has an sort-polymorphic type variable, precisely so that
-we can instantiate it with Int#.  So we also allow such type variables
-to be instantiate with foralls.  It's a bit of a hack, but seems
-straightforward.
-
 Note [Never need to instantiate coercion variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 With coercion variables sloshing around in types, it might seem that we
@@ -608,7 +738,6 @@ newAnonMetaTyVar meta_info kind
   = do  { uniq <- newUnique
         ; let name = mkMetaTyVarName uniq s
               s = case meta_info of
-                        ReturnTv    -> fsLit "r"
                         TauTv       -> fsLit "t"
                         FlatMetaTv  -> fsLit "fmv"
                         SigTv       -> fsLit "a"
@@ -626,42 +755,11 @@ newFlexiTyVarTy kind = do
 newFlexiTyVarTys :: Int -> Kind -> TcM [TcType]
 newFlexiTyVarTys n kind = mapM newFlexiTyVarTy (nOfThem n kind)
 
-newReturnTyVar :: Kind -> TcM TcTyVar
-newReturnTyVar kind = newAnonMetaTyVar ReturnTv kind
-
-newReturnTyVarTy :: Kind -> TcM TcType
-newReturnTyVarTy kind = mkTyVarTy <$> newReturnTyVar kind
-
 -- | Create a tyvar that can be a lifted or unlifted type.
 newOpenFlexiTyVarTy :: TcM TcType
 newOpenFlexiTyVarTy
   = do { lev <- newFlexiTyVarTy levityTy
        ; newFlexiTyVarTy (tYPE lev) }
-
--- | Create a *return* tyvar that can be a lifted or unlifted type.
-newOpenReturnTyVar :: TcM (TcTyVar, TcKind)
-newOpenReturnTyVar
-  = do { lev <- newFlexiTyVarTy levityTy  -- this doesn't need ReturnTv
-       ; let k = tYPE lev
-       ; tv <- newReturnTyVar k
-       ; return (tv, k) }
-
--- | If the type is a ReturnTv, fill it with a new meta-TauTv. Otherwise,
--- no change. This function can look through ReturnTvs and returns a partially
--- zonked type as an optimisation.
-tauTvForReturnTv :: TcType -> TcM TcType
-tauTvForReturnTv ty
-  | Just tv <- tcGetTyVar_maybe ty
-  , isReturnTyVar tv
-  = do { contents <- readMetaTyVar tv
-       ; case contents of
-           Flexi -> do { tau_ty <- newFlexiTyVarTy (tyVarKind tv)
-                       ; writeMetaTyVar tv tau_ty
-                       ; return tau_ty }
-           Indirect ty -> tauTvForReturnTv ty }
-  | otherwise
-  = ASSERT( all (not . isReturnTyVar) (tyCoVarsOfTypeList ty) )
-    return ty
 
 newMetaSigTyVars :: [TyVar] -> TcM (TCvSubst, [TcTyVar])
 newMetaSigTyVars = mapAccumLM newMetaSigTyVarX emptyTCvSubst
@@ -681,15 +779,15 @@ newMetaTyVarX :: TCvSubst -> TyVar -> TcM (TCvSubst, TcTyVar)
 -- an existing TyVar. We substitute kind variables in the kind.
 newMetaTyVarX subst tyvar
   = do  { uniq <- newUnique
-               -- See Note [Levity polymorphic variables accept foralls]
-        ; let info | isLevityPolymorphic (tyVarKind tyvar) = ReturnTv
-                   | otherwise                             = TauTv
-        ; details <- newMetaDetails info
+        ; details <- newMetaDetails TauTv
         ; let name   = mkSystemName uniq (getOccName tyvar)
                        -- See Note [Name of an instantiated type variable]
-              kind   = substTy subst (tyVarKind tyvar)
+              kind   = substTyUnchecked subst (tyVarKind tyvar)
               new_tv = mkTcTyVar name kind details
-        ; return (extendTCvSubst subst tyvar (mkTyVarTy new_tv), new_tv) }
+        ; return (extendTCvSubstAndInScope subst tyvar
+                   (mkTyVarTy new_tv)
+                 , new_tv)
+        }
 
 newMetaSigTyVarX :: TCvSubst -> TyVar -> TcM (TCvSubst, TcTyVar)
 -- Just like newMetaTyVarX, but make a SigTv
@@ -699,29 +797,14 @@ newMetaSigTyVarX subst tyvar
         ; let name   = mkSystemName uniq (getOccName tyvar)
               kind   = substTy subst (tyVarKind tyvar)
               new_tv = mkTcTyVar name kind details
-        ; return (extendTCvSubst subst tyvar (mkTyVarTy new_tv), new_tv) }
+        ; return (extendTCvSubst (extendTCvInScope subst new_tv) tyvar
+                   (mkTyVarTy new_tv)
+                 , new_tv) }
 
 {- Note [Name of an instantiated type variable]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 At the moment we give a unification variable a System Name, which
 influences the way it is tidied; see TypeRep.tidyTyVarBndr.
-
-Note [Levity polymorphic variables accept foralls]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Here is a common paradigm:
-   foo :: (forall a. a -> a) -> Int
-   foo = error "urk"
-To make this work we need to instantiate 'error' with a polytype.
-A similar case is
-   bar :: Bool -> (forall a. a->a) -> Int
-   bar True = \x. (x 3)
-   bar False = error "urk"
-Here we need to instantiate 'error' with a polytype.
-
-But 'error' has a levity polymorphic type variable, precisely so that
-we can instantiate it with Int#.  So we also allow such type variables
-to be instantiated with foralls.  It's a bit of a hack, but seems
-straightforward.
 
 ************************************************************************
 *                                                                      *
@@ -894,7 +977,7 @@ skolemiseUnboundMetaTyVar tv details
               final_name  = mkInternalName uniq tv_name span
               final_tv    = mkTcTyVar final_name kind details
 
-        ; traceTc "Skolemising" (ppr tv <+> ptext (sLit ":=") <+> ppr final_tv)
+        ; traceTc "Skolemising" (ppr tv <+> text ":=" <+> ppr final_tv)
         ; writeMetaTyVar tv (mkTyVarTy final_tv)
         ; return final_tv }
 
@@ -1094,8 +1177,9 @@ zonkCtEvidence ctev@(CtDerived { ctev_pred = pred })
        ; return (ctev { ctev_pred = pred' }) }
 
 zonkSkolemInfo :: SkolemInfo -> TcM SkolemInfo
-zonkSkolemInfo (SigSkol cx ty)  = do { ty' <- zonkTcType ty
-                                     ; return (SigSkol cx ty') }
+zonkSkolemInfo (SigSkol cx ty)  = do { ty  <- readExpType ty
+                                     ; ty' <- zonkTcType ty
+                                     ; return (SigSkol cx (mkCheckExpType ty')) }
 zonkSkolemInfo (InferSkol ntys) = do { ntys' <- mapM do_one ntys
                                      ; return (InferSkol ntys') }
   where
@@ -1195,34 +1279,41 @@ zonkTidyTcType env ty = do { ty' <- zonkTcType ty
 
 -- | Make an 'ErrorThing' storing a type.
 mkTypeErrorThing :: TcType -> ErrorThing
-mkTypeErrorThing ty = ErrorThing ty (Just $ length $ snd $ splitAppTys ty)
+mkTypeErrorThing ty = ErrorThing ty (Just $ length $ snd $ repSplitAppTys ty)
                                  zonkTidyTcType
+   -- NB: Use *rep*splitAppTys, else we get #11313
 
 -- | Make an 'ErrorThing' storing a type, with some extra args known about
 mkTypeErrorThingArgs :: TcType -> Int -> ErrorThing
 mkTypeErrorThingArgs ty num_args
-  = ErrorThing ty (Just $ (length $ snd $ splitAppTys ty) + num_args)
+  = ErrorThing ty (Just $ (length $ snd $ repSplitAppTys ty) + num_args)
                zonkTidyTcType
 
 zonkTidyOrigin :: TidyEnv -> CtOrigin -> TcM (TidyEnv, CtOrigin)
 zonkTidyOrigin env (GivenOrigin skol_info)
   = do { skol_info1 <- zonkSkolemInfo skol_info
-       ; let (env1, skol_info2) = tidySkolemInfo env skol_info1
-       ; return (env1, GivenOrigin skol_info2) }
+       ; let skol_info2 = tidySkolemInfo env skol_info1
+       ; return (env, GivenOrigin skol_info2) }
 zonkTidyOrigin env orig@(TypeEqOrigin { uo_actual   = act
                                       , uo_expected = exp
                                       , uo_thing    = m_thing })
   = do { (env1, act') <- zonkTidyTcType env  act
-       ; (env2, exp') <- zonkTidyTcType env1 exp
+       ; mb_exp <- readExpType_maybe exp  -- it really should be filled in.
+                                          -- unless we're debugging.
+       ; (env2, exp') <- case mb_exp of
+           Just ty -> second mkCheckExpType <$> zonkTidyTcType env1 ty
+           Nothing -> return (env1, exp)
        ; (env3, m_thing') <- zonkTidyErrorThing env2 m_thing
        ; return ( env3, orig { uo_actual   = act'
                              , uo_expected = exp'
                              , uo_thing    = m_thing' }) }
-zonkTidyOrigin env (KindEqOrigin ty1 ty2 orig t_or_k)
-  = do { (env1, ty1') <- zonkTidyTcType env  ty1
-       ; (env2, ty2') <- zonkTidyTcType env1 ty2
-       ; (env3, orig') <- zonkTidyOrigin env2 orig
-       ; return (env3, KindEqOrigin ty1' ty2' orig' t_or_k) }
+zonkTidyOrigin env (KindEqOrigin ty1 m_ty2 orig t_or_k)
+  = do { (env1, ty1')   <- zonkTidyTcType env  ty1
+       ; (env2, m_ty2') <- case m_ty2 of
+                             Just ty2 -> second Just <$> zonkTidyTcType env1 ty2
+                             Nothing  -> return (env1, Nothing)
+       ; (env3, orig')  <- zonkTidyOrigin env2 orig
+       ; return (env3, KindEqOrigin ty1' m_ty2' orig' t_or_k) }
 zonkTidyOrigin env (FunDepOrigin1 p1 l1 p2 l2)
   = do { (env1, p1') <- zonkTidyTcType env  p1
        ; (env2, p2') <- zonkTidyTcType env1 p2
@@ -1267,25 +1358,11 @@ tidyEvVar :: TidyEnv -> EvVar -> EvVar
 tidyEvVar env var = setVarType var (tidyType env (varType var))
 
 ----------------
-tidySkolemInfo :: TidyEnv -> SkolemInfo -> (TidyEnv, SkolemInfo)
-tidySkolemInfo env (SigSkol cx ty)
-  = (env', SigSkol cx ty')
-  where
-    (env', ty') = tidyOpenType env ty
-
-tidySkolemInfo env (InferSkol ids)
-  = (env', InferSkol ids')
-  where
-    (env', ids') = mapAccumL do_one env ids
-    do_one env (name, ty) = (env', (name, ty'))
-       where
-         (env', ty') = tidyOpenType env ty
-
-tidySkolemInfo env (UnifyForAllSkol skol_tvs ty)
-  = (env1, UnifyForAllSkol skol_tvs' ty')
-  where
-    env1 = tidyFreeTyCoVars env (tyCoVarsOfType ty `delVarSetList` skol_tvs)
-    (env2, skol_tvs') = tidyTyCoVarBndrs env1 skol_tvs
-    ty'               = tidyType env2 ty
-
-tidySkolemInfo env info = (env, info)
+tidySkolemInfo :: TidyEnv -> SkolemInfo -> SkolemInfo
+tidySkolemInfo env (DerivSkol ty)       = DerivSkol (tidyType env ty)
+tidySkolemInfo env (SigSkol cx ty)      = SigSkol cx (mkCheckExpType $
+                                                      tidyType env $
+                                                      checkingExpType "tidySkolemInfo" ty)
+tidySkolemInfo env (InferSkol ids)      = InferSkol (mapSnd (tidyType env) ids)
+tidySkolemInfo env (UnifyForAllSkol ty) = UnifyForAllSkol (tidyType env ty)
+tidySkolemInfo _   info                 = info

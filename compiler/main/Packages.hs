@@ -605,15 +605,11 @@ matchingStr str p
         || str == packageNameString p
 
 matchingId :: String -> PackageConfig -> Bool
-matchingId str p =  str == componentIdString p
-
-matchingKey :: String -> PackageConfig -> Bool
-matchingKey str p = str == unitIdString (packageConfigId p)
+matchingId str p = str == unitIdString (packageConfigId p)
 
 matching :: PackageArg -> PackageConfig -> Bool
 matching (PackageArg str) = matchingStr str
-matching (PackageIdArg str) = matchingId str
-matching (UnitIdArg str) = matchingKey str
+matching (UnitIdArg str)  = matchingId str
 
 sortByVersion :: [PackageConfig] -> [PackageConfig]
 sortByVersion = sortBy (flip (comparing packageVersion))
@@ -725,17 +721,17 @@ findWiredInPackages dflags pkgs vis_map = do
           where
                 notfound = do
                           debugTraceMsg dflags 2 $
-                            ptext (sLit "wired-in package ")
+                            text "wired-in package "
                                  <> text wired_pkg
-                                 <> ptext (sLit " not found.")
+                                 <> text " not found."
                           return Nothing
                 pick :: PackageConfig
                      -> IO (Maybe PackageConfig)
                 pick pkg = do
                         debugTraceMsg dflags 2 $
-                            ptext (sLit "wired-in package ")
+                            text "wired-in package "
                                  <> text wired_pkg
-                                 <> ptext (sLit " mapped to ")
+                                 <> text " mapped to "
                                  <> ppr (unitId pkg)
                         return (Just pkg)
 
@@ -775,8 +771,14 @@ findWiredInPackages dflags pkgs vis_map = do
                   | otherwise
                   = pkg
                 upd_deps pkg = pkg {
-                      depends = map upd_wired_in (depends pkg)
+                      depends = map upd_wired_in (depends pkg),
+                      exposedModules
+                        = map (\(ExposedModule k v) ->
+                                (ExposedModule k (fmap upd_wired_in_mod v)))
+                              (exposedModules pkg)
                     }
+                upd_wired_in_mod (OriginalModule uid m)
+                    = OriginalModule (upd_wired_in uid) m
                 upd_wired_in key
                     | Just key' <- Map.lookup key wiredInMap = key'
                     | otherwise = key
@@ -804,7 +806,7 @@ type UnusablePackages = Map UnitId
 pprReason :: SDoc -> UnusablePackageReason -> SDoc
 pprReason pref reason = case reason of
   IgnoredWithFlag ->
-      pref <+> ptext (sLit "ignored due to an -ignore-package flag")
+      pref <+> text "ignored due to an -ignore-package flag"
   MissingDependencies is_shadowed deps ->
       pref <+> text "unusable due to"
            <+> (if is_shadowed then text "shadowed"
@@ -818,7 +820,7 @@ reportUnusable dflags pkgs = mapM_ report (Map.toList pkgs)
     report (ipid, (_, reason)) =
        debugTraceMsg dflags 2 $
          pprReason
-           (ptext (sLit "package") <+> ppr ipid <+> text "is") reason
+           (text "package" <+> ppr ipid <+> text "is") reason
 
 -- ----------------------------------------------------------------------------
 --
@@ -1162,8 +1164,7 @@ mkModuleToPkgConfAll dflags pkg_db vis_map =
 
     es :: Bool -> [(ModuleName, Map Module ModuleOrigin)]
     es e = do
-     -- TODO: signature support
-     ExposedModule m exposedReexport _exposedSignature <- exposed_mods
+     ExposedModule m exposedReexport <- exposed_mods
      let (pk', m', pkg', origin') =
           case exposedReexport of
            Nothing -> (pk, m, pkg, fromExposedModules e)
@@ -1448,12 +1449,12 @@ add_package pkg_db ps (p, mb_parent)
               = add_package pkg_db ps (key, Just p)
 
 missingPackageMsg :: Outputable pkgid => pkgid -> SDoc
-missingPackageMsg p = ptext (sLit "unknown package:") <+> ppr p
+missingPackageMsg p = text "unknown package:" <+> ppr p
 
 missingDependencyMsg :: Maybe UnitId -> SDoc
 missingDependencyMsg Nothing = Outputable.empty
 missingDependencyMsg (Just parent)
-  = space <> parens (ptext (sLit "dependency of") <+> ftext (unitIdFS parent))
+  = space <> parens (text "dependency of" <+> ftext (unitIdFS parent))
 
 -- -----------------------------------------------------------------------------
 

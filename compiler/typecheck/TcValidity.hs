@@ -51,7 +51,6 @@ import Util
 import ListSetOps
 import SrcLoc
 import Outputable
-import FastString
 import BasicTypes
 import Module
 import qualified GHC.LanguageExtensions as LangExt
@@ -201,7 +200,7 @@ checkAmbiguity ctxt ty
        ; allow_ambiguous <- xoptM LangExt.AllowAmbiguousTypes
        ; (_wrap, wanted) <- addErrCtxt (mk_msg allow_ambiguous) $
                             captureConstraints $
-                            tcSubType_NC ctxt ty ty
+                            tcSubType_NC ctxt ty (mkCheckExpType ty)
        ; simplifyAmbiguityCheck ty wanted
 
        ; traceTc "Done ambiguity check for" (ppr ty) }
@@ -210,9 +209,9 @@ checkAmbiguity ctxt ty
   = return ()
  where
    mk_msg allow_ambiguous
-     = vcat [ ptext (sLit "In the ambiguity check for") <+> what
+     = vcat [ text "In the ambiguity check for" <+> what
             , ppUnless allow_ambiguous ambig_msg ]
-   ambig_msg = ptext (sLit "To defer the ambiguity check to use sites, enable AllowAmbiguousTypes")
+   ambig_msg = text "To defer the ambiguity check to use sites, enable AllowAmbiguousTypes"
    what | Just n <- isSigMaybe ctxt = quotes (ppr n)
         | otherwise                 = pprUserTypeCtxt ctxt
 
@@ -414,10 +413,12 @@ data Rank = ArbitraryRank         -- Any rank ok
 
           | MustBeMonoType  -- Monotype regardless of flags
 
-rankZeroMonoType, tyConArgMonoType, synArgMonoType :: Rank
-rankZeroMonoType = MonoType (ptext (sLit "Perhaps you intended to use RankNTypes or Rank2Types"))
-tyConArgMonoType = MonoType (ptext (sLit "GHC doesn't yet support impredicative polymorphism"))
-synArgMonoType   = MonoType (ptext (sLit "Perhaps you intended to use LiberalTypeSynonyms"))
+
+rankZeroMonoType, tyConArgMonoType, synArgMonoType, constraintMonoType :: Rank
+rankZeroMonoType   = MonoType (text "Perhaps you intended to use RankNTypes or Rank2Types")
+tyConArgMonoType   = MonoType (text "GHC doesn't yet support impredicative polymorphism")
+synArgMonoType     = MonoType (text "Perhaps you intended to use LiberalTypeSynonyms")
+constraintMonoType = MonoType (text "A constraint must be a monotype")
 
 funArgResRank :: Rank -> (Rank, Rank)             -- Function argument and result
 funArgResRank (LimitedRank _ arg_rank) = (arg_rank, LimitedRank (forAllAllowed arg_rank) arg_rank)
@@ -432,7 +433,7 @@ forAllAllowed _                         = False
 -- | Fail with error message if the type is unlifted
 check_lifted :: TidyEnv -> Type -> TcM ()
 check_lifted env ty
-  = checkTcM (not (isUnLiftedType ty)) (unliftedArgErr env ty)
+  = checkTcM (not (isUnliftedType ty)) (unliftedArgErr env ty)
 
 check_type :: TidyEnv -> UserTypeCtxt -> Rank -> Type -> TcM ()
 -- The args say what the *type context* requires, independent
@@ -443,7 +444,8 @@ check_type :: TidyEnv -> UserTypeCtxt -> Rank -> Type -> TcM ()
 
 check_type env ctxt rank ty
   | not (null tvs && null theta)
-  = do  { checkTcM (forAllAllowed rank) (forAllTyErr env' rank ty)
+  = do  { traceTc "check_type" (ppr ty $$ ppr (forAllAllowed rank))
+        ; checkTcM (forAllAllowed rank) (forAllTyErr env rank ty)
                 -- Reject e.g. (Maybe (?x::Int => Int)),
                 -- with a decent error message
 
@@ -574,7 +576,7 @@ check_arg_type env ctxt rank ty
 
         ; check_type env ctxt rank' ty
         ; check_lifted env ty }
-             -- NB the isUnLiftedType test also checks for
+             -- NB the isUnliftedType test also checks for
              --    T State#
              -- where there is an illegal partial application of State# (which has
              -- kind * -> #); see Note [The kind invariant] in TyCoRep
@@ -583,11 +585,14 @@ check_arg_type env ctxt rank ty
 forAllTyErr :: TidyEnv -> Rank -> Type -> (TidyEnv, SDoc)
 forAllTyErr env rank ty
    = ( env
-     , vcat [ hang (ptext (sLit "Illegal polymorphic or qualified type:")) 2 (ppr_tidy env ty)
+     , vcat [ hang herald 2 (ppr_tidy env ty)
             , suggestion ] )
   where
+    (tvs, _theta, _tau) = tcSplitSigmaTy ty
+    herald | null tvs  = text "Illegal qualified type:"
+           | otherwise = text "Illegal polymorphic type:"
     suggestion = case rank of
-                   LimitedRank {} -> ptext (sLit "Perhaps you intended to use RankNTypes or Rank2Types")
+                   LimitedRank {} -> text "Perhaps you intended to use RankNTypes or Rank2Types"
                    MonoType d     -> d
                    _              -> Outputable.empty -- Polytype is always illegal
 
@@ -600,11 +605,11 @@ forAllEscapeErr env ty tau_kind
                  , text "of kind:" <+> ppr_tidy env tau_kind ]) )
 
 unliftedArgErr, ubxArgTyErr :: TidyEnv -> Type -> (TidyEnv, SDoc)
-unliftedArgErr  env ty = (env, sep [ptext (sLit "Illegal unlifted type:"), ppr_tidy env ty])
-ubxArgTyErr     env ty = (env, sep [ptext (sLit "Illegal unboxed tuple type as function argument:"), ppr_tidy env ty])
+unliftedArgErr  env ty = (env, sep [text "Illegal unlifted type:", ppr_tidy env ty])
+ubxArgTyErr     env ty = (env, sep [text "Illegal unboxed tuple type as function argument:", ppr_tidy env ty])
 
 kindErr :: TidyEnv -> Kind -> (TidyEnv, SDoc)
-kindErr env kind = (env, sep [ptext (sLit "Expecting an ordinary type, but found a type of kind"), ppr_tidy env kind])
+kindErr env kind = (env, sep [text "Expecting an ordinary type, but found a type of kind", ppr_tidy env kind])
 
 {-
 Note [Liberal type synonyms]
@@ -676,14 +681,35 @@ check_valid_theta env ctxt theta
     (_,dups) = removeDups cmpType theta
 
 -------------------------
+{- Note [Validity checking for constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We look through constraint synonyms so that we can see the underlying
+constraint(s).  For example
+   type Foo = ?x::Int
+   instance Foo => C T
+We should reject the instance because it has an implicit parameter in
+the context.
+
+But we record, in 'under_syn', whether we have looked under a synonym
+to avoid requiring language extensions at the use site.  Main example
+(Trac #9838):
+
+   {-# LANGUAGE ConstraintKinds #-}
+   module A where
+      type EqShow a = (Eq a, Show a)
+
+   module B where
+      import A
+      foo :: EqShow a => a -> String
+
+We don't want to require ConstraintKinds in module B.
+-}
+
 check_pred_ty :: TidyEnv -> DynFlags -> UserTypeCtxt -> PredType -> TcM ()
 -- Check the validity of a predicate in a signature
--- Do not look through any type synonyms; any constraint kinded
--- type synonyms have been checked at their definition site
--- C.f. Trac #9838
-
+-- See Note [Validity checking for constraints]
 check_pred_ty env dflags ctxt pred
-  = do { check_type env SigmaCtxt MustBeMonoType pred
+  = do { check_type env SigmaCtxt constraintMonoType pred
        ; check_pred_help False env dflags ctxt pred }
 
 check_pred_help :: Bool    -- True <=> under a type synonym
@@ -815,18 +841,19 @@ okIPCtxt GhciCtxt           = True
 okIPCtxt SigmaCtxt          = True
 okIPCtxt (DataTyCtxt {})    = True
 okIPCtxt (PatSynCtxt {})    = True
+okIPCtxt (TySynCtxt {})     = True   -- e.g.   type Blah = ?x::Int
+                                     -- Trac #11466
 
 okIPCtxt (ClassSCCtxt {})  = False
 okIPCtxt (InstDeclCtxt {}) = False
 okIPCtxt (SpecInstCtxt {}) = False
-okIPCtxt (TySynCtxt {})    = False
 okIPCtxt (RuleSigCtxt {})  = False
 okIPCtxt DefaultDeclCtxt   = False
 
 badIPPred :: TidyEnv -> PredType -> (TidyEnv, SDoc)
 badIPPred env pred
   = ( env
-    , ptext (sLit "Illegal implicit parameter") <+> quotes (ppr_tidy env pred) )
+    , text "Illegal implicit parameter" <+> quotes (ppr_tidy env pred) )
 
 {-
 Note [Kind polymorphic type classes]
@@ -852,38 +879,38 @@ Flexibility check:
 checkThetaCtxt :: UserTypeCtxt -> ThetaType -> TidyEnv -> TcM (TidyEnv, SDoc)
 checkThetaCtxt ctxt theta env
   = return ( env
-           , vcat [ ptext (sLit "In the context:") <+> pprTheta (tidyTypes env theta)
-                  , ptext (sLit "While checking") <+> pprUserTypeCtxt ctxt ] )
+           , vcat [ text "In the context:" <+> pprTheta (tidyTypes env theta)
+                  , text "While checking" <+> pprUserTypeCtxt ctxt ] )
 
 eqPredTyErr, predTupleErr, predIrredErr, predSuperClassErr :: TidyEnv -> PredType -> (TidyEnv, SDoc)
 eqPredTyErr  env pred
   = ( env
-    , ptext (sLit "Illegal equational constraint") <+> ppr_tidy env pred $$
-      parens (ptext (sLit "Use GADTs or TypeFamilies to permit this")) )
+    , text "Illegal equational constraint" <+> ppr_tidy env pred $$
+      parens (text "Use GADTs or TypeFamilies to permit this") )
 predTupleErr env pred
   = ( env
-    , hang (ptext (sLit "Illegal tuple constraint:") <+> ppr_tidy env pred)
+    , hang (text "Illegal tuple constraint:" <+> ppr_tidy env pred)
          2 (parens constraintKindsMsg) )
 predIrredErr env pred
   = ( env
-    , hang (ptext (sLit "Illegal constraint:") <+> ppr_tidy env pred)
+    , hang (text "Illegal constraint:" <+> ppr_tidy env pred)
          2 (parens constraintKindsMsg) )
 predSuperClassErr env pred
   = ( env
-    , hang (ptext (sLit "Illegal constraint") <+> quotes (ppr_tidy env pred)
-            <+> ptext (sLit "in a superclass context"))
+    , hang (text "Illegal constraint" <+> quotes (ppr_tidy env pred)
+            <+> text "in a superclass context")
          2 (parens undecidableMsg) )
 
 predTyVarErr :: PredType -> SDoc   -- type is already tidied!
 predTyVarErr pred
-  = vcat [ hang (ptext (sLit "Non type-variable argument"))
-              2 (ptext (sLit "in the constraint:") <+> ppr pred)
-         , parens (ptext (sLit "Use FlexibleContexts to permit this")) ]
+  = vcat [ hang (text "Non type-variable argument")
+              2 (text "in the constraint:" <+> ppr pred)
+         , parens (text "Use FlexibleContexts to permit this") ]
 
 constraintSynErr :: TidyEnv -> Type -> (TidyEnv, SDoc)
 constraintSynErr env kind
   = ( env
-    , hang (ptext (sLit "Illegal constraint synonym of kind:") <+> quotes (ppr_tidy env kind))
+    , hang (text "Illegal constraint synonym of kind:" <+> quotes (ppr_tidy env kind))
          2 (parens constraintKindsMsg) )
 
 dupPredWarn :: TidyEnv -> [[PredType]] -> (TidyEnv, SDoc)
@@ -912,13 +939,13 @@ tyConArityErr tc tks
 
 arityErr :: Outputable a => String -> a -> Int -> Int -> SDoc
 arityErr what name n m
-  = hsep [ ptext (sLit "The") <+> text what, quotes (ppr name), ptext (sLit "should have"),
+  = hsep [ text "The" <+> text what, quotes (ppr name), text "should have",
            n_arguments <> comma, text "but has been given",
            if m==0 then text "none" else int m]
     where
-        n_arguments | n == 0 = ptext (sLit "no arguments")
-                    | n == 1 = ptext (sLit "1 argument")
-                    | True   = hsep [int n, ptext (sLit "arguments")]
+        n_arguments | n == 0 = text "no arguments"
+                    | n == 1 = text "1 argument"
+                    | True   = hsep [int n, text "arguments"]
 
 {-
 ************************************************************************
@@ -947,7 +974,7 @@ checkValidInstHead ctxt clas cls_args
                  (instTypeErr clas cls_args abstract_class_msg)
 
            -- Check language restrictions;
-           -- but not for SPECIALISE isntance pragmas
+           -- but not for SPECIALISE instance pragmas
        ; let ty_args = filterOutInvisibleTypes (classTyCon clas) cls_args
        ; unless spec_inst_prag $
          do { checkTc (xopt LangExt.TypeSynonymInstances dflags ||
@@ -999,6 +1026,48 @@ checkValidInstHead ctxt clas cls_args
     abstract_class_msg =
                 text "Manual instances of this class are not permitted."
 
+tcInstHeadTyNotSynonym :: Type -> Bool
+-- Used in Haskell-98 mode, for the argument types of an instance head
+-- These must not be type synonyms, but everywhere else type synonyms
+-- are transparent, so we need a special function here
+tcInstHeadTyNotSynonym ty
+  = case ty of  -- Do not use splitTyConApp,
+                -- because that expands synonyms!
+        TyConApp tc _ -> not (isTypeSynonymTyCon tc)
+        _ -> True
+
+tcInstHeadTyAppAllTyVars :: Type -> Bool
+-- Used in Haskell-98 mode, for the argument types of an instance head
+-- These must be a constructor applied to type variable arguments.
+-- But we allow kind instantiations.
+tcInstHeadTyAppAllTyVars ty
+  | Just (tc, tys) <- tcSplitTyConApp_maybe (dropCasts ty)
+  = ok (filterOutInvisibleTypes tc tys)  -- avoid kinds
+
+  | otherwise
+  = False
+  where
+        -- Check that all the types are type variables,
+        -- and that each is distinct
+    ok tys = equalLength tvs tys && hasNoDups tvs
+           where
+             tvs = mapMaybe tcGetTyVar_maybe tys
+
+dropCasts :: Type -> Type
+-- See Note [Casts during validity checking]
+-- This function can turn a well-kinded type into an ill-kinded
+-- one, so I've kept it local to this module
+-- To consider: drop only UnivCo(HoleProv) casts
+dropCasts (CastTy ty _)     = dropCasts ty
+dropCasts (AppTy t1 t2)     = mkAppTy (dropCasts t1) (dropCasts t2)
+dropCasts (TyConApp tc tys) = mkTyConApp tc (map dropCasts tys)
+dropCasts (ForAllTy b ty)   = ForAllTy (dropCastsB b) (dropCasts ty)
+dropCasts ty                = ty  -- LitTy, TyVarTy, CoercionTy
+
+dropCastsB :: TyBinder -> TyBinder
+dropCastsB (Anon ty) = Anon (dropCasts ty)
+dropCastsB b         = b   -- Don't bother in the kind of a forall
+
 abstractClassKeys :: [Unique]
 abstractClassKeys = [ heqTyConKey
                     , eqTyConKey
@@ -1007,12 +1076,27 @@ abstractClassKeys = [ heqTyConKey
 
 instTypeErr :: Class -> [Type] -> SDoc -> SDoc
 instTypeErr cls tys msg
-  = hang (hang (ptext (sLit "Illegal instance declaration for"))
+  = hang (hang (text "Illegal instance declaration for")
              2 (quotes (pprClassPred cls tys)))
        2 msg
 
-{- Note [Valid 'deriving' predicate]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{- Note [Casts during validity checking]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider the (bogus)
+     instance Eq Char#
+We elaborate to  'Eq (Char# |> UnivCo(hole))'  where the hole is an
+insoluble equality constraint for * ~ #.  We'll report the insoluble
+constraint separately, but we don't want to *also* complain that Eq is
+not applied to a type constructor.  So we look gaily look through
+CastTys here.
+
+Another example:  Eq (Either a).  Then we actually get a cast in
+the middle:
+   Eq ((Either |> g) a)
+
+
+Note [Valid 'deriving' predicate]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 validDerivPred checks for OK 'deriving' context.  See Note [Exotic
 derived instance contexts] in TcDeriv.  However the predicate is
 here because it uses sizeTypes, fvTypes.
@@ -1100,13 +1184,12 @@ checkValidInstance ctxt hs_type ty
         ; return (tvs, theta, clas, inst_tys) }
 
   | otherwise
-  = failWithTc (ptext (sLit "Malformed instance head:") <+> ppr tau)
+  = failWithTc (text "Malformed instance head:" <+> ppr tau)
   where
     (tvs, theta, tau) = tcSplitSigmaTy ty
 
         -- The location of the "head" of the instance
-    head_loc = case splitLHsInstDeclTy hs_type of
-                 (_, _, L loc _) -> loc
+    head_loc = getLoc (getLHsInstDeclHead hs_type)
 
 {-
 Note [Paterson conditions]
@@ -1160,29 +1243,29 @@ checkInstTermination tys theta
      | pred_size >= head_size = addErrTc (smallerMsg what)
      | otherwise              = return ()
      where
-        what    = ptext (sLit "constraint") <+> quotes (ppr pred)
+        what    = text "constraint" <+> quotes (ppr pred)
         bad_tvs = fvType pred \\ head_fvs
 
 smallerMsg :: SDoc -> SDoc
 smallerMsg what
-  = vcat [ hang (ptext (sLit "The") <+> what)
-              2 (ptext (sLit "is no smaller than the instance head"))
+  = vcat [ hang (text "The" <+> what)
+              2 (text "is no smaller than the instance head")
          , parens undecidableMsg ]
 
 noMoreMsg :: [TcTyVar] -> SDoc -> SDoc
 noMoreMsg tvs what
-  = vcat [ hang (ptext (sLit "Variable") <> plural tvs <+> quotes (pprWithCommas ppr tvs)
-                <+> occurs <+> ptext (sLit "more often"))
-              2 (sep [ ptext (sLit "in the") <+> what
-                     , ptext (sLit "than in the instance head") ])
+  = vcat [ hang (text "Variable" <> plural tvs <+> quotes (pprWithCommas ppr tvs)
+                <+> occurs <+> text "more often")
+              2 (sep [ text "in the" <+> what
+                     , text "than in the instance head" ])
          , parens undecidableMsg ]
   where
-   occurs = if isSingleton tvs then ptext (sLit "occurs")
-                               else ptext (sLit "occur")
+   occurs = if isSingleton tvs then text "occurs"
+                               else text "occur"
 
 undecidableMsg, constraintKindsMsg :: SDoc
-undecidableMsg     = ptext (sLit "Use UndecidableInstances to permit this")
-constraintKindsMsg = ptext (sLit "Use ConstraintKinds to permit this")
+undecidableMsg     = text "Use UndecidableInstances to permit this"
+constraintKindsMsg = text "Use ConstraintKinds to permit this"
 
 {-
 Note [Associated type instances]
@@ -1280,12 +1363,10 @@ checkConsistentFamInst (Just (clas, mini_env)) fam_tc at_tvs at_tys
        ; discardResult $ foldrM check_arg emptyTCvSubst $
                          tyConTyVars fam_tc `zip` at_tys }
   where
-    at_tv_set = mkVarSet at_tvs
-
     check_arg :: (TyVar, Type) -> TCvSubst -> TcM TCvSubst
     check_arg (fam_tc_tv, at_ty) subst
       | Just inst_ty <- lookupVarEnv mini_env fam_tc_tv
-      = case tcMatchTyX at_tv_set subst at_ty inst_ty of
+      = case tcMatchTyX subst at_ty inst_ty of
            Just subst | all_distinct subst -> return subst
            _ -> failWithTc $ wrongATArgErr at_ty inst_ty
                 -- No need to instantiate here, because the axiom
@@ -1309,14 +1390,14 @@ checkConsistentFamInst (Just (clas, mini_env)) fam_tc at_tvs at_tys
 
 badATErr :: Name -> Name -> SDoc
 badATErr clas op
-  = hsep [ptext (sLit "Class"), quotes (ppr clas),
-          ptext (sLit "does not have an associated type"), quotes (ppr op)]
+  = hsep [text "Class", quotes (ppr clas),
+          text "does not have an associated type", quotes (ppr op)]
 
 wrongATArgErr :: Type -> Type -> SDoc
 wrongATArgErr ty instTy =
-  sep [ ptext (sLit "Type indexes must match class instance head")
-      , ptext (sLit "Found") <+> quotes (ppr ty)
-        <+> ptext (sLit "but expected") <+> quotes (ppr instTy)
+  sep [ text "Type indexes must match class instance head"
+      , text "Found" <+> quotes (ppr ty)
+        <+> text "but expected" <+> quotes (ppr instTy)
       ]
 
 {-
@@ -1445,7 +1526,7 @@ checkFamInstRhs lhsTys famInsts
       | size <= sizeTypes tys     = Just (smallerMsg what)
       | otherwise                 = Nothing
       where
-        what    = ptext (sLit "type family application") <+> quotes (pprType (TyConApp tc tys))
+        what    = text "type family application" <+> quotes (pprType (TyConApp tc tys))
         bad_tvs = fvTypes tys \\ fvs
 
 checkValidFamPats :: TyCon -> [TyVar] -> [CoVar] -> [Type] -> TcM ()
@@ -1475,7 +1556,7 @@ checkValidFamPats fam_tc tvs cvs ty_pats
 
 wrongNumberOfParmsErr :: Arity -> SDoc
 wrongNumberOfParmsErr exp_arity
-  = ptext (sLit "Number of parameters must match family declaration; expected")
+  = text "Number of parameters must match family declaration; expected"
     <+> ppr exp_arity
 
 -- Ensure that no type family instances occur in a type.
@@ -1493,26 +1574,27 @@ isTyFamFree = null . tcTyFamInsts
 
 inaccessibleCoAxBranch :: CoAxiom br -> CoAxBranch -> SDoc
 inaccessibleCoAxBranch fi_ax cur_branch
-  = ptext (sLit "Type family instance equation is overlapped:") $$
+  = text "Type family instance equation is overlapped:" $$
     nest 2 (pprCoAxBranch fi_ax cur_branch)
 
 tyFamInstIllegalErr :: Type -> SDoc
 tyFamInstIllegalErr ty
-  = hang (ptext (sLit "Illegal type synonym family application in instance") <>
+  = hang (text "Illegal type synonym family application in instance" <>
          colon) 2 $
       ppr ty
 
 nestedMsg :: SDoc -> SDoc
 nestedMsg what
-  = sep [ ptext (sLit "Illegal nested") <+> what
+  = sep [ text "Illegal nested" <+> what
         , parens undecidableMsg ]
 
 famPatErr :: TyCon -> [TyVar] -> [Type] -> SDoc
 famPatErr fam_tc tvs pats
-  = hang (ptext (sLit "Family instance purports to bind type variable") <> plural tvs
+  = hang (text "Family instance purports to bind type variable" <> plural tvs
           <+> pprQuotedList tvs)
-       2 (hang (ptext (sLit "but the real LHS (expanding synonyms) is:"))
-             2 (pprTypeApp fam_tc (map expandTypeSynonyms pats) <+> ptext (sLit "= ...")))
+       2 (hang (text "but the real LHS (expanding synonyms) is:")
+             2 (pprTypeApp fam_tc (map expandTypeSynonyms pats) <+>
+                text "= ..."))
 
 {-
 ************************************************************************
@@ -1555,7 +1637,7 @@ If there is a bad telescope, the kind-generalization will end up generalizing
 over a variable bound later in the telescope.
 
 For non-tycons, we do scope checking when we bring tyvars into scope,
-in tcImplicitTKBndrs and tcHsTyVarBndrs. Note that we also have to
+in tcImplicitTKBndrs and tcExplicitTKBndrs. Note that we also have to
 sort implicit binders into a well-scoped order whenever we have implicit
 binders to worry about. This is done in quantifyTyVars and in
 tcImplicitTKBndrs.

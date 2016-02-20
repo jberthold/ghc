@@ -140,8 +140,9 @@ exprBotStrictness_maybe e
         Just ar -> Just (ar, sig ar)
   where
     env    = AE { ae_ped_bot = True, ae_cheap_fn = \ _ _ -> False }
-    sig ar = mkClosedStrictSig (replicate ar topDmd) botRes
+    sig ar = mkClosedStrictSig (replicate ar topDmd) exnRes
                   -- For this purpose we can be very simple
+                  -- exnRes is a bit less aggressive than botRes
 
 {-
 Note [exprArity invariant]
@@ -893,8 +894,8 @@ data EtaInfo = EtaVar Var       -- /\a. [],   [] a
              | EtaCo Coercion   -- [] |> co,  [] |> (sym co)
 
 instance Outputable EtaInfo where
-   ppr (EtaVar v) = ptext (sLit "EtaVar") <+> ppr v
-   ppr (EtaCo co) = ptext (sLit "EtaCo")  <+> ppr co
+   ppr (EtaVar v) = text "EtaVar" <+> ppr v
+   ppr (EtaCo co) = text "EtaCo"  <+> ppr co
 
 pushCoercion :: Coercion -> [EtaInfo] -> [EtaInfo]
 pushCoercion co1 (EtaCo co2 : eis)

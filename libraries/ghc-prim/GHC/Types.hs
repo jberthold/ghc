@@ -43,6 +43,10 @@ import GHC.Prim
 
 infixr 5 :
 
+-- Take note: All types defined here must have associated type representations
+-- defined in Data.Typeable.Internal.
+-- See Note [Representation of types defined in GHC.Types] below.
+
 {- *********************************************************************
 *                                                                      *
                   Kinds
@@ -340,7 +344,7 @@ data Levity = Lifted | Unlifted
 
 {- *********************************************************************
 *                                                                      *
-             Runtime represntation of TyCon
+             Runtime representation of TyCon
 *                                                                      *
 ********************************************************************* -}
 
@@ -359,14 +363,6 @@ type lets us use the TrNameS constructor when allocating static data;
 but we also need TrNameD for the case where we are deserialising a TyCon
 or Module (for example when deserialising a TypeRep), in which case we
 can't conveniently come up with an Addr#.
-
-
-Note [Representations of types defined in GHC.Types]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-The representations for the types defined in GHC.Types are
-defined in GHC.Typeable.Internal.
-
 -}
 
 #include "MachDeps.h"

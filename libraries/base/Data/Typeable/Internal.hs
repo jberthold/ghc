@@ -41,16 +41,6 @@ module Data.Typeable.Internal (
     mkTyCon3, mkTyCon3#,
     rnfTyCon,
 
-    tcBool, tc'True, tc'False,
-    tcOrdering, tc'LT, tc'EQ, tc'GT,
-    tcChar, tcInt, tcWord, tcFloat, tcDouble, tcFun,
-    tcIO, tcSPEC, tcTyCon, tcModule, tcTrName,
-    tcCoercible, tcList, tcHEq,
-    tcConstraint,
-    tcTYPE, tcLevity, tc'Lifted, tc'Unlifted,
-
-    funTc,  -- ToDo
-
     -- * TypeRep
     TypeRep(..), KindRep,
     typeRep,
@@ -72,6 +62,7 @@ module Data.Typeable.Internal (
   ) where
 
 import GHC.Base
+import GHC.Types (TYPE)
 import GHC.Word
 import GHC.Show
 import Data.Proxy
@@ -252,6 +243,24 @@ funResultTy trFun trArg
       (tc, [t1,t2]) | tc == tcFun && t1 == trArg -> Just t2
       _ -> Nothing
 
+tyConOf :: Typeable a => Proxy a -> TyCon
+tyConOf = typeRepTyCon . typeRep
+
+tcFun :: TyCon
+tcFun = tyConOf (Proxy :: Proxy (Int -> Int))
+
+tcList :: TyCon
+tcList = tyConOf (Proxy :: Proxy [])
+
+tcTYPE :: TyCon
+tcTYPE = tyConOf (Proxy :: Proxy TYPE)
+
+tc'Lifted :: TyCon
+tc'Lifted = tyConOf (Proxy :: Proxy 'Lifted)
+
+tc'Unlifted :: TyCon
+tc'Unlifted = tyConOf (Proxy :: Proxy 'Unlifted)
+
 -- | Adds a TypeRep argument to a TypeRep.
 mkAppTy :: TypeRep -> TypeRep -> TypeRep
 {-# INLINE mkAppTy #-}
@@ -355,7 +364,10 @@ instance Show TypeRep where
   showsPrec p (TypeRep _ tycon kinds tys) =
     case tys of
       [] -> showsPrec p tycon
-      [x]   | tycon == tcList -> showChar '[' . shows x . showChar ']'
+      [x@(TypeRep _ argCon _ _)]
+        | tycon == tcList -> showChar '[' . shows x . showChar ']'
+        | tycon == tcTYPE && argCon == tc'Lifted   -> showChar '*'
+        | tycon == tcTYPE && argCon == tc'Unlifted -> showChar '#'
       [a,r] | tycon == tcFun  -> showParen (p > 8) $
                                  showsPrec 9 a .
                                  showString " -> " .
@@ -390,57 +402,6 @@ showTuple :: [TypeRep] -> ShowS
 showTuple args = showChar '('
                . showArgs (showChar ',') args
                . showChar ')'
-
-{- *********************************************************
-*                                                          *
-*            TyCon definitions for GHC.Types               *
-*                                                          *
-********************************************************* -}
-
-mkGhcTypesTyCon :: Addr# -> TyCon
-{-# INLINE mkGhcTypesTyCon #-}
-mkGhcTypesTyCon name = mkTyCon3# "ghc-prim"# "GHC.Types"# name
-
-tcBool, tc'True, tc'False,
-  tcOrdering, tc'GT, tc'EQ, tc'LT,
-  tcChar, tcInt, tcWord, tcFloat, tcDouble, tcFun,
-  tcIO, tcSPEC, tcTyCon, tcModule, tcTrName,
-  tcCoercible, tcHEq, tcList :: TyCon
-
-tcBool      = mkGhcTypesTyCon "Bool"#      -- Bool is promotable
-tc'True     = mkGhcTypesTyCon "'True"#
-tc'False    = mkGhcTypesTyCon "'False"#
-tcOrdering  = mkGhcTypesTyCon "Ordering"#  -- Ordering is promotable
-tc'GT       = mkGhcTypesTyCon "'GT"#
-tc'EQ       = mkGhcTypesTyCon "'EQ"#
-tc'LT       = mkGhcTypesTyCon "'LT"#
-
--- None of the rest are promotable (see TysWiredIn)
-tcChar       = mkGhcTypesTyCon "Char"#
-tcInt        = mkGhcTypesTyCon "Int"#
-tcWord       = mkGhcTypesTyCon "Word"#
-tcFloat      = mkGhcTypesTyCon "Float"#
-tcDouble     = mkGhcTypesTyCon "Double"#
-tcSPEC       = mkGhcTypesTyCon "SPEC"#
-tcIO         = mkGhcTypesTyCon "IO"#
-tcTyCon      = mkGhcTypesTyCon "TyCon"#
-tcModule     = mkGhcTypesTyCon "Module"#
-tcTrName     = mkGhcTypesTyCon "TrName"#
-tcCoercible  = mkGhcTypesTyCon "Coercible"#
-
-tcFun       = mkGhcTypesTyCon "->"#
-tcList      = mkGhcTypesTyCon "[]"#   -- Type rep for the list type constructor
-tcHEq       = mkGhcTypesTyCon "~~"#   -- Type rep for the (~~) type constructor
-
-tcConstraint, tcTYPE, tcLevity, tc'Lifted, tc'Unlifted :: TyCon
-tcConstraint   = mkGhcTypesTyCon "Constraint"#
-tcTYPE         = mkGhcTypesTyCon "TYPE"#
-tcLevity       = mkGhcTypesTyCon "Levity"#
-tc'Lifted      = mkGhcTypesTyCon "'Lifted"#
-tc'Unlifted    = mkGhcTypesTyCon "'Unlifted"#
-
-funTc :: TyCon
-funTc = tcFun   -- Legacy
 
 {- *********************************************************
 *                                                          *

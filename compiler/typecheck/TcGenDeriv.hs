@@ -41,8 +41,7 @@ import Encoding
 import DynFlags
 import PrelInfo
 import FamInstEnv( FamInst )
-import MkCore ( eRROR_ID )
-import PrelNames hiding (error_RDR)
+import PrelNames
 import THNames
 import Module ( moduleName, moduleNameString
               , moduleUnitId, unitIdString )
@@ -482,7 +481,7 @@ mkCompareFields tycon op tys
   where
     go []   _      _          = eqResult op
     go [ty] (a:_)  (b:_)
-      | isUnLiftedType ty     = unliftedOrdOp tycon ty op a b
+      | isUnliftedType ty     = unliftedOrdOp tycon ty op a b
       | otherwise             = genOpApp (nlHsVar a) (ordMethRdr op) (nlHsVar b)
     go (ty:tys) (a:as) (b:bs) = mk_compare ty a b
                                   (ltResult op)
@@ -494,7 +493,7 @@ mkCompareFields tycon op tys
     --    (case (compare a b) of { LT -> <lt>; EQ -> <eq>; GT -> <bt> })
     -- but with suitable special cases for
     mk_compare ty a b lt eq gt
-      | isUnLiftedType ty
+      | isUnliftedType ty
       = unliftedCompare lt_op eq_op a_expr b_expr lt eq gt
       | otherwise
       = nlHsCase (nlHsPar (nlHsApp (nlHsApp (nlHsVar compare_RDR) a_expr) b_expr))
@@ -787,16 +786,19 @@ gen_Ix_binds loc tycon
            ))
         )
 
+    -- This produces something like `(ch >= ah) && (ch <= bh)`
     enum_inRange
       = mk_easy_FunBind loc inRange_RDR [nlTuplePat [a_Pat, b_Pat] Boxed, c_Pat] $
           untag_Expr tycon [(a_RDR, ah_RDR)] (
           untag_Expr tycon [(b_RDR, bh_RDR)] (
           untag_Expr tycon [(c_RDR, ch_RDR)] (
-          nlHsIf (genPrimOpApp (nlHsVar ch_RDR) geInt_RDR (nlHsVar ah_RDR)) (
-             (genPrimOpApp (nlHsVar ch_RDR) leInt_RDR (nlHsVar bh_RDR))
-          ) {-else-} (
-             false_Expr
-          ))))
+          -- This used to use `if`, which interacts badly with RebindableSyntax.
+          -- See #11396.
+          nlHsApps and_RDR
+              [ genPrimOpApp (nlHsVar ch_RDR) geInt_RDR (nlHsVar ah_RDR)
+              , genPrimOpApp (nlHsVar ch_RDR) leInt_RDR (nlHsVar bh_RDR)
+              ]
+          )))
 
     --------------------------------------------------------------
     single_con_ixes
@@ -1056,7 +1058,7 @@ gen_Read_binds get_fixity loc tycon
 
     data_con_str con = occNameString (getOccName con)
 
-    read_arg a ty = ASSERT( not (isUnLiftedType ty) )
+    read_arg a ty = ASSERT( not (isUnliftedType ty) )
                     noLoc (mkBindStmt (nlVarPat a) (nlHsVarApps step_RDR [readPrec_RDR]))
 
     read_field lbl a = read_lbl lbl ++
@@ -1175,7 +1177,7 @@ gen_Show_binds get_fixity loc tycon
 
              show_arg :: RdrName -> Type -> LHsExpr RdrName
              show_arg b arg_ty
-               | isUnLiftedType arg_ty
+               | isUnliftedType arg_ty
                -- See Note [Deriving and unboxed types] in TcDeriv
                = nlHsApps compose_RDR [mk_shows_app boxed_arg,
                                        mk_showString_app postfixMod]
@@ -1229,7 +1231,7 @@ appPrecedence = fromIntegral maxPrecedence + 1
 getPrecedence :: (Name -> Fixity) -> Name -> Integer
 getPrecedence get_fixity nm
    = case get_fixity nm of
-        Fixity x _assoc -> fromIntegral x
+        Fixity _ x _assoc -> fromIntegral x
           -- NB: the Report says that associativity is not taken
           --     into account for either Read or Show; hence we
           --     ignore associativity here
@@ -1323,7 +1325,7 @@ gen_Data_binds dflags loc rep_tc
            | otherwise = prefix_RDR
 
         ------------ gfoldl
-    gfoldl_bind = mk_FunBind loc gfoldl_RDR (map gfoldl_eqn data_cons)
+    gfoldl_bind = mk_HRFunBind 2 loc gfoldl_RDR (map gfoldl_eqn data_cons)
 
     gfoldl_eqn con
       = ([nlVarPat k_RDR, nlVarPat z_RDR, nlConVarPat con_name as_needed],
@@ -1335,10 +1337,10 @@ gen_Data_binds dflags loc rep_tc
                      mk_k_app e v = nlHsPar (nlHsOpApp e k_RDR (nlHsVar v))
 
         ------------ gunfold
-    gunfold_bind = mk_FunBind loc
-                              gunfold_RDR
-                              [([k_Pat, z_Pat, if one_constr then nlWildPat else c_Pat],
-                                gunfold_rhs)]
+    gunfold_bind = mk_HRFunBind 2 loc
+                     gunfold_RDR
+                     [([k_Pat, z_Pat, if one_constr then nlWildPat else c_Pat],
+                       gunfold_rhs)]
 
     gunfold_rhs
         | one_constr = mk_unfold_rhs (head data_cons)   -- No need for case
@@ -1933,7 +1935,7 @@ gen_Lift_binds loc tycon
             tys_needed   = dataConOrigArgTys data_con
 
             mk_lift_app ty a
-              | not (isUnLiftedType ty) = nlHsApp (nlHsVar lift_RDR)
+              | not (isUnliftedType ty) = nlHsApp (nlHsVar lift_RDR)
                                                   (nlHsVar a)
               | otherwise = nlHsApp (nlHsVar litE_RDR)
                               (primLitOp (mkBoxExp (nlHsVar a)))
@@ -2144,13 +2146,26 @@ mkParentType tc
 mk_FunBind :: SrcSpan -> RdrName
            -> [([LPat RdrName], LHsExpr RdrName)]
            -> LHsBind RdrName
-mk_FunBind loc fun pats_and_exprs
-  = mkRdrFunBind (L loc fun) matches
+mk_FunBind = mk_HRFunBind 0   -- by using mk_FunBind and not mk_HRFunBind,
+                              -- the caller says that the Void case needs no
+                              -- patterns
+
+-- | This variant of 'mk_FunBind' puts an 'Arity' number of wildcards before
+-- the "=" in the empty-data-decl case. This is necessary if the function
+-- has a higher-rank type, like foldl. (See deriving/should_compile/T4302)
+mk_HRFunBind :: Arity -> SrcSpan -> RdrName
+             -> [([LPat RdrName], LHsExpr RdrName)]
+             -> LHsBind RdrName
+mk_HRFunBind arity loc fun pats_and_exprs
+  = mkHRRdrFunBind arity (L loc fun) matches
   where
     matches = [mkMatch p e (noLoc emptyLocalBinds) | (p,e) <-pats_and_exprs]
 
 mkRdrFunBind :: Located RdrName -> [LMatch RdrName (LHsExpr RdrName)] -> LHsBind RdrName
-mkRdrFunBind fun@(L loc fun_rdr) matches = L loc (mkFunBind fun matches')
+mkRdrFunBind = mkHRRdrFunBind 0
+
+mkHRRdrFunBind :: Arity -> Located RdrName -> [LMatch RdrName (LHsExpr RdrName)] -> LHsBind RdrName
+mkHRRdrFunBind arity fun@(L loc fun_rdr) matches = L loc (mkFunBind fun matches')
  where
    -- Catch-all eqn looks like
    --     fmap = error "Void fmap"
@@ -2158,7 +2173,8 @@ mkRdrFunBind fun@(L loc fun_rdr) matches = L loc (mkFunBind fun matches')
    -- which can happen with -XEmptyDataDecls
    -- See Trac #4302
    matches' = if null matches
-              then [mkMatch [] (error_Expr str) (noLoc emptyLocalBinds)]
+              then [mkMatch (replicate arity nlWildPat)
+                            (error_Expr str) (noLoc emptyLocalBinds)]
               else matches
    str = "Void " ++ occNameString (rdrNameOcc fun_rdr)
 
@@ -2264,7 +2280,7 @@ and_Expr a b = genOpApp a and_RDR    b
 
 eq_Expr :: TyCon -> Type -> LHsExpr RdrName -> LHsExpr RdrName -> LHsExpr RdrName
 eq_Expr tycon ty a b
-    | not (isUnLiftedType ty) = genOpApp a eq_RDR b
+    | not (isUnliftedType ty) = genOpApp a eq_RDR b
     | otherwise               = genPrimOpApp a prim_eq b
  where
    (_, _, prim_eq, _, _) = primOrdOps "Eq" tycon ty
@@ -2387,10 +2403,9 @@ f_Pat           = nlVarPat f_RDR
 k_Pat           = nlVarPat k_RDR
 z_Pat           = nlVarPat z_RDR
 
-minusInt_RDR, tagToEnum_RDR, error_RDR :: RdrName
+minusInt_RDR, tagToEnum_RDR :: RdrName
 minusInt_RDR  = getRdrName (primOpId IntSubOp   )
 tagToEnum_RDR = getRdrName (primOpId TagToEnumOp)
-error_RDR     = getRdrName eRROR_ID
 
 con2tag_RDR, tag2con_RDR, maxtag_RDR :: TyCon -> RdrName
 -- Generates Orig s RdrName, for the binding positions

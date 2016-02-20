@@ -184,7 +184,12 @@ HaveLibDL = @HaveLibDL@
 
 # ArchSupportsSMP should be set iff there is support for that arch in
 # includes/stg/SMP.h
-ArchSupportsSMP=$(strip $(patsubst $(TargetArch_CPP), YES, $(findstring $(TargetArch_CPP), i386 x86_64 sparc powerpc powerpc64 powerpc64le arm aarch64)))
+ifeq "$(TargetArch_CPP)" "arm"
+# We don't support load/store barriers pre-ARMv7. See #10433.
+ArchSupportsSMP="$(if $(filter $(ARM_ISA),ARMv5 ARMv6),NO,YES)"
+else
+ArchSupportsSMP=$(strip $(patsubst $(TargetArch_CPP), YES, $(findstring $(TargetArch_CPP), i386 x86_64 sparc powerpc powerpc64 powerpc64le aarch64)))
+endif
 
 GhcWithSMP := $(strip $(if $(filter YESNO, $(ArchSupportsSMP)$(GhcUnregisterised)),YES,NO))
 
@@ -472,7 +477,7 @@ SRC_HC_OPTS_STAGE0 =
 SRC_HC_OPTS_STAGE1 =
 SRC_HC_OPTS_STAGE2 =
 
-# Warning supression flags. See mk/warnings.mk.
+# Warning suppression flags. See mk/warnings.mk.
 SRC_CC_WARNING_OPTS =
 SRC_HC_WARNING_OPTS =
 
@@ -533,6 +538,7 @@ GHC_PACKAGE_DB_FLAG = @GHC_PACKAGE_DB_FLAG@
 CMM_SINK_BOOTSTRAP_IS_NEEDED = @CMM_SINK_BOOTSTRAP_IS_NEEDED@
 
 SUPPORTS_COMPONENT_ID = @SUPPORTS_COMPONENT_ID@
+SUPPORTS_THIS_UNIT_ID = @SUPPORTS_THIS_UNIT_ID@
 
 #-----------------------------------------------------------------------------
 # C compiler
@@ -805,10 +811,10 @@ PATCH_CMD      = @PatchCmd@
 TAR_CMD        = @TarCmd@
 BZIP2_CMD      = bzip2
 GZIP_CMD       = gzip
-XZ_CMD         = xz -9e
+XZ_CMD         = xz
 
 # xz is default compression
-TAR_COMP      = xz
+TAR_COMP      ?= xz
 
 # select compression command and .tar extension based on TAR_COMP value
 ifeq "$(TAR_COMP)" "bzip2"

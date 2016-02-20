@@ -54,13 +54,17 @@ import Data.Type.Bool
 -- | Lifted, homogeneous equality. By lifted, we mean that it can be
 -- bogus (deferred type error). By homogeneous, the two types @a@
 -- and @b@ must have the same kind.
-class a ~~ b => (a :: k) ~ (b :: k) | a -> b, b -> a
+class a ~~ b => (a :: k) ~ (b :: k)
   -- See Note [The equality types story] in TysPrim
   -- NB: All this class does is to wrap its superclass, which is
   --     the "real", inhomogeneous equality; this is needed when
   --     we have a Given (a~b), and we want to prove things from it
   -- NB: Not exported, as (~) is magical syntax. That's also why there's
   -- no fixity.
+
+  -- It's tempting to put functional dependencies on (~), but it's not
+  -- necessary because the functional-depedency coverage check looks
+  -- through superclasses, and (~#) is handled in that check.
 
 instance {-# INCOHERENT #-} a ~~ b => a ~ b
   -- See Note [The equality types story] in TysPrim
@@ -205,37 +209,37 @@ families.
 
 -- all of the following closed type families are local to this module
 type family EqStar (a :: *) (b :: *) where
-  EqStar _a _a = 'True
-  EqStar _a _b = 'False
+  EqStar a a = 'True
+  EqStar a b = 'False
 
 -- This looks dangerous, but it isn't. This allows == to be defined
 -- over arbitrary type constructors.
 type family EqArrow (a :: k1 -> k2) (b :: k1 -> k2) where
-  EqArrow _a _a = 'True
-  EqArrow _a _b = 'False
+  EqArrow a a = 'True
+  EqArrow a b = 'False
 
 type family EqBool a b where
   EqBool 'True  'True  = 'True
   EqBool 'False 'False = 'True
-  EqBool _a     _b     = 'False
+  EqBool a      b      = 'False
 
 type family EqOrdering a b where
   EqOrdering 'LT 'LT = 'True
   EqOrdering 'EQ 'EQ = 'True
   EqOrdering 'GT 'GT = 'True
-  EqOrdering _a  _b  = 'False
+  EqOrdering a   b   = 'False
 
 type EqUnit (a :: ()) (b :: ()) = 'True
 
 type family EqList a b where
   EqList '[]        '[]        = 'True
   EqList (h1 ': t1) (h2 ': t2) = (h1 == h2) && (t1 == t2)
-  EqList _a         _b         = 'False
+  EqList a          b          = 'False
 
 type family EqMaybe a b where
   EqMaybe 'Nothing   'Nothing  = 'True
   EqMaybe ('Just x) ('Just y)  = x == y
-  EqMaybe _a        _b         = 'False
+  EqMaybe a         b          = 'False
 
 type family Eq2 a b where
   Eq2 '(a1, b1) '(a2, b2) = a1 == a2 && b1 == b2

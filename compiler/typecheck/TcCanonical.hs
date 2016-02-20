@@ -37,7 +37,6 @@ import MonadUtils
 import Control.Monad
 import Data.List  ( zip4, foldl' )
 import BasicTypes
-import FastString
 
 #if __GLASGOW_HASKELL__ < 709
 bimap :: (a -> b) -> (c -> d) -> Either a c -> Either b d
@@ -267,11 +266,12 @@ So here's the plan:
    in solveSimpleGivens or solveSimpleWanteds.
    See Note [Danger of adding superclasses during solving]
 
-3. If we have any remaining unsolved wanteds, try harder:
-   take both the Givens and Wanteds, and expand superclasses again.
-   This may succeed in generating (a finite number of) extra Givens,
-   and extra Deriveds. Both may help the proof.
-   This is done in TcSimplify.expandSuperClasses.
+3. If we have any remaining unsolved wanteds
+        (see Note [When superclasses help] in TcRnTypes)
+   try harder: take both the Givens and Wanteds, and expand
+   superclasses again.  This may succeed in generating (a finite
+   number of) extra Givens, and extra Deriveds. Both may help the
+   proof.  This is done in TcSimplify.expandSuperClasses.
 
 4. Go round to (2) again.  This loop (2,3,4) is implemented
    in TcSimplify.simpl_loop.
@@ -372,21 +372,37 @@ mkGivensWithSuperClasses :: CtLoc -> [EvId] -> TcS [Ct]
 -- From a given EvId, make its Ct, plus the Ct's of its superclasses
 -- See Note [The superclass story]
 -- The loop-breaking here follows Note [Expanding superclasses] in TcType
+--
+-- Example:  class D a => C a
+--           class C [a] => D a
+-- makeGivensWithSuperClasses (C x) will return (C x, D x, C[x])
+--   i.e. up to and including the first repetition of C
 mkGivensWithSuperClasses loc ev_ids = concatMapM go ev_ids
   where
-    go ev_id = mk_superclasses emptyNameSet $
-               CtGiven { ctev_evar = ev_id
-                       , ctev_pred = evVarPred ev_id
-                       , ctev_loc  = loc }
+    go ev_id = mk_superclasses emptyNameSet this_ev
+       where
+         this_ev = CtGiven { ctev_evar = ev_id
+                           , ctev_pred = evVarPred ev_id
+                           , ctev_loc = loc }
 
 makeSuperClasses :: [Ct] -> TcS [Ct]
 -- Returns strict superclasses, transitively, see Note [The superclasses story]
 -- See Note [The superclass story]
 -- The loop-breaking here follows Note [Expanding superclasses] in TcType
+-- Specifically, for an incoming (C t) constraint, we return all of (C t)'s
+--    superclasses, up to /and including/ the first repetition of C
+--
+-- Example:  class D a => C a
+--           class C [a] => D a
+-- makeSuperClasses (C x) will return (D x, C [x])
+--
+-- NB: the incoming constraints have had their cc_pend_sc flag already
+--     flipped to False, by isPendingScDict, so we are /obliged/ to at
+--     least produce the immediate superclasses
 makeSuperClasses cts = concatMapM go cts
   where
     go (CDictCan { cc_ev = ev, cc_class = cls, cc_tyargs = tys })
-          = mk_strict_superclasses emptyNameSet ev cls tys
+          = mk_strict_superclasses (unitNameSet (className cls)) ev cls tys
     go ct = pprPanic "makeSuperClasses" (ppr ct)
 
 mk_superclasses :: NameSet -> CtEvidence -> TcS [Ct]
@@ -399,13 +415,13 @@ mk_superclasses rec_clss ev
   = return [mkNonCanonical ev]
 
 mk_superclasses_of :: NameSet -> CtEvidence -> Class -> [Type] -> TcS [Ct]
--- Return this class constraint, plus its superclasses
+-- Always return this class constraint,
+-- and expand its superclasses
 mk_superclasses_of rec_clss ev cls tys
-  | loop_found
-  = return [this_ct]
-  | otherwise
-  = do { sc_cts <- mk_strict_superclasses rec_clss' ev cls tys
-       ; return (this_ct : sc_cts) }
+  | loop_found = return [this_ct]  -- cc_pend_sc of this_ct = True
+  | otherwise  = do { sc_cts <- mk_strict_superclasses rec_clss' ev cls tys
+                    ; return (this_ct : sc_cts) }
+                                   -- cc_pend_sc of this_ct = False
   where
     cls_nm     = className cls
     loop_found = cls_nm `elemNameSet` rec_clss
@@ -413,14 +429,18 @@ mk_superclasses_of rec_clss ev cls tys
                | otherwise         = rec_clss `extendNameSet` cls_nm
     this_ct    = CDictCan { cc_ev = ev, cc_class = cls, cc_tyargs = tys
                           , cc_pend_sc = loop_found }
+                 -- NB: If there is a loop, we cut off, so we have not
+                 --     added the superclasses, hence cc_pend_sc = True
 
 mk_strict_superclasses :: NameSet -> CtEvidence -> Class -> [Type] -> TcS [Ct]
+-- Always return the immediate superclasses of (cls tys);
+-- and expand their superclasses, provided none of them are in rec_clss
+-- nor are repeated
 mk_strict_superclasses rec_clss ev cls tys
   | CtGiven { ctev_evar = evar, ctev_loc = loc } <- ev
   = do { sc_evs <- newGivenEvVars (mk_given_loc loc)
                                   (mkEvScSelectors (EvId evar) cls tys)
        ; concatMapM (mk_superclasses rec_clss) sc_evs }
-
 
   | isEmptyVarSet (tyCoVarsOfTypes tys)
   = return [] -- Wanteds with no variables yield no deriveds.
@@ -449,7 +469,6 @@ mk_strict_superclasses rec_clss ev cls tys
 
        | otherwise  -- Probably doesn't happen, since this function
        = loc        -- is only used for Givens, but does no harm
-
 
 
 {-
@@ -1459,9 +1478,9 @@ canEqTyVarTyVar ev eq_rel swapped tv1 tv2 kco2
       -- the floating step looks for meta tyvars on the left
       | isMetaTyVar tv2 = True
 
-      -- So neither is a meta tyvar
+      -- So neither is a meta tyvar (including FlatMetaTv)
 
-      -- If only one is a flatten tyvar, put it on the left
+      -- If only one is a flatten skolem, put it on the left
       -- See Note [Eliminate flat-skols]
       | not (isFlattenTyVar tv1), isFlattenTyVar tv2 = True
 
@@ -1699,8 +1718,8 @@ instance Functor StopOrContinue where
   fmap _ (Stop ev s)      = Stop ev s
 
 instance Outputable a => Outputable (StopOrContinue a) where
-  ppr (Stop ev s)      = ptext (sLit "Stop") <> parens s <+> ppr ev
-  ppr (ContinueWith w) = ptext (sLit "ContinueWith") <+> ppr w
+  ppr (Stop ev s)      = text "Stop" <> parens s <+> ppr ev
+  ppr (ContinueWith w) = text "ContinueWith" <+> ppr w
 
 continueWith :: a -> TcS (StopOrContinue a)
 continueWith = return . ContinueWith

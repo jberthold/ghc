@@ -43,7 +43,6 @@ import BasicTypes
 import UniqFM
 import Util
 import Id
-import FastString
 import Data.Data        ( Data, Typeable )
 import Data.Maybe       ( isJust, isNothing )
 #if __GLASGOW_HASKELL__ < 709
@@ -176,14 +175,14 @@ pprInstance :: ClsInst -> SDoc
 -- Prints the ClsInst as an instance declaration
 pprInstance ispec
   = hang (pprInstanceHdr ispec)
-       2 (vcat [ ptext (sLit "--") <+> pprDefinedAt (getName ispec)
+       2 (vcat [ text "--" <+> pprDefinedAt (getName ispec)
                , ifPprDebug (ppr (is_dfun ispec)) ])
 
 -- * pprInstanceHdr is used in VStudio to populate the ClassView tree
 pprInstanceHdr :: ClsInst -> SDoc
 -- Prints the ClsInst as an instance declaration
 pprInstanceHdr (ClsInst { is_flag = flag, is_dfun = dfun })
-  = ptext (sLit "instance") <+> ppr flag <+> pprSigmaType (idType dfun)
+  = text "instance" <+> ppr flag <+> pprSigmaType (idType dfun)
 
 pprInstances :: [ClsInst] -> SDoc
 pprInstances ispecs = vcat (map pprInstance ispecs)
@@ -417,12 +416,12 @@ identicalClsInstHead :: ClsInst -> ClsInst -> Bool
 -- e.g.  both are   Eq [(a,b)]
 -- Used for overriding in GHCi
 -- Obviously should be insenstive to alpha-renaming
-identicalClsInstHead (ClsInst { is_cls_nm = cls_nm1, is_tcs = rough1, is_tvs = tvs1, is_tys = tys1 })
-                     (ClsInst { is_cls_nm = cls_nm2, is_tcs = rough2, is_tvs = tvs2, is_tys = tys2 })
+identicalClsInstHead (ClsInst { is_cls_nm = cls_nm1, is_tcs = rough1, is_tys = tys1 })
+                     (ClsInst { is_cls_nm = cls_nm2, is_tcs = rough2, is_tys = tys2 })
   =  cls_nm1 == cls_nm2
   && not (instanceCantMatch rough1 rough2)  -- Fast check for no match, uses the "rough match" fields
-  && isJust (tcMatchTys (mkVarSet tvs1) tys1 tys2)
-  && isJust (tcMatchTys (mkVarSet tvs2) tys2 tys1)
+  && isJust (tcMatchTys tys1 tys2)
+  && isJust (tcMatchTys tys2 tys1)
 
 {-
 ************************************************************************
@@ -670,12 +669,13 @@ lookupUniqueInstEnv instEnv cls tys
   = case lookupInstEnv False instEnv cls tys of
       ([(inst, inst_tys)], _, _)
              | noFlexiVar -> Right (inst, inst_tys')
-             | otherwise  -> Left $ ptext (sLit "flexible type variable:") <+>
+             | otherwise  -> Left $ text "flexible type variable:" <+>
                                     (ppr $ mkTyConApp (classTyCon cls) tys)
              where
                inst_tys'  = [ty | Just ty <- inst_tys]
                noFlexiVar = all isJust inst_tys
-      _other -> Left $ ptext (sLit "instance not found") <+> (ppr $ mkTyConApp (classTyCon cls) tys)
+      _other -> Left $ text "instance not found" <+>
+                       (ppr $ mkTyConApp (classTyCon cls) tys)
 
 lookupInstEnv' :: InstEnv          -- InstEnv to look in
                -> VisibleOrphanModules   -- But filter against this
@@ -714,7 +714,7 @@ lookupInstEnv' ie vis_mods cls tys
       | instanceCantMatch rough_tcs mb_tcs
       = find ms us rest
 
-      | Just subst <- tcMatchTys tpl_tv_set tpl_tys tys
+      | Just subst <- tcMatchTys tpl_tys tys
       = find ((item, map (lookupTyVar subst) tpl_tvs) : ms) us rest
 
         -- Does not match, so next check whether the things unify
@@ -851,8 +851,7 @@ insert_overlapping new_item (old_item : old_items)
     -- `instB` can be instantiated to match `instA`
     -- or the two are equal
     (instA,_) `more_specific_than` (instB,_)
-      = isJust (tcMatchTys (mkVarSet (is_tvs instB))
-               (is_tys instB) (is_tys instA))
+      = isJust (tcMatchTys (is_tys instB) (is_tys instA))
 
     (instA, _) `can_override` (instB, _)
        =  hasOverlappingFlag  (overlapMode (is_flag instA))

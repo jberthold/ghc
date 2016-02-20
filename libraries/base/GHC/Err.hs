@@ -1,5 +1,6 @@
 {-# LANGUAGE Trustworthy #-}
 {-# LANGUAGE NoImplicitPrelude, MagicHash, ImplicitParams #-}
+{-# LANGUAGE RankNTypes, TypeInType #-}
 {-# OPTIONS_HADDOCK hide #-}
 
 -----------------------------------------------------------------------------
@@ -23,7 +24,7 @@
 
 module GHC.Err( absentErr, error, errorWithoutStackTrace, undefined ) where
 import GHC.CString ()
-import GHC.Types (Char)
+import GHC.Types (Char, Levity)
 import GHC.Stack.Types
 import GHC.Prim
 import GHC.Integer ()   -- Make sure Integer is compiled first
@@ -32,24 +33,31 @@ import GHC.Integer ()   -- Make sure Integer is compiled first
 import {-# SOURCE #-} GHC.Exception( errorCallWithCallStackException )
 
 -- | 'error' stops execution and displays an error message.
-error :: (?callStack :: CallStack) => [Char] -> a
+error :: forall (v :: Levity). forall (a :: TYPE v).
+         HasCallStack => [Char] -> a
 error s = raise# (errorCallWithCallStackException s ?callStack)
+          -- Bleh, we should be using 'GHC.Stack.callStack' instead of
+          -- '?callStack' here, but 'GHC.Stack.callStack' depends on
+          -- 'GHC.Stack.popCallStack', which is partial and depends on
+          -- 'error'.. Do as I say, not as I do.
 
 -- | A variant of 'error' that does not produce a stack trace.
 --
 -- @since 4.9.0.0
-errorWithoutStackTrace :: [Char] -> a
-errorWithoutStackTrace s
-  = let ?callStack = freezeCallStack ?callStack
-    in error s
-{-# NOINLINE errorWithoutStackTrace #-}
+errorWithoutStackTrace :: forall (v :: Levity). forall (a :: TYPE v).
+                          [Char] -> a
+errorWithoutStackTrace s =
+  -- we don't have withFrozenCallStack yet, so we just inline the definition
+  let ?callStack = freezeCallStack emptyCallStack
+  in error s
+
 
 -- Note [Errors in base]
 -- ~~~~~~~~~~~~~~~~~~~~~
 -- As of base-4.9.0.0, `error` produces a stack trace alongside the
--- error message using the Implicit CallStack machinery. This provides
+-- error message using the HasCallStack machinery. This provides
 -- a partial stack trace, containing the call-site of each function
--- with a (?callStack :: CallStack) implicit parameter constraint.
+-- with a HasCallStack constraint.
 --
 -- In base, however, the only functions that have such constraints are
 -- error and undefined, so the stack traces from partial functions in
@@ -59,14 +67,15 @@ errorWithoutStackTrace s
 -- name of the offending partial function, so the partial stack-trace
 -- does not provide any extra information, just noise. Thus, we export
 -- the callstack-aware error, but within base we use the
--- errorWithoutStackTrace variant for more hygienic erorr messages.
+-- errorWithoutStackTrace variant for more hygienic error messages.
 
 
 -- | A special case of 'error'.
 -- It is expected that compilers will recognize this and insert error
 -- messages which are more appropriate to the context in which 'undefined'
 -- appears.
-undefined :: (?callStack :: CallStack) => a
+undefined :: forall (v :: Levity). forall (a :: TYPE v).
+             HasCallStack => a
 undefined =  error "Prelude.undefined"
 
 -- | Used for compiler-generated error message;

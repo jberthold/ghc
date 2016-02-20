@@ -26,7 +26,6 @@ import DynFlags( DynFlags )
 import Util
 import Bag
 import Pair
-import FastString
 import Control.Monad
 import MonadUtils ( zipWithAndUnzipM )
 import GHC.Exts ( inline )
@@ -245,7 +244,7 @@ BUT this works badly for Trac #10340:
 For 'foo' we instantiate 'get' at types mm ss
        [W] MonadState ss mm, [W] mm ss ~ State Any Any
 Flatten, and decompose
-       [W] MnadState ss mm, [W] Any ~ fmv, [W] mm ~ State fmv, [W] fmv ~ ss
+       [W] MonadState ss mm, [W] Any ~ fmv, [W] mm ~ State fmv, [W] fmv ~ ss
 Unify mm := State fmv:
        [W] MonadState ss (State fmv), [W] Any ~ fmv, [W] fmv ~ ss
 If we orient with (untouchable) fmv on the left we are now stuck:
@@ -961,7 +960,7 @@ flatten_one (TyConApp tc tys)
   -- Expand type synonyms that mention type families
   -- on the RHS; see Note [Flattening synonyms]
   | Just (tenv, rhs, tys') <- expandSynTyCon_maybe tc tys
-  , let expanded_ty = mkAppTys (substTy (mkTopTCvSubst tenv) rhs) tys'
+  , let expanded_ty = mkAppTys (substTy (mkTvSubstPrs tenv) rhs) tys'
   = do { mode <- getMode
        ; let used_tcs = tyConsOfType rhs
        ; case mode of
@@ -1151,7 +1150,7 @@ flatten_exact_fam_app_fully tc tys
        ; fr <- getFlavourRole
        ; case mb_ct of
            Just (co, rhs_ty, flav)  -- co :: F xis ~ fsk
-             | (flav, NomEq) `canDischargeFR` fr
+             | (flav, NomEq) `funEqCanDischargeFR` fr
              ->  -- Usable hit in the flat-cache
                  -- We certainly *can* use a Wanted for a Wanted
                 do { traceFlat "flatten/flat-cache hit" $ (ppr tc <+> ppr xis $$ ppr rhs_ty)
@@ -1443,8 +1442,8 @@ unflatten tv_eqs funeqs
       ; tclvl    <- getTcLevel
 
       ; traceTcS "Unflattening" $ braces $
-        vcat [ ptext (sLit "Funeqs =") <+> pprCts funeqs
-             , ptext (sLit "Tv eqs =") <+> pprCts tv_eqs ]
+        vcat [ text "Funeqs =" <+> pprCts funeqs
+             , text "Tv eqs =" <+> pprCts tv_eqs ]
 
          -- Step 1: unflatten the CFunEqCans, except if that causes an occurs check
          -- Occurs check: consider  [W] alpha ~ [F alpha]

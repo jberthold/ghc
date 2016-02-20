@@ -16,6 +16,7 @@ which deal with the instantiated versions are located elsewhere:
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module HsUtils(
   -- Terms
@@ -27,7 +28,8 @@ module HsUtils(
   mkHsOpApp, mkHsDo, mkHsComp, mkHsWrapPat, mkHsWrapPatCo,
   mkLHsPar, mkHsCmdWrap, mkLHsCmdWrap, isLHsTypeExpr_maybe, isLHsTypeExpr,
 
-  nlHsTyApp, nlHsTyApps, nlHsVar, nlHsLit, nlHsApp, nlHsApps, nlHsIntLit, nlHsVarApps,
+  nlHsTyApp, nlHsTyApps, nlHsVar, nlHsLit, nlHsApp, nlHsApps, nlHsSyntaxApps,
+  nlHsIntLit, nlHsVarApps,
   nlHsDo, nlHsOpApp, nlHsLam, nlHsPar, nlHsIf, nlHsCase, nlList,
   mkLHsTupleExpr, mkLHsVarTuple, missingTupArg,
   toLHsSigWcType,
@@ -54,11 +56,10 @@ module HsUtils(
   mkHsAppTy, mkHsAppTys, userHsTyVarBndrs, userHsLTyVarBndrs,
   mkLHsSigType, mkLHsSigWcType, mkClassOpSigs,
   nlHsAppTy, nlHsTyVar, nlHsFunTy, nlHsTyConApp,
-  getAppsTyHead_maybe, hsTyGetAppHead_maybe, splitHsAppsTy,
-  getLHsInstDeclClass_maybe,
 
   -- Stmts
-  mkTransformStmt, mkTransformByStmt, mkBodyStmt, mkBindStmt, mkLastStmt,
+  mkTransformStmt, mkTransformByStmt, mkBodyStmt, mkBindStmt, mkTcBindStmt,
+  mkLastStmt,
   emptyTransStmt, mkGroupUsingStmt, mkGroupByUsingStmt,
   emptyRecStmt, emptyRecStmtName, emptyRecStmtId, mkRecStmt,
 
@@ -99,6 +100,7 @@ import RdrName
 import Var
 import TyCoRep
 import Type   ( filterOutInvisibleTypes )
+import TysWiredIn ( unitTy )
 import TcType
 import DataCon
 import Name
@@ -169,12 +171,6 @@ mkMatchGroupName origin matches = MG { mg_alts = mkLocatedList matches
                                      , mg_res_ty = placeHolderType
                                      , mg_origin = origin }
 
-mkHsAppTy :: LHsType name -> LHsType name -> LHsType name
-mkHsAppTy t1 t2 = addCLoc t1 t2 (HsAppTy t1 t2)
-
-mkHsAppTys :: LHsType name -> [LHsType name] -> LHsType name
-mkHsAppTys = foldl mkHsAppTy
-
 mkHsApp :: LHsExpr name -> LHsExpr name -> LHsExpr name
 mkHsApp e1 e2 = addCLoc e1 e2 (HsApp e1 e2)
 
@@ -228,13 +224,16 @@ mkHsDo         :: HsStmtContext Name -> [ExprLStmt RdrName] -> HsExpr RdrName
 mkHsComp       :: HsStmtContext Name -> [ExprLStmt RdrName] -> LHsExpr RdrName
                -> HsExpr RdrName
 
-mkNPat      :: Located (HsOverLit id) -> Maybe (SyntaxExpr id) -> Pat id
-mkNPlusKPat :: Located id -> Located (HsOverLit id) -> Pat id
+mkNPat      :: Located (HsOverLit RdrName) -> Maybe (SyntaxExpr RdrName) -> Pat RdrName
+mkNPlusKPat :: Located RdrName -> Located (HsOverLit RdrName) -> Pat RdrName
 
 mkLastStmt :: Located (bodyR idR) -> StmtLR idL idR (Located (bodyR idR))
 mkBodyStmt :: Located (bodyR RdrName)
            -> StmtLR idL RdrName (Located (bodyR RdrName))
-mkBindStmt :: LPat idL -> Located (bodyR idR) -> StmtLR idL idR (Located (bodyR idR))
+mkBindStmt :: (PostTc idR Type ~ PlaceHolder)
+           => LPat idL -> Located (bodyR idR)
+           -> StmtLR idL idR (Located (bodyR idR))
+mkTcBindStmt :: LPat Id -> Located (bodyR Id) -> StmtLR Id Id (Located (bodyR Id))
 
 emptyRecStmt     :: StmtLR idL  RdrName bodyR
 emptyRecStmtName :: StmtLR Name Name    bodyR
@@ -242,9 +241,9 @@ emptyRecStmtId   :: StmtLR Id   Id      bodyR
 mkRecStmt    :: [LStmtLR idL RdrName bodyR] -> StmtLR idL RdrName bodyR
 
 
-mkHsIntegral src i  = OverLit (HsIntegral   src i) noRebindableInfo noSyntaxExpr
-mkHsFractional   f  = OverLit (HsFractional     f) noRebindableInfo noSyntaxExpr
-mkHsIsString src s  = OverLit (HsIsString   src s) noRebindableInfo noSyntaxExpr
+mkHsIntegral src i  = OverLit (HsIntegral   src i) noRebindableInfo noExpr
+mkHsFractional   f  = OverLit (HsFractional     f) noRebindableInfo noExpr
+mkHsIsString src s  = OverLit (HsIsString   src s) noRebindableInfo noExpr
 
 noRebindableInfo :: PlaceHolder
 noRebindableInfo = PlaceHolder -- Just another placeholder;
@@ -257,24 +256,29 @@ mkHsComp ctxt stmts expr = mkHsDo ctxt (stmts ++ [last_stmt])
 mkHsIf :: LHsExpr id -> LHsExpr id -> LHsExpr id -> HsExpr id
 mkHsIf c a b = HsIf (Just noSyntaxExpr) c a b
 
-mkNPat lit neg     = NPat lit neg noSyntaxExpr
-mkNPlusKPat id lit = NPlusKPat id lit noSyntaxExpr noSyntaxExpr
+mkNPat lit neg     = NPat lit neg noSyntaxExpr placeHolderType
+mkNPlusKPat id lit = NPlusKPat id lit (unLoc lit) noSyntaxExpr noSyntaxExpr placeHolderType
 
-mkTransformStmt    :: [ExprLStmt idL] -> LHsExpr idR
+mkTransformStmt    :: (PostTc idR Type ~ PlaceHolder)
+                   => [ExprLStmt idL] -> LHsExpr idR
                    -> StmtLR idL idR (LHsExpr idL)
-mkTransformByStmt  :: [ExprLStmt idL] -> LHsExpr idR -> LHsExpr idR
+mkTransformByStmt  :: (PostTc idR Type ~ PlaceHolder)
+                   => [ExprLStmt idL] -> LHsExpr idR -> LHsExpr idR
                    -> StmtLR idL idR (LHsExpr idL)
-mkGroupUsingStmt   :: [ExprLStmt idL]                -> LHsExpr idR
+mkGroupUsingStmt   :: (PostTc idR Type ~ PlaceHolder)
+                   => [ExprLStmt idL]                -> LHsExpr idR
                    -> StmtLR idL idR (LHsExpr idL)
-mkGroupByUsingStmt :: [ExprLStmt idL] -> LHsExpr idR -> LHsExpr idR
+mkGroupByUsingStmt :: (PostTc idR Type ~ PlaceHolder)
+                   => [ExprLStmt idL] -> LHsExpr idR -> LHsExpr idR
                    -> StmtLR idL idR (LHsExpr idL)
 
-emptyTransStmt :: StmtLR idL idR (LHsExpr idR)
+emptyTransStmt :: (PostTc idR Type ~ PlaceHolder) => StmtLR idL idR (LHsExpr idR)
 emptyTransStmt = TransStmt { trS_form = panic "emptyTransStmt: form"
                            , trS_stmts = [], trS_bndrs = []
-                           , trS_by = Nothing, trS_using = noLoc noSyntaxExpr
+                           , trS_by = Nothing, trS_using = noLoc noExpr
                            , trS_ret = noSyntaxExpr, trS_bind = noSyntaxExpr
-                           , trS_fmap = noSyntaxExpr }
+                           , trS_bind_arg_ty = PlaceHolder
+                           , trS_fmap = noExpr }
 mkTransformStmt    ss u   = emptyTransStmt { trS_form = ThenForm,  trS_stmts = ss, trS_using = u }
 mkTransformByStmt  ss u b = emptyTransStmt { trS_form = ThenForm,  trS_stmts = ss, trS_using = u, trS_by = Just b }
 mkGroupUsingStmt   ss u   = emptyTransStmt { trS_form = GroupForm, trS_stmts = ss, trS_using = u }
@@ -282,8 +286,9 @@ mkGroupByUsingStmt ss b u = emptyTransStmt { trS_form = GroupForm, trS_stmts = s
 
 mkLastStmt body     = LastStmt body False noSyntaxExpr
 mkBodyStmt body     = BodyStmt body noSyntaxExpr noSyntaxExpr placeHolderType
-mkBindStmt pat body = BindStmt pat body noSyntaxExpr noSyntaxExpr
-
+mkBindStmt pat body = BindStmt pat body noSyntaxExpr noSyntaxExpr PlaceHolder
+mkTcBindStmt pat body = BindStmt pat body noSyntaxExpr noSyntaxExpr unitTy
+  -- don't use placeHolderTypeTc above, because that panics during zonking
 
 emptyRecStmt' :: forall idL idR body.
                        PostTc idR Type -> StmtLR idL idR body
@@ -293,12 +298,13 @@ emptyRecStmt' tyVal =
      , recS_rec_ids = []
      , recS_ret_fn = noSyntaxExpr
      , recS_mfix_fn = noSyntaxExpr
-     , recS_bind_fn = noSyntaxExpr, recS_later_rets = []
+     , recS_bind_fn = noSyntaxExpr, recS_bind_ty = tyVal
+     , recS_later_rets = []
      , recS_rec_rets = [], recS_ret_ty = tyVal }
 
 emptyRecStmt     = emptyRecStmt' placeHolderType
 emptyRecStmtName = emptyRecStmt' placeHolderType
-emptyRecStmtId   = emptyRecStmt' placeHolderTypeTc
+emptyRecStmtId   = emptyRecStmt' unitTy -- a panic might trigger during zonking
 mkRecStmt stmts  = emptyRecStmt { recS_stmts = stmts }
 
 -------------------------------
@@ -370,6 +376,18 @@ nlLitPat l = noLoc (LitPat l)
 
 nlHsApp :: LHsExpr id -> LHsExpr id -> LHsExpr id
 nlHsApp f x = noLoc (HsApp f x)
+
+nlHsSyntaxApps :: SyntaxExpr id -> [LHsExpr id] -> LHsExpr id
+nlHsSyntaxApps (SyntaxExpr { syn_expr      = fun
+                           , syn_arg_wraps = arg_wraps
+                           , syn_res_wrap  = res_wrap }) args
+  | [] <- arg_wraps   -- in the noSyntaxExpr case
+  = ASSERT( isIdHsWrapper res_wrap )
+    foldl nlHsApp (noLoc fun) args
+
+  | otherwise
+  = mkLHsWrap res_wrap (foldl nlHsApp (noLoc fun) (zipWithEqual "nlHsSyntaxApps"
+                                                     mkLHsWrap arg_wraps args))
 
 nlHsIntLit :: Integer -> LHsExpr id
 nlHsIntLit n = noLoc (HsLit (HsInt (show n) n))
@@ -802,11 +820,11 @@ collectLStmtBinders = collectStmtBinders . unLoc
 
 collectStmtBinders :: StmtLR idL idR body -> [idL]
   -- Id Binders for a Stmt... [but what about pattern-sig type vars]?
-collectStmtBinders (BindStmt pat _ _ _)  = collectPatBinders pat
+collectStmtBinders (BindStmt pat _ _ _ _)= collectPatBinders pat
 collectStmtBinders (LetStmt (L _ binds)) = collectLocalBinders binds
 collectStmtBinders (BodyStmt {})         = []
 collectStmtBinders (LastStmt {})         = []
-collectStmtBinders (ParStmt xs _ _)   = collectLStmtsBinders
+collectStmtBinders (ParStmt xs _ _ _) = collectLStmtsBinders
                                       $ [s | ParStmtBlock ss _ _ <- xs, s <- ss]
 collectStmtBinders (TransStmt { trS_stmts = stmts }) = collectLStmtsBinders stmts
 collectStmtBinders (RecStmt { recS_stmts = ss })     = collectLStmtsBinders ss
@@ -841,8 +859,8 @@ collect_lpat (L _ pat) bndrs
     go (ConPatOut {pat_args=ps})  = foldr collect_lpat bndrs (hsConPatArgs ps)
         -- See Note [Dictionary binders in ConPatOut]
     go (LitPat _)                 = bndrs
-    go (NPat _ _ _)               = bndrs
-    go (NPlusKPat (L _ n) _ _ _)  = n : bndrs
+    go (NPat {})                  = bndrs
+    go (NPlusKPat (L _ n) _ _ _ _ _)= n : bndrs
 
     go (SigPatIn pat _)           = collect_lpat pat bndrs
     go (SigPatOut pat _)          = collect_lpat pat bndrs
@@ -1059,14 +1077,14 @@ lStmtsImplicits = hs_lstmts
     hs_lstmts = foldr (\stmt rest -> unionNameSet (hs_stmt (unLoc stmt)) rest) emptyNameSet
 
     hs_stmt :: StmtLR Name idR (Located (body idR)) -> NameSet
-    hs_stmt (BindStmt pat _ _ _) = lPatImplicits pat
+    hs_stmt (BindStmt pat _ _ _ _) = lPatImplicits pat
     hs_stmt (ApplicativeStmt args _ _) = unionNameSets (map do_arg args)
       where do_arg (_, ApplicativeArgOne pat _) = lPatImplicits pat
             do_arg (_, ApplicativeArgMany stmts _ _) = hs_lstmts stmts
     hs_stmt (LetStmt binds)      = hs_local_binds (unLoc binds)
     hs_stmt (BodyStmt {})        = emptyNameSet
     hs_stmt (LastStmt {})        = emptyNameSet
-    hs_stmt (ParStmt xs _ _)     = hs_lstmts [s | ParStmtBlock ss _ _ <- xs, s <- ss]
+    hs_stmt (ParStmt xs _ _ _)   = hs_lstmts [s | ParStmtBlock ss _ _ <- xs, s <- ss]
     hs_stmt (TransStmt { trS_stmts = stmts }) = hs_lstmts stmts
     hs_stmt (RecStmt { recS_stmts = ss })     = hs_lstmts ss
 
@@ -1120,60 +1138,3 @@ lPatImplicits = hs_lpat
                                                           pat_explicit = maybe True (i<) (rec_dotdot fs)]
     details (InfixCon p1 p2) = hs_lpat p1 `unionNameSet` hs_lpat p2
 
-{-
-************************************************************************
-*                                                                      *
-   Dealing with HsAppsTy
-*                                                                      *
-************************************************************************
--}
-
--- | Retrieves the head of an HsAppsTy, if this can be done unambiguously,
--- without consulting fixities.
-getAppsTyHead_maybe :: [LHsAppType name] -> Maybe (LHsType name, [LHsType name])
-getAppsTyHead_maybe tys = case splitHsAppsTy tys of
-  ([app1:apps], []) ->  -- no symbols, some normal types
-    Just (mkHsAppTys app1 apps, [])
-  ([app1l:appsl, app1r:appsr], [L loc op]) ->  -- one operator
-    Just (L loc (HsTyVar (L loc op)), [mkHsAppTys app1l appsl, mkHsAppTys app1r appsr])
-  _ -> -- can't figure it out
-    Nothing
-
--- | Splits a [HsAppType name] (the payload of an HsAppsTy) into regions of prefix
--- types (normal types) and infix operators.
--- If @splitHsAppsTy tys = (non_syms, syms)@, then @tys@ starts with the first
--- element of @non_syms@ followed by the first element of @syms@ followed by
--- the next element of @non_syms@, etc. It is guaranteed that the non_syms list
--- has one more element than the syms list.
-splitHsAppsTy :: [LHsAppType name] -> ([[LHsType name]], [Located name])
-splitHsAppsTy = go [] [] []
-  where
-    go acc acc_non acc_sym [] = (reverse (reverse acc : acc_non), reverse acc_sym)
-    go acc acc_non acc_sym (L _ (HsAppPrefix ty) : rest)
-      = go (ty : acc) acc_non acc_sym rest
-    go acc acc_non acc_sym (L _ (HsAppInfix op) : rest)
-      = go [] (reverse acc : acc_non) (op : acc_sym) rest
-
--- retrieve the name of the "head" of a nested type application
--- somewhat like splitHsAppTys, but a little more thorough
--- used to examine the result of a GADT-like datacon, so it doesn't handle
--- *all* cases (like lists, tuples, (~), etc.)
-hsTyGetAppHead_maybe :: LHsType name -> Maybe (Located name, [LHsType name])
-hsTyGetAppHead_maybe = go []
-  where
-    go tys (L _ (HsTyVar ln))           = Just (ln, tys)
-    go tys (L _ (HsAppsTy apps))
-      | Just (head, args) <- getAppsTyHead_maybe apps
-                                         = go (args ++ tys) head
-    go tys (L _ (HsAppTy l r))           = go (r : tys) l
-    go tys (L _ (HsOpTy l (L loc n) r))  = Just (L loc n, l : r : tys)
-    go tys (L _ (HsParTy t))             = go tys t
-    go tys (L _ (HsKindSig t _))         = go tys t
-    go _   _                             = Nothing
-
-getLHsInstDeclClass_maybe :: LHsSigType name -> Maybe (Located name)
--- Works on (HsSigType RdrName)
-getLHsInstDeclClass_maybe inst_ty
-  = do { let (_, tau) = splitLHsQualTy (hsSigType inst_ty)
-       ; (cls, _) <- hsTyGetAppHead_maybe tau
-       ; return cls }

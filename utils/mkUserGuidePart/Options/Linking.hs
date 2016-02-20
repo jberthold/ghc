@@ -21,25 +21,6 @@ linkingOptions =
            "Generate position-independent code (where available)"
          , flagType = DynamicFlag
          }
-  , flag { flagName = "-dynamic"
-         , flagDescription = "Use dynamic Haskell libraries (if available)"
-         , flagType = DynamicFlag
-         }
-  , flag { flagName = "-dynamic-too"
-         , flagDescription =
-           "Build dynamic object files *as well as* static object files " ++
-           "during compilation"
-         , flagType = DynamicFlag
-         }
-  , flag { flagName = "-dyno"
-         , flagDescription =
-           "Set the output path for the *dynamically* linked objects"
-         , flagType = DynamicFlag
-         }
-  , flag { flagName = "-dynosuf"
-         , flagDescription = "Set the output suffix for dynamic object files"
-         , flagType = DynamicFlag
-         }
   , flag { flagName = "-dynload"
          , flagDescription =
            "Selects one of a number of modes for finding shared libraries at runtime."
@@ -94,7 +75,7 @@ linkingOptions =
          }
   , flag { flagName = "-no-rtsopts-suggestions"
          , flagDescription =
-           "Don't print RTS suggestions about linking with ``-rtsopts``."
+           "Don't print RTS suggestions about linking with :ghc-flag:`rtsopts`."
          , flagType = DynamicFlag
          }
   , flag { flagName = "-no-link"
@@ -123,7 +104,7 @@ linkingOptions =
          }
   , flag { flagName = "-ticky"
          , flagDescription =
-           "For linking, this simply implies ``-debug``; "++
+           "For linking, this simply implies :ghc-flag:`debug`; "++
            "see :ref:`ticky-ticky`."
          , flagType = DynamicFlag
          }

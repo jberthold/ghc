@@ -205,16 +205,19 @@ basicKnownKeyNames
         ioTyConName, ioDataConName,
         runMainIOName,
 
+        -- Type representation types
+        trModuleTyConName, trModuleDataConName,
+        trNameTyConName, trNameSDataConName, trNameDDataConName,
+        trTyConTyConName, trTyConDataConName,
+
         -- Typeable
         typeableClassName,
         typeRepTyConName,
-        trTyConDataConName,
-        trModuleDataConName,
-        trNameSDataConName,
         typeRepIdName,
         mkPolyTyConAppName,
         mkAppTyName,
         typeSymbolTypeRepName, typeNatTypeRepName,
+        trGhcPrimModuleName,
 
         -- Dynamic
         toDynName,
@@ -326,9 +329,14 @@ basicKnownKeyNames
         -- Overloaded labels
         isLabelClassName,
 
-        -- Source locations
-        callStackDataConName, callStackTyConName,
+        -- Implicit Parameters
+        ipClassName,
+
+        -- Call Stacks
+        callStackTyConName,
         emptyCallStackName, pushCallStackName,
+
+        -- Source Locations
         srcLocDataConName,
 
         -- Annotation type checking
@@ -813,39 +821,6 @@ and it's convenient to write them all down in one place.
 -- guys as well (perhaps) e.g. see  trueDataConName     below
 -}
 
--- | Build a 'Name' for the 'Typeable' representation of the given special 'TyCon'.
--- Special 'TyCon's include @(->)@, @BOX@, @Constraint@, etc. See 'TysPrim'.
-mkSpecialTyConRepName :: FastString -> Name -> Name
--- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
-mkSpecialTyConRepName fs tc_name
-  = mkExternalName (tyConRepNameUnique (nameUnique tc_name))
-                   tYPEABLE_INTERNAL
-                   (mkVarOccFS fs)
-                   wiredInSrcSpan
-
--- | Make a 'Name' for the 'Typeable' representation of the given wired-in type
-mkPrelTyConRepName :: Name -> Name
--- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
-mkPrelTyConRepName tc_name  -- Prelude tc_name is always External,
-                            -- so nameModule will work
-  = mkExternalName rep_uniq rep_mod rep_occ (nameSrcSpan tc_name)
-  where
-    name_occ  = nameOccName tc_name
-    name_mod  = nameModule  tc_name
-    name_uniq = nameUnique  tc_name
-    rep_uniq | isTcOcc name_occ = tyConRepNameUnique   name_uniq
-             | otherwise        = dataConRepNameUnique name_uniq
-    (rep_mod, rep_occ) = tyConRepModOcc name_mod name_occ
-
--- | TODO
--- See Note [Grand plan for Typeable] in 'TcTypeable' in TcTypeable.
-tyConRepModOcc :: Module -> OccName -> (Module, OccName)
-tyConRepModOcc tc_module tc_occ
-  | tc_module == gHC_TYPES
-  = (tYPEABLE_INTERNAL, mkTyConRepUserOcc tc_occ)
-  | otherwise
-  = (tc_module,         mkTyConRepSysOcc tc_occ)
-
 wildCardName :: Name
 wildCardName = mkSystemVarName wildCardKey (fsLit "wild")
 
@@ -1160,28 +1135,43 @@ rationalToDoubleName = varQual gHC_FLOAT (fsLit "rationalToDouble") rationalToDo
 ixClassName :: Name
 ixClassName = clsQual gHC_ARR (fsLit "Ix") ixClassKey
 
+-- Typeable representation types
+trModuleTyConName
+  , trModuleDataConName
+  , trNameTyConName
+  , trNameSDataConName
+  , trNameDDataConName
+  , trTyConTyConName
+  , trTyConDataConName
+  :: Name
+trModuleTyConName     = tcQual gHC_TYPES          (fsLit "Module")         trModuleTyConKey
+trModuleDataConName   = dcQual gHC_TYPES          (fsLit "Module")         trModuleDataConKey
+trNameTyConName       = tcQual gHC_TYPES          (fsLit "TrName")         trNameTyConKey
+trNameSDataConName    = dcQual gHC_TYPES          (fsLit "TrNameS")        trNameSDataConKey
+trNameDDataConName    = dcQual gHC_TYPES          (fsLit "TrNameD")        trNameDDataConKey
+trTyConTyConName      = tcQual gHC_TYPES          (fsLit "TyCon")          trTyConTyConKey
+trTyConDataConName    = dcQual gHC_TYPES          (fsLit "TyCon")          trTyConDataConKey
+
 -- Class Typeable, and functions for constructing `Typeable` dictionaries
 typeableClassName
   , typeRepTyConName
-  , trTyConDataConName
-  , trModuleDataConName
-  , trNameSDataConName
   , mkPolyTyConAppName
   , mkAppTyName
   , typeRepIdName
   , typeNatTypeRepName
   , typeSymbolTypeRepName
+  , trGhcPrimModuleName
   :: Name
 typeableClassName     = clsQual tYPEABLE_INTERNAL (fsLit "Typeable")       typeableClassKey
 typeRepTyConName      = tcQual  tYPEABLE_INTERNAL (fsLit "TypeRep")        typeRepTyConKey
-trTyConDataConName    = dcQual  gHC_TYPES         (fsLit "TyCon")          trTyConDataConKey
-trModuleDataConName   = dcQual  gHC_TYPES         (fsLit "Module")         trModuleDataConKey
-trNameSDataConName    = dcQual  gHC_TYPES         (fsLit "TrNameS")        trNameSDataConKey
 typeRepIdName         = varQual tYPEABLE_INTERNAL (fsLit "typeRep#")       typeRepIdKey
 mkPolyTyConAppName    = varQual tYPEABLE_INTERNAL (fsLit "mkPolyTyConApp") mkPolyTyConAppKey
 mkAppTyName           = varQual tYPEABLE_INTERNAL (fsLit "mkAppTy")        mkAppTyKey
 typeNatTypeRepName    = varQual tYPEABLE_INTERNAL (fsLit "typeNatTypeRep") typeNatTypeRepKey
 typeSymbolTypeRepName = varQual tYPEABLE_INTERNAL (fsLit "typeSymbolTypeRep") typeSymbolTypeRepKey
+-- this is the Typeable 'Module' for GHC.Prim (which has no code, so we place in GHC.Types)
+-- See Note [Grand plan for Typeable] in TcTypeable.
+trGhcPrimModuleName   = varQual gHC_TYPES         (fsLit "tr$ModuleGHCPrim")  trGhcPrimModuleKey
 
 -- Custom type errors
 errorMessageTypeErrorFamName
@@ -1350,11 +1340,14 @@ isLabelClassName :: Name
 isLabelClassName
  = clsQual gHC_OVER_LABELS (fsLit "IsLabel") isLabelClassNameKey
 
+-- Implicit Parameters
+ipClassName :: Name
+ipClassName
+  = clsQual gHC_CLASSES (fsLit "IP") ipClassKey
+
 -- Source Locations
-callStackDataConName, callStackTyConName, emptyCallStackName, pushCallStackName,
+callStackTyConName, emptyCallStackName, pushCallStackName,
   srcLocDataConName :: Name
-callStackDataConName
-  = dcQual gHC_STACK_TYPES  (fsLit "CallStack") callStackDataConKey
 callStackTyConName
   = tcQual gHC_STACK_TYPES  (fsLit "CallStack") callStackTyConKey
 emptyCallStackName
@@ -1506,6 +1499,10 @@ isLabelClassNameKey = mkPreludeClassUnique 45
 semigroupClassKey, monoidClassKey :: Unique
 semigroupClassKey = mkPreludeClassUnique 46
 monoidClassKey    = mkPreludeClassUnique 47
+
+-- Implicit Parameters
+ipClassKey :: Unique
+ipClassKey = mkPreludeClassUnique 48
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES ClassUniques 200-299
@@ -1734,13 +1731,6 @@ callStackTyConKey = mkPreludeTyConUnique 182
 typeRepTyConKey :: Unique
 typeRepTyConKey = mkPreludeTyConUnique 183
 
--- Implicit Parameters
-ipTyConKey :: Unique
-ipTyConKey = mkPreludeTyConUnique 184
-
-ipCoNameKey :: Unique
-ipCoNameKey = mkPreludeTyConUnique 185
-
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES TyConUniques 200-299
 -----------------------------------------------------
@@ -1815,22 +1805,26 @@ staticPtrInfoDataConKey                 = mkPreludeDataConUnique 34
 fingerprintDataConKey :: Unique
 fingerprintDataConKey                   = mkPreludeDataConUnique 35
 
-callStackDataConKey, srcLocDataConKey :: Unique
-callStackDataConKey                     = mkPreludeDataConUnique 36
+srcLocDataConKey :: Unique
 srcLocDataConKey                        = mkPreludeDataConUnique 37
-
-ipDataConKey :: Unique
-ipDataConKey                            = mkPreludeDataConUnique 38
 
 -- Levity
 liftedDataConKey, unliftedDataConKey :: Unique
 liftedDataConKey                        = mkPreludeDataConUnique 39
 unliftedDataConKey                      = mkPreludeDataConUnique 40
 
-trTyConDataConKey, trModuleDataConKey, trNameSDataConKey :: Unique
-trTyConDataConKey                       = mkPreludeDataConUnique 41
-trModuleDataConKey                      = mkPreludeDataConUnique 42
-trNameSDataConKey                       = mkPreludeDataConUnique 43
+trTyConTyConKey, trTyConDataConKey,
+  trModuleTyConKey, trModuleDataConKey,
+  trNameTyConKey, trNameSDataConKey, trNameDDataConKey,
+  trGhcPrimModuleKey :: Unique
+trTyConTyConKey                         = mkPreludeDataConUnique 41
+trTyConDataConKey                       = mkPreludeDataConUnique 42
+trModuleTyConKey                        = mkPreludeDataConUnique 43
+trModuleDataConKey                      = mkPreludeDataConUnique 44
+trNameTyConKey                          = mkPreludeDataConUnique 45
+trNameSDataConKey                       = mkPreludeDataConUnique 46
+trNameDDataConKey                       = mkPreludeDataConUnique 47
+trGhcPrimModuleKey                      = mkPreludeDataConUnique 48
 
 typeErrorTextDataConKey,
   typeErrorAppendDataConKey,

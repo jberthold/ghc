@@ -91,7 +91,7 @@ rnHsSigWcTypeScoped :: HsDocContext -> LHsSigWcType RdrName
 rnHsSigWcTypeScoped ctx sig_ty thing_inside
   = rn_hs_sig_wc_type False ctx sig_ty thing_inside
     -- False: for pattern type sigs and rules we /do/ want
-    --        to bring those type varibles into scope
+    --        to bring those type variables into scope
     -- e.g  \ (x :: forall a. a-> b) -> e
     -- Here we do bring 'b' into scope
 
@@ -151,7 +151,9 @@ rnWcSigTy env (L loc hs_ty@(HsForAllTy { hst_bndrs = tvs, hst_body = hs_tau }))
                       Nothing [] tvs $ \ _ tvs' ->
     do { (hs_tau', fvs) <- rnWcSigTy env hs_tau
        ; let hs_ty' = HsForAllTy { hst_bndrs = tvs', hst_body = hswc_body hs_tau' }
-       ; return ( hs_tau' { hswc_body = L loc hs_ty' }, fvs) }
+             awcs_bndrs = collectAnonWildCardsBndrs tvs'
+       ; return ( hs_tau' { hswc_wcs = hswc_wcs hs_tau' ++ awcs_bndrs
+                          , hswc_body = L loc hs_ty' }, fvs) }
 
 rnWcSigTy env (L loc (HsQualTy { hst_ctxt = hs_ctxt, hst_body = tau }))
   = do { (hs_ctxt', fvs1) <- rnWcSigContext env hs_ctxt
@@ -281,14 +283,14 @@ rnLHsInstType doc_str inst_ty
   , isTcOcc (rdrNameOcc (unLoc cls))
          -- The guards check that the instance type looks like
          --   blah => C ty1 .. tyn
-  = do { let full_doc = doc_str <+> ptext (sLit "for") <+> quotes (ppr cls)
+  = do { let full_doc = doc_str <+> text "for" <+> quotes (ppr cls)
        ; rnHsSigType (GenericCtx full_doc) inst_ty }
 
   | otherwise  -- The instance is malformed, but we'd still like
                -- to make progress rather than failing outright, so
                -- we report more errors.  So we rename it anyway.
   = do { addErrAt (getLoc (hsSigType inst_ty)) $
-         ptext (sLit "Malformed instance:") <+> ppr inst_ty
+         text "Malformed instance:" <+> ppr inst_ty
        ; rnHsSigType (GenericCtx doc_str) inst_ty }
 
 
@@ -394,7 +396,7 @@ data RnTyKiWhat = RnTypeBody
 instance Outputable RnTyKiEnv where
   ppr (RTKE { rtke_level = lev, rtke_what = what
             , rtke_nwcs = wcs, rtke_ctxt = ctxt })
-    = ptext (sLit "RTKE")
+    = text "RTKE"
       <+> braces (sep [ ppr lev, ppr what, ppr wcs
                       , pprHsDocContext ctxt ])
 
@@ -503,7 +505,7 @@ rnHsTyKi env ty@(HsRecTy flds)
     get_fields (ConDeclCtx names)
       = concatMapM (lookupConstructorFields . unLoc) names
     get_fields _
-      = do { addErr (hang (ptext (sLit "Record syntax is illegal here:"))
+      = do { addErr (hang (text "Record syntax is illegal here:")
                                    2 (ppr ty))
            ; return [] }
 
@@ -557,7 +559,7 @@ rnHsTyKi env tyLit@(HsTyLit t)
   where
     negLit (HsStrTy _ _) = False
     negLit (HsNumTy _ i) = i < 0
-    negLitErr = ptext (sLit "Illegal literal in type (type literals must not be negative):") <+> ppr tyLit
+    negLitErr = text "Illegal literal in type (type literals must not be negative):" <+> ppr tyLit
 
 rnHsTyKi env overall_ty@(HsAppsTy tys)
   = do { -- Step 1: Break up the HsAppsTy into symbols and non-symbol regions
@@ -698,11 +700,11 @@ rnHsTyOp env overall_ty (L loc op)
 --------------
 notAllowed :: SDoc -> SDoc
 notAllowed doc
-  = ptext (sLit "Wildcard") <+> quotes doc <+> ptext (sLit "not allowed")
+  = text "Wildcard" <+> quotes doc <+> ptext (sLit "not allowed")
 
 checkWildCard :: RnTyKiEnv -> Maybe SDoc -> RnM ()
 checkWildCard env (Just doc)
-  = addErr $ vcat [doc, nest 2 (ptext (sLit "in") <+> pprHsDocContext (rtke_ctxt env))]
+  = addErr $ vcat [doc, nest 2 (text "in" <+> pprHsDocContext (rtke_ctxt env))]
 checkWildCard _ Nothing
   = return ()
 
@@ -720,10 +722,10 @@ checkAnonWildCard env wc
                RnConstraint    -> Just constraint_msg
                RnTopConstraint -> Just constraint_msg
 
-    constraint_msg = hang (notAllowed (ppr wc) <+> ptext (sLit "in a constraint"))
+    constraint_msg = hang (notAllowed (ppr wc) <+> text "in a constraint")
                         2 hint_msg
-    hint_msg = vcat [ ptext (sLit "except as the last top-level constraint of a type signature")
-                    , nest 2 (ptext (sLit "e.g  f :: (Eq a, _) => blah")) ]
+    hint_msg = vcat [ text "except as the last top-level constraint of a type signature"
+                    , nest 2 (text "e.g  f :: (Eq a, _) => blah") ]
 
 checkNamedWildCard :: RnTyKiEnv -> Name -> RnM ()
 -- Report an error if a named wildcard is illegal here
@@ -739,7 +741,7 @@ checkNamedWildCard env name
                RnTypeBody      -> Nothing   -- Allowed
                RnTopConstraint -> Nothing   -- Allowed
                RnConstraint    -> Just constraint_msg
-    constraint_msg = notAllowed (ppr name) <+> ptext (sLit "in a constraint")
+    constraint_msg = notAllowed (ppr name) <+> text "in a constraint"
 
 checkExtraConstraintWildCard :: RnTyKiEnv -> HsWildCardInfo RdrName
                              -> RnM ()
@@ -751,8 +753,8 @@ checkExtraConstraintWildCard env wc
   = checkWildCard env mb_bad
   where
     mb_bad | not (extraConstraintWildCardsAllowed env)
-           = Just (ptext (sLit "Extra-constraint wildcard") <+> quotes (ppr wc)
-                   <+> ptext (sLit "not allowed"))
+           = Just (text "Extra-constraint wildcard" <+> quotes (ppr wc)
+                   <+> text "not allowed")
            | otherwise
            = Nothing
 
@@ -1047,6 +1049,11 @@ collectAnonWildCards lty = go lty
     prefix_types_only (HsAppPrefix ty) = Just ty
     prefix_types_only (HsAppInfix _)   = Nothing
 
+collectAnonWildCardsBndrs :: [LHsTyVarBndr Name] -> [Name]
+collectAnonWildCardsBndrs ltvs = concatMap (go . unLoc) ltvs
+  where
+    go (UserTyVar _)      = []
+    go (KindedTyVar _ ki) = collectAnonWildCards ki
 
 {-
 *********************************************************
@@ -1307,8 +1314,8 @@ checkPrecMatch op (MG { mg_alts = L _ ms })
 
 checkPrec :: Name -> Pat Name -> Bool -> IOEnv (Env TcGblEnv TcLclEnv) ()
 checkPrec op (ConPatIn op1 (InfixCon _ _)) right = do
-    op_fix@(Fixity op_prec  op_dir) <- lookupFixityRn op
-    op1_fix@(Fixity op1_prec op1_dir) <- lookupFixityRn (unLoc op1)
+    op_fix@(Fixity _ op_prec  op_dir) <- lookupFixityRn op
+    op1_fix@(Fixity _ op1_prec op1_dir) <- lookupFixityRn (unLoc op1)
     let
         inf_ok = op1_prec > op_prec ||
                  (op1_prec == op_prec &&
@@ -1336,8 +1343,8 @@ checkSectionPrec direction section op arg
         _                -> return ()
   where
     op_name = get_op op
-    go_for_it arg_op arg_fix@(Fixity arg_prec assoc) = do
-          op_fix@(Fixity op_prec _) <- lookupFixityRn op_name
+    go_for_it arg_op arg_fix@(Fixity _ arg_prec assoc) = do
+          op_fix@(Fixity _ op_prec _) <- lookupFixityRn op_name
           unless (op_prec < arg_prec
                   || (op_prec == arg_prec && direction == assoc))
                  (sectionPrecErr (op_name, op_fix)
@@ -1350,25 +1357,25 @@ precParseErr op1@(n1,_) op2@(n2,_)
   | isUnboundName n1 || isUnboundName n2
   = return ()     -- Avoid error cascade
   | otherwise
-  = addErr $ hang (ptext (sLit "Precedence parsing error"))
-      4 (hsep [ptext (sLit "cannot mix"), ppr_opfix op1, ptext (sLit "and"),
+  = addErr $ hang (text "Precedence parsing error")
+      4 (hsep [text "cannot mix", ppr_opfix op1, ptext (sLit "and"),
                ppr_opfix op2,
-               ptext (sLit "in the same infix expression")])
+               text "in the same infix expression"])
 
 sectionPrecErr :: (Name, Fixity) -> (Name, Fixity) -> HsExpr RdrName -> RnM ()
 sectionPrecErr op@(n1,_) arg_op@(n2,_) section
   | isUnboundName n1 || isUnboundName n2
   = return ()     -- Avoid error cascade
   | otherwise
-  = addErr $ vcat [ptext (sLit "The operator") <+> ppr_opfix op <+> ptext (sLit "of a section"),
-         nest 4 (sep [ptext (sLit "must have lower precedence than that of the operand,"),
-                      nest 2 (ptext (sLit "namely") <+> ppr_opfix arg_op)]),
-         nest 4 (ptext (sLit "in the section:") <+> quotes (ppr section))]
+  = addErr $ vcat [text "The operator" <+> ppr_opfix op <+> ptext (sLit "of a section"),
+         nest 4 (sep [text "must have lower precedence than that of the operand,",
+                      nest 2 (text "namely" <+> ppr_opfix arg_op)]),
+         nest 4 (text "in the section:" <+> quotes (ppr section))]
 
 ppr_opfix :: (Name, Fixity) -> SDoc
 ppr_opfix (op, fixity) = pp_op <+> brackets (ppr fixity)
    where
-     pp_op | op == negateName = ptext (sLit "prefix `-'")
+     pp_op | op == negateName = text "prefix `-'"
            | otherwise        = quotes (ppr op)
 
 {- *****************************************************
@@ -1380,45 +1387,45 @@ ppr_opfix (op, fixity) = pp_op <+> brackets (ppr fixity)
 badKindBndrs :: HsDocContext -> [Located RdrName] -> SDoc
 badKindBndrs doc kvs
   = withHsDocContext doc $
-    hang (ptext (sLit "Unexpected kind variable") <> plural kvs
+    hang (text "Unexpected kind variable" <> plural kvs
                  <+> pprQuotedList kvs)
-       2 (ptext (sLit "Perhaps you intended to use PolyKinds"))
+       2 (text "Perhaps you intended to use PolyKinds")
 
 badKindSigErr :: HsDocContext -> LHsType RdrName -> TcM ()
 badKindSigErr doc (L loc ty)
   = setSrcSpan loc $ addErr $
     withHsDocContext doc $
-    hang (ptext (sLit "Illegal kind signature:") <+> quotes (ppr ty))
-       2 (ptext (sLit "Perhaps you intended to use KindSignatures"))
+    hang (text "Illegal kind signature:" <+> quotes (ppr ty))
+       2 (text "Perhaps you intended to use KindSignatures")
 
 dataKindsErr :: RnTyKiEnv -> HsType RdrName -> SDoc
 dataKindsErr env thing
-  = hang (ptext (sLit "Illegal") <+> pp_what <> colon <+> quotes (ppr thing))
-       2 (ptext (sLit "Perhaps you intended to use DataKinds"))
+  = hang (text "Illegal" <+> pp_what <> colon <+> quotes (ppr thing))
+       2 (text "Perhaps you intended to use DataKinds")
   where
-    pp_what | isRnKindLevel env = ptext (sLit "kind")
-            | otherwise          = ptext (sLit "type")
+    pp_what | isRnKindLevel env = text "kind"
+            | otherwise          = text "type"
 
 inTypeDoc :: HsType RdrName -> SDoc
-inTypeDoc ty = ptext (sLit "In the type") <+> quotes (ppr ty)
+inTypeDoc ty = text "In the type" <+> quotes (ppr ty)
 
 warnUnusedForAll :: SDoc -> LHsTyVarBndr Name -> FreeVars -> TcM ()
 warnUnusedForAll in_doc (L loc tv) used_names
-  = whenWOptM Opt_WarnUnusedMatches $
+  = whenWOptM Opt_WarnUnusedForalls $
     unless (hsTyVarName tv `elemNameSet` used_names) $
     addWarnAt loc $
-    vcat [ ptext (sLit "Unused quantified type variable") <+> quotes (ppr tv)
+    vcat [ text "Unused quantified type variable" <+> quotes (ppr tv)
          , in_doc ]
 
 opTyErr :: Outputable a => RdrName -> a -> SDoc
 opTyErr op overall_ty
-  = hang (ptext (sLit "Illegal operator") <+> quotes (ppr op) <+> ptext (sLit "in type") <+> quotes (ppr overall_ty))
+  = hang (text "Illegal operator" <+> quotes (ppr op) <+> ptext (sLit "in type") <+> quotes (ppr overall_ty))
          2 extra
   where
     extra | op == dot_tv_RDR
           = perhapsForallMsg
           | otherwise
-          = ptext (sLit "Use TypeOperators to allow operators in types")
+          = text "Use TypeOperators to allow operators in types"
 
 emptyNonSymsErr :: HsType RdrName -> SDoc
 emptyNonSymsErr overall_ty

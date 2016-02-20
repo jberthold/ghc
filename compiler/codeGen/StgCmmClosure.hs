@@ -74,7 +74,6 @@ import CLabel
 import Id
 import IdInfo
 import DataCon
-import FastString
 import Name
 import Type
 import TyCoRep
@@ -104,8 +103,8 @@ data CgLoc
         -- and branch to the block id
 
 instance Outputable CgLoc where
-  ppr (CmmLoc e)    = ptext (sLit "cmm") <+> ppr e
-  ppr (LneLoc b rs) = ptext (sLit "lne") <+> ppr b <+> ppr rs
+  ppr (CmmLoc e)    = text "cmm" <+> ppr e
+  ppr (LneLoc b rs) = text "lne" <+> ppr b <+> ppr rs
 
 type SelfLoopInfo = (Id, BlockId, [LocalReg])
 
@@ -174,7 +173,7 @@ data LambdaFormInfo
                         --        because then we know the entry code will do
                         --        For a function, the entry code is the fast entry point
 
-  | LFUnLifted          -- A value of unboxed type;
+  | LFUnlifted          -- A value of unboxed type;
                         -- always a value, needs evaluation
 
   | LFLetNoEscape       -- See LetNoEscape module for precise description
@@ -212,7 +211,7 @@ data StandardFormInfo
 
 mkLFArgument :: Id -> LambdaFormInfo
 mkLFArgument id
-  | isUnLiftedType ty             = LFUnLifted
+  | isUnliftedType ty             = LFUnlifted
   | might_be_a_function ty = LFUnknown True
   | otherwise                    = LFUnknown False
   where
@@ -235,7 +234,7 @@ mkLFReEntrant top fvs args arg_descr
 -------------
 mkLFThunk :: Type -> TopLevelFlag -> [Id] -> UpdateFlag -> LambdaFormInfo
 mkLFThunk thunk_ty top fvs upd_flag
-  = ASSERT( not (isUpdatable upd_flag) || not (isUnLiftedType thunk_ty) )
+  = ASSERT( not (isUpdatable upd_flag) || not (isUnliftedType thunk_ty) )
     LFThunk top (null fvs)
             (isUpdatable upd_flag)
             NonStandardThunk
@@ -422,7 +421,7 @@ nodeMustPointToIt _ (LFCon _) = True
         -- 27/11/92.
 
 nodeMustPointToIt _ (LFUnknown _)   = True
-nodeMustPointToIt _ LFUnLifted      = False
+nodeMustPointToIt _ LFUnlifted      = False
 nodeMustPointToIt _ LFLetNoEscape   = False
 
 {- Note [GC recovery]
@@ -497,6 +496,7 @@ getCallMethod :: DynFlags
                                 -- itself
               -> LambdaFormInfo -- Its info
               -> RepArity       -- Number of available arguments
+              -> RepArity       -- Number of them being void arguments
               -> CgLoc          -- Passed in from cgIdApp so that we can
                                 -- handle let-no-escape bindings and self-recursive
                                 -- tail calls using the same data constructor,
@@ -505,30 +505,34 @@ getCallMethod :: DynFlags
               -> Maybe SelfLoopInfo -- can we perform a self-recursive tail call?
               -> CallMethod
 
-getCallMethod dflags _ id _ n_args _cg_loc (Just (self_loop_id, block_id, args))
-  | gopt Opt_Loopification dflags, id == self_loop_id, n_args == length args
+getCallMethod dflags _ id _ n_args v_args _cg_loc
+              (Just (self_loop_id, block_id, args))
+  | gopt Opt_Loopification dflags
+  , id == self_loop_id
+  , n_args - v_args == length args
   -- If these patterns match then we know that:
   --   * loopification optimisation is turned on
   --   * function is performing a self-recursive call in a tail position
-  --   * number of parameters of the function matches functions arity.
-  -- See Note [Self-recursive tail calls] in StgCmmExpr for more details
+  --   * number of non-void parameters of the function matches functions arity.
+  -- See Note [Self-recursive tail calls] and Note [Void arguments in
+  -- self-recursive tail calls] in StgCmmExpr for more details
   = JumpToIt block_id args
 
-getCallMethod dflags name id (LFReEntrant _ arity _ _) n_args _cg_loc
+getCallMethod dflags name id (LFReEntrant _ arity _ _) n_args _v_args _cg_loc
               _self_loop_info
   | n_args == 0    = ASSERT( arity /= 0 )
                      ReturnIt        -- No args at all
   | n_args < arity = SlowCall        -- Not enough args
   | otherwise      = DirectEntry (enterIdLabel dflags name (idCafInfo id)) arity
 
-getCallMethod _ _name _ LFUnLifted n_args _cg_loc _self_loop_info
+getCallMethod _ _name _ LFUnlifted n_args _v_args _cg_loc _self_loop_info
   = ASSERT( n_args == 0 ) ReturnIt
 
-getCallMethod _ _name _ (LFCon _) n_args _cg_loc _self_loop_info
+getCallMethod _ _name _ (LFCon _) n_args _v_args _cg_loc _self_loop_info
   = ASSERT( n_args == 0 ) ReturnIt
 
 getCallMethod dflags name id (LFThunk _ _ updatable std_form_info is_fun)
-              n_args _cg_loc _self_loop_info
+              n_args _v_args _cg_loc _self_loop_info
   | is_fun      -- it *might* be a function, so we must "call" it (which is always safe)
   = SlowCall    -- We cannot just enter it [in eval/apply, the entry code
                 -- is the fast-entry code]
@@ -559,18 +563,18 @@ getCallMethod dflags name id (LFThunk _ _ updatable std_form_info is_fun)
     DirectEntry (thunkEntryLabel dflags name (idCafInfo id) std_form_info
                 updatable) 0
 
-getCallMethod _ _name _ (LFUnknown True) _n_arg _cg_locs _self_loop_info
+getCallMethod _ _name _ (LFUnknown True) _n_arg _v_args _cg_locs _self_loop_info
   = SlowCall -- might be a function
 
-getCallMethod _ name _ (LFUnknown False) n_args _cg_loc _self_loop_info
+getCallMethod _ name _ (LFUnknown False) n_args _v_args _cg_loc _self_loop_info
   = ASSERT2( n_args == 0, ppr name <+> ppr n_args )
     EnterIt -- Not a function
 
-getCallMethod _ _name _ LFLetNoEscape _n_args (LneLoc blk_id lne_regs)
+getCallMethod _ _name _ LFLetNoEscape _n_args _v_args (LneLoc blk_id lne_regs)
               _self_loop_info
   = JumpToIt blk_id lne_regs
 
-getCallMethod _ _ _ _ _ _ _ = panic "Unknown call method"
+getCallMethod _ _ _ _ _ _ _ _ = panic "Unknown call method"
 
 -----------------------------------------------------------------------------
 --                staticClosureRequired

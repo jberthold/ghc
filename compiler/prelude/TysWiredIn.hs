@@ -49,6 +49,7 @@ module TysWiredIn (
         listTyCon, listTyCon_RDR, listTyConName, listTyConKey,
         nilDataCon, nilDataConName, nilDataConKey,
         consDataCon_RDR, consDataCon, consDataConName,
+        promotedNilDataCon, promotedConsDataCon,
 
         mkListTy,
 
@@ -82,11 +83,6 @@ module TysWiredIn (
         heqTyCon, heqClass, heqDataCon,
         coercibleTyCon, coercibleDataCon, coercibleClass,
 
-        -- * Implicit Parameters
-        ipTyCon, ipDataCon, ipClass,
-
-        callStackTyCon,
-
         mkWiredInTyConName, -- This is used in TcTypeNats to define the
                             -- built-in functions for evaluation.
 
@@ -96,10 +92,11 @@ module TysWiredIn (
         levityTy, levityTyCon, liftedDataCon, unliftedDataCon,
         liftedPromDataCon, unliftedPromDataCon,
         liftedDataConTy, unliftedDataConTy,
-        liftedDataConName, unliftedDataConName
+        liftedDataConName, unliftedDataConName,
     ) where
 
 #include "HsVersions.h"
+#include "MachDeps.h"
 
 import {-# SOURCE #-} MkId( mkDataConWorkId, mkDictSelId )
 
@@ -108,7 +105,6 @@ import PrelNames
 import TysPrim
 
 -- others:
-import FamInstEnv( mkNewTypeCoAxiom )
 import CoAxiom
 import Id
 import Constants        ( mAX_TUPLE_SIZE, mAX_CTUPLE_SIZE )
@@ -122,7 +118,7 @@ import RdrName
 import Name
 import NameSet          ( NameSet, mkNameSet, elemNameSet )
 import BasicTypes       ( Arity, RecFlag(..), Boxity(..),
-                           TupleSort(..) )
+                          TupleSort(..) )
 import ForeignCall
 import SrcLoc           ( noSrcSpan )
 import Unique
@@ -187,7 +183,6 @@ wiredInTyCons = [ unitTyCon     -- Not treated like other tuples, because
               , liftedTypeKindTyCon
               , starKindTyCon
               , unicodeStarKindTyCon
-              , ipTyCon
               ]
 
 mkWiredInTyConName :: BuiltInSyntax -> Module -> FastString -> Unique -> TyCon -> Name
@@ -200,13 +195,6 @@ mkWiredInDataConName :: BuiltInSyntax -> Module -> FastString -> Unique -> DataC
 mkWiredInDataConName built_in modu fs unique datacon
   = mkWiredInName modu (mkDataOccFS fs) unique
                   (AConLike (RealDataCon datacon))    -- Relevant DataCon
-                  built_in
-
-mkWiredInCoAxiomName :: BuiltInSyntax -> Module -> FastString -> Unique
-                     -> CoAxiom Branched -> Name
-mkWiredInCoAxiomName built_in modu fs unique ax
-  = mkWiredInName modu (mkTcOccFS fs) unique
-                  (ACoAxiom ax)        -- Relevant CoAxiom
                   built_in
 
 mkWiredInIdName :: Module -> FastString -> Unique -> Id -> Name
@@ -619,6 +607,7 @@ unboxedUnitDataCon = tupleDataCon   Unboxed 0
 ********************************************************************* -}
 
 -- See Note [The equality types story] in TysPrim
+-- (:~~: :: forall k1 k2 (a :: k1) (b :: k2). a -> b -> Constraint)
 heqTyCon, coercibleTyCon :: TyCon
 heqClass, coercibleClass :: Class
 heqDataCon, coercibleDataCon :: DataCon
@@ -629,7 +618,7 @@ heqSCSelId, coercibleSCSelId :: Id
   where
     tycon     = mkClassTyCon heqTyConName kind tvs roles
                              rhs klass NonRecursive
-                             (mkSpecialTyConRepName (fsLit "tcHEq") heqTyConName)
+                             (mkPrelTyConRepName heqTyConName)
     klass     = mkClass tvs [] [sc_pred] [sc_sel_id] [] [] (mkAnd []) tycon
     datacon   = pcDataCon heqDataConName tvs [sc_pred] tycon
 
@@ -880,7 +869,7 @@ listTyCon = buildAlgTyCon listTyConName alpha_tyvar [Representational]
                           Nothing []
                           (DataTyCon [nilDataCon, consDataCon] False )
                           Recursive False
-                          (VanillaAlgTyCon (mkSpecialTyConRepName (fsLit "tcList") listTyConName))
+                          (VanillaAlgTyCon $ mkPrelTyConRepName listTyConName)
 
 nilDataCon :: DataCon
 nilDataCon  = pcDataCon nilDataConName alpha_tyvar [] listTyCon
@@ -1063,54 +1052,7 @@ promotedLTDataCon     = promoteDataCon ltDataCon
 promotedEQDataCon     = promoteDataCon eqDataCon
 promotedGTDataCon     = promoteDataCon gtDataCon
 
-{-
-Note [The Implicit Parameter class]
-
-Implicit parameters `?x :: a` are desugared into dictionaries for the
-class `IP "x" a`, which is defined (in GHC.Classes) as
-
-  class IP (x :: Symbol) a | x -> a
-
-This class is wired-in so that `error` and `undefined`, which have
-wired-in types, can use the implicit-call-stack feature to provide
-a call-stack alongside the error message.
--}
-
-ipDataConName, ipTyConName, ipCoName :: Name
-ipDataConName = mkWiredInDataConName UserSyntax gHC_CLASSES (fsLit "IP")
-                  ipDataConKey ipDataCon
-ipTyConName   = mkWiredInTyConName UserSyntax gHC_CLASSES (fsLit "IP")
-                  ipTyConKey ipTyCon
-ipCoName      = mkWiredInCoAxiomName BuiltInSyntax gHC_CLASSES (fsLit "NTCo:IP")
-                  ipCoNameKey (toBranchedAxiom ipCoAxiom)
-
--- See Note [The Implicit Parameter class]
-ipTyCon :: TyCon
-ipTyCon = mkClassTyCon ipTyConName kind [ip,a] [] rhs ipClass NonRecursive
-                       (mkPrelTyConRepName ipTyConName)
-  where
-    kind = mkFunTys [typeSymbolKind, liftedTypeKind] constraintKind
-    [ip,a] = mkTemplateTyVars [typeSymbolKind, liftedTypeKind]
-    rhs = NewTyCon ipDataCon (mkTyVarTy a) ([], mkTyVarTy a) ipCoAxiom
-
-ipCoAxiom :: CoAxiom Unbranched
-ipCoAxiom = mkNewTypeCoAxiom ipCoName ipTyCon [ip,a] [Nominal, Nominal] (mkTyVarTy a)
-  where
-    [ip,a] = mkTemplateTyVars [typeSymbolKind, liftedTypeKind]
-
-ipDataCon :: DataCon
-ipDataCon = pcDataCon ipDataConName [ip,a] ts ipTyCon
-  where
-    [ip,a] = mkTemplateTyVars [typeSymbolKind, liftedTypeKind]
-    ts  = [mkTyVarTy a]
-
-ipClass :: Class
-ipClass = mkClass (tyConTyVars ipTyCon) [([ip], [a])] [] [] [] [] (mkAnd [])
-            ipTyCon
-  where
-    [ip, a] = tyConTyVars ipTyCon
-
--- this is a fake version of the CallStack TyCon so we can refer to it
--- in MkCore.errorTy
-callStackTyCon :: TyCon
-callStackTyCon = pcNonRecDataTyCon callStackTyConName Nothing [] []
+-- Promoted List
+promotedConsDataCon, promotedNilDataCon :: TyCon
+promotedConsDataCon   = promoteDataCon consDataCon
+promotedNilDataCon    = promoteDataCon nilDataCon

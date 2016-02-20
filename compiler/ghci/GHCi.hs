@@ -13,7 +13,8 @@ module GHCi
   , evalString
   , evalStringToIOString
   , mallocData
-  , mkCostCentre
+  , createBCOs
+  , mkCostCentres
   , costCentreStackInfo
   , newBreakArray
   , enableBreakpoint
@@ -47,34 +48,40 @@ module GHCi
 import GHCi.Message
 import GHCi.Run
 import GHCi.RemoteTypes
+import GHCi.ResolvedBCO
 import GHCi.BreakArray (BreakArray)
 import HscTypes
 import UniqFM
 import Panic
 import DynFlags
-#ifndef mingw32_HOST_OS
 import ErrUtils
 import Outputable
-#endif
 import Exception
 import BasicTypes
 import FastString
+import Util
 
 import Control.Concurrent
 import Control.Monad
 import Control.Monad.IO.Class
 import Data.Binary
+import Data.Binary.Put
 import Data.ByteString (ByteString)
+import qualified Data.ByteString.Lazy as LB
 import Data.IORef
-import Foreign
-import Foreign.C
+import Foreign hiding (void)
 import GHC.Stack.CCS (CostCentre,CostCentreStack)
 import System.Exit
-#ifndef mingw32_HOST_OS
 import Data.Maybe
+import GHC.IO.Handle.Types (Handle)
+#ifdef mingw32_HOST_OS
+import Foreign.C
+import GHC.IO.Handle.FD (fdToHandle)
+#else
 import System.Posix as Posix
 #endif
 import System.Process
+import GHC.Conc (getNumProcessors, pseq, par)
 
 {- Note [Remote GHCi]
 
@@ -252,11 +259,42 @@ evalStringToIOString hsc_env fhv str = do
 mallocData :: HscEnv -> ByteString -> IO (RemotePtr ())
 mallocData hsc_env bs = iservCmd hsc_env (MallocData bs)
 
-mkCostCentre
-  :: HscEnv -> RemotePtr CChar -> String -> String -> IO (RemotePtr CostCentre)
-mkCostCentre hsc_env c_module name src =
-  iservCmd hsc_env (MkCostCentre c_module name src)
+mkCostCentres
+  :: HscEnv -> String -> [(String,String)] -> IO [RemotePtr CostCentre]
+mkCostCentres hsc_env mod ccs =
+  iservCmd hsc_env (MkCostCentres mod ccs)
 
+-- | Create a set of BCOs that may be mutually recursive.
+createBCOs :: HscEnv -> [ResolvedBCO] -> IO [HValueRef]
+createBCOs hsc_env rbcos = do
+  n_jobs <- case parMakeCount (hsc_dflags hsc_env) of
+              Nothing -> liftIO getNumProcessors
+              Just n  -> return n
+  -- Serializing ResolvedBCO is expensive, so if we're in parallel mode
+  -- (-j<n>) parallelise the serialization.
+  if (n_jobs == 1)
+    then
+      iservCmd hsc_env (CreateBCOs [runPut (put rbcos)])
+
+    else do
+      old_caps <- getNumCapabilities
+      if old_caps == n_jobs
+         then void $ evaluate puts
+         else bracket_ (setNumCapabilities n_jobs)
+                       (setNumCapabilities old_caps)
+                       (void $ evaluate puts)
+      iservCmd hsc_env (CreateBCOs puts)
+ where
+  puts = parMap doChunk (chunkList 100 rbcos)
+
+  -- make sure we force the whole lazy ByteString
+  doChunk c = pseq (LB.length bs) bs
+    where bs = runPut (put c)
+
+  -- We don't have the parallel package, so roll our own simple parMap
+  parMap _ [] = []
+  parMap f (x:xs) = fx `par` (fxs `pseq` (fx : fxs))
+    where fx = f x; fxs = parMap f xs
 
 costCentreStackInfo :: HscEnv -> RemotePtr CostCentreStack -> IO [String]
 costCentreStackInfo hsc_env ccs =
@@ -396,11 +434,6 @@ handleIServFailure IServ{..} e = do
 -- Starting and stopping the iserv process
 
 startIServ :: DynFlags -> IO IServ
-#ifdef mingw32_HOST_OS
-startIServ _ = panic "startIServ"
-  -- should not be called, because we disable -fexternal-interpreter on Windows.
-  -- (see DynFlags.makeDynFlagsConsistent)
-#else
 startIServ dflags = do
   let flavour
         | WayProf `elem` ways dflags = "-prof"
@@ -409,16 +442,7 @@ startIServ dflags = do
       prog = pgm_i dflags ++ flavour
       opts = getOpts dflags opt_i
   debugTraceMsg dflags 3 $ text "Starting " <> text prog
-  (rfd1, wfd1) <- Posix.createPipe -- we read on rfd1
-  (rfd2, wfd2) <- Posix.createPipe -- we write on wfd2
-  setFdOption rfd1 CloseOnExec True
-  setFdOption wfd2 CloseOnExec True
-  let args = show wfd1 : show rfd2 : opts
-  (_, _, _, ph) <- createProcess (proc prog args)
-  closeFd wfd1
-  closeFd rfd2
-  rh <- fdToHandle rfd1
-  wh <- fdToHandle wfd2
+  (ph, rh, wh) <- runWithPipes prog opts
   lo_ref <- newIORef Nothing
   cache_ref <- newIORef emptyUFM
   return $ IServ
@@ -429,12 +453,8 @@ startIServ dflags = do
     , iservLookupSymbolCache = cache_ref
     , iservPendingFrees = []
     }
-#endif
 
 stopIServ :: HscEnv -> IO ()
-#ifdef mingw32_HOST_OS
-stopIServ _ = return ()
-#else
 stopIServ HscEnv{..} =
   gmask $ \_restore -> do
     m <- takeMVar hsc_iserv
@@ -446,6 +466,40 @@ stopIServ HscEnv{..} =
     if isJust ex
        then return ()
        else iservCall iserv Shutdown
+
+runWithPipes :: FilePath -> [String] -> IO (ProcessHandle, Handle, Handle)
+#ifdef mingw32_HOST_OS
+foreign import ccall "io.h _close"
+   c__close :: CInt -> IO CInt
+
+foreign import ccall unsafe "io.h _get_osfhandle"
+   _get_osfhandle :: CInt -> IO CInt
+
+runWithPipes prog opts = do
+    (rfd1, wfd1) <- createPipeFd -- we read on rfd1
+    (rfd2, wfd2) <- createPipeFd -- we write on wfd2
+    wh_client    <- _get_osfhandle wfd1
+    rh_client    <- _get_osfhandle rfd2
+    let args = show wh_client : show rh_client : opts
+    (_, _, _, ph) <- createProcess (proc prog args)
+    rh <- mkHandle rfd1
+    wh <- mkHandle wfd2
+    return (ph, rh, wh)
+      where mkHandle :: CInt -> IO Handle
+            mkHandle fd = (fdToHandle fd) `onException` (c__close fd)
+#else
+runWithPipes prog opts = do
+    (rfd1, wfd1) <- Posix.createPipe -- we read on rfd1
+    (rfd2, wfd2) <- Posix.createPipe -- we write on wfd2
+    setFdOption rfd1 CloseOnExec True
+    setFdOption wfd2 CloseOnExec True
+    let args = show wfd1 : show rfd2 : opts
+    (_, _, _, ph) <- createProcess (proc prog args)
+    closeFd wfd1
+    closeFd rfd2
+    rh <- fdToHandle rfd1
+    wh <- fdToHandle wfd2
+    return (ph, rh, wh)
 #endif
 
 -- -----------------------------------------------------------------------------

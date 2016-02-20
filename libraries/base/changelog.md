@@ -13,7 +13,9 @@
 
   * New `GHC.Generics.packageName` operation
 
-  * New `GHC.Stack.CallStack` data type
+  * Redesigned `GHC.Stack.CallStack` data type. As a result, `CallStack`'s
+    `Show` instance produces different output, and `CallStack` no longer has an
+    `Eq` instance.
 
   * New `GHC.Generics.packageName` operation
 
@@ -25,6 +27,9 @@
   * New `GHC.Stack.Types.freezeCallStack` function freezes a `CallStack` preventing future `pushCallStack` operations from having any effect
 
   * New `GHC.Stack.Types.pushCallStack` function pushes a call-site onto a `CallStack`
+
+  * New `GHC.Stack.Types.fromCallSiteList` function creates a `CallStack` from
+    a list of call-sites (i.e., `[(String, SrcLoc)]`)
 
   * `GHC.SrcLoc` has been removed
 
@@ -91,6 +96,9 @@
     precision: `log1p`, `expm1`, `log1pexp` and `log1mexp`. These are not
     available from `Prelude`, but the full class is exported from `Numeric`.
 
+  * New `Control.Exception.TypeError` datatype, which is thrown when an
+    expression fails to typecheck when run using `-fdefer-type-errors` (#10284)
+
 ### New instances
 
   * `Alt`, `Dual`, `First`, `Last`, `Product`, and `Sum` now have `Data`,
@@ -129,6 +137,8 @@
 
   * Add `MonadPlus IO` and `Alternative IO` instances
     (previously orphans in `transformers`) (#10755)
+
+  * `CallStack` now has an `IsList` instance
 
 ### Generalizations
 

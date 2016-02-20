@@ -19,6 +19,7 @@ Note [The Type-related module hierarchy]
 {-# OPTIONS_HADDOCK hide #-}
 {-# LANGUAGE CPP, DeriveDataTypeable, DeriveFunctor, DeriveFoldable,
              DeriveTraversable, MultiWayIf #-}
+{-# LANGUAGE ImplicitParams #-}
 
 module TyCoRep (
         TyThing(..),
@@ -32,6 +33,7 @@ module TyCoRep (
         -- Coercions
         Coercion(..), LeftOrRight(..),
         UnivCoProvenance(..), CoercionHole(..),
+        CoercionN, CoercionR, CoercionP, KindCoercion,
 
         -- Functions over types
         mkTyConTy, mkTyVarTy, mkTyVarTys,
@@ -81,15 +83,15 @@ module TyCoRep (
         extendTCvSubst, extendTCvSubstAndInScope, extendTCvSubstList,
         extendTCvSubstBinder,
         unionTCvSubst, zipTyEnv, zipCoEnv, mkTyCoInScopeSet,
-        mkOpenTCvSubst, zipOpenTCvSubst, zipOpenTCvSubstCoVars,
-        zipOpenTCvSubstBinders,
-        mkTopTCvSubst, zipTopTCvSubst,
+        zipTvSubst, zipCvSubst,
+        zipTyBinderSubst,
+        mkTvSubstPrs,
 
         substTelescope,
         substTyWith, substTyWithCoVars, substTysWith, substTysWithCoVars,
         substCoWith,
-        substTy,
-        substTyWithBinders,
+        substTy, substTyAddInScope, substTyUnchecked,
+        substTyWithBinders, substTyWithInScope,
         substTys, substTheta,
         lookupTyVar, substTyVarBndr,
         substCo, substCos, substCoVar, substCoVars, lookupCoVar,
@@ -144,11 +146,15 @@ import Pair
 import UniqSupply
 import ListSetOps
 import Util
+import UniqFM
 
 -- libraries
 import qualified Data.Data as Data hiding ( TyCon )
 import Data.List
 import Data.IORef ( IORef )   -- for CoercionHole
+#if __GLASGOW_HASKELL__ > 710
+import GHC.Stack (CallStack)
+#endif
 
 {-
 %************************************************************************
@@ -202,10 +208,10 @@ data Type
 
   | CastTy
         Type
-        Coercion    -- ^ A kind cast. The coercion is always nominal.
-                    -- INVARIANT: The cast is never refl.
-                    -- INVARIANT: The cast is "pushed down" as far as it
-                    -- can go. See Note [Pushing down casts]
+        KindCoercion  -- ^ A kind cast. The coercion is always nominal.
+                      -- INVARIANT: The cast is never refl.
+                      -- INVARIANT: The cast is "pushed down" as far as it
+                      -- can go. See Note [Pushing down casts]
 
   | CoercionTy
         Coercion    -- ^ Injection of a Coercion into a type
@@ -445,8 +451,7 @@ mkTyVarTys = map mkTyVarTy -- a common use of mkTyVarTy
 infixr 3 `mkFunTy`      -- Associates to the right
 -- | Make an arrow type
 mkFunTy :: Type -> Type -> Type
-mkFunTy arg res
-  = ForAllTy (Anon arg) res
+mkFunTy arg res = ForAllTy (Anon arg) res
 
 -- | Make nested arrow types
 mkFunTys :: [Type] -> Type -> Type
@@ -569,11 +574,11 @@ data Coercion
                -- we expand synonyms eagerly
                -- But it can be a type function
 
-  | AppCo Coercion Coercion             -- lift AppTy
+  | AppCo Coercion CoercionN             -- lift AppTy
           -- AppCo :: e -> N -> e
 
   -- See Note [Forall coercions]
-  | ForAllCo TyVar Coercion Coercion
+  | ForAllCo TyVar KindCoercion Coercion
          -- ForAllCo :: _ -> N -> e -> e
 
   -- These are special
@@ -603,15 +608,15 @@ data Coercion
     -- Using NthCo on a ForAllCo gives an N coercion always
     -- See Note [NthCo and newtypes]
 
-  | LRCo   LeftOrRight Coercion     -- Decomposes (t_left t_right)
+  | LRCo   LeftOrRight CoercionN     -- Decomposes (t_left t_right)
     -- :: _ -> N -> N
-  | InstCo Coercion Coercion
+  | InstCo Coercion CoercionN
     -- :: e -> N -> e
     -- See Note [InstCo roles]
 
   -- Coherence applies a coercion to the left-hand type of another coercion
   -- See Note [Coherence]
-  | CoherenceCo Coercion Coercion
+  | CoherenceCo Coercion KindCoercion
      -- :: e -> N -> e
 
   -- Extract a kind coercion from a (heterogeneous) type coercion
@@ -619,10 +624,15 @@ data Coercion
   | KindCo Coercion
      -- :: e -> N
 
-  | SubCo Coercion                  -- Turns a ~N into a ~R
+  | SubCo CoercionN                  -- Turns a ~N into a ~R
     -- :: N -> R
 
   deriving (Data.Data, Data.Typeable)
+
+type CoercionN = Coercion       -- always nominal
+type CoercionR = Coercion       -- always representational
+type CoercionP = Coercion       -- always phantom
+type KindCoercion = CoercionN   -- always nominal
 
 -- If you edit this type, you may need to update the GHC formalism
 -- See Note [GHC Formalism] in coreSyn/CoreLint.hs
@@ -979,10 +989,12 @@ role and kind, which is done in the UnivCo constructor.
 data UnivCoProvenance
   = UnsafeCoerceProv   -- ^ From @unsafeCoerce#@. These are unsound.
 
-  | PhantomProv Coercion -- ^ See Note [Phantom coercions]
+  | PhantomProv KindCoercion -- ^ See Note [Phantom coercions]. Only in Phantom
+                             -- roled coercions
 
-  | ProofIrrelProv Coercion  -- ^ From the fact that any two coercions are
-                             --   considered equivalent. See Note [ProofIrrelProv]
+  | ProofIrrelProv KindCoercion  -- ^ From the fact that any two coercions are
+                                 --   considered equivalent. See Note [ProofIrrelProv].
+                                 -- Can be used in Nominal or Representational coercions
 
   | PluginProv String  -- ^ From a plugin, which asserts that this coercion
                        --   is sound. The string is for the use of the plugin.
@@ -1340,12 +1352,12 @@ pprTyThing thing = pprTyThingCategory thing <+> quotes (ppr (getName thing))
 
 pprTyThingCategory :: TyThing -> SDoc
 pprTyThingCategory (ATyCon tc)
-  | isClassTyCon tc = ptext (sLit "Class")
-  | otherwise       = ptext (sLit "Type constructor")
-pprTyThingCategory (ACoAxiom _) = ptext (sLit "Coercion axiom")
-pprTyThingCategory (AnId   _)   = ptext (sLit "Identifier")
-pprTyThingCategory (AConLike (RealDataCon _)) = ptext (sLit "Data constructor")
-pprTyThingCategory (AConLike (PatSynCon _))  = ptext (sLit "Pattern synonym")
+  | isClassTyCon tc = text "Class"
+  | otherwise       = text "Type constructor"
+pprTyThingCategory (ACoAxiom _) = text "Coercion axiom"
+pprTyThingCategory (AnId   _)   = text "Identifier"
+pprTyThingCategory (AConLike (RealDataCon _)) = text "Data constructor"
+pprTyThingCategory (AConLike (PatSynCon _))  = text "Pattern synonym"
 
 
 instance NamedThing TyThing where       -- Can't put this with the type
@@ -1383,6 +1395,7 @@ data TCvSubst
         -- See Note [Apply Once]
         -- and Note [Extending the TvSubstEnv]
         -- and Note [Substituting types and coercions]
+        -- and Note [The substitution invariant]
 
 -- | A substitution of 'Type's for 'TyVar's
 --                 and 'Kind's for 'KindVar's
@@ -1454,6 +1467,25 @@ Note that the TvSubstEnv should *never* map a CoVar (built with the Id
 constructor) and the CvSubstEnv should *never* map a TyVar. Furthermore,
 the range of the TvSubstEnv should *never* include a type headed with
 CoercionTy.
+
+Note [The substitution invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When calling substTy subst ty it should be the case that
+the in-scope set in the substitution is a superset of both:
+
+  * The free vars of the range of the substitution
+  * The free vars of ty minus the domain of the substitution
+
+If we want to substitute [a -> ty1, b -> ty2] I used to
+think it was enough to generate an in-scope set that includes
+fv(ty1,ty2).  But that's not enough; we really should also take the
+free vars of the type we are substituting into!  Example:
+     (forall b. (a,b,x)) [a -> List b]
+Then if we use the in-scope set {b}, there is a danger we will rename
+the forall'd variable to 'x' by mistake, getting this:
+     (forall x. (List b, x, x))
+
+Breaking this invariant caused the bug from #11371.
 -}
 
 emptyTvSubstEnv :: TvSubstEnv
@@ -1553,7 +1585,7 @@ extendSubstEnvs (tenv, cenv) v ty
   | CoercionTy co <- ty
   = (tenv, extendVarEnv cenv v co)
   | otherwise
-  = pprPanic "extendSubstEnvs" (ppr v <+> ptext (sLit "|->") <+> ppr ty)
+  = pprPanic "extendSubstEnvs" (ppr v <+> text "|->" <+> ppr ty)
 
 extendTCvSubst :: TCvSubst -> Var -> Type -> TCvSubst
 extendTCvSubst (TCvSubst in_scope tenv cenv) tv ty
@@ -1584,22 +1616,9 @@ unionTCvSubst (TCvSubst in_scope1 tenv1 cenv1) (TCvSubst in_scope2 tenv2 cenv2)
              (tenv1     `plusVarEnv`   tenv2)
              (cenv1     `plusVarEnv`   cenv2)
 
--- mkOpenTCvSubst and zipOpenTCvSubst generate the in-scope set from
+-- mkTvSubstPrs and zipTvSubst generate the in-scope set from
 -- the types given; but it's just a thunk so with a bit of luck
 -- it'll never be evaluated
-
--- Note [Generating the in-scope set for a substitution]
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
--- If we want to substitute [a -> ty1, b -> ty2] I used to
--- think it was enough to generate an in-scope set that includes
--- fv(ty1,ty2).  But that's not enough; we really should also take the
--- free vars of the type we are substituting into!  Example:
---      (forall b. (a,b,x)) [a -> List b]
--- Then if we use the in-scope set {b}, there is a danger we will rename
--- the forall'd variable to 'x' by mistake, getting this:
---      (forall x. (List b, x, x))
--- Urk!  This means looking at all the calls to mkOpenTCvSubst....
-
 
 -- | Generates an in-scope set from the free variables in a list of types
 -- and a list of coercions
@@ -1608,57 +1627,49 @@ mkTyCoInScopeSet tys cos
   = mkInScopeSet (tyCoVarsOfTypes tys `unionVarSet` tyCoVarsOfCos cos)
 
 -- | Generates the in-scope set for the 'TCvSubst' from the types in the incoming
--- environment, hence "open"
-mkOpenTCvSubst :: TvSubstEnv -> CvSubstEnv -> TCvSubst
-mkOpenTCvSubst tenv cenv
-  = TCvSubst (mkTyCoInScopeSet (varEnvElts tenv) (varEnvElts cenv)) tenv cenv
-
--- | Generates the in-scope set for the 'TCvSubst' from the types in the incoming
--- environment, hence "open". No CoVars, please!
-zipOpenTCvSubst :: [TyVar] -> [Type] -> TCvSubst
-zipOpenTCvSubst tyvars tys
-  | debugIsOn && (length tyvars /= length tys)
-  = pprTrace "zipOpenTCvSubst" (ppr tyvars $$ ppr tys) emptyTCvSubst
+-- environment. No CoVars, please!
+zipTvSubst :: [TyVar] -> [Type] -> TCvSubst
+zipTvSubst tvs tys
+  | debugIsOn
+  , not (all isTyVar tvs) || length tvs /= length tys
+  = pprTrace "zipTvSubst" (ppr tvs $$ ppr tys) emptyTCvSubst
   | otherwise
   = TCvSubst (mkInScopeSet (tyCoVarsOfTypes tys)) tenv emptyCvSubstEnv
-  where tenv = zipTyEnv tyvars tys
+  where
+    tenv = zipTyEnv tvs tys
 
 -- | Generates the in-scope set for the 'TCvSubst' from the types in the incoming
--- environment, hence "open".
-zipOpenTCvSubstCoVars :: [CoVar] -> [Coercion] -> TCvSubst
-zipOpenTCvSubstCoVars cvs cos
-  | debugIsOn && (length cvs /= length cos)
-  = pprTrace "zipOpenTCvSubstCoVars" (ppr cvs $$ ppr cos) emptyTCvSubst
+-- environment.  No TyVars, please!
+zipCvSubst :: [CoVar] -> [Coercion] -> TCvSubst
+zipCvSubst cvs cos
+  | debugIsOn
+  , not (all isCoVar cvs) || length cvs /= length cos
+  = pprTrace "zipCvSubst" (ppr cvs $$ ppr cos) emptyTCvSubst
   | otherwise
   = TCvSubst (mkInScopeSet (tyCoVarsOfCos cos)) emptyTvSubstEnv cenv
-  where cenv = zipCoEnv cvs cos
+  where
+    cenv = zipCoEnv cvs cos
 
-
--- | Create an open TCvSubst combining the binders and types provided.
--- NB: It is OK if the lists are of different lengths.
-zipOpenTCvSubstBinders :: [TyBinder] -> [Type] -> TCvSubst
-zipOpenTCvSubstBinders bndrs tys
+-- | Create a TCvSubst combining the binders and types provided.
+-- NB: It is specifically OK if the lists are of different lengths.
+zipTyBinderSubst :: [TyBinder] -> [Type] -> TCvSubst
+zipTyBinderSubst bndrs tys
   = TCvSubst is tenv emptyCvSubstEnv
   where
     is = mkInScopeSet (tyCoVarsOfTypes tys)
-    (tvs, tys') = unzip [ (tv, ty) | (Named tv _, ty) <- zip bndrs tys ]
-    tenv = zipTyEnv tvs tys'
+    tenv = mkVarEnv [ (tv, ty) | (Named tv _, ty) <- zip bndrs tys ]
 
--- | Called when doing top-level substitutions. Here we expect that the
--- free vars of the range of the substitution will be empty.
-mkTopTCvSubst :: [(TyCoVar, Type)] -> TCvSubst
-mkTopTCvSubst prs = TCvSubst emptyInScopeSet tenv cenv
-  where (tenv, cenv) = foldl extend (emptyTvSubstEnv, emptyCvSubstEnv) prs
-        extend envs (v, ty) = extendSubstEnvs envs v ty
-
--- | Makes a subst with an empty in-scope-set. No CoVars, please!
-zipTopTCvSubst :: [TyVar] -> [Type] -> TCvSubst
-zipTopTCvSubst tyvars tys
-  | debugIsOn && (length tyvars /= length tys)
-  = pprTrace "zipTopTCvSubst" (ppr tyvars $$ ppr tys) emptyTCvSubst
-  | otherwise
-  = TCvSubst emptyInScopeSet tenv emptyCvSubstEnv
-  where tenv = zipTyEnv tyvars tys
+-- | Generates the in-scope set for the 'TCvSubst' from the types in the
+-- incoming environment. No CoVars, please!
+mkTvSubstPrs :: [(TyVar, Type)] -> TCvSubst
+mkTvSubstPrs prs =
+    ASSERT2( onlyTyVarsAndNoCoercionTy, text "prs" <+> ppr prs )
+    TCvSubst in_scope tenv emptyCvSubstEnv
+  where tenv = mkVarEnv prs
+        in_scope = mkInScopeSet $ tyCoVarsOfTypes $ map snd prs
+        onlyTyVarsAndNoCoercionTy =
+          and [ isTyVar tv && not (isCoercionTy ty)
+              | (tv, ty) <- prs ]
 
 zipTyEnv :: [TyVar] -> [Type] -> TvSubstEnv
 zipTyEnv tyvars tys
@@ -1682,10 +1693,10 @@ zipCoEnv cvs cos = mkVarEnv (zipEqual "zipCoEnv" cvs cos)
 
 instance Outputable TCvSubst where
   ppr (TCvSubst ins tenv cenv)
-    = brackets $ sep[ ptext (sLit "TCvSubst"),
-                      nest 2 (ptext (sLit "In scope:") <+> ppr ins),
-                      nest 2 (ptext (sLit "Type env:") <+> ppr tenv),
-                      nest 2 (ptext (sLit "Co env:") <+> ppr cenv) ]
+    = brackets $ sep[ text "TCvSubst",
+                      nest 2 (text "In scope:" <+> ppr ins),
+                      nest 2 (text "Type env:" <+> ppr tenv),
+                      nest 2 (text "Co env:" <+> ppr cenv) ]
 
 {-
 %************************************************************************
@@ -1749,43 +1760,107 @@ substTelescope = go_subst emptyTCvSubst
     go_subst _ _ _ = panic "substTelescope"
 
 
--- | Type substitution making use of an 'TCvSubst' that
--- is assumed to be open, see 'zipOpenTCvSubst'
+-- | Type substitution, see 'zipTvSubst'
 substTyWith :: [TyVar] -> [Type] -> Type -> Type
 substTyWith tvs tys = ASSERT( length tvs == length tys )
-                      substTy (zipOpenTCvSubst tvs tys)
+                      substTyUnchecked (zipTvSubst tvs tys)
 
--- | Coercion substitution making use of an 'TCvSubst' that
--- is assumed to be open, see 'zipOpenTCvSubst'
+-- | Substitute tyvars within a type using a known 'InScopeSet'.
+-- Pre-condition: the 'in_scope' set should satisfy Note [The substitution
+-- invariant]; specifically it should include the free vars of 'tys',
+-- and of 'ty' minus the domain of the subst.
+substTyWithInScope :: InScopeSet -> [TyVar] -> [Type] -> Type -> Type
+substTyWithInScope in_scope tvs tys ty =
+  ASSERT( length tvs == length tys )
+  substTy (mkTCvSubst in_scope (tenv, emptyCvSubstEnv)) ty
+  where tenv = zipTyEnv tvs tys
+
+-- | Coercion substitution, see 'zipTvSubst'
 substCoWith :: [TyVar] -> [Type] -> Coercion -> Coercion
 substCoWith tvs tys = ASSERT( length tvs == length tys )
-                      substCo (zipOpenTCvSubst tvs tys)
+                      substCo (zipTvSubst tvs tys)
 
 -- | Substitute covars within a type
 substTyWithCoVars :: [CoVar] -> [Coercion] -> Type -> Type
-substTyWithCoVars cvs cos = substTy (zipOpenTCvSubstCoVars cvs cos)
+substTyWithCoVars cvs cos = substTy (zipCvSubst cvs cos)
 
--- | Type substitution making use of an 'TCvSubst' that
--- is assumed to be open, see 'zipOpenTCvSubst'
+-- | Type substitution, see 'zipTvSubst'
 substTysWith :: [TyVar] -> [Type] -> [Type] -> [Type]
 substTysWith tvs tys = ASSERT( length tvs == length tys )
-                       substTys (zipOpenTCvSubst tvs tys)
+                       substTys (zipTvSubst tvs tys)
 
--- | Type substitution making use of an 'TCvSubst' that
--- is assumed to be open, see 'zipOpenTCvSubst'
+-- | Type substitution, see 'zipTvSubst'
 substTysWithCoVars :: [CoVar] -> [Coercion] -> [Type] -> [Type]
 substTysWithCoVars cvs cos = ASSERT( length cvs == length cos )
-                             substTys (zipOpenTCvSubstCoVars cvs cos)
+                             substTys (zipCvSubst cvs cos)
 
 -- | Type substitution using 'Binder's. Anonymous binders
 -- simply ignore their matching type.
 substTyWithBinders :: [TyBinder] -> [Type] -> Type -> Type
 substTyWithBinders bndrs tys = ASSERT( length bndrs == length tys )
-                               substTy (zipOpenTCvSubstBinders bndrs tys)
+                               substTyUnchecked (zipTyBinderSubst bndrs tys)
+
+-- | Substitute within a 'Type' after adding the free variables of the type
+-- to the in-scope set. This is useful for the case when the free variables
+-- aren't already in the in-scope set or easily available.
+-- See also Note [The substitution invariant].
+substTyAddInScope :: TCvSubst -> Type -> Type
+substTyAddInScope subst ty =
+  substTy (extendTCvInScopeSet subst $ tyCoVarsOfType ty) ty
+
+-- | When calling `substTy` it should be the case that the in-scope set in
+-- the substitution is a superset of the free vars of the range of the
+-- substitution.
+-- See also Note [The substitution invariant].
+isValidTCvSubst :: TCvSubst -> Bool
+isValidTCvSubst (TCvSubst in_scope tenv cenv) =
+  (tenvFVs `varSetInScope` in_scope) &&
+  (cenvFVs `varSetInScope` in_scope)
+  where
+  tenvFVs = tyCoVarsOfTypes $ varEnvElts tenv
+  cenvFVs = tyCoVarsOfCos $ varEnvElts cenv
 
 -- | Substitute within a 'Type'
-substTy :: TCvSubst -> Type  -> Type
-substTy subst ty | isEmptyTCvSubst subst = ty
+-- The substitution has to satisfy the invariants described in
+-- Note [The substitution invariant].
+
+substTy ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    TCvSubst -> Type  -> Type
+substTy subst@(TCvSubst in_scope tenv cenv) ty
+  | isEmptyTCvSubst subst = ty
+  | otherwise = ASSERT2( isValidTCvSubst subst,
+                         text "in_scope" <+> ppr in_scope $$
+                         text "tenv" <+> ppr tenv $$
+                         text "tenvFVs"
+                           <+> ppr (tyCoVarsOfTypes $ varEnvElts tenv) $$
+                         text "cenv" <+> ppr cenv $$
+                         text "cenvFVs"
+                           <+> ppr (tyCoVarsOfCos $ varEnvElts cenv) $$
+                         text "ty" <+> ppr ty )
+                ASSERT2( typeFVsInScope,
+                         text "in_scope" <+> ppr in_scope $$
+                         text "tenv" <+> ppr tenv $$
+                         text "cenv" <+> ppr cenv $$
+                         text "ty" <+> ppr ty $$
+                         text "needInScope" <+> ppr needInScope )
+                subst_ty subst ty
+  where
+  substDomain = varEnvKeys tenv ++ varEnvKeys cenv
+  needInScope = tyCoVarsOfType ty `delListFromUFM_Directly` substDomain
+  typeFVsInScope = needInScope `varSetInScope` in_scope
+
+-- | Substitute within a 'Type' disabling the sanity checks.
+-- The problems that the sanity checks in substTy catch are described in
+-- Note [The substitution invariant].
+-- The goal of #11371 is to migrate all the calls of substTyUnchecked to
+-- substTy and remove this function. Please don't use in new code.
+substTyUnchecked :: TCvSubst -> Type  -> Type
+substTyUnchecked subst ty
+                 | isEmptyTCvSubst subst = ty
                  | otherwise             = subst_ty subst ty
 
 -- | Substitute within several 'Type's
@@ -1931,7 +2006,7 @@ lookupCoVar :: TCvSubst -> Var  -> Maybe Coercion
 lookupCoVar (TCvSubst _ _ cenv) v = lookupVarEnv cenv v
 
 substTyVarBndr :: TCvSubst -> TyVar -> (TCvSubst, TyVar)
-substTyVarBndr = substTyVarBndrCallback substTy
+substTyVarBndr = substTyVarBndrCallback substTyUnchecked
 
 -- | Substitute a tyvar in a binding position, returning an
 -- extended subst and a new tyvar.
@@ -1962,7 +2037,8 @@ substTyVarBndrCallback subst_fn subst@(TCvSubst in_scope tenv cenv) old_var
         -- Here we must simply zap the substitution for x
 
     new_var | no_kind_change = uniqAway in_scope old_var
-            | otherwise = uniqAway in_scope $ updateTyVarKind (subst_fn subst) old_var
+            | otherwise = uniqAway in_scope $
+                          setTyVarKind old_var (subst_fn subst old_ki)
         -- The uniqAway part makes sure the new variable is not already in scope
 
 substCoVarBndr :: TCvSubst -> CoVar -> (TCvSubst, CoVar)
@@ -1996,16 +2072,18 @@ substCoVarBndrCallback sym subst_fun subst@(TCvSubst in_scope tenv cenv) old_var
                   -- because they can have free type variables
 
 cloneTyVarBndr :: TCvSubst -> TyVar -> Unique -> (TCvSubst, TyVar)
-cloneTyVarBndr (TCvSubst in_scope tv_env cv_env) tv uniq
-  | isTyVar tv
-  = (TCvSubst (extendInScopeSet in_scope tv')
+cloneTyVarBndr subst@(TCvSubst in_scope tv_env cv_env) tv uniq
+  = ASSERT2( isTyVar tv, ppr tv )   -- I think it's only called on TyVars
+    (TCvSubst (extendInScopeSet in_scope tv')
               (extendVarEnv tv_env tv (mkTyVarTy tv')) cv_env, tv')
-  | otherwise
-  = (TCvSubst (extendInScopeSet in_scope tv')
-              tv_env (extendVarEnv cv_env tv (mkCoVarCo tv')), tv')
   where
-    tv' = setVarUnique tv uniq  -- Simply set the unique; the kind
-                                -- has no type variables to worry about
+    old_ki = tyVarKind tv
+    no_kind_change = isEmptyVarSet (tyCoVarsOfType old_ki) -- verify that kind is closed
+
+    tv1 | no_kind_change = tv
+        | otherwise      = setTyVarKind tv (substTy subst old_ki)
+
+    tv' = setVarUnique tv1 uniq
 
 cloneTyVarBndrs :: TCvSubst -> [TyVar] -> UniqSupply -> (TCvSubst, [TyVar])
 cloneTyVarBndrs subst []     _usupply = (subst, [])
@@ -2034,7 +2112,7 @@ Note [Precedence in types]
 We don't keep the fixity of type operators in the operator. So the pretty printer
 operates the following precedene structre:
    Type constructor application   binds more tightly than
-   Oerator applications           which bind more tightly than
+   Operator applications          which bind more tightly than
    Function arrow
 
 So we might see  a :+: T b -> c
@@ -2143,7 +2221,7 @@ ppr_type p (AppTy t1 t2)
 
 ppr_type p (CastTy ty co)
   = if_print_coercions
-      (parens (ppr_type TopPrec ty <+> ptext (sLit "|>") <+> ppr co))
+      (parens (ppr_type TopPrec ty <+> text "|>" <+> ppr co))
       (ppr_type p ty)
 
 ppr_type _ (CoercionTy co)
@@ -2301,8 +2379,8 @@ instance Outputable VisibilityFlag where
 instance Outputable Coercion where -- defined here to avoid orphans
   ppr = pprCo
 instance Outputable LeftOrRight where
-  ppr CLeft    = ptext (sLit "Left")
-  ppr CRight   = ptext (sLit "Right")
+  ppr CLeft    = text "Left"
+  ppr CRight   = text "Right"
 
 {-
 Note [When to print foralls]
@@ -2367,10 +2445,10 @@ pprTyTcApp :: TyPrec -> TyCon -> [Type] -> SDoc
 -- Used for types only; so that we can make a
 -- special case for type-level lists
 pprTyTcApp p tc tys
-  | tc `hasKey` ipTyConKey
+  | tc `hasKey` ipClassKey
   , [LitTy (StrTyLit n),ty] <- tys
   = maybeParen p FunPrec $
-    char '?' <> ftext n <> ptext (sLit "::") <> ppr_type TopPrec ty
+    char '?' <> ftext n <> text "::" <> ppr_type TopPrec ty
 
   | tc `hasKey` consDataConKey
   , [_kind,ty1,ty2] <- tys
@@ -2384,7 +2462,8 @@ pprTyTcApp p tc tys
 
   | tc `hasKey` tYPETyConKey
   , [TyConApp lev_tc []] <- tys
-  = if | lev_tc `hasKey` liftedDataConKey   -> char '*'
+  = if | lev_tc `hasKey` liftedDataConKey   ->
+           unicodeSyntax (char '★') (char '*')
        | lev_tc `hasKey` unliftedDataConKey -> char '#'
        | otherwise                          -> ppr_deflt
 
@@ -2435,9 +2514,9 @@ pprTupleApp :: TyPrec -> (TyPrec -> a -> SDoc)
 pprTupleApp p pp tc sort tys
   | null tys
   , ConstraintTuple <- sort
-  = if opt_PprStyle_Debug then ptext (sLit "(%%)")
+  = if opt_PprStyle_Debug then text "(%%)"
                           else maybeParen p FunPrec $
-                               ptext (sLit "() :: Constraint")
+                               text "() :: Constraint"
   | otherwise
   = pprPromotionQuote tc <>
     tupleParens sort (pprWithCommas (pp TopPrec) tys)

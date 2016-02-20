@@ -175,7 +175,7 @@ canDoGenerics tc tc_args
 
         -- Nor can we do the job if it's an existential data constructor,
         -- Nor if the args are polymorphic types (I don't think)
-    bad_arg_type ty = (isUnLiftedType ty && not (allowedUnliftedTy ty))
+    bad_arg_type ty = (isUnliftedType ty && not (allowedUnliftedTy ty))
                       || not (isTauTy ty)
 
 allowedUnliftedTy :: Type -> Bool
@@ -235,8 +235,8 @@ canDoGenerics1 rep_tc tc_args =
     additionalChecks
         -- check (f) from Note [Requirements for deriving Generic and Rep]
       | null (tyConTyVars rep_tc) = NotValid $
-          ptext (sLit "Data type") <+> quotes (ppr rep_tc)
-      <+> ptext (sLit "must have some type parameters")
+          text "Data type" <+> quotes (ppr rep_tc)
+      <+> text "must have some type parameters"
 
       | otherwise = mergeErrors $ concatMap check_con data_cons
 
@@ -246,7 +246,7 @@ canDoGenerics1 rep_tc tc_args =
       IsValid -> _ccdg1_errors `map` foldDataConArgs (ft_check con) con
 
     bad :: DataCon -> SDoc -> SDoc
-    bad con msg = ptext (sLit "Constructor") <+> quotes (ppr con) <+> msg
+    bad con msg = text "Constructor" <+> quotes (ppr con) <+> msg
 
     check_vanilla :: DataCon -> Validity
     check_vanilla con | isVanillaDataCon con = IsValid
@@ -576,9 +576,9 @@ tc_mkRepTy gk_ tycon =
         ctFix c
             | dataConIsInfix c
             = case lookupFixity fix_env (dataConName c) of
-                   Fixity n InfixL -> buildFix n pLA
-                   Fixity n InfixR -> buildFix n pRA
-                   Fixity n InfixN -> buildFix n pNA
+                   Fixity _ n InfixL -> buildFix n pLA
+                   Fixity _ n InfixR -> buildFix n pRA
+                   Fixity _ n InfixN -> buildFix n pNA
             | otherwise = mkTyConTy pPrefix
         buildFix n assoc = mkTyConApp pInfix [ mkTyConTy assoc
                                              , mkNumLitTy (fromIntegral n)]

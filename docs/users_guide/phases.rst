@@ -161,11 +161,14 @@ Options affecting the C pre-processor
     large system with significant doses of conditional compilation, you
     really shouldn't need it.
 
-.. ghc-flag:: -D ⟨symbol⟩[=⟨value⟩]
+.. ghc-flag:: -D <symbol>[=<value>]
 
     Define macro ⟨symbol⟩ in the usual way. NB: does *not* affect ``-D``
-    macros passed to the C compiler when compiling via C! For those, use
-    the ``-optc-Dfoo`` hack… (see :ref:`forcing-options-through`).
+    macros passed to the C compiler when compiling with :ghc-flag:`-fvia-C`! For
+    those, use the ``-optc-Dfoo`` hack… (see :ref:`forcing-options-through`).
+
+    When no value is given, the value is taken to be ``1``. For instance,
+    ``-DUSE_MYLIB`` is equivalent to ``-DUSE_MYLIB=1``.
 
 .. ghc-flag:: -U ⟨symbol⟩
 
@@ -178,6 +181,11 @@ Options affecting the C pre-processor
 
 The GHC driver pre-defines several macros when processing Haskell source
 code (``.hs`` or ``.lhs`` files).
+
+.. _standard-cpp-macros:
+
+Standard CPP macros
+~~~~~~~~~~~~~~~~~~~
 
 The symbols defined by GHC are listed below. To check which symbols are
 defined by your local GHC installation, the following trick is useful:
@@ -255,7 +263,7 @@ defined by your local GHC installation, the following trick is useful:
     is required, the presence of the ``MIN_VERSION_GLASGOW_HASKELL``
     macro needs to be ensured before it is called, e.g.:
 
-    .. code-block: c
+    .. code-block:: c
 
         #ifdef MIN_VERSION_GLASGOW_HASKELL
         #if MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
@@ -448,12 +456,27 @@ Options affecting code generation
     no-op on that platform.
 
 .. ghc-flag:: -dynamic
+    :noindex:
 
     When generating code, assume that entities imported from a different
     package will reside in a different shared library or binary.
 
     Note that using this option when linking causes GHC to link against
     shared libraries.
+
+.. ghc-flag:: -dynamic-too
+
+    Generates both dynamic and static object files in a single run of
+    GHC. This option is functionally equivalent to running GHC twice,
+    the second time adding ``-dynamic -osuf dyn_o -hisuf dyn_hi``.
+
+    Although it is equivalent to running GHC twice, using
+    ``-dynamic-too`` is more efficient, because the earlier phases of
+    the compiler up to code generation are performed just once.
+
+    When using ``-dynamic-too``, the options ``-dyno``, ``-dynosuf``,
+    and ``-dynhisuf`` are the counterparts of ``-o``, ``-osuf``, and
+    ``-hisuf`` respectively, but applying to the dynamic compilation.
 
 .. _options-linker:
 

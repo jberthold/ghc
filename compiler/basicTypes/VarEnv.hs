@@ -40,6 +40,7 @@ module VarEnv (
         extendInScopeSet, extendInScopeSetList, extendInScopeSetSet,
         getInScopeVars, lookupInScope, lookupInScope_Directly,
         unionInScope, elemInScopeSet, uniqAway,
+        varSetInScope,
 
         -- * The RnEnv2 type
         RnEnv2,
@@ -69,7 +70,6 @@ import Util
 import Maybes
 import Outputable
 import StaticFlags
-import FastString
 
 {-
 ************************************************************************
@@ -90,7 +90,7 @@ data InScopeSet = InScope (VarEnv Var) {-# UNPACK #-} !Int
         -- unfolding), so this lookup is useful.
         --
         -- INVARIANT: the VarEnv maps (the Unique of) a variable to
-        --            a variable with the same Uniqua.  (This was not
+        --            a variable with the same Unique.  (This was not
         --            the case in the past, when we had a grevious hack
         --            mapping var1 to var2.
         --
@@ -99,7 +99,7 @@ data InScopeSet = InScope (VarEnv Var) {-# UNPACK #-} !Int
         -- INVARIANT: it's not zero; we use it as a multiplier in uniqAway
 
 instance Outputable InScopeSet where
-  ppr (InScope s _) = ptext (sLit "InScope") <+> ppr s
+  ppr (InScope s _) = text "InScope" <+> ppr s
 
 emptyInScopeSet :: InScopeSet
 emptyInScopeSet = InScope emptyVarSet 1
@@ -140,6 +140,9 @@ lookupInScope_Directly (InScope in_scope _) uniq
 unionInScope :: InScopeSet -> InScopeSet -> InScopeSet
 unionInScope (InScope s1 _) (InScope s2 n2)
   = InScope (s1 `plusVarEnv` s2) n2
+
+varSetInScope :: VarSet -> InScopeSet -> Bool
+varSetInScope vars (InScope s1 _) = vars `subVarSet` s1
 
 -- | @uniqAway in_scope v@ finds a unique that is not used in the
 -- in-scope set, and gives that to v.

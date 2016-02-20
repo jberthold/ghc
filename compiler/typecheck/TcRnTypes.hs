@@ -56,18 +56,21 @@ module TcRnTypes(
         ArrowCtxt(..),
 
         -- TcSigInfo
-        TcSigInfo(..), TcIdSigInfo(..), TcPatSynInfo(..), TcIdSigBndr(..),
+        TcSigFun, TcSigInfo(..), TcIdSigInfo(..),
+        TcPatSynInfo(..), TcIdSigBndr(..),
         findScopedTyVars, isPartialSig, noCompleteSig, tcSigInfoName,
-        completeIdSigPolyId, completeSigPolyId_maybe, completeIdSigPolyId_maybe,
+        completeIdSigPolyId, completeSigPolyId_maybe,
+        completeIdSigPolyId_maybe,
 
         -- Canonical constraints
         Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, pprCts,
         singleCt, listToCts, ctsElts, consCts, snocCts, extendCtsList,
         isEmptyCts, isCTyEqCan, isCFunEqCan,
+        isPendingScDict, superClassesMightHelp,
         isCDictCan_Maybe, isCFunEqCan_maybe,
         isCIrredEvCan, isCNonCanonical, isWantedCt, isDerivedCt,
         isGivenCt, isHoleCt, isOutOfScopeCt, isExprHoleCt, isTypeHoleCt,
-        isUserTypeErrorCt, isCallStackCt, getUserTypeErrorMsg,
+        isUserTypeErrorCt, isCallStackDict, getUserTypeErrorMsg,
         ctEvidence, ctLoc, setCtLoc, ctPred, ctFlavour, ctEqRel, ctOrigin,
         mkTcEqPredLikeEv,
         mkNonCanonical, mkNonCanonicalCt,
@@ -112,7 +115,8 @@ module TcRnTypes(
 
         CtFlavour(..), ctEvFlavour,
         CtFlavourRole, ctEvFlavourRole, ctFlavourRole,
-        eqCanRewrite, eqCanRewriteFR, canDischarge, canDischargeFR,
+        eqCanRewrite, eqCanRewriteFR,  eqCanDischarge,
+        funEqCanDischarge, funEqCanDischargeFR,
 
         -- Pretty printing
         pprEvVarTheta,
@@ -129,7 +133,6 @@ import HsSyn
 import CoreSyn
 import HscTypes
 import TcEvidence
-import TysWiredIn ( callStackTyCon, ipClass )
 import Type
 import Class    ( Class )
 import TyCon    ( TyCon )
@@ -138,6 +141,8 @@ import ConLike  ( ConLike(..) )
 import DataCon  ( DataCon, dataConUserType, dataConOrigArgTys )
 import PatSyn   ( PatSyn, patSynType )
 import Id       ( idName )
+import PrelNames ( callStackTyConKey, ipClassKey )
+import Unique ( hasKey )
 import FieldLabel ( FieldLabel )
 import TcType
 import Annotations
@@ -214,7 +219,7 @@ type RnM  = TcRn
 -- | Historical "type-checking monad" (now it's just 'TcRn').
 type TcM  = TcRn
 
--- We 'stack' these envs through the Reader like monad infastructure
+-- We 'stack' these envs through the Reader like monad infrastructure
 -- as we move into an expression (although the change is focused in
 -- the lcl type).
 data Env gbl lcl
@@ -223,7 +228,7 @@ data Env gbl lcl
                              -- Includes all info about imported things
 
         env_us   :: {-# UNPACK #-} !(IORef UniqSupply),
-                             -- Unique supply for local varibles
+                             -- Unique supply for local variables
 
         env_gbl  :: gbl,     -- Info about things defined at the top level
                              -- of the module being compiled
@@ -233,8 +238,6 @@ data Env gbl lcl
 
 instance ContainsDynFlags (Env gbl lcl) where
     extractDynFlags env = hsc_dflags (env_top env)
-    replaceDynFlags env dflags
-        = env {env_top = replaceDynFlags (env_top env) dflags}
 
 instance ContainsModule gbl => ContainsModule (Env gbl lcl) where
     extractModule env = extractModule (env_gbl env)
@@ -335,7 +338,8 @@ data DsLclEnv = DsLclEnv {
         dsl_meta    :: DsMetaEnv,        -- Template Haskell bindings
         dsl_loc     :: RealSrcSpan,      -- To put in pattern-matching error msgs
         dsl_dicts   :: Bag EvVar,        -- Constraints from GADT pattern-matching
-        dsl_tm_cs   :: Bag SimpleEq
+        dsl_tm_cs   :: Bag SimpleEq,
+        dsl_pm_iter :: IORef Int         -- no iterations for pmcheck
      }
 
 -- Inside [| |] brackets, the desugarer looks
@@ -755,9 +759,15 @@ data TcIdBinder
        TopLevelFlag    -- Tells whether the bindind is syntactically top-level
                        -- (The monomorphic Ids for a recursive group count
                        --  as not-top-level for this purpose.)
+  | TcIdBndr_ExpType  -- Variant that allows the type to be specified as
+                      -- an ExpType
+       Name
+       ExpType
+       TopLevelFlag
 
 instance Outputable TcIdBinder where
-   ppr (TcIdBndr id top_lvl) = ppr id <> brackets (ppr top_lvl)
+   ppr (TcIdBndr id top_lvl)           = ppr id <> brackets (ppr top_lvl)
+   ppr (TcIdBndr_ExpType id _ top_lvl) = ppr id <> brackets (ppr top_lvl)
 
 ---------------------------
 -- Template Haskell stages and levels
@@ -895,7 +905,8 @@ data PromotionErr
 
   | RecDataConPE     -- Data constructor in a recursive loop
                      -- See Note [ARecDataCon: recusion and promoting data constructors] in TcTyClsDecls
-  | NoDataKinds      -- -XDataKinds not enabled
+  | NoDataKindsTC    -- -XDataKinds not enabled (for a tycon)
+  | NoDataKindsDC    -- -XDataKinds not enabled (for a datacon)
   | NoTypeInTypeTC   -- -XTypeInType not enabled (for a tycon)
   | NoTypeInTypeDC   -- -XTypeInType not enabled (for a datacon)
 
@@ -915,26 +926,28 @@ instance Outputable PromotionErr where
   ppr PatSynPE       = text "PatSynPE"
   ppr FamDataConPE   = text "FamDataConPE"
   ppr RecDataConPE   = text "RecDataConPE"
-  ppr NoDataKinds    = text "NoDataKinds"
+  ppr NoDataKindsTC  = text "NoDataKindsTC"
+  ppr NoDataKindsDC  = text "NoDataKindsDC"
   ppr NoTypeInTypeTC = text "NoTypeInTypeTC"
   ppr NoTypeInTypeDC = text "NoTypeInTypeDC"
 
 pprTcTyThingCategory :: TcTyThing -> SDoc
 pprTcTyThingCategory (AGlobal thing)    = pprTyThingCategory thing
-pprTcTyThingCategory (ATyVar {})        = ptext (sLit "Type variable")
-pprTcTyThingCategory (ATcId {})         = ptext (sLit "Local identifier")
-pprTcTyThingCategory (ATcTyCon {})     = ptext (sLit "Local tycon")
+pprTcTyThingCategory (ATyVar {})        = text "Type variable"
+pprTcTyThingCategory (ATcId {})         = text "Local identifier"
+pprTcTyThingCategory (ATcTyCon {})     = text "Local tycon"
 pprTcTyThingCategory (APromotionErr pe) = pprPECategory pe
 
 pprPECategory :: PromotionErr -> SDoc
-pprPECategory ClassPE        = ptext (sLit "Class")
-pprPECategory TyConPE        = ptext (sLit "Type constructor")
-pprPECategory PatSynPE       = ptext (sLit "Pattern synonym")
-pprPECategory FamDataConPE   = ptext (sLit "Data constructor")
-pprPECategory RecDataConPE   = ptext (sLit "Data constructor")
-pprPECategory NoDataKinds    = ptext (sLit "Data constructor")
-pprPECategory NoTypeInTypeTC = ptext (sLit "Type constructor")
-pprPECategory NoTypeInTypeDC = ptext (sLit "Data constructor")
+pprPECategory ClassPE        = text "Class"
+pprPECategory TyConPE        = text "Type constructor"
+pprPECategory PatSynPE       = text "Pattern synonym"
+pprPECategory FamDataConPE   = text "Data constructor"
+pprPECategory RecDataConPE   = text "Data constructor"
+pprPECategory NoDataKindsTC  = text "Type constructor"
+pprPECategory NoDataKindsDC  = text "Data constructor"
+pprPECategory NoTypeInTypeTC = text "Type constructor"
+pprPECategory NoTypeInTypeDC = text "Data constructor"
 
 {- Note [Bindings with closed types]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1119,10 +1132,10 @@ data WhereFrom
                                         -- See Note [Care with plugin imports] in LoadIface
 
 instance Outputable WhereFrom where
-  ppr (ImportByUser is_boot) | is_boot     = ptext (sLit "{- SOURCE -}")
+  ppr (ImportByUser is_boot) | is_boot     = text "{- SOURCE -}"
                              | otherwise   = empty
-  ppr ImportBySystem                       = ptext (sLit "{- SYSTEM -}")
-  ppr ImportByPlugin                       = ptext (sLit "{- PLUGIN -}")
+  ppr ImportBySystem                       = text "{- SYSTEM -}"
+  ppr ImportByPlugin                       = text "{- PLUGIN -}"
 
 
 {- *********************************************************************
@@ -1130,6 +1143,8 @@ instance Outputable WhereFrom where
                 Type signatures
 *                                                                      *
 ********************************************************************* -}
+
+type TcSigFun  = Name -> Maybe TcSigInfo
 
 data TcSigInfo = TcIdSig     TcIdSigInfo
                | TcPatSynSig TcPatSynInfo
@@ -1168,7 +1183,7 @@ data TcIdSigInfo
     }
 
 data TcIdSigBndr   -- See Note [Complete and partial type signatures]
-  = CompleteSig    -- A complete signature with no wildards,
+  = CompleteSig    -- A complete signature with no wildcards,
                    -- so the complete polymorphic type is known.
         TcId          -- The polymorphic Id with that type
 
@@ -1220,8 +1235,8 @@ instance Outputable TcIdSigInfo where
                , ppr (map fst tyvars) ]
 
 instance Outputable TcIdSigBndr where
-    ppr (CompleteSig f)               = ptext (sLit "CompleteSig") <+> ppr f
-    ppr (PartialSig { sig_name = n }) = ptext (sLit "PartialSig")  <+> ppr n
+    ppr (CompleteSig f)               = text "CompleteSig" <+> ppr f
+    ppr (PartialSig { sig_name = n }) = text "PartialSig"  <+> ppr n
 
 instance Outputable TcPatSynInfo where
     ppr (TPSI{ patsig_name = name}) = ppr name
@@ -1354,7 +1369,7 @@ data Ct
       cc_class  :: Class,
       cc_tyargs :: [Xi],       -- cc_tyargs are function-free, hence Xi
       cc_pend_sc :: Bool       -- True <=> (a) cc_class has superclasses
-                               --          (b) we have not yet added those
+                               --          (b) we have not (yet) added those
                                --              superclasses as Givens
            -- NB: cc_pend_sc is used for G/W/D.  For W/D the reason
            --     we need superclasses is to expose possible improvement
@@ -1522,12 +1537,18 @@ ctFlavour = ctEvFlavour . ctEvidence
 ctEqRel :: Ct -> EqRel
 ctEqRel = ctEvEqRel . ctEvidence
 
-dropDerivedWC :: WantedConstraints -> WantedConstraints
--- See Note [Dropping derived constraints]
-dropDerivedWC wc@(WC { wc_simple = simples, wc_insol = insols })
-  = wc { wc_simple = dropDerivedSimples simples
-       , wc_insol  = dropDerivedInsols insols }
-    -- The wc_impl implications are already (recursively) filtered
+instance Outputable Ct where
+  ppr ct = ppr (cc_ev ct) <+> parens pp_sort
+    where
+      pp_sort = case ct of
+         CTyEqCan {}      -> text "CTyEqCan"
+         CFunEqCan {}     -> text "CFunEqCan"
+         CNonCanonical {} -> text "CNonCanonical"
+         CDictCan { cc_pend_sc = pend_sc }
+            | pend_sc   -> text "CDictCan(psc)"
+            | otherwise -> text "CDictCan"
+         CIrredEvCan {}   -> text "CIrredEvCan"
+         CHoleCan { cc_occ = occ } -> text "CHoleCan:" <+> ppr occ
 
 {-
 ************************************************************************
@@ -1750,30 +1771,72 @@ isUserTypeErrorCt ct = case getUserTypeErrorMsg ct of
                          Just _ -> True
                          _      -> False
 
--- | Is the constraint for an Implicit CallStack
+isPendingScDict :: Ct -> Maybe Ct
+-- Says whether cc_pend_sc is True, AND if so flips the flag
+isPendingScDict ct@(CDictCan { cc_pend_sc = True })
+                  = Just (ct { cc_pend_sc = False })
+isPendingScDict _ = Nothing
+
+-- | Are we looking at an Implicit CallStack
 -- (i.e. @IP "name" CallStack@)?
 --
 -- If so, returns @Just "name"@.
-isCallStackCt :: Ct -> Maybe FastString
-isCallStackCt CDictCan { cc_class = cls, cc_tyargs = tys }
-  | cls == ipClass
+isCallStackDict :: Class -> [Type] -> Maybe FastString
+isCallStackDict cls tys
+  | cls `hasKey` ipClassKey
   , [ip_name_ty, ty] <- tys
   , Just (tc, _) <- splitTyConApp_maybe ty
-  , tc == callStackTyCon
+  , tc `hasKey` callStackTyConKey
   = isStrLitTy ip_name_ty
-isCallStackCt _
+isCallStackDict _ _
   = Nothing
 
-instance Outputable Ct where
-  ppr ct = ppr (cc_ev ct) <+> parens pp_sort
-    where
-      pp_sort = case ct of
-         CTyEqCan {}      -> text "CTyEqCan"
-         CFunEqCan {}     -> text "CFunEqCan"
-         CNonCanonical {} -> text "CNonCanonical"
-         CDictCan {}      -> text "CDictCan"
-         CIrredEvCan {}   -> text "CIrredEvCan"
-         CHoleCan { cc_occ = occ } -> text "CHoleCan:" <+> ppr occ
+superClassesMightHelp :: Ct -> Bool
+-- ^ True if taking superclasses of givens, or of wanteds (to perhaps
+-- expose more equalities or functional dependencies) might help to
+-- solve this constraint.  See Note [When superclases help]
+superClassesMightHelp ct
+  = isWantedCt ct && not (is_ip ct)
+  where
+    is_ip (CDictCan { cc_class = cls }) = isIPClass cls
+    is_ip _                             = False
+
+{- Note [When superclasses help]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+First read Note [The superclass story] in TcCanonical.
+
+We expand superclasses and iterate only if there is at unsolved wanted
+for which expansion of superclasses (e.g. from given constraints)
+might actually help. The function superClassesMightHelp tells if
+doing this superclass expansion might help solve this constraint.
+Note that
+
+  * Superclasses help only for Wanted constraints.  Derived constraints
+    are not really "unsolved" and we certainly don't want them to
+    trigger superclass expansion. This was a good part of the loop
+    in  Trac #11523
+
+  * Even for Wanted constraints, we say "no" for implicit paramters.
+    we have [W] ?x::ty, expanding superclasses won't help:
+      - Superclasses can't be implicit parameters
+      - If we have a [G] ?x:ty2, then we'll have another unsolved
+        [D] ty ~ ty2 (from the functional dependency)
+        which will trigger superclass expansion.
+
+    It's a bit of a special case, but it's easy to do.  The runtime cost
+    is low because the unsolved set is usually empty anyway (errors
+    aside), and the first non-imlicit-parameter will terminate the search.
+
+    The special case is worth it (Trac #11480, comment:2) because it
+    applies to CallStack constraints, which aren't type errors. If we have
+       f :: (C a) => blah
+       f x = ...undefined...
+    we'll get a CallStack constraint.  If that's the only unsolved
+    constraint it'll eventually be solved by defaulting.  So we don't
+    want to emit warnings about hitting the simplifier's iteration
+    limit.  A CallStack constraint really isn't an unsolved
+    constraint; it can always be solved by defaulting.
+-}
 
 singleCt :: Ct -> Cts
 singleCt = unitBag
@@ -1879,6 +1942,13 @@ addInsols :: WantedConstraints -> Bag Ct -> WantedConstraints
 addInsols wc cts
   = wc { wc_insol = wc_insol wc `unionBags` cts }
 
+dropDerivedWC :: WantedConstraints -> WantedConstraints
+-- See Note [Dropping derived constraints]
+dropDerivedWC wc@(WC { wc_simple = simples, wc_insol = insols })
+  = wc { wc_simple = dropDerivedSimples simples
+       , wc_insol  = dropDerivedInsols insols }
+    -- The wc_impl implications are already (recursively) filtered
+
 isInsolubleStatus :: ImplicStatus -> Bool
 isInsolubleStatus IC_Insoluble = True
 isInsolubleStatus _            = False
@@ -1903,10 +1973,10 @@ trulyInsoluble _tc_lvl insol
 
 instance Outputable WantedConstraints where
   ppr (WC {wc_simple = s, wc_impl = i, wc_insol = n})
-   = ptext (sLit "WC") <+> braces (vcat
-        [ ppr_bag (ptext (sLit "wc_simple")) s
-        , ppr_bag (ptext (sLit "wc_insol")) n
-        , ppr_bag (ptext (sLit "wc_impl")) i ])
+   = text "WC" <+> braces (vcat
+        [ ppr_bag (text "wc_simple") s
+        , ppr_bag (text "wc_insol") n
+        , ppr_bag (text "wc_impl") i ])
 
 ppr_bag :: Outputable a => SDoc -> Bag a -> SDoc
 ppr_bag doc bag
@@ -1969,23 +2039,23 @@ instance Outputable Implication where
               , ic_given = given, ic_no_eqs = no_eqs
               , ic_wanted = wanted, ic_status = status
               , ic_binds = binds, ic_info = info })
-   = hang (ptext (sLit "Implic") <+> lbrace)
-        2 (sep [ ptext (sLit "TcLevel =") <+> ppr tclvl
-               , ptext (sLit "Skolems =") <+> pprTvBndrs skols
-               , ptext (sLit "No-eqs =") <+> ppr no_eqs
-               , ptext (sLit "Status =") <+> ppr status
-               , hang (ptext (sLit "Given ="))  2 (pprEvVars given)
-               , hang (ptext (sLit "Wanted =")) 2 (ppr wanted)
-               , ptext (sLit "Binds =") <+> ppr binds
+   = hang (text "Implic" <+> lbrace)
+        2 (sep [ text "TcLevel =" <+> ppr tclvl
+               , text "Skolems =" <+> pprTvBndrs skols
+               , text "No-eqs =" <+> ppr no_eqs
+               , text "Status =" <+> ppr status
+               , hang (text "Given =")  2 (pprEvVars given)
+               , hang (text "Wanted =") 2 (ppr wanted)
+               , text "Binds =" <+> ppr binds
                , pprSkolInfo info ] <+> rbrace)
 
 instance Outputable ImplicStatus where
-  ppr IC_Insoluble   = ptext (sLit "Insoluble")
-  ppr IC_Unsolved    = ptext (sLit "Unsolved")
+  ppr IC_Insoluble   = text "Insoluble"
+  ppr IC_Unsolved    = text "Unsolved"
   ppr (IC_Solved { ics_need = vs, ics_dead = dead })
-    = ptext (sLit "Solved")
-      <+> (braces $ vcat [ ptext (sLit "Dead givens =") <+> ppr dead
-                         , ptext (sLit "Needed =") <+> ppr vs ])
+    = text "Solved"
+      <+> (braces $ vcat [ text "Dead givens =" <+> ppr dead
+                         , text "Needed =" <+> ppr vs ])
 
 {-
 Note [Needed evidence variables]
@@ -2005,7 +2075,7 @@ Note [Shadowing in a constraint]
 We assume NO SHADOWING in a constraint.  Specifically
  * The unification variables are all implicitly quantified at top
    level, and are all unique
- * The skolem varibles bound in ic_skols are all freah when the
+ * The skolem variables bound in ic_skols are all freah when the
    implication is created.
 So we can safely substitute. For example, if we have
    forall a.  a~Int => ...(forall b. ...a...)...
@@ -2104,7 +2174,7 @@ For Givens we make new EvVars and bind them immediately. Two main reasons:
     But that superclass selector can't (yet) appear in a coercion
     (see evTermCoercion), so the easy thing is to bind it to an Id.
 
-So a Given has EvVar inside it rather that (as previously) an EvTerm.
+So a Given has EvVar inside it rather than (as previously) an EvTerm.
 -}
 
 -- | A place for type-checking evidence to go after it is generated.
@@ -2174,9 +2244,9 @@ instance Outputable TcEvDest where
 
 instance Outputable CtEvidence where
   ppr fl = case fl of
-             CtGiven {}   -> ptext (sLit "[G]") <+> ppr (ctev_evar fl) <+> ppr_pty
-             CtWanted {}  -> ptext (sLit "[W]") <+> ppr (ctev_dest fl) <+> ppr_pty
-             CtDerived {} -> ptext (sLit "[D]") <+> text "_" <+> ppr_pty
+             CtGiven {}   -> text "[G]" <+> ppr (ctev_evar fl) <+> ppr_pty
+             CtWanted {}  -> text "[W]" <+> ppr (ctev_dest fl) <+> ppr_pty
+             CtDerived {} -> text "[D]" <+> text "_" <+> ppr_pty
          where ppr_pty = dcolon <+> ppr (ctEvPred fl)
 
 isWanted :: CtEvidence -> Bool
@@ -2273,54 +2343,74 @@ we can; straight from the Wanteds during improvment. And from a Derived
 ReprEq we could conceivably get a Derived NomEq improvment (by decomposing
 a type constructor with Nomninal role), and hence unify.
 
-Note [canDischarge]
-~~~~~~~~~~~~~~~~~~~
-(x1:c1 `canDischarge` x2:c2) returns True if we can use c1 to
-/discharge/ c2; that is, if we can simply drop (x2:c2) altogether,
-perhaps adding a binding for x2 in terms of x1.  We only ask this
-question in two cases:
+Note [funEqCanDischarge]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we have two CFunEqCans with the same LHS:
+    (x1:F ts ~ f1) `funEqCanDischarge` (x2:F ts ~ f2)
+Can we drop x2 in favour of x1, either unifying
+f2 (if it's a flatten meta-var) or adding a new Given
+(f1 ~ f2), if x2 is a Given?
 
-* Identical equality constraints:
-      (x1:s~t) `canDischarge` (xs:s~t)
-  In this case we can just drop x2 in favour of x1.
+Answer: yes if funEqCanDischarge is true.
 
-* Function calls with the same LHS:
-    (x1:F ts ~ f1) `canDischarge` (x2:F ts ~ f2)
-  Here we can drop x2 in favour of x1, either unifying
-  f2 (if it's a flatten meta-var) or adding a new Given
-  (f1 ~ f2), if x2 is a Given.
+Note [eqCanDischarge]
+~~~~~~~~~~~~~~~~~~~~~
+Suppose we have two identicla equality constraints
+(i.e. both LHS and RHS are the same)
+      (x1:s~t) `eqCanDischarge` (xs:s~t)
+Can we just drop x2 in favour of x1?
 
-This is different from eqCanRewrite; for exammple, a Wanted
-can certainly discharge an identical Wanted.  So canDicharge
-does /not/ define a can-rewrite relation in the sense of
-Definition [Can-rewrite relation] in TcSMonad.
+Answer: yes if eqCanDischarge is true.
+
+Note that we do /not/ allow Wanted to discharge Derived.
+We must keep both.  Why?  Because the Derived may rewrite
+other Deriveds in the model whereas the Wanted cannot.
+
+However a Wanted can certainly discharge an identical Wanted.  So
+eqCanDischarge does /not/ define a can-rewrite relation in the
+sense of Definition [Can-rewrite relation] in TcSMonad.
 -}
 
+-----------------
 eqCanRewrite :: CtEvidence -> CtEvidence -> Bool
-eqCanRewrite ev1 ev2 = eqCanRewriteFR (ctEvFlavourRole ev1)
-                                      (ctEvFlavourRole ev2)
-
-eqCanRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
 -- Very important function!
 -- See Note [eqCanRewrite]
 -- See Note [Wanteds do not rewrite Wanteds]
 -- See Note [Deriveds do rewrite Deriveds]
-eqCanRewriteFR (Given, NomEq)  (_, _)      = True
-eqCanRewriteFR (Given, ReprEq) (_, ReprEq) = True
-eqCanRewriteFR _               _           = False
-
-canDischarge :: CtEvidence -> CtEvidence -> Bool
--- See Note [canDischarge]
-canDischarge ev1 ev2 = canDischargeFR (ctEvFlavourRole ev1)
+eqCanRewrite ev1 ev2 = eqCanRewriteFR (ctEvFlavourRole ev1)
                                       (ctEvFlavourRole ev2)
 
-canDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
-canDischargeFR (_, ReprEq)  (_, NomEq)   = False
-canDischargeFR (Given,   _) _            = True
-canDischargeFR (Wanted,  _) (Wanted,  _) = True
-canDischargeFR (Wanted,  _) (Derived, _) = True
-canDischargeFR (Derived, _) (Derived, _) = True
-canDischargeFR _            _            = False
+eqCanRewriteFR :: CtFlavourRole -> CtFlavourRole -> Bool
+eqCanRewriteFR (Given, NomEq)   (_, _)           = True
+eqCanRewriteFR (Given, ReprEq)  (_, ReprEq)      = True
+eqCanRewriteFR (Derived, NomEq) (Derived, NomEq) = True
+eqCanRewriteFR _                _                = False
+
+-----------------
+funEqCanDischarge :: CtEvidence -> CtEvidence -> Bool
+-- See Note [funEqCanDischarge]
+funEqCanDischarge ev1 ev2 = funEqCanDischargeFR (ctEvFlavourRole ev1)
+                                      (ctEvFlavourRole ev2)
+
+funEqCanDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
+funEqCanDischargeFR (_, ReprEq)  (_, NomEq)   = False
+funEqCanDischargeFR (Given,   _) _            = True
+funEqCanDischargeFR (Wanted,  _) (Wanted,  _) = True
+funEqCanDischargeFR (Wanted,  _) (Derived, _) = True
+funEqCanDischargeFR (Derived, _) (Derived, _) = True
+funEqCanDischargeFR _            _            = False
+
+-----------------
+eqCanDischarge :: CtEvidence -> CtEvidence -> Bool
+-- See Note [eqCanDischarge]
+eqCanDischarge ev1 ev2 = eqCanDischargeFR (ctEvFlavourRole ev1)
+                                          (ctEvFlavourRole ev2)
+eqCanDischargeFR :: CtFlavourRole -> CtFlavourRole -> Bool
+eqCanDischargeFR (_, ReprEq)  (_, NomEq)   = False
+eqCanDischargeFR (Given,   _) (Given,_)    = True
+eqCanDischargeFR (Wanted,  _) (Wanted,  _) = True
+eqCanDischargeFR (Derived, _) (Derived, _) = True
+eqCanDischargeFR _            _            = False
 
 {-
 ************************************************************************
@@ -2357,7 +2447,7 @@ level.
 equalities involving type functions. Example:
   Assume we have a wanted at depth 7:
     [W] d{7} : F () ~ a
-  If thre is an type function equation "F () = Int", this would be rewritten to
+  If there is an type function equation "F () = Int", this would be rewritten to
     [W] d{8} : Int ~ a
   and remembered as having depth 8.
 
@@ -2425,8 +2515,8 @@ mkGivenLoc tclvl skol_info env
 mkKindLoc :: TcType -> TcType   -- original *types* being compared
           -> CtLoc -> CtLoc
 mkKindLoc s1 s2 loc = setCtLocOrigin (toKindLoc loc)
-                        (KindEqOrigin s1 s2 (ctLocOrigin loc)
-                                            (ctLocTypeOrKind_maybe loc))
+                        (KindEqOrigin s1 (Just s2) (ctLocOrigin loc)
+                                      (ctLocTypeOrKind_maybe loc))
 
 -- | Take a CtLoc and moves it to the kind level
 toKindLoc :: CtLoc -> CtLoc
@@ -2484,7 +2574,7 @@ pushErrCtxtSameOrigin err loc@(CtLoc { ctl_env = lcl })
 --   b) an implication constraint is generated
 data SkolemInfo
   = SigSkol UserTypeCtxt        -- A skolem that is created by instantiating
-            Type                -- a programmer-supplied type signature
+            ExpType             -- a programmer-supplied type signature
                                 -- Location of the binding site is on the TyVar
 
   | ClsSkol Class       -- Bound at a class decl
@@ -2523,7 +2613,6 @@ data SkolemInfo
   | BracketSkol         -- Template Haskell bracket
 
   | UnifyForAllSkol     -- We are unifying two for-all types
-       [TcTyVar]        -- The instantiated skolem variables
        TcType           -- The instantiated type *inside* the forall
 
   | UnkSkol             -- Unhelpful info (until I improve it)
@@ -2534,42 +2623,42 @@ instance Outputable SkolemInfo where
 pprSkolInfo :: SkolemInfo -> SDoc
 -- Complete the sentence "is a rigid type variable bound by..."
 pprSkolInfo (SigSkol ctxt ty) = pprSigSkolInfo ctxt ty
-pprSkolInfo (IPSkol ips)      = ptext (sLit "the implicit-parameter binding") <> plural ips <+> ptext (sLit "for")
+pprSkolInfo (IPSkol ips)      = text "the implicit-parameter binding" <> plural ips <+> text "for"
                                 <+> pprWithCommas ppr ips
-pprSkolInfo (ClsSkol cls)     = ptext (sLit "the class declaration for") <+> quotes (ppr cls)
-pprSkolInfo (DerivSkol pred)  = ptext (sLit "the deriving clause for") <+> quotes (ppr pred)
-pprSkolInfo InstSkol          = ptext (sLit "the instance declaration")
-pprSkolInfo (InstSC n)        = ptext (sLit "the instance declaration") <> ifPprDebug (parens (ppr n))
-pprSkolInfo DataSkol          = ptext (sLit "a data type declaration")
-pprSkolInfo FamInstSkol       = ptext (sLit "a family instance declaration")
-pprSkolInfo BracketSkol       = ptext (sLit "a Template Haskell bracket")
-pprSkolInfo (RuleSkol name)   = ptext (sLit "the RULE") <+> pprRuleName name
-pprSkolInfo ArrowSkol         = ptext (sLit "an arrow form")
+pprSkolInfo (ClsSkol cls)     = text "the class declaration for" <+> quotes (ppr cls)
+pprSkolInfo (DerivSkol pred)  = text "the deriving clause for" <+> quotes (ppr pred)
+pprSkolInfo InstSkol          = text "the instance declaration"
+pprSkolInfo (InstSC n)        = text "the instance declaration" <> ifPprDebug (parens (ppr n))
+pprSkolInfo DataSkol          = text "a data type declaration"
+pprSkolInfo FamInstSkol       = text "a family instance declaration"
+pprSkolInfo BracketSkol       = text "a Template Haskell bracket"
+pprSkolInfo (RuleSkol name)   = text "the RULE" <+> pprRuleName name
+pprSkolInfo ArrowSkol         = text "an arrow form"
 pprSkolInfo (PatSkol cl mc)   = sep [ pprPatSkolInfo cl
-                                    , ptext (sLit "in") <+> pprMatchContext mc ]
-pprSkolInfo (InferSkol ids)   = sep [ ptext (sLit "the inferred type of")
+                                    , text "in" <+> pprMatchContext mc ]
+pprSkolInfo (InferSkol ids)   = sep [ text "the inferred type of"
                                     , vcat [ ppr name <+> dcolon <+> ppr ty
                                            | (name,ty) <- ids ]]
-pprSkolInfo (UnifyForAllSkol tvs ty) = ptext (sLit "the type") <+> ppr (mkInvForAllTys tvs ty)
+pprSkolInfo (UnifyForAllSkol ty) = text "the type" <+> ppr ty
 
 -- UnkSkol
 -- For type variables the others are dealt with by pprSkolTvBinding.
 -- For Insts, these cases should not happen
-pprSkolInfo UnkSkol = WARN( True, text "pprSkolInfo: UnkSkol" ) ptext (sLit "UnkSkol")
+pprSkolInfo UnkSkol = WARN( True, text "pprSkolInfo: UnkSkol" ) text "UnkSkol"
 
-pprSigSkolInfo :: UserTypeCtxt -> Type -> SDoc
+pprSigSkolInfo :: UserTypeCtxt -> ExpType -> SDoc
 pprSigSkolInfo ctxt ty
   = case ctxt of
        FunSigCtxt f _ -> pp_sig f
        _              -> vcat [ pprUserTypeCtxt ctxt <> colon
                               , nest 2 (ppr ty) ]
   where
-    pp_sig f = vcat [ ptext (sLit "the type signature for:")
+    pp_sig f = vcat [ text "the type signature for:"
                     , nest 2 (pprPrefixOcc f <+> dcolon <+> ppr ty) ]
 
 pprPatSkolInfo :: ConLike -> SDoc
 pprPatSkolInfo (RealDataCon dc)
-  = sep [ ptext (sLit "a pattern with constructor:")
+  = sep [ text "a pattern with constructor:"
         , nest 2 $ ppr dc <+> dcolon
           <+> pprType (dataConUserType dc) <> comma ]
           -- pprType prints forall's regardless of -fprint-explict-foralls
@@ -2577,7 +2666,7 @@ pprPatSkolInfo (RealDataCon dc)
           -- type variable 't' is bound by ...
 
 pprPatSkolInfo (PatSynCon ps)
-  = sep [ ptext (sLit "a pattern with pattern synonym:")
+  = sep [ text "a pattern with pattern synonym:"
         , nest 2 $ ppr ps <+> dcolon
                    <+> pprType (patSynType ps) <> comma ]
 
@@ -2601,13 +2690,13 @@ data CtOrigin
                                    -- function or instance
 
   | TypeEqOrigin { uo_actual   :: TcType
-                 , uo_expected :: TcType
+                 , uo_expected :: ExpType
                  , uo_thing    :: Maybe ErrorThing
                                   -- ^ The thing that has type "actual"
                  }
 
   | KindEqOrigin
-      TcType TcType             -- A kind equality arising from unifying these two types
+      TcType (Maybe TcType)     -- A kind equality arising from unifying these two types
       CtOrigin                  -- originally arising from this
       (Maybe TypeOrKind)        -- the level of the eq this arises from
 
@@ -2731,7 +2820,7 @@ exprCtOrigin (SectionL _ _)     = SectionOrigin
 exprCtOrigin (SectionR _ _)     = SectionOrigin
 exprCtOrigin (ExplicitTuple {}) = Shouldn'tHappenOrigin "explicit tuple"
 exprCtOrigin (HsCase _ matches) = matchesCtOrigin matches
-exprCtOrigin (HsIf (Just syn) _ _ _) = exprCtOrigin syn
+exprCtOrigin (HsIf (Just syn) _ _ _) = exprCtOrigin (syn_expr syn)
 exprCtOrigin (HsIf {})          = Shouldn'tHappenOrigin "if expression"
 exprCtOrigin (HsMultiIf _ rhs)  = lGRHSCtOrigin rhs
 exprCtOrigin (HsLet _ (L _ e))  = exprCtOrigin e
@@ -2756,7 +2845,7 @@ exprCtOrigin (HsArrApp {})      = panic "exprCtOrigin HsArrApp"
 exprCtOrigin (HsArrForm {})     = panic "exprCtOrigin HsArrForm"
 exprCtOrigin (HsTick _ (L _ e)) = exprCtOrigin e
 exprCtOrigin (HsBinTick _ _ (L _ e)) = exprCtOrigin e
-exprCtOrigin (HsTickPragma _ _ (L _ e)) = exprCtOrigin e
+exprCtOrigin (HsTickPragma _ _ _ (L _ e)) = exprCtOrigin e
 exprCtOrigin EWildPat           = panic "exprCtOrigin EWildPat"
 exprCtOrigin (EAsPat {})        = panic "exprCtOrigin EAsPat"
 exprCtOrigin (EViewPat {})      = panic "exprCtOrigin EViewPat"
@@ -2798,38 +2887,42 @@ pprCtOrigin (GivenOrigin sk) = ctoHerald <+> ppr sk
 
 pprCtOrigin (SpecPragOrigin ctxt)
   = case ctxt of
-       FunSigCtxt n _ -> ptext (sLit "a SPECIALISE pragma for") <+> quotes (ppr n)
-       SpecInstCtxt   -> ptext (sLit "a SPECIALISE INSTANCE pragma")
-       _              -> ptext (sLit "a SPECIALISE pragma")  -- Never happens I think
+       FunSigCtxt n _ -> text "a SPECIALISE pragma for" <+> quotes (ppr n)
+       SpecInstCtxt   -> text "a SPECIALISE INSTANCE pragma"
+       _              -> text "a SPECIALISE pragma"  -- Never happens I think
 
 pprCtOrigin (FunDepOrigin1 pred1 loc1 pred2 loc2)
-  = hang (ctoHerald <+> ptext (sLit "a functional dependency between constraints:"))
+  = hang (ctoHerald <+> text "a functional dependency between constraints:")
        2 (vcat [ hang (quotes (ppr pred1)) 2 (pprCtLoc loc1)
                , hang (quotes (ppr pred2)) 2 (pprCtLoc loc2) ])
 
 pprCtOrigin (FunDepOrigin2 pred1 orig1 pred2 loc2)
-  = hang (ctoHerald <+> ptext (sLit "a functional dependency between:"))
-       2 (vcat [ hang (ptext (sLit "constraint") <+> quotes (ppr pred1))
+  = hang (ctoHerald <+> text "a functional dependency between:")
+       2 (vcat [ hang (text "constraint" <+> quotes (ppr pred1))
                     2 (pprCtOrigin orig1 )
-               , hang (ptext (sLit "instance") <+> quotes (ppr pred2))
-                    2 (ptext (sLit "at") <+> ppr loc2) ])
+               , hang (text "instance" <+> quotes (ppr pred2))
+                    2 (text "at" <+> ppr loc2) ])
 
-pprCtOrigin (KindEqOrigin t1 t2 _ _)
-  = hang (ctoHerald <+> ptext (sLit "a kind equality arising from"))
+pprCtOrigin (KindEqOrigin t1 (Just t2) _ _)
+  = hang (ctoHerald <+> text "a kind equality arising from")
        2 (sep [ppr t1, char '~', ppr t2])
 
+pprCtOrigin (KindEqOrigin t1 Nothing _ _)
+  = hang (ctoHerald <+> text "a kind equality when matching")
+       2 (ppr t1)
+
 pprCtOrigin (UnboundOccurrenceOf name)
-  = ctoHerald <+> ptext (sLit "an undeclared identifier") <+> quotes (ppr name)
+  = ctoHerald <+> text "an undeclared identifier" <+> quotes (ppr name)
 
 pprCtOrigin (DerivOriginDC dc n)
-  = hang (ctoHerald <+> ptext (sLit "the") <+> speakNth n
-          <+> ptext (sLit "field of") <+> quotes (ppr dc))
-       2 (parens (ptext (sLit "type") <+> quotes (ppr ty)))
+  = hang (ctoHerald <+> text "the" <+> speakNth n
+          <+> text "field of" <+> quotes (ppr dc))
+       2 (parens (text "type" <+> quotes (ppr ty)))
   where
     ty = dataConOrigArgTys dc !! (n-1)
 
 pprCtOrigin (DerivOriginCoerce meth ty1 ty2)
-  = hang (ctoHerald <+> ptext (sLit "the coercion of the method") <+> quotes (ppr meth))
+  = hang (ctoHerald <+> text "the coercion of the method" <+> quotes (ppr meth))
        2 (sep [ text "from type" <+> quotes (ppr ty1)
               , nest 2 $ text "to type" <+> quotes (ppr ty2) ])
 
@@ -2845,7 +2938,7 @@ pprCtOrigin (MCompPatOrigin pat)
 pprCtOrigin (FailablePattern pat)
     = ctoHerald <+> text "the failable pattern" <+> quotes (ppr pat)
       $$
-      text "(this will become an error a future GHC release)"
+      text "(this will become an error in a future GHC release)"
 
 pprCtOrigin (Shouldn'tHappenOrigin note)
   = sdocWithDynFlags $ \dflags ->
@@ -2861,37 +2954,37 @@ pprCtOrigin simple_origin
 
 -- | Short one-liners
 pprCtO :: CtOrigin -> SDoc
-pprCtO (OccurrenceOf name)   = hsep [ptext (sLit "a use of"), quotes (ppr name)]
-pprCtO (OccurrenceOfRecSel name) = hsep [ptext (sLit "a use of"), quotes (ppr name)]
-pprCtO AppOrigin             = ptext (sLit "an application")
-pprCtO (IPOccOrigin name)    = hsep [ptext (sLit "a use of implicit parameter"), quotes (ppr name)]
-pprCtO (OverLabelOrigin l)   = hsep [ptext (sLit "the overloaded label")
+pprCtO (OccurrenceOf name)   = hsep [text "a use of", quotes (ppr name)]
+pprCtO (OccurrenceOfRecSel name) = hsep [text "a use of", quotes (ppr name)]
+pprCtO AppOrigin             = text "an application"
+pprCtO (IPOccOrigin name)    = hsep [text "a use of implicit parameter", quotes (ppr name)]
+pprCtO (OverLabelOrigin l)   = hsep [text "the overloaded label"
                                     ,quotes (char '#' <> ppr l)]
-pprCtO RecordUpdOrigin       = ptext (sLit "a record update")
-pprCtO ExprSigOrigin         = ptext (sLit "an expression type signature")
-pprCtO PatSigOrigin          = ptext (sLit "a pattern type signature")
-pprCtO PatOrigin             = ptext (sLit "a pattern")
-pprCtO ViewPatOrigin         = ptext (sLit "a view pattern")
-pprCtO IfOrigin              = ptext (sLit "an if expression")
-pprCtO (LiteralOrigin lit)   = hsep [ptext (sLit "the literal"), quotes (ppr lit)]
-pprCtO (ArithSeqOrigin seq)  = hsep [ptext (sLit "the arithmetic sequence"), quotes (ppr seq)]
-pprCtO (PArrSeqOrigin seq)   = hsep [ptext (sLit "the parallel array sequence"), quotes (ppr seq)]
-pprCtO SectionOrigin         = ptext (sLit "an operator section")
-pprCtO TupleOrigin           = ptext (sLit "a tuple")
-pprCtO NegateOrigin          = ptext (sLit "a use of syntactic negation")
-pprCtO (ScOrigin n)          = ptext (sLit "the superclasses of an instance declaration")
+pprCtO RecordUpdOrigin       = text "a record update"
+pprCtO ExprSigOrigin         = text "an expression type signature"
+pprCtO PatSigOrigin          = text "a pattern type signature"
+pprCtO PatOrigin             = text "a pattern"
+pprCtO ViewPatOrigin         = text "a view pattern"
+pprCtO IfOrigin              = text "an if expression"
+pprCtO (LiteralOrigin lit)   = hsep [text "the literal", quotes (ppr lit)]
+pprCtO (ArithSeqOrigin seq)  = hsep [text "the arithmetic sequence", quotes (ppr seq)]
+pprCtO (PArrSeqOrigin seq)   = hsep [text "the parallel array sequence", quotes (ppr seq)]
+pprCtO SectionOrigin         = text "an operator section"
+pprCtO TupleOrigin           = text "a tuple"
+pprCtO NegateOrigin          = text "a use of syntactic negation"
+pprCtO (ScOrigin n)          = text "the superclasses of an instance declaration"
                                <> ifPprDebug (parens (ppr n))
-pprCtO DerivOrigin           = ptext (sLit "the 'deriving' clause of a data type declaration")
-pprCtO StandAloneDerivOrigin = ptext (sLit "a 'deriving' declaration")
-pprCtO DefaultOrigin         = ptext (sLit "a 'default' declaration")
-pprCtO DoOrigin              = ptext (sLit "a do statement")
+pprCtO DerivOrigin           = text "the 'deriving' clause of a data type declaration"
+pprCtO StandAloneDerivOrigin = text "a 'deriving' declaration"
+pprCtO DefaultOrigin         = text "a 'default' declaration"
+pprCtO DoOrigin              = text "a do statement"
 pprCtO MCompOrigin           = text "a statement in a monad comprehension"
-pprCtO ProcOrigin            = ptext (sLit "a proc expression")
-pprCtO (TypeEqOrigin t1 t2 _)= ptext (sLit "a type equality") <+> sep [ppr t1, char '~', ppr t2]
-pprCtO AnnOrigin             = ptext (sLit "an annotation")
-pprCtO HoleOrigin            = ptext (sLit "a use of") <+> quotes (ptext $ sLit "_")
-pprCtO ListOrigin            = ptext (sLit "an overloaded list")
-pprCtO StaticOrigin          = ptext (sLit "a static form")
+pprCtO ProcOrigin            = text "a proc expression"
+pprCtO (TypeEqOrigin t1 t2 _)= text "a type equality" <+> sep [ppr t1, char '~', ppr t2]
+pprCtO AnnOrigin             = text "an annotation"
+pprCtO HoleOrigin            = text "a use of" <+> quotes (text "_")
+pprCtO ListOrigin            = text "an overloaded list"
+pprCtO StaticOrigin          = text "a static form"
 pprCtO _                     = panic "pprCtOrigin"
 
 {-

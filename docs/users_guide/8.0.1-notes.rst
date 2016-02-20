@@ -47,8 +47,8 @@ The highlights, since the 7.10 branch, are:
 - :ghc-flag:`-XDuplicateRecordFields`, allowing multiple datatypes to declare the same
   record field names provided they are used unambiguously (see :ref:`duplicate-record-fields`)
 
-- Support for implicit parameters providing light-weight
-  :ref:`callstacks and source locations <implicit-callstacks>`
+- Support for lightweight
+  :ref:`callstacks and source locations <hascallstack>`
 
 - User-defined error messages for type errors
 
@@ -83,24 +83,20 @@ Language
             -- | Just a normal sum
             Sum :: Int -> Int -> Expr Int
 
--  Implicit parameters of the new ``base`` type :base-ref:`GHC.Stack.CallStack <GHC-Stack.html>`
-   are treated specially in function calls, the solver automatically
-   appends the source location of the call to the ``CallStack`` in
-   the environment. For example ::
+-  The new ``base`` constraint :base-ref:`GHC.Stack.HasCallStack <GHC-Stack.html>`
+   can be used by functions to request a partial call-stack. For example ::
 
-        myerror :: (?callStack :: CallStack) => String -> a
-        myerror msg = error (msg ++ "\n" ++ prettyCallStack ?callStack)
+        errorWithCallStack :: HasCallStack => String -> a
+        errorWithCallStack msg = error (msg ++ "\n" ++ prettyCallStack callStack)
 
-        ghci> myerror "die"
+        ghci> errorWithCallStack "die"
         *** Exception: die
-        CallStack (from ImplicitParams):
-          myerror, called at <interactive>:2:1 in interactive:Ghci1
+        CallStack (from HasCallStack):
+          errorWithCallStack, called at <interactive>:2:1 in interactive:Ghci1
 
-   prints the call-site of ``myerror``. The name of the implicit
-   parameter does not matter, but within ``base`` we call it
-   ``?callStack``.
+   prints the call-site of ``errorWithCallStack``.
 
-   See :ref:`lib-base` for a description of the ``CallStack`` type.
+   See :ref:`hascallstack` for a description of ``HasCallStack``.
 
 -  GHC now supports visible type application, allowing
    programmers to easily specify how type parameters should be
@@ -200,7 +196,7 @@ Compiler
    compilers. The old ``-f``-based warning flags will remain functional for
    the forseeable future.
 
--  Added the option :ghc-flag:`-dth-dec-file`. This dumps out a .th.hs file of
+-  Added the option :ghc-flag:`-dth-dec-file`. This dumps out a ``.th.hs`` file of
    all Template Haskell declarations in a corresponding .hs file. The
    idea is that application developers can check this into their
    repository so that they can grep for identifiers used elsewhere that
@@ -209,6 +205,13 @@ Compiler
    file instead of being coupled to :ghc-flag:`-ddump-to-file` and only outputs
    code that does not exist in the .hs file and a comment for the splice
    location in the original file.
+
+-  After a long hiatus (see :ghc-ticket:`10935`) the
+   :ghc-flag:`-Wmonomorphism-restriction` (formerly
+   :ghc-flag:`-fwarn-monomorphism-restriction`) flag has returned.
+   The functionality of this flag was inadvertently removed by a commit in 2010;
+   this has been fixed and the flag should now issue warnings as it
+   previously did.
 
 -  Added the option :ghc-flag:`-fprint-expanded-types`. When enabled, GHC also
    prints type-synonym-expanded types in type errors.
@@ -231,8 +234,9 @@ Compiler
    is intended to alert users to cases where they apply ``INLINEABLE`` but
    may not get the speed-up they expect.
 
--  Added the option :ghc-flag:`-Wnoncanonical-monad-instances` which helps
-   detect noncanonical ``Applicative``/``Monad`` instance definitions.
+-  Added the option :ghc-flag:`-Wnoncanonical-monad-instances` and
+   :ghc-flag:`-Wnoncanonical-monadfail-instances` which help detect noncanonical
+   ``Applicative``/``Monad``/``MonadFail`` instance definitions.
    See flag description in :ref:`options-sanity` for more details.
 
 -  When printing an out-of-scope error message, GHC will give helpful advice if
@@ -244,7 +248,7 @@ Compiler
    allows library authors eager to make their code future compatible to adapt
    to new features before they even generate warnings.
 
--  Added the :ghc-flag:`-Wmissing-monadfail-instance` flag. When enabled, this
+-  Added the :ghc-flag:`-Wmissing-monadfail-instances` flag. When enabled, this
    will issue a warning if a failable pattern is used in a context that does
    not have a ``MonadFail`` constraint. This flag represents phase 1 of the
    `MonadFail Proposal (MFP)
@@ -256,23 +260,44 @@ Compiler
    warnings makes sure the definition of ``Semigroup`` as a superclass of
    ``Monoid`` does not break any code.
 
--  Added the :ghc-flag:`-Wmissing-pat-syn-sigs` flag. When enabled, this will issue
+-  Added the :ghc-flag:`-Wmissing-pat-syn-signatures` flag. When enabled, this will issue
    a warning when a pattern synonym definition doesn't have a type signature.
    It is turned off by default but enabled by :ghc-flag:`-Wall`.
 
--  Changed the :ghc-flag:`-fwarn-unused-matches` flag to report unused type variables
-   in data and type families in addition to its previous behaviour.
-   To avoid warnings, unused type variables should be prefixed or replaced with
-   underscores.
+-  Added the :ghc-flag:`-Wunused-type-patterns` flag to report unused
+   type variables in data and type family instances. This flag is not implied
+   by :ghc-flag:`-Wall`, since :ghc-flag:`-Wunused-type-patterns` will
+   warn about unused type variables even if the types themselves are intended
+   to be used as documentation. If :ghc-flag:`-Wunused-type-patterns` is
+   enabled, one can prefix or replace unused type variables with underscores to
+   avoid warnings.
 
--  Added the :ghc-flag:`-Wtoo-many-guards` flag. When enabled, this will issue a
-   warning if a pattern match contains too many guards (over 20 at the
-   moment). Makes a difference only if pattern match checking is also enabled.
+-  Split off the new flag :ghc-flag:`-Wunused-foralls` from the previously
+   existing flag :ghc-flag:`-Wunused-matches`. :ghc-flag:`-Wunused-foralls`
+   emits a warning in the specific case that a user writes explicit ``forall``
+   syntax with unused type variables, while :ghc-flag:`-Wunused-matches` only
+   warns in the case of unused term-level patterns. Both flags are implied by
+   :ghc-flag:`-W`.
 
--  Added the :ghc-flag:`-ffull-guard-reasoning` flag. When enabled, pattern match
-   checking tries its best to reason about guards. Since the additional
-   expressivity may come with a high price in terms of compilation time and
-   memory consumption, it is turned off by default.
+-  Added the :ghc-flag:`-fmax-pmcheck-iterations` to control how many times
+   the pattern match checker iterates. Since coverage checking is exponential
+   in the general case, setting a default number of iterations prevents memory
+   and performance blowups. By default, the number of iterations is set to
+   10000000 but it can be set to ``n`` with: ``-fmax-pmcheck-iterations=n``.
+   If the set number of iterations is exceeded, an informative warning is
+   issued.
+
+-  :ghc-flag:`-this-package-key` has been renamed again (hopefully for the last time!)
+   to :ghc-flag:`-this-unit-id`.  The renaming was motivated by the fact that
+   the identifier you pass to GHC here doesn't have much to do with packages:
+   you may provide different unit IDs for libraries which are in the same
+   package.  :ghc-flag:`-this-package-key` is deprecated; you should use
+   :ghc-flag:`-this-unit-id` or, if you need compatibility over multiple
+   versions of GHC, :ghc-flag:`-package-name`.
+
+-  When :ghc-flag:`-fdefer-type-errors` is enabled and an expression fails to
+   typecheck, ``Control.Exception.TypeError`` will now be thrown instead of
+   ``Control.Exception.ErrorCall``.
 
 GHCi
 ~~~~
@@ -370,6 +395,13 @@ Template Haskell
 
 Runtime system
 ~~~~~~~~~~~~~~
+
+- We have a shiny new two-step memory allocator for 64-bit platforms (see
+  :ghc-ticket:`9706`). In addition to simplifying the runtime system's
+  implementation this may significantly improve garbage collector performance.
+  Note, however, that Haskell processes will have an apparent virtual memory
+  footprint of a terabyte or so. Don't worry though, most of this amount is merely
+  mapped but uncommitted address space which is not backed by physical memory.
 
 - Support for performance monitoring with PAPI has been dropped.
 
@@ -487,6 +519,10 @@ See ``changelog.md`` in the ``base`` package for full release notes.
 
 - Enable ``PolyKinds`` in the ``Data.Functor.Const`` module to give ``Const``
   the kind ``* -> k -> *`` (see :ghc-ticket:`10039`).
+
+- Add the ``TypeError`` datatype to ``Control.Exception``, which represents the
+  error that is thrown when an expression fails to typecheck when run using
+  :ghc-flag:`-fdefer-type-errors`. (see :ghc-ticket:`10284`)
 
 binary
 ~~~~~~

@@ -430,7 +430,7 @@ test('T783',
             # 2014-09-03: 223377364 (Windows) better specialisation, raft of core-to-core optimisations
             # 2014-12-22: 235002220 (Windows) not sure why
 
-           (wordsize(64), 1134085384, 10)]),
+           (wordsize(64), 488592288, 10)]),
             # prev:       349263216 (amd64/Linux)
             # 07/08/2012: 384479856 (amd64/Linux)
             # 29/08/2012: 436927840 (amd64/Linux)
@@ -457,6 +457,8 @@ test('T783',
             #    (D757: Emit Typeable instances at site of type definition)
             # 2015-12-04: 1134085384 (amd64/Linux)
             #    (D1535: Major overhaul of pattern match checker, #11162)
+            # 2016-02-03: 488592288 (amd64/Linux)
+            #    (D1795: Another overhaul of pattern match checker, #11374)
       extra_hc_opts('-static')
       ],
       compile,[''])
@@ -520,7 +522,7 @@ test('T5321FD',
 
 test('T5642',
      [ only_ways(['normal']),
-       skip, # See Trac #11163
+       normal,
        compiler_stats_num_field('bytes allocated',
            [(wordsize(32), 641085256, 10),
                      # sample from x86/Linux
@@ -528,7 +530,7 @@ test('T5642',
             # 2014-09-03:  753045568
             # 2014-12-10:  641085256 Improvements in constraints solver
 
-            (wordsize(64), 1071915072, 10)])
+            (wordsize(64), 950004816, 10)])
             # prev:        1300000000
             # 2014-07-17:  1358833928 (general round of updates)
             # 2014-08-07:  1402242360 (caused by 1fc60ea)
@@ -541,6 +543,7 @@ test('T5642',
             # 2014-12-10:  1282916024 Improvements in constraints solver
             # 2015-10-28:  1412808976 Emit Typeable at definition site
             # 2015-11-22:  1071915072 Use TypeLits in the metadata encoding
+            # 2016-02-08:  950004816  Pattern match checker re-rework
       ],
       compile,['-O'])
 
@@ -603,12 +606,13 @@ test('T9020',
           [(wordsize(32), 343005716, 10),
            # Original:    381360728
            # 2014-07-31:  343005716 (Windows) (general round of updates)
-           (wordsize(64), 786189008, 10)])
+           (wordsize(64), 698401736, 10)])
            # prev:        795469104
            # 2014-07-17:  728263536 (general round of updates)
            # 2014-09-10:  785871680 post-AMP-cleanup
            # 2014-11-03:  680162056 Further Applicative and Monad adjustments
            # 2015-10-21:  786189008 Make stronglyConnCompFromEdgedVertices deterministic
+	   # 2016-01-26:  698401736 improvement from using ExpTypes instead of ReturnTvs
       ],
       compile,[''])
 

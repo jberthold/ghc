@@ -41,7 +41,7 @@ import FastString
 import Util
 import DynFlags
 import ForeignCall
-import Demand           ( isSingleUsed )
+import Demand           ( isUsedOnce )
 import PrimOp           ( PrimCall(..) )
 
 import Data.Maybe    (isJust)
@@ -310,8 +310,8 @@ coreToTopStgRhs dflags this_mod scope_fv_info (bndr, rhs)
     id_arity  = idArity bndr
     mk_arity_msg stg_arity
         = vcat [ppr bndr,
-                ptext (sLit "Id arity:") <+> ppr id_arity,
-                ptext (sLit "STG arity:") <+> ppr stg_arity]
+                text "Id arity:" <+> ppr id_arity,
+                text "STG arity:" <+> ppr stg_arity]
 
 mkTopStgRhs :: DynFlags -> Module -> FreeVarsInfo
             -> SRT -> Id -> StgBinderInfo -> StgExpr
@@ -480,7 +480,7 @@ coreToStgExpr e = pprPanic "coreToStgExpr" (ppr e)
 mkStgAltType :: Id -> [CoreAlt] -> AltType
 mkStgAltType bndr alts = case repType (idType bndr) of
     UnaryRep rep_ty -> case tyConAppTyCon_maybe rep_ty of
-        Just tc | isUnLiftedTyCon tc -> PrimAlt tc
+        Just tc | isUnliftedTyCon tc -> PrimAlt tc
                 | isAbstractTyCon tc -> look_for_better_tycon
                 | isAlgTyCon tc      -> AlgAlt tc
                 | otherwise          -> ASSERT2( _is_poly_alt_tycon tc, ppr tc )
@@ -654,7 +654,7 @@ coreToStgArgs (arg : args) = do         -- Non-type argument
     let
         arg_ty = exprType arg
         stg_arg_ty = stgArgType stg_arg
-        bad_args = (isUnLiftedType arg_ty && not (isUnLiftedType stg_arg_ty))
+        bad_args = (isUnliftedType arg_ty && not (isUnliftedType stg_arg_ty))
                 || (map typePrimRep (flattenRepType (repType arg_ty))
                         /= map typePrimRep (flattenRepType (repType stg_arg_ty)))
         -- In GHCi we coerce an argument of type BCO# (unlifted) to HValue (lifted),
@@ -663,7 +663,7 @@ coreToStgArgs (arg : args) = do         -- Non-type argument
         -- we complain.
         -- We also want to check if a pointer is cast to a non-ptr etc
 
-    WARN( bad_args, ptext (sLit "Dangerous-looking argument. Probable cause: bad unsafeCoerce#") $$ ppr arg )
+    WARN( bad_args, text "Dangerous-looking argument. Probable cause: bad unsafeCoerce#" $$ ppr arg )
      return (stg_arg : stg_args, fvs, ticks ++ aticks)
 
 
@@ -833,8 +833,8 @@ mkStgRhs' con_updateable rhs_fvs srt bndr binder_info rhs
 
     (_, unticked_rhs) = stripStgTicksTop (not . tickishIsCode) rhs
 
-    upd_flag | isSingleUsed (idDemandInfo bndr)  = SingleEntry
-             | otherwise                         = Updatable
+    upd_flag | isUsedOnce (idDemandInfo bndr) = SingleEntry
+             | otherwise                      = Updatable
 
   {-
     SDM: disabled.  Eval/Apply can't handle functions with arity zero very

@@ -32,6 +32,7 @@ import HscTypes         ( Warnings(..), plusWarns )
 import Class            ( FunDep )
 import PrelNames        ( applicativeClassName, pureAName, thenAName
                         , monadClassName, returnMName, thenMName
+                        , monadFailClassName, failMName, failMName_preMFP
                         , semigroupClassName, sappendName
                         , monoidClassName, mappendName
                         )
@@ -289,7 +290,7 @@ rnSrcFixityDecls bndr_set fix_decls
                     -- this lookup will fail if the definition isn't local
         do names <- lookupLocalTcNames sig_ctxt what rdr_name
            return [ L name_loc name | (_, name) <- names ]
-    what = ptext (sLit "fixity signature")
+    what = text "fixity signature"
 
 {-
 *********************************************************
@@ -328,7 +329,7 @@ rnSrcWarnDecls bndr_set decls'
                                 rdr_names
           ; return [(rdrNameOcc rdr, txt) | (rdr, _) <- names] }
 
-   what = ptext (sLit "deprecation")
+   what = text "deprecation"
 
    warn_rdr_dups = findDupRdrNames $ concatMap (\(L _ (Warning ns _)) -> ns)
                                                decls
@@ -343,8 +344,8 @@ findDupRdrNames = findDupsEq (\ x -> \ y -> rdrNameOcc (unLoc x) == rdrNameOcc (
 dupWarnDecl :: Located RdrName -> RdrName -> SDoc
 -- Located RdrName -> DeprecDecl RdrName -> SDoc
 dupWarnDecl (L loc _) rdr_name
-  = vcat [ptext (sLit "Multiple warning declarations for") <+> quotes (ppr rdr_name),
-          ptext (sLit "also at ") <+> ppr loc]
+  = vcat [text "Multiple warning declarations for" <+> quotes (ppr rdr_name),
+          text "also at " <+> ppr loc]
 
 {-
 *********************************************************
@@ -476,6 +477,9 @@ checkCanonicalInstances cls poly_ty mbinds = do
     whenWOptM Opt_WarnNonCanonicalMonadInstances
         checkCanonicalMonadInstances
 
+    whenWOptM Opt_WarnNonCanonicalMonadFailInstances
+        checkCanonicalMonadFailInstances
+
     whenWOptM Opt_WarnNonCanonicalMonoidInstances
         checkCanonicalMonoidInstances
 
@@ -516,6 +520,40 @@ checkCanonicalInstances cls poly_ty mbinds = do
                       | name == thenMName, isAliasMG mg /= Just thenAName
                       -> addWarnNonCanonicalMethod2 "(>>)" "(*>)"
 
+                  _ -> return ()
+
+      | otherwise = return ()
+
+    -- | Warn about unsound/non-canonical 'Monad'/'MonadFail' instance
+    -- declarations. Specifically, the following conditions are verified:
+    --
+    -- In 'Monad' instances declarations:
+    --
+    --  * If 'fail' is overridden it must be canonical
+    --    (i.e. @fail = Control.Monad.Fail.fail@)
+    --
+    -- In 'MonadFail' instance declarations:
+    --
+    --  * Warn if 'fail' is defined backwards
+    --    (i.e. @fail = Control.Monad.fail@).
+    --
+    checkCanonicalMonadFailInstances
+      | cls == monadFailClassName  = do
+          forM_ (bagToList mbinds) $ \(L loc mbind) -> setSrcSpan loc $ do
+              case mbind of
+                  FunBind { fun_id = L _ name, fun_matches = mg }
+                      | name == failMName, isAliasMG mg == Just failMName_preMFP
+                      -> addWarnNonCanonicalMethod1 "fail" "Control.Monad.fail"
+
+                  _ -> return ()
+
+      | cls == monadClassName  = do
+          forM_ (bagToList mbinds) $ \(L loc mbind) -> setSrcSpan loc $ do
+              case mbind of
+                  FunBind { fun_id = L _ name, fun_matches = mg }
+                      | name == failMName_preMFP, isAliasMG mg /= Just failMName
+                      -> addWarnNonCanonicalMethod2 "fail"
+                                                    "Control.Monad.Fail.fail"
                   _ -> return ()
 
       | otherwise = return ()
@@ -598,11 +636,10 @@ checkCanonicalInstances cls poly_ty mbinds = do
     -- stolen from TcInstDcls
     instDeclCtxt1 :: LHsSigType Name -> SDoc
     instDeclCtxt1 hs_inst_ty
-      | (_, _, head_ty) <- splitLHsInstDeclTy hs_inst_ty
-      = inst_decl_ctxt (ppr head_ty)
+      = inst_decl_ctxt (ppr (getLHsInstDeclHead hs_inst_ty))
 
     inst_decl_ctxt :: SDoc -> SDoc
-    inst_decl_ctxt doc = hang (ptext (sLit "in the instance declaration for"))
+    inst_decl_ctxt doc = hang (text "in the instance declaration for")
                          2 (quotes doc <> text ".")
 
 
@@ -694,7 +731,7 @@ rnFamInstDecl doc mb_cls tycon (HsIB { hsib_body = pats }) payload rnPayload
                           -- appear *more than once* on the LHS
                           -- e.g.   F a Int a = Bool
                     ; let tv_nms_used = extendNameSetList rhs_fvs tv_nms_dups
-                    ; warnUnusedMatches var_names tv_nms_used
+                    ; warnUnusedTypePatterns var_names tv_nms_used
 
                          -- See Note [Renaming associated types]
                     ; let bad_tvs = case mb_cls of
@@ -819,7 +856,7 @@ fresh meta-variables whereas the former generate fresh skolems.
 
 Note [Unused type variables in family instances]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When the flag -fwarn-unused-matches is on, the compiler reports warnings
+When the flag -fwarn-unused-type-patterns is on, the compiler reports warnings
 about unused type variables. (rnFamInstDecl) A type variable is considered
 used
  * when it is either occurs on the RHS of the family instance, or
@@ -834,7 +871,7 @@ beginning with an underscore.
 Extra-constraints wild cards are not supported in type/data family
 instance declarations.
 
-Relevant tickets: #3699, #10586 and #10982.
+Relevant tickets: #3699, #10586, #10982 and #11451.
 
 Note [Renaming associated types]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -882,8 +919,8 @@ rnSrcDerivDecl (DerivDecl ty overlap)
 
 standaloneDerivErr :: SDoc
 standaloneDerivErr
-  = hang (ptext (sLit "Illegal standalone deriving declaration"))
-       2 (ptext (sLit "Use StandaloneDeriving to enable this extension"))
+  = hang (text "Illegal standalone deriving declaration")
+       2 (text "Use StandaloneDeriving to enable this extension")
 
 {-
 *********************************************************
@@ -995,21 +1032,21 @@ validRuleLhs foralls lhs
 
 badRuleVar :: FastString -> Name -> SDoc
 badRuleVar name var
-  = sep [ptext (sLit "Rule") <+> doubleQuotes (ftext name) <> colon,
-         ptext (sLit "Forall'd variable") <+> quotes (ppr var) <+>
-                ptext (sLit "does not appear on left hand side")]
+  = sep [text "Rule" <+> doubleQuotes (ftext name) <> colon,
+         text "Forall'd variable" <+> quotes (ppr var) <+>
+                text "does not appear on left hand side"]
 
 badRuleLhsErr :: FastString -> LHsExpr Name -> HsExpr Name -> SDoc
 badRuleLhsErr name lhs bad_e
-  = sep [ptext (sLit "Rule") <+> pprRuleName name <> colon,
+  = sep [text "Rule" <+> pprRuleName name <> colon,
          nest 4 (vcat [err,
-                       ptext (sLit "in left-hand side:") <+> ppr lhs])]
+                       text "in left-hand side:" <+> ppr lhs])]
     $$
-    ptext (sLit "LHS must be of form (f e1 .. en) where f is not forall'd")
+    text "LHS must be of form (f e1 .. en) where f is not forall'd"
   where
     err = case bad_e of
-            HsUnboundVar occ -> ptext (sLit "Not in scope:") <+> ppr occ
-            _ -> ptext (sLit "Illegal expression:") <+> ppr bad_e
+            HsUnboundVar occ -> text "Not in scope:" <+> ppr occ
+            _ -> text "Illegal expression:" <+> ppr bad_e
 
 {-
 *********************************************************
@@ -1029,8 +1066,8 @@ rnHsVectDecl (HsVect s var rhs@(L _ (HsVar _)))
        }
 rnHsVectDecl (HsVect _ _var _rhs)
   = failWith $ vcat
-               [ ptext (sLit "IMPLEMENTATION RESTRICTION: right-hand side of a VECTORISE pragma")
-               , ptext (sLit "must be an identifier")
+               [ text "IMPLEMENTATION RESTRICTION: right-hand side of a VECTORISE pragma"
+               , text "must be an identifier"
                ]
 rnHsVectDecl (HsNoVect s var)
   = do { var' <- lookupLocatedTopBndrRn var           -- only applies to local (not imported) names
@@ -1380,8 +1417,8 @@ rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
 
 badGadtStupidTheta :: HsDocContext -> SDoc
 badGadtStupidTheta _
-  = vcat [ptext (sLit "No context is allowed on a GADT-style data declaration"),
-          ptext (sLit "(You can put a context on each contructor, though.)")]
+  = vcat [text "No context is allowed on a GADT-style data declaration",
+          text "(You can put a context on each contructor, though.)"]
 
 rnFamDecl :: Maybe Name -- Just cls => this FamilyDecl is nested
                         --             inside an *class decl* for cls
@@ -1640,9 +1677,9 @@ modules), we get better error messages, too.
 ---------------
 badAssocRhs :: [Name] -> RnM ()
 badAssocRhs ns
-  = addErr (hang (ptext (sLit "The RHS of an associated type declaration mentions")
+  = addErr (hang (text "The RHS of an associated type declaration mentions"
                   <+> pprWithCommas (quotes . ppr) ns)
-               2 (ptext (sLit "All such variables must be bound on the LHS")))
+               2 (text "All such variables must be bound on the LHS"))
 
 -----------------
 rnConDecls :: [LConDecl RdrName] -> RnM ([LConDecl Name], FreeVars)
@@ -1840,8 +1877,8 @@ add gp loc (SpliceD splice@(SpliceDecl _ flag)) ds
 
        ; return (gp, Just (splice, ds)) }
   where
-    badImplicitSplice = ptext (sLit "Parse error: naked expression at top level")
-                     $$ ptext (sLit "Perhaps you intended to use TemplateHaskell")
+    badImplicitSplice = text "Parse error: naked expression at top level"
+                     $$ text "Perhaps you intended to use TemplateHaskell"
 
 -- Class declarations: pull out the fixity signatures to the top
 add gp@(HsGroup {hs_tyclds = ts, hs_fixds = fs}) l (TyClD d) ds

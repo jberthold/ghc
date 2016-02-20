@@ -372,7 +372,7 @@ cpeBind :: TopLevelFlag -> CorePrepEnv -> CoreBind
 cpeBind top_lvl env (NonRec bndr rhs)
   = do { (_, bndr1) <- cpCloneBndr env bndr
        ; let dmd         = idDemandInfo bndr
-             is_unlifted = isUnLiftedType (idType bndr)
+             is_unlifted = isUnliftedType (idType bndr)
        ; (floats, bndr2, rhs2) <- cpePair top_lvl NonRecursive
                                           dmd
                                           is_unlifted
@@ -768,7 +768,7 @@ cpeArg env dmd arg arg_ty
              arg_float = mkFloat dmd is_unlifted v arg3
        ; return (addFloat floats2 arg_float, varToCoreExpr v) } }
   where
-    is_unlifted = isUnLiftedType arg_ty
+    is_unlifted = isUnliftedType arg_ty
     is_strict   = isStrictDmd dmd
     want_float  = wantFloatNested NonRecursive (is_strict || is_unlifted)
 
@@ -996,13 +996,13 @@ instance Outputable FloatingBind where
   ppr (FloatTick t) = ppr t
 
 instance Outputable Floats where
-  ppr (Floats flag fs) = ptext (sLit "Floats") <> brackets (ppr flag) <+>
+  ppr (Floats flag fs) = text "Floats" <> brackets (ppr flag) <+>
                          braces (vcat (map ppr (fromOL fs)))
 
 instance Outputable OkToSpec where
-  ppr OkToSpec    = ptext (sLit "OkToSpec")
-  ppr IfUnboxedOk = ptext (sLit "IfUnboxedOk")
-  ppr NotOkToSpec = ptext (sLit "NotOkToSpec")
+  ppr OkToSpec    = text "OkToSpec"
+  ppr IfUnboxedOk = text "IfUnboxedOk"
+  ppr NotOkToSpec = text "NotOkToSpec"
 
 -- Can we float these binds out of the rhs of a let?  We cache this decision
 -- to avoid having to recompute it in a non-linear way when there are

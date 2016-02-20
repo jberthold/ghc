@@ -278,6 +278,10 @@ discardResult a = a >> return ()
 getTopEnv :: TcRnIf gbl lcl HscEnv
 getTopEnv = do { env <- getEnv; return (env_top env) }
 
+updTopEnv :: (HscEnv -> HscEnv) -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
+updTopEnv upd = updEnv (\ env@(Env { env_top = top }) ->
+                          env { env_top = upd top })
+
 getGblEnv :: TcRnIf gbl lcl gbl
 getGblEnv = do { env <- getEnv; return (env_gbl env) }
 
@@ -319,16 +323,16 @@ woptM :: WarningFlag -> TcRnIf gbl lcl Bool
 woptM flag = do { dflags <- getDynFlags; return (wopt flag dflags) }
 
 setXOptM :: LangExt.Extension -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
-setXOptM flag = updEnv (\ env@(Env { env_top = top }) ->
-                          env { env_top = top { hsc_dflags = xopt_set (hsc_dflags top) flag}} )
+setXOptM flag =
+  updTopEnv (\top -> top { hsc_dflags = xopt_set (hsc_dflags top) flag})
 
 unsetGOptM :: GeneralFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
-unsetGOptM flag = updEnv (\ env@(Env { env_top = top }) ->
-                            env { env_top = top { hsc_dflags = gopt_unset (hsc_dflags top) flag}} )
+unsetGOptM flag =
+  updTopEnv (\top -> top { hsc_dflags = gopt_unset (hsc_dflags top) flag})
 
 unsetWOptM :: WarningFlag -> TcRnIf gbl lcl a -> TcRnIf gbl lcl a
-unsetWOptM flag = updEnv (\ env@(Env { env_top = top }) ->
-                            env { env_top = top { hsc_dflags = wopt_unset (hsc_dflags top) flag}} )
+unsetWOptM flag =
+  updTopEnv (\top -> top { hsc_dflags = wopt_unset (hsc_dflags top) flag})
 
 -- | Do it flag is true
 whenDOptM :: DumpFlag -> TcRnIf gbl lcl () -> TcRnIf gbl lcl ()
@@ -351,11 +355,9 @@ getGhcMode :: TcRnIf gbl lcl GhcMode
 getGhcMode = do { env <- getTopEnv; return (ghcMode (hsc_dflags env)) }
 
 withDoDynamicToo :: TcRnIf gbl lcl a -> TcRnIf gbl lcl a
-withDoDynamicToo m = do env <- getEnv
-                        let dflags = extractDynFlags env
-                            dflags' = dynamicTooMkDynamicDynFlags dflags
-                            env' = replaceDynFlags env dflags'
-                        setEnv env' m
+withDoDynamicToo =
+  updTopEnv (\top@(HscEnv { hsc_dflags = dflags }) ->
+              top { hsc_dflags = dynamicTooMkDynamicDynFlags dflags })
 
 getEpsVar :: TcRnIf gbl lcl (TcRef ExternalPackageState)
 getEpsVar = do { env <- getTopEnv; return (hsc_EPS env) }
@@ -953,9 +955,9 @@ checkTH e what = failTH e what  -- Raise an error in a stage-1 compiler
 failTH :: Outputable a => a -> String -> TcRn x
 failTH e what  -- Raise an error in a stage-1 compiler
   = failWithTc (vcat [ hang (char 'A' <+> text what
-                             <+> ptext (sLit "requires GHC with interpreter support:"))
+                             <+> text "requires GHC with interpreter support:")
                           2 (ppr e)
-                     , ptext (sLit "Perhaps you are using a stage-1 compiler?") ])
+                     , text "Perhaps you are using a stage-1 compiler?" ])
 
 {-
 ************************************************************************
@@ -1268,7 +1270,7 @@ captureConstraints thing_inside
 pushLevelAndCaptureConstraints :: TcM a -> TcM (TcLevel, WantedConstraints, a)
 pushLevelAndCaptureConstraints thing_inside
   = do { env <- getLclEnv
-       ; lie_var <- newTcRef emptyWC ;
+       ; lie_var <- newTcRef emptyWC
        ; let tclvl' = pushTcLevel (tcl_tclvl env)
        ; res <- setLclEnv (env { tcl_tclvl = tclvl'
                                , tcl_lie   = lie_var })
@@ -1277,7 +1279,7 @@ pushLevelAndCaptureConstraints thing_inside
        ; return (tclvl', lie, res) }
 
 pushTcLevelM_ :: TcM a -> TcM a
-pushTcLevelM_ = updLclEnv (\ env -> env { tcl_tclvl = pushTcLevel (tcl_tclvl env) })
+pushTcLevelM_ x = updLclEnv (\ env -> env { tcl_tclvl = pushTcLevel (tcl_tclvl env) }) x
 
 pushTcLevelM :: TcM a -> TcM (a, TcLevel)
 pushTcLevelM thing_inside
@@ -1353,7 +1355,7 @@ recordThSpliceUse = do { env <- getGblEnv; writeTcRef (tcg_th_splice_used env) T
 keepAlive :: Name -> TcRn ()     -- Record the name in the keep-alive set
 keepAlive name
   = do { env <- getGblEnv
-       ; traceRn (ptext (sLit "keep alive") <+> ppr name)
+       ; traceRn (text "keep alive" <+> ppr name)
        ; updTcRef (tcg_keep env) (`extendNameSet` name) }
 
 getStage :: TcM ThStage
@@ -1466,7 +1468,7 @@ initIfaceTc iface do_this
     }
   where
     mod = mi_module iface
-    doc = ptext (sLit "The interface for") <+> quotes (ppr mod)
+    doc = text "The interface for" <+> quotes (ppr mod)
 
 initIfaceLcl :: Module -> SDoc -> IfL a -> IfM lcl a
 initIfaceLcl mod loc_doc thing_inside

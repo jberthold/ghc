@@ -6,7 +6,6 @@ BUILD_PROF_LIBS    = NO
 SplitObjs          = NO
 HADDOCK_DOCS       = YES
 BUILD_SPHINX_HTML  = YES
-BUILD_SPHINX_PS    = NO
 BUILD_SPHINX_PDF   = NO
 
 ifeq "$(ValidateHpc)" "YES"
@@ -17,8 +16,12 @@ ifeq "$(ValidateSpeed)" "SLOW"
 GhcStage2HcOpts   += -DDEBUG
 endif
 
+ifeq "$(ValidateSpeed)" "SLOW"
+BUILD_PROF_LIBS    = YES
+endif
+
 ifneq "$(ValidateSpeed)" "FAST"
-BUILD_EXTRA_PKGS=YES
+BUILD_EXTRA_PKGS   = YES
 endif
 
 WERROR             = -Werror

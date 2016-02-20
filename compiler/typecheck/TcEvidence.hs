@@ -9,7 +9,6 @@ module TcEvidence (
   (<.>), mkWpTyApps, mkWpEvApps, mkWpEvVarApps, mkWpTyLams,
   mkWpLams, mkWpLet, mkWpCastN, mkWpCastR,
   mkWpFun, mkWpFuns, idHsWrapper, isIdHsWrapper, pprHsWrapper,
-  symWrapper_maybe,
 
   -- Evidence bindings
   TcEvBinds(..), EvBindsVar(..),
@@ -49,7 +48,7 @@ import Type
 import TyCon
 import Class( Class )
 import PrelNames
-import DynFlags   ( gopt, GeneralFlag(Opt_PrintExplicitCoercions) )
+import DynFlags   ( gopt, GeneralFlag(Opt_PrintTypecheckerElaboration) )
 import VarEnv
 import VarSet
 import Name
@@ -203,21 +202,25 @@ mkWpFun :: HsWrapper -> HsWrapper
         -> TcType    -- either type of the second wrapper (used only when the
                      -- second wrapper is the identity)
         -> HsWrapper
-        -- NB: These optimisations are important, because we need
-        -- symWrapper_maybe to work in TcUnify.matchExpectedFunTys
-        -- See that function for more info.
 mkWpFun WpHole       WpHole       _  _  = WpHole
 mkWpFun WpHole       (WpCast co2) t1 _  = WpCast (mkTcFunCo Representational (mkTcRepReflCo t1) co2)
 mkWpFun (WpCast co1) WpHole       _  t2 = WpCast (mkTcFunCo Representational (mkTcSymCo co1) (mkTcRepReflCo t2))
 mkWpFun (WpCast co1) (WpCast co2) _  _  = WpCast (mkTcFunCo Representational (mkTcSymCo co1) co2)
 mkWpFun co1          co2          t1 _  = WpFun co1 co2 t1
 
--- | @mkWpFuns arg_tys wrap@, where @wrap :: a "->" b@, gives a wrapper from
--- @arg_tys -> a@ to @arg_tys -> b@.
-mkWpFuns :: [TcType] -> HsWrapper -> HsWrapper
-mkWpFuns []                 res_wrap = res_wrap
-mkWpFuns (arg_ty : arg_tys) res_wrap
-  = WpFun idHsWrapper (mkWpFuns arg_tys res_wrap) arg_ty
+-- | @mkWpFuns [(ty1, wrap1), (ty2, wrap2)] ty_res wrap_res@,
+-- where @wrap1 :: ty1 "->" ty1'@ and @wrap2 :: ty2 "->" ty2'@,
+-- @wrap3 :: ty3 "->" ty3'@ and @ty_res@ is /either/ @ty3@ or @ty3'@,
+-- gives a wrapper @(ty1' -> ty2' -> ty3) "->" (ty1 -> ty2 -> ty3')@.
+-- Notice that the result wrapper goes the other way round to all
+-- the others. This is a result of sub-typing contravariance.
+mkWpFuns :: [(TcType, HsWrapper)] -> TcType -> HsWrapper -> HsWrapper
+mkWpFuns args res_ty res_wrap = snd $ go args res_ty res_wrap
+  where
+    go [] res_ty res_wrap = (res_ty, res_wrap)
+    go ((arg_ty, arg_wrap) : args) res_ty res_wrap
+      = let (tail_ty, tail_wrap) = go args res_ty res_wrap in
+        (arg_ty `mkFunTy` tail_ty, mkWpFun arg_wrap tail_wrap arg_ty tail_ty)
 
 mkWpCastR :: TcCoercionR -> HsWrapper
 mkWpCastR co
@@ -231,21 +234,6 @@ mkWpCastN co
   | otherwise     = ASSERT2(tcCoercionRole co == Nominal, ppr co)
                     WpCast (mkTcSubCo co)
     -- The mkTcSubCo converts Nominal to Representational
-
--- | In a few limited cases, it is possible to reverse the direction
--- of an HsWrapper. This tries to do so.
-symWrapper_maybe :: HsWrapper -> Maybe HsWrapper
-symWrapper_maybe = go
-  where
-    go WpHole              = return WpHole
-    go (WpCompose wp1 wp2) = WpCompose <$> go wp2 <*> go wp1
-    go (WpFun {})          = Nothing
-    go (WpCast co)         = return (WpCast (mkTcSymCo co))
-    go (WpEvLam {})        = Nothing
-    go (WpEvApp {})        = Nothing
-    go (WpTyLam {})        = Nothing
-    go (WpTyApp {})        = Nothing
-    go (WpLet {})          = Nothing
 
 mkWpTyApps :: [Type] -> HsWrapper
 mkWpTyApps tys = mk_co_app_fn WpTyApp tys
@@ -543,16 +531,18 @@ Note [Overview of implicit CallStacks]
 The goal of CallStack evidence terms is to reify locations
 in the program source as runtime values, without any support
 from the RTS. We accomplish this by assigning a special meaning
-to implicit parameters of type GHC.Stack.CallStack.
+to constraints of type GHC.Stack.Types.HasCallStack, an alias
 
-Implicit CallStacks are regular implicit parameters, augmented with two
-extra rules in the constraint solver:
+  type HasCallStack = (?callStack :: CallStack)
+
+Implicit parameters of type GHC.Stack.Types.CallStack (the name is not
+important) are solved in three steps:
 
 1. Occurrences of CallStack IPs are solved directly from the given IP,
    just like a regular IP. For example, the occurrence of `?stk` in
 
      error :: (?stk :: CallStack) => String -> a
-     error s = raise (ErrorCall (s ++ show ?stk))
+     error s = raise (ErrorCall (s ++ prettyCallStack ?stk))
 
    will be solved for the `?stk` in `error`s context as before.
 
@@ -620,14 +610,15 @@ in `g`, because `head` did not explicitly request a CallStack.
 Important Details:
 - GHC should NEVER report an insoluble CallStack constraint.
 
-- A CallStack (defined in GHC.Stack) is a [(String, SrcLoc)], where the String
-  is the name of the binder that is used at the SrcLoc. SrcLoc is defined in
-  GHC.SrcLoc and contains the package/module/file name, as well as the full
-  source-span. Both CallStack and SrcLoc are kept abstract so only GHC can
-  construct new values.
+- A CallStack (defined in GHC.Stack.Types) is a [(String, SrcLoc)],
+  where the String is the name of the binder that is used at the
+  SrcLoc. SrcLoc is also defined in GHC.Stack.Types and contains the
+  package/module/file name, as well as the full source-span. Both
+  CallStack and SrcLoc are kept abstract so only GHC can construct new
+  values.
 
-- We will automatically solve any wanted CallStack regardless of the name of the
-  IP, i.e.
+- We will automatically solve any wanted CallStack regardless of the
+  name of the IP, i.e.
 
     f = show (?stk :: CallStack)
     g = show (?loc :: CallStack)
@@ -656,7 +647,7 @@ Important Details:
 
 mkEvCast :: EvTerm -> TcCoercion -> EvTerm
 mkEvCast ev lco
-  | ASSERT2(tcCoercionRole lco == Representational, (vcat [ptext (sLit "Coercion of wrong role passed to mkEvCast:"), ppr ev, ppr lco]))
+  | ASSERT2(tcCoercionRole lco == Representational, (vcat [text "Coercion of wrong role passed to mkEvCast:", ppr ev, ppr lco]))
     isTcReflCo lco = ev
   | otherwise      = EvCast ev lco
 
@@ -729,45 +720,47 @@ evVarsOfTypeable ev =
 -}
 
 instance Outputable HsWrapper where
-  ppr co_fn = pprHsWrapper (ptext (sLit "<>")) co_fn
+  ppr co_fn = pprHsWrapper co_fn (no_parens (text "<>"))
 
-pprHsWrapper :: SDoc -> HsWrapper -> SDoc
--- In debug mode, print the wrapper
--- otherwise just print what's inside
-pprHsWrapper doc wrap
+pprHsWrapper ::HsWrapper ->  (Bool -> SDoc) -> SDoc
+-- With -fprint-typechecker-elaboration, print the wrapper
+--   otherwise just print what's inside
+-- The pp_thing_inside function takes Bool to say whether
+--    it's in a position that needs parens for a non-atomic thing
+pprHsWrapper wrap pp_thing_inside
   = sdocWithDynFlags $ \ dflags ->
-    getPprStyle (\ s -> if debugStyle s || gopt Opt_PrintExplicitCoercions dflags
-                        then (help (add_parens doc) wrap False)
-                        else doc )
+    if gopt Opt_PrintTypecheckerElaboration dflags
+    then help pp_thing_inside wrap False
+    else pp_thing_inside False
   where
     help :: (Bool -> SDoc) -> HsWrapper -> Bool -> SDoc
     -- True  <=> appears in function application position
     -- False <=> appears as body of let or lambda
     help it WpHole             = it
     help it (WpCompose f1 f2)  = help (help it f2) f1
-    help it (WpFun f1 f2 t1)   = add_parens $ ptext (sLit "\\(x") <> dcolon <> ppr t1 <> ptext (sLit ").") <+>
-                                              help (\_ -> it True <+> help (\_ -> ptext (sLit "x")) f1 True) f2 False
-    help it (WpCast co)   = add_parens $ sep [it False, nest 2 (ptext (sLit "|>")
+    help it (WpFun f1 f2 t1)   = add_parens $ text "\\(x" <> dcolon <> ppr t1 <> text ")." <+>
+                                              help (\_ -> it True <+> help (\_ -> text "x") f1 True) f2 False
+    help it (WpCast co)   = add_parens $ sep [it False, nest 2 (text "|>"
                                               <+> pprParendCo co)]
-    help it (WpEvApp id)    = no_parens  $ sep [it True, nest 2 (ppr id)]
-    help it (WpTyApp ty)    = no_parens  $ sep [it True, ptext (sLit "@") <+> pprParendType ty]
-    help it (WpEvLam id)    = add_parens $ sep [ ptext (sLit "\\") <> pp_bndr id, it False]
-    help it (WpTyLam tv)    = add_parens $ sep [ptext (sLit "/\\") <> pp_bndr tv, it False]
-    help it (WpLet binds)   = add_parens $ sep [ptext (sLit "let") <+> braces (ppr binds), it False]
+    help it (WpEvApp id)  = no_parens  $ sep [it True, nest 2 (ppr id)]
+    help it (WpTyApp ty)  = no_parens  $ sep [it True, text "@" <+> pprParendType ty]
+    help it (WpEvLam id)  = add_parens $ sep [ text "\\" <> pp_bndr id, it False]
+    help it (WpTyLam tv)  = add_parens $ sep [text "/\\" <> pp_bndr tv, it False]
+    help it (WpLet binds) = add_parens $ sep [text "let" <+> braces (ppr binds), it False]
 
     pp_bndr v = pprBndr LambdaBind v <> dot
 
-    add_parens, no_parens :: SDoc -> Bool -> SDoc
-    add_parens d True  = parens d
-    add_parens d False = d
-    no_parens d _ = d
+add_parens, no_parens :: SDoc -> Bool -> SDoc
+add_parens d True  = parens d
+add_parens d False = d
+no_parens d _ = d
 
 instance Outputable TcEvBinds where
   ppr (TcEvBinds v) = ppr v
-  ppr (EvBinds bs)  = ptext (sLit "EvBinds") <> braces (vcat (map ppr (bagToList bs)))
+  ppr (EvBinds bs)  = text "EvBinds" <> braces (vcat (map ppr (bagToList bs)))
 
 instance Outputable EvBindsVar where
-  ppr (EvBindsVar _ u) = ptext (sLit "EvBindsVar") <> angleBrackets (ppr u)
+  ppr (EvBindsVar _ u) = text "EvBindsVar" <> angleBrackets (ppr u)
 
 instance Uniquable EvBindsVar where
   getUnique (EvBindsVar _ u) = u
@@ -782,15 +775,15 @@ instance Outputable EvBind where
 
 instance Outputable EvTerm where
   ppr (EvId v)              = ppr v
-  ppr (EvCast v co)         = ppr v <+> (ptext (sLit "`cast`")) <+> pprParendCo co
-  ppr (EvCoercion co)       = ptext (sLit "CO") <+> ppr co
-  ppr (EvSuperClass d n)    = ptext (sLit "sc") <> parens (ppr (d,n))
+  ppr (EvCast v co)         = ppr v <+> (text "`cast`") <+> pprParendCo co
+  ppr (EvCoercion co)       = text "CO" <+> ppr co
+  ppr (EvSuperClass d n)    = text "sc" <> parens (ppr (d,n))
   ppr (EvDFunApp df tys ts) = ppr df <+> sep [ char '@' <> ppr tys, ppr ts ]
   ppr (EvLit l)             = ppr l
   ppr (EvCallStack cs)      = ppr cs
-  ppr (EvDelayedError ty msg) =     ptext (sLit "error")
+  ppr (EvDelayedError ty msg) =     text "error"
                                 <+> sep [ char '@' <> ppr ty, ppr msg ]
-  ppr (EvTypeable ty ev)      = ppr ev <+> dcolon <+> ptext (sLit "Typeable") <+> ppr ty
+  ppr (EvTypeable ty ev)      = ppr ev <+> dcolon <+> text "Typeable" <+> ppr ty
 
 instance Outputable EvLit where
   ppr (EvNum n) = integer n
@@ -798,14 +791,14 @@ instance Outputable EvLit where
 
 instance Outputable EvCallStack where
   ppr EvCsEmpty
-    = ptext (sLit "[]")
+    = text "[]"
   ppr (EvCsPushCall name loc tm)
-    = ppr (name,loc) <+> ptext (sLit ":") <+> ppr tm
+    = ppr (name,loc) <+> text ":" <+> ppr tm
 
 instance Outputable EvTypeable where
-  ppr (EvTypeableTyCon ts)    = ptext (sLit "TC") <+> ppr ts
+  ppr (EvTypeableTyCon ts)    = text "TC" <+> ppr ts
   ppr (EvTypeableTyApp t1 t2) = parens (ppr t1 <+> ppr t2)
-  ppr (EvTypeableTyLit t1)    = ptext (sLit "TyLit") <> ppr t1
+  ppr (EvTypeableTyLit t1)    = text "TyLit" <> ppr t1
 
 
 ----------------------------------------------------------------------

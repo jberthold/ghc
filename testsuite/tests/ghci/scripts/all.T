@@ -39,11 +39,11 @@ test('ghci022', normal, ghci_script, ['ghci022.script'])
 
 test('ghci023', normal, ghci_script, ['ghci023.script'])
 test('ghci024',
-     when(fast(), skip),
+     [req_interp, when(fast(), skip)],
      run_command,
      ['$MAKE -s --no-print-directory ghci024'])
 test('T9367',
-     when(fast() or config.os != 'mingw32', skip),
+     [req_interp, when(fast() or config.os != 'mingw32', skip)],
      run_command,
      ['$MAKE -s --no-print-directory T9367'])
 test('ghci025', normal, ghci_script, ['ghci025.script'])
@@ -215,7 +215,7 @@ test('T10122', normal, ghci_script, ['T10122.script'])
 
 test('T10321', normal, ghci_script, ['T10321.script'])
 
-test('T10408', normal, run_command,
+test('T10408', req_interp, run_command,
     ['$MAKE -s --no-print-directory T10408'])
 test('T10248', normal, ghci_script, ['T10248.script'])
 test('T10110', normal, ghci_script, ['T10110.script'])
@@ -234,3 +234,11 @@ test('T10989',
 test('T11098', normal, ghci_script, ['T11098.script'])
 test('T8316', expect_broken(8316), ghci_script, ['T8316.script'])
 test('T11252', normal, ghci_script, ['T11252.script'])
+
+test('T10576a', expect_broken(10576), ghci_script, ['T10576a.script'])
+test('T10576b', expect_broken(10576), ghci_script, ['T10576b.script'])
+test('T11051a', normal, ghci_script, ['T11051a.script'])
+test('T11051b', normal, ghci_script, ['T11051b.script'])
+test('T11266', check_stdout(lambda *args: 1), ghci_script, ['T11266.script'])
+
+test('T11389', req_interp, run_command, ['$MAKE -s --no-print-directory T11389'])

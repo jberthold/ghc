@@ -254,9 +254,7 @@ initProfilingLogFile(void)
     }
 #endif
 
-    if (RtsFlags.CcFlags.doCostCentres == 0 &&
-        RtsFlags.ProfFlags.doHeapProfile != HEAP_BY_RETAINER &&
-        RtsFlags.ProfFlags.retainerSelector == NULL)
+    if (RtsFlags.CcFlags.doCostCentres == 0 && !doingRetainerProfiling())
     {
         /* No need for the <prog>.prof file */
         prof_filename = NULL;
@@ -272,11 +270,11 @@ initProfilingLogFile(void)
         if ((prof_file = fopen(prof_filename, "w")) == NULL) {
             debugBelch("Can't open profiling report file %s\n", prof_filename);
             RtsFlags.CcFlags.doCostCentres = 0;
-            // The following line was added by Sung; retainer/LDV profiling may need
-            // two output files, i.e., <program>.prof/hp.
-            if (RtsFlags.ProfFlags.doHeapProfile == HEAP_BY_RETAINER)
+            // Retainer profiling (`-hr` or `-hr<cc> -h<x>`) writes to
+            // both <program>.hp as <program>.prof.
+            if (doingRetainerProfiling()) {
                 RtsFlags.ProfFlags.doHeapProfile = 0;
-            return;
+            }
         }
     }
 
@@ -290,7 +288,6 @@ initProfilingLogFile(void)
             debugBelch("Can't open profiling report file %s\n",
                     hp_filename);
             RtsFlags.ProfFlags.doHeapProfile = 0;
-            return;
         }
     }
 }
@@ -954,7 +951,7 @@ logCCS(CostCentreStack *ccs, nat indent,
                 max_module_len - strlen_utf8(cc->module), "");
 
         fprintf(prof_file,
-                " %*ld %11" FMT_Word64 "  %5.1f  %5.1f   %5.1f  %5.1f",
+                " %*" FMT_Int "%11" FMT_Word64 "  %5.1f  %5.1f   %5.1f  %5.1f",
                 max_id_len, ccs->ccsID, ccs->scc_count,
                 total_prof_ticks == 0 ? 0.0 : ((double)ccs->time_ticks / (double)total_prof_ticks * 100.0),
                 total_alloc == 0 ? 0.0 : ((double)ccs->mem_alloc / (double)total_alloc * 100.0),

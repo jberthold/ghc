@@ -221,10 +221,10 @@ pprFamInst famInst
   = hang (pprFamInstHdr famInst) 2 (ifPprDebug debug_stuff)
   where
     ax = fi_axiom famInst
-    debug_stuff = vcat [ ptext (sLit "Coercion axiom:") <+> ppr ax
-                       , ptext (sLit "Tvs:") <+> ppr (fi_tvs famInst)
-                       , ptext (sLit "LHS:") <+> ppr (fi_tys famInst)
-                       , ptext (sLit "RHS:") <+> ppr (fi_rhs famInst) ]
+    debug_stuff = vcat [ text "Coercion axiom:" <+> ppr ax
+                       , text "Tvs:" <+> ppr (fi_tvs famInst)
+                       , text "LHS:" <+> ppr (fi_tys famInst)
+                       , text "RHS:" <+> ppr (fi_rhs famInst) ]
 
 pprFamInstHdr :: FamInst -> SDoc
 pprFamInstHdr fi@(FamInst {fi_flavor = flavor})
@@ -234,7 +234,7 @@ pprFamInstHdr fi@(FamInst {fi_flavor = flavor})
     -- For *top level* type instances, say "type instance T Int = blah"
     pp_instance
       | isTyConAssoc fam_tc = empty
-      | otherwise           = ptext (sLit "instance")
+      | otherwise           = text "instance"
 
     (fam_tc, etad_lhs_tys) = famInstSplitLHS fi
     vanilla_pp_head = pprTypeApp fam_tc etad_lhs_tys
@@ -256,12 +256,12 @@ pprFamInstHdr fi@(FamInst {fi_flavor = flavor})
             = vanilla_pp_head
 
     pprTyConSort = case flavor of
-                     SynFamilyInst        -> ptext (sLit "type")
+                     SynFamilyInst        -> text "type"
                      DataFamilyInst tycon
-                       | isDataTyCon     tycon -> ptext (sLit "data")
-                       | isNewTyCon      tycon -> ptext (sLit "newtype")
-                       | isAbstractTyCon tycon -> ptext (sLit "data")
-                       | otherwise             -> ptext (sLit "WEIRD") <+> ppr tycon
+                       | isDataTyCon     tycon -> text "data"
+                       | isNewTyCon      tycon -> text "newtype"
+                       | isAbstractTyCon tycon -> text "data"
+                       | otherwise             -> text "WEIRD" <+> ppr tycon
 
 pprFamInsts :: [FamInst] -> SDoc
 pprFamInsts finsts = vcat (map pprFamInst finsts)
@@ -371,7 +371,7 @@ newtype FamilyInstEnv
   = FamIE [FamInst]     -- The instances for a particular family, in any order
 
 instance Outputable FamilyInstEnv where
-  ppr (FamIE fs) = ptext (sLit "FamIE") <+> vcat (map ppr fs)
+  ppr (FamIE fs) = text "FamIE" <+> vcat (map ppr fs)
 
 -- INVARIANTS:
 --  * The fs_tvs are distinct in each FamInst
@@ -425,11 +425,9 @@ identicalFamInstHead (FamInst { fi_axiom = ax1 }) (FamInst { fi_axiom = ax2 })
     brs2 = coAxiomBranches ax2
 
     identical_branch br1 br2
-      =  isJust (tcMatchTys tvs1 lhs1 lhs2)
-      && isJust (tcMatchTys tvs2 lhs2 lhs1)
+      =  isJust (tcMatchTys lhs1 lhs2)
+      && isJust (tcMatchTys lhs2 lhs1)
       where
-        tvs1 = mkVarSet (coAxBranchTyVars br1)
-        tvs2 = mkVarSet (coAxBranchTyVars br2)
         lhs1 = coAxBranchLHS br1
         lhs2 = coAxBranchLHS br2
 
@@ -707,7 +705,7 @@ instance Outputable FamInstMatch where
   ppr (FamInstMatch { fim_instance = inst
                     , fim_tys      = tys
                     , fim_cos      = cos })
-    = ptext (sLit "match with") <+> parens (ppr inst) <+> ppr tys <+> ppr cos
+    = text "match with" <+> parens (ppr inst) <+> ppr tys <+> ppr cos
 
 lookupFamInstEnvByTyCon :: FamInstEnvs -> TyCon -> [FamInst]
 lookupFamInstEnvByTyCon (pkg_ie, home_ie) fam_tc
@@ -726,7 +724,7 @@ lookupFamInstEnv
 lookupFamInstEnv
    = lookup_fam_inst_env match
    where
-     match _ tpl_tvs tpl_tys tys = tcMatchTys tpl_tvs tpl_tys tys
+     match _ _ tpl_tys tys = tcMatchTys tpl_tys tys
 
 lookupFamInstEnvConflicts
     :: FamInstEnvs
@@ -1014,8 +1012,8 @@ isDominatedBy branch branches
   = or $ map match branches
     where
       lhs = coAxBranchLHS branch
-      match (CoAxBranch { cab_tvs = tvs, cab_lhs = tys })
-        = isJust $ tcMatchTys (mkVarSet tvs) tys lhs
+      match (CoAxBranch { cab_lhs = tys })
+        = isJust $ tcMatchTys tys lhs
 
 {-
 ************************************************************************
@@ -1105,7 +1103,7 @@ findBranch branches target_tys
                             map (tyCoVarsOfTypes . coAxBranchLHS) incomps)
             -- See Note [Flattening] below
             flattened_target = flattenTys in_scope target_tys
-        in case tcMatchTys (mkVarSet (tpl_tvs ++ tpl_cvs)) tpl_lhs target_tys of
+        in case tcMatchTys tpl_lhs target_tys of
         Just subst -- matching worked. now, check for apartness.
           |  apartnessCheck flattened_target branch
           -> -- matching worked & we're apart from all incompatible branches.
@@ -1239,7 +1237,7 @@ normalise_tc_app tc tys
        ; case expandSynTyCon_maybe tc ntys of
          { Just (tenv, rhs, ntys') ->
            do { (co2, ninst_rhs)
-                  <- normalise_type (substTy (mkTopTCvSubst tenv) rhs)
+                  <- normalise_type (substTy (mkTvSubstPrs tenv) rhs)
               ; return $
                 if isReflCo co2
                 then (args_co,                 mkTyConApp tc ntys)

@@ -20,7 +20,6 @@ import CoreSyn
 import Outputable
 import VarEnv
 import BasicTypes
-import FastString
 import Data.List
 import DataCon
 import Id
@@ -115,9 +114,9 @@ dmdAnalStar :: AnalEnv
             -> Demand   -- This one takes a *Demand*
             -> CoreExpr -> (BothDmdArg, CoreExpr)
 dmdAnalStar env dmd e
-  | (cd, defer_and_use) <- toCleanDmd dmd (exprType e)
+  | (defer_and_use, cd) <- toCleanDmd dmd (exprType e)
   , (dmd_ty, e')        <- dmdAnal env cd e
-  = (postProcessDmdTypeM defer_and_use dmd_ty, e')
+  = (postProcessDmdType defer_and_use dmd_ty, e')
 
 -- Main Demand Analsysis machinery
 dmdAnal, dmdAnal' :: AnalEnv
@@ -197,10 +196,12 @@ dmdAnal' env dmd (Lam var body)
     (body_ty, Lam var body')
 
   | otherwise
-  = let (body_dmd, defer_and_use@(_,one_shot)) = peelCallDmd dmd
-          -- body_dmd  - a demand to analyze the body
-          -- one_shot  - one-shotness of the lambda
-          --             hence, cardinality of its free vars
+  = let (body_dmd, defer_and_use) = peelCallDmd dmd
+          -- body_dmd: a demand to analyze the body
+
+        one_shot         = useCount (getUseDmd defer_and_use)
+          -- one_shot: one-shotness of the lambda
+          --           hence, cardinality of its free vars
 
         env'             = extendSigsWithLam env var
         (body_ty, body') = dmdAnal env' body_dmd body
@@ -1005,9 +1006,9 @@ type SigEnv = VarEnv (StrictSig, TopLevelFlag)
 
 instance Outputable AnalEnv where
   ppr (AE { ae_sigs = env, ae_virgin = virgin })
-    = ptext (sLit "AE") <+> braces (vcat
-         [ ptext (sLit "ae_virgin =") <+> ppr virgin
-         , ptext (sLit "ae_sigs =") <+> ppr env ])
+    = text "AE" <+> braces (vcat
+         [ text "ae_virgin =" <+> ppr virgin
+         , text "ae_sigs =" <+> ppr env ])
 
 emptyAnalEnv :: DynFlags -> FamInstEnvs -> AnalEnv
 emptyAnalEnv dflags fam_envs

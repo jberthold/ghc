@@ -44,8 +44,8 @@ module MkCore (
         mkRuntimeErrorApp, mkImpossibleExpr, errorIds,
         rEC_CON_ERROR_ID, iRREFUT_PAT_ERROR_ID, rUNTIME_ERROR_ID,
         nON_EXHAUSTIVE_GUARDS_ERROR_ID, nO_METHOD_BINDING_ERROR_ID,
-        pAT_ERROR_ID, eRROR_ID, rEC_SEL_ERROR_ID, aBSENT_ERROR_ID,
-        uNDEFINED_ID, tYPE_ERROR_ID, undefinedName
+        pAT_ERROR_ID, rEC_SEL_ERROR_ID, aBSENT_ERROR_ID,
+        tYPE_ERROR_ID
     ) where
 
 #include "HsVersions.h"
@@ -369,8 +369,8 @@ data FloatBind
       -- See Note [Floating cases] in SetLevels
 
 instance Outputable FloatBind where
-  ppr (FloatLet b) = ptext (sLit "LET") <+> ppr b
-  ppr (FloatCase e b c bs) = hang (ptext (sLit "CASE") <+> ppr e <+> ptext (sLit "of") <+> ppr b)
+  ppr (FloatLet b) = text "LET" <+> ppr b
+  ppr (FloatCase e b c bs) = hang (text "CASE" <+> ppr e <+> ptext (sLit "of") <+> ppr b)
                                 2 (ppr c <+> ppr bs)
 
 wrapFloat :: FloatBind -> CoreExpr -> CoreExpr
@@ -624,16 +624,7 @@ templates, but we don't ever expect to generate code for it.
 
 errorIds :: [Id]
 errorIds
-  = [ eRROR_ID,   -- This one isn't used anywhere else in the compiler
-                  -- But we still need it in wiredInIds so that when GHC
-                  -- compiles a program that mentions 'error' we don't
-                  -- import its type from the interface file; we just get
-                  -- the Id defined here.  Which has an 'open-tyvar' type.
-
-      uNDEFINED_ID,   -- Ditto for 'undefined'. The big deal is to give it
-                      -- an 'open-tyvar' type.
-
-      rUNTIME_ERROR_ID,
+  = [ rUNTIME_ERROR_ID,
       iRREFUT_PAT_ERROR_ID,
       nON_EXHAUSTIVE_GUARDS_ERROR_ID,
       nO_METHOD_BINDING_ERROR_ID,
@@ -687,35 +678,6 @@ runtimeErrorTy :: Type
 runtimeErrorTy = mkSpecSigmaTy [levity1TyVar, openAlphaTyVar] []
                                (mkFunTy addrPrimTy openAlphaTy)
 
-errorName :: Name
-errorName = mkWiredInIdName gHC_ERR (fsLit "error") errorIdKey eRROR_ID
-
-eRROR_ID :: Id
-eRROR_ID = pc_bottoming_Id2 errorName errorTy
-
-errorTy  :: Type   -- See Note [Error and friends have an "open-tyvar" forall]
-errorTy  = mkSpecSigmaTy [levity1TyVar, openAlphaTyVar] []
-             (mkFunTys [ mkClassPred
-                           ipClass
-                           [ mkStrLitTy (fsLit "callStack")
-                           , mkTyConTy callStackTyCon ]
-                       , mkListTy charTy]
-                       openAlphaTy)
-
-undefinedName :: Name
-undefinedName = mkWiredInIdName gHC_ERR (fsLit "undefined") undefinedKey uNDEFINED_ID
-
-uNDEFINED_ID :: Id
-uNDEFINED_ID = pc_bottoming_Id1 undefinedName undefinedTy
-
-undefinedTy  :: Type   -- See Note [Error and friends have an "open-tyvar" forall]
-undefinedTy  = mkSpecSigmaTy [levity1TyVar, openAlphaTyVar] []
-                 (mkFunTy (mkClassPred
-                             ipClass
-                             [ mkStrLitTy (fsLit "callStack")
-                             , mkTyConTy callStackTyCon ])
-                          openAlphaTy)
-
 {-
 Note [Error and friends have an "open-tyvar" forall]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -755,14 +717,5 @@ pc_bottoming_Id1 name ty
         -- any pc_bottoming_Id will itself have CafRefs, which bloats
         -- SRTs.
 
-    strict_sig = mkClosedStrictSig [evalDmd] botRes
-    -- These "bottom" out, no matter what their arguments
-
-pc_bottoming_Id2 :: Name -> Type -> Id
--- Same but arity two
-pc_bottoming_Id2 name ty
- = mkVanillaGlobalWithInfo name ty bottoming_info
- where
-    bottoming_info = vanillaIdInfo `setStrictnessInfo` strict_sig
-                                   `setArityInfo`      2
-    strict_sig = mkClosedStrictSig [evalDmd, evalDmd] botRes
+    strict_sig = mkClosedStrictSig [evalDmd] exnRes
+              -- exnRes: these throw an exception, not just diverge
