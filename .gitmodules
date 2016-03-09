@@ -10,6 +10,7 @@
 	path = libraries/Cabal
 	url = http://git.haskell.org/packages/Cabal.git
 	ignore = untracked
+	branch = 1.24
 [submodule "libraries/containers"]
 	path = libraries/containers
 	url = http://git.haskell.org/packages/containers.git

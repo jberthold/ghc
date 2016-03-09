@@ -10,8 +10,8 @@ performance improvements over the 7.10 branch.
 .. warning::
 
     Only Cabal versions 1.24 and newer will function properly with this release.
-    Consequently it will likely be necessary to recompile ``cabal-install``
-    before installing new packages.
+    (see :ghc-ticket:`11558`). Consequently it will likely be necessary to
+    recompile ``cabal-install`` before installing new packages.
 
     The reason for this is a change in how packages are identified in GHC
     8.0. While previous versions of Cabal identified packages to GHC with a
@@ -184,7 +184,10 @@ Language
    In previous versions of GHC, this required a workaround via an
    explicit export list in ``Bar``.
 
-
+-  :ghc-flag:`-XDeriveFoldable` and :ghc-flag:`-XDeriveTraversable` now
+   generate code without superfluous ``mempty`` or ``pure`` expressions. As a
+   result, :ghc-flag:`-XDeriveTraversable` now works on datatypes that contain
+   arguments which have unlifted types.
 
 Compiler
 ~~~~~~~~
@@ -260,9 +263,10 @@ Compiler
    warnings makes sure the definition of ``Semigroup`` as a superclass of
    ``Monoid`` does not break any code.
 
--  Added the :ghc-flag:`-Wmissing-pat-syn-signatures` flag. When enabled, this will issue
-   a warning when a pattern synonym definition doesn't have a type signature.
-   It is turned off by default but enabled by :ghc-flag:`-Wall`.
+-  Added the :ghc-flag:`-Wmissing-pattern-synonym-signatures`
+   flag. When enabled, this will issue a warning when a pattern
+   synonym definition doesn't have a type signature.  It is turned off
+   by default but enabled by :ghc-flag:`-Wall`.
 
 -  Added the :ghc-flag:`-Wunused-type-patterns` flag to report unused
    type variables in data and type family instances. This flag is not implied
@@ -298,6 +302,15 @@ Compiler
 -  When :ghc-flag:`-fdefer-type-errors` is enabled and an expression fails to
    typecheck, ``Control.Exception.TypeError`` will now be thrown instead of
    ``Control.Exception.ErrorCall``.
+
+-  :ghc-flag:`-Wmissing-local-sigs` is now deprecated in favor of
+   :ghc-flag:`-Wmissing-local-signatures`.
+
+-  :ghc-flag:`-Wmissing-exported-sigs` is now deprecated in favor of
+   :ghc-flag:`-Wmissing-exported-signatures`.
+
+-  :ghc-flag:`-ddump-strsigs` has been renamed to
+   :ghc-flag:`-ddump-str-signatures`.
 
 GHCi
 ~~~~
@@ -508,6 +521,11 @@ See ``changelog.md`` in the ``base`` package for full release notes.
 - Add ``GHC.TypeLits.TypeError`` and ``ErrorMessage`` to allow users
   to define custom compile-time error messages. (see :ref:`custom-errors` and
   the original :ghc-wiki:`proposal <Proposal/CustomTypeErrors>`).
+
+- The datatypes in ``GHC.Generics`` now have ``Enum``, ``Bounded``, ``Ix``,
+  ``Functor``, ``Applicative``, ``Monad``, ``MonadFix``, ``MonadPlus``, ``MonadZip``,
+  ``Foldable``, ``Foldable``, ``Traversable``, ``Generic1``, and ``Data`` instances
+  as appropriate. (:ghc-ticket:`9043`)
 
 - The ``Generic`` instance for ``Proxy`` is now poly-kinded (see :ghc-ticket:`10775`)
 

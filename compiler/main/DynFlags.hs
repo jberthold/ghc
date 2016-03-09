@@ -21,7 +21,7 @@ module DynFlags (
         -- * Dynamic flags and associated configuration types
         DumpFlag(..),
         GeneralFlag(..),
-        WarningFlag(..),
+        WarningFlag(..), WarnReason(..),
         Language(..),
         PlatformConstants(..),
         FatalMessager, LogAction, FlushOut(..), FlushErr(..),
@@ -173,7 +173,7 @@ import FastString
 import Outputable
 import Foreign.C        ( CInt(..) )
 import System.IO.Unsafe ( unsafeDupablePerformIO )
-import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessage )
+import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessageAnn )
 
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.IORef
@@ -338,7 +338,7 @@ data DumpFlag
    | Opt_D_dump_stg
    | Opt_D_dump_call_arity
    | Opt_D_dump_stranal
-   | Opt_D_dump_strsigs
+   | Opt_D_dump_str_signatures
    | Opt_D_dump_tc
    | Opt_D_dump_types
    | Opt_D_dump_rules
@@ -385,6 +385,7 @@ data GeneralFlag
    | Opt_NoLlvmMangler                 -- hidden flag
 
    | Opt_WarnIsError                    -- -Werror; makes warnings fatal
+   | Opt_ShowWarnGroups                 -- Show the group a warning belongs to
 
    | Opt_PrintExplicitForalls
    | Opt_PrintExplicitKinds
@@ -535,6 +536,11 @@ data GeneralFlag
    | Opt_PackageTrust
    deriving (Eq, Show, Enum)
 
+-- | Used when outputting warnings: if a reason is given, it is
+-- displayed. If a warning isn't controlled by a flag, this is made
+-- explicit at the point of use.
+data WarnReason = NoReason | Reason !WarningFlag
+
 data WarningFlag =
 -- See Note [Updating flag description in the User's Guide]
      Opt_WarnDuplicateExports
@@ -550,8 +556,8 @@ data WarningFlag =
    | Opt_WarnMissingFields
    | Opt_WarnMissingImportList
    | Opt_WarnMissingMethods
-   | Opt_WarnMissingSigs
-   | Opt_WarnMissingLocalSigs
+   | Opt_WarnMissingSignatures
+   | Opt_WarnMissingLocalSignatures
    | Opt_WarnNameShadowing
    | Opt_WarnOverlappingPatterns
    | Opt_WarnTypeDefaults
@@ -590,14 +596,14 @@ data WarningFlag =
    | Opt_WarnInlineRuleShadowing
    | Opt_WarnTypedHoles
    | Opt_WarnPartialTypeSignatures
-   | Opt_WarnMissingExportedSigs
+   | Opt_WarnMissingExportedSignatures
    | Opt_WarnUntickedPromotedConstructors
    | Opt_WarnDerivingTypeable
    | Opt_WarnDeferredTypeErrors
    | Opt_WarnNonCanonicalMonadInstances   -- since 8.0
    | Opt_WarnNonCanonicalMonadFailInstances -- since 8.0
    | Opt_WarnNonCanonicalMonoidInstances  -- since 8.0
-   | Opt_WarnMissingPatSynSigs            -- since 8.0
+   | Opt_WarnMissingPatternSynonymSignatures -- since 8.0
    | Opt_WarnUnrecognisedWarningFlags     -- since 8.0
    deriving (Eq, Show, Enum)
 
@@ -1664,13 +1670,20 @@ interpreterDynamic dflags
 --------------------------------------------------------------------------
 
 type FatalMessager = String -> IO ()
-type LogAction = DynFlags -> Severity -> SrcSpan -> PprStyle -> MsgDoc -> IO ()
+
+type LogAction = DynFlags
+              -> WarnReason
+              -> Severity
+              -> SrcSpan
+              -> PprStyle
+              -> MsgDoc
+              -> IO ()
 
 defaultFatalMessager :: FatalMessager
 defaultFatalMessager = hPutStrLn stderr
 
 defaultLogAction :: LogAction
-defaultLogAction dflags severity srcSpan style msg
+defaultLogAction dflags reason severity srcSpan style msg
     = case severity of
       SevOutput      -> printSDoc msg style
       SevDump        -> printSDoc (msg $$ blankLine) style
@@ -1678,7 +1691,7 @@ defaultLogAction dflags severity srcSpan style msg
       SevInfo        -> printErrs msg style
       SevFatal       -> printErrs msg style
       _              -> do hPutChar stderr '\n'
-                           printErrs (mkLocMessage severity srcSpan msg) style
+                           printErrs message style
                            -- careful (#2302): printErrs prints in UTF-8,
                            -- whereas converting to string first and using
                            -- hPutStr would just emit the low 8 bits of
@@ -1686,6 +1699,19 @@ defaultLogAction dflags severity srcSpan style msg
     where printSDoc  = defaultLogActionHPrintDoc  dflags stdout
           printErrs  = defaultLogActionHPrintDoc  dflags stderr
           putStrSDoc = defaultLogActionHPutStrDoc dflags stdout
+          -- Pretty print the warning flag, if any (#10752)
+          message = mkLocMessageAnn flagMsg severity srcSpan msg
+          flagMsg = case reason of
+                        NoReason -> Nothing
+                        Reason flag -> (\spec -> "-W" ++ flagSpecName spec ++ flagGrp flag) <$>
+                                          flagSpecOf flag
+
+          flagGrp flag
+              | gopt Opt_ShowWarnGroups dflags =
+                    case smallestGroups flag of
+                        [] -> ""
+                        groups -> " (in " ++ intercalate ", " (map ("-W"++) groups) ++ ")"
+              | otherwise = ""
 
 defaultLogActionHPrintDoc :: DynFlags -> Handle -> SDoc -> PprStyle -> IO ()
 defaultLogActionHPrintDoc dflags h d sty
@@ -2677,8 +2703,8 @@ dynamic_flags_deps = [
         (setDumpFlag Opt_D_dump_call_arity)
   , make_ord_flag defGhcFlag "ddump-stranal"
         (setDumpFlag Opt_D_dump_stranal)
-  , make_ord_flag defGhcFlag "ddump-strsigs"
-        (setDumpFlag Opt_D_dump_strsigs)
+  , make_ord_flag defGhcFlag "ddump-str-signatures"
+        (setDumpFlag Opt_D_dump_str_signatures)
   , make_ord_flag defGhcFlag "ddump-tc"
         (setDumpFlag Opt_D_dump_tc)
   , make_ord_flag defGhcFlag "ddump-types"
@@ -2983,14 +3009,16 @@ dynamic_flags_deps = [
     wWarningFlagsDeps
  ++ map (mkFlag turnOff "fno-warn-" unSetWarningFlag . hideFlag)
     wWarningFlagsDeps
+ ++ [ (NotDeprecated, unrecognisedWarning "W")
+    , (NotDeprecated, unrecognisedWarning "fwarn-")
+    , (NotDeprecated, unrecognisedWarning "fno-warn-") ]
  ++ map (mkFlag turnOn  "f"         setExtensionFlag  ) fLangFlagsDeps
  ++ map (mkFlag turnOff "fno-"      unSetExtensionFlag) fLangFlagsDeps
  ++ map (mkFlag turnOn  "X"         setExtensionFlag  ) xFlagsDeps
  ++ map (mkFlag turnOff "XNo"       unSetExtensionFlag) xFlagsDeps
  ++ map (mkFlag turnOn  "X"         setLanguage       ) languageFlagsDeps
  ++ map (mkFlag turnOn  "X"         setSafeHaskell    ) safeHaskellFlagsDeps
- ++ [ (NotDeprecated, unrecognisedWarning)
-    , make_dep_flag defFlag "XGenerics"
+ ++ [ make_dep_flag defFlag "XGenerics"
         (NoArg $ return ())
                   ("it does nothing; look into -XDefaultSignatures " ++
                    "and -XDeriveGeneric for generic programming support.")
@@ -3001,13 +3029,13 @@ dynamic_flags_deps = [
 
 -- | This is where we handle unrecognised warning flags. We only issue a warning
 -- if -Wunrecognised-warning-flags is set. See Trac #11429 for context.
-unrecognisedWarning :: Flag (CmdLineP DynFlags)
-unrecognisedWarning = defFlag "W" (Prefix action)
+unrecognisedWarning :: String -> Flag (CmdLineP DynFlags)
+unrecognisedWarning prefix = defFlag prefix (Prefix action)
   where
     action :: String -> EwM (CmdLineP DynFlags) ()
     action flag = do
       f <- wopt Opt_WarnUnrecognisedWarningFlags <$> liftEwM getCmdLineState
-      when f $ addWarn $ "unrecognised warning flag: -W" ++ flag
+      when f $ addWarn $ "unrecognised warning flag: -" ++ prefix ++ flag
 
 -- See Note [Supporting CLI completion]
 package_flags_deps :: [(Deprecation, Flag (CmdLineP DynFlags))]
@@ -3191,6 +3219,12 @@ useInstead flag turn_on
 nop :: TurnOnFlag -> DynP ()
 nop _ = return ()
 
+-- | Find the 'FlagSpec' for a 'WarningFlag'.
+flagSpecOf :: WarningFlag -> Maybe (FlagSpec WarningFlag)
+flagSpecOf flag = listToMaybe $ filter check wWarningFlags
+  where
+    check fs = flagSpecFlag fs == flag
+
 -- | These @-W\<blah\>@ flags can all be reversed with @-Wno-\<blah\>@
 wWarningFlags :: [FlagSpec WarningFlag]
 wWarningFlags = map snd wWarningFlagsDeps
@@ -3229,12 +3263,16 @@ wWarningFlagsDeps = [
   flagSpec "identities"                  Opt_WarnIdentities,
   flagSpec "missing-fields"              Opt_WarnMissingFields,
   flagSpec "missing-import-lists"        Opt_WarnMissingImportList,
-  flagSpec "missing-local-sigs"          Opt_WarnMissingLocalSigs,
+  depFlagSpec "missing-local-sigs"       Opt_WarnMissingLocalSignatures
+    "it is replaced by -Wmissing-local-signatures",
+  flagSpec "missing-local-signatures"    Opt_WarnMissingLocalSignatures,
   flagSpec "missing-methods"             Opt_WarnMissingMethods,
   flagSpec "missing-monadfail-instances" Opt_WarnMissingMonadFailInstances,
   flagSpec "semigroup"                   Opt_WarnSemigroup,
-  flagSpec "missing-signatures"          Opt_WarnMissingSigs,
-  flagSpec "missing-exported-sigs"       Opt_WarnMissingExportedSigs,
+  flagSpec "missing-signatures"          Opt_WarnMissingSignatures,
+  depFlagSpec "missing-exported-sigs"    Opt_WarnMissingExportedSignatures
+    "it is replaced by -Wmissing-exported-signatures",
+  flagSpec "missing-exported-signatures" Opt_WarnMissingExportedSignatures,
   flagSpec "monomorphism-restriction"    Opt_WarnMonomorphism,
   flagSpec "name-shadowing"              Opt_WarnNameShadowing,
   flagSpec "noncanonical-monad-instances"
@@ -3271,7 +3309,8 @@ wWarningFlagsDeps = [
   flagSpec "unused-type-patterns"        Opt_WarnUnusedTypePatterns,
   flagSpec "warnings-deprecations"       Opt_WarnWarningsDeprecations,
   flagSpec "wrong-do-bind"               Opt_WarnWrongDoBind,
-  flagSpec "missing-pat-syn-signatures"  Opt_WarnMissingPatSynSigs,
+  flagSpec "missing-pattern-synonym-signatures"
+                                    Opt_WarnMissingPatternSynonymSignatures,
   flagSpec "unrecognised-warning-flags"  Opt_WarnUnrecognisedWarningFlags ]
 
 -- | These @-\<blah\>@ flags can all be reversed with @-no-\<blah\>@
@@ -3384,7 +3423,8 @@ fFlagsDeps = [
   flagSpec "unbox-strict-fields"              Opt_UnboxStrictFields,
   flagSpec "vectorisation-avoidance"          Opt_VectorisationAvoidance,
   flagSpec "vectorise"                        Opt_Vectorise,
-  flagSpec "worker-wrapper"                   Opt_WorkerWrapper
+  flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
+  flagSpec "show-warning-groups"              Opt_ShowWarnGroups
   ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@
@@ -3782,6 +3822,51 @@ optLevelFlags -- see Note [Documenting optimisation flags]
 --  * utils/mkUserGuidePart/
 --  * docs/users_guide/using-warnings.rst
 
+-- | Warning groups.
+--
+-- As all warnings are in the Weverything set, it is ignored when
+-- displaying to the user which group a warning is in.
+warningGroups :: [(String, [WarningFlag])]
+warningGroups =
+    [ ("compat",       minusWcompatOpts)
+    , ("unused-binds", unusedBindsFlags)
+    , ("default",      standardWarnings)
+    , ("extra",        minusWOpts)
+    , ("all",          minusWallOpts)
+    , ("everything",   minusWeverythingOpts)
+    ]
+
+-- | Warning group hierarchies, where there is an explicit inclusion
+-- relation.
+--
+-- Each inner list is a hierarchy of warning groups, ordered from
+-- smallest to largest, where each group is a superset of the one
+-- before it.
+--
+-- Separating this from 'warningGroups' allows for multiple
+-- hierarchies with no inherent relation to be defined.
+--
+-- The special-case Weverything group is not included.
+warningHierarchies :: [[String]]
+warningHierarchies = hierarchies ++ map (:[]) rest
+  where
+    hierarchies = [["default", "extra", "all"]]
+    rest = filter (`notElem` "everything" : concat hierarchies) $
+           map fst warningGroups
+
+-- | Find the smallest group in every hierarchy which a warning
+-- belongs to, excluding Weverything.
+smallestGroups :: WarningFlag -> [String]
+smallestGroups flag = mapMaybe go warningHierarchies where
+    -- Because each hierarchy is arranged from smallest to largest,
+    -- the first group we find in a hierarchy which contains the flag
+    -- is the smallest.
+    go (group:rest) = fromMaybe (go rest) $ do
+        flags <- lookup group warningGroups
+        guard (flag `elem` flags)
+        pure (Just group)
+    go [] = Nothing
+
 -- | Warnings enabled unless specified otherwise
 standardWarnings :: [WarningFlag]
 standardWarnings -- see Note [Documenting warning flags]
@@ -3828,13 +3913,14 @@ minusWallOpts
     = minusWOpts ++
       [ Opt_WarnTypeDefaults,
         Opt_WarnNameShadowing,
-        Opt_WarnMissingSigs,
+        Opt_WarnMissingSignatures,
         Opt_WarnHiShadows,
         Opt_WarnOrphans,
         Opt_WarnUnusedDoBind,
         Opt_WarnTrustworthySafe,
         Opt_WarnUntickedPromotedConstructors,
-        Opt_WarnMissingPatSynSigs
+        Opt_WarnMissingPatternSynonymSignatures,
+        Opt_WarnRedundantConstraints
       ]
 
 -- | Things you get with -Weverything, i.e. *all* known warnings flags

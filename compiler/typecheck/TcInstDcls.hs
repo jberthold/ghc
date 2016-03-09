@@ -37,7 +37,6 @@ import MkCore     ( nO_METHOD_BINDING_ERROR_ID )
 import Type
 import TcEvidence
 import TyCon
-import Coercion   ( emptyCvSubstEnv )
 import CoAxiom
 import DataCon
 import Class
@@ -448,7 +447,7 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
            if isHsBootOrSig (tcg_src env)
              then
                do warn <- woptM Opt_WarnDerivingTypeable
-                  when warn $ addWarnTc $ vcat
+                  when warn $ addWarnTc (Reason Opt_WarnDerivingTypeable) $ vcat
                     [ ppTypeable <+> text "instances in .hs-boot files are ignored"
                     , text "This warning will become an error in future versions of the compiler"
                     ]
@@ -529,8 +528,7 @@ tcClsInstDecl (L loc (ClsInstDecl { cid_poly_ty = poly_ty, cid_binds = binds
 
         ; (tyvars, theta, clas, inst_tys) <- tcHsClsInstType InstDeclCtxt poly_ty
         ; let mini_env   = mkVarEnv (classTyVars clas `zip` inst_tys)
-              mini_subst = mkTCvSubst (mkInScopeSet (mkVarSet tyvars))
-                                      (mini_env, emptyCvSubstEnv)
+              mini_subst = mkTvSubst (mkInScopeSet (mkVarSet tyvars)) mini_env
               mb_info    = Just (clas, mini_env)
 
         -- Next, process any associated types.
@@ -1575,7 +1573,7 @@ derivBindCtxt sel_id clas tys
 warnUnsatisfiedMinimalDefinition :: ClassMinimalDef -> TcM ()
 warnUnsatisfiedMinimalDefinition mindef
   = do { warn <- woptM Opt_WarnMissingMethods
-       ; warnTc warn message
+       ; warnTc (Reason Opt_WarnMissingMethods) warn message
        }
   where
     message = vcat [text "No explicit implementation for"

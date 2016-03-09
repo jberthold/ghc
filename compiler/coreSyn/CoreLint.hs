@@ -284,7 +284,7 @@ displayLintResults :: DynFlags -> CoreToDo
                    -> IO ()
 displayLintResults dflags pass warns errs binds
   | not (isEmptyBag errs)
-  = do { log_action dflags dflags Err.SevDump noSrcSpan defaultDumpStyle
+  = do { log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle
            (vcat [ lint_banner "errors" (ppr pass), Err.pprMessageBag errs
                  , text "*** Offending Program ***"
                  , pprCoreBindings binds
@@ -294,7 +294,7 @@ displayLintResults dflags pass warns errs binds
   | not (isEmptyBag warns)
   , not opt_NoDebugOutput
   , showLintWarnings pass
-  = log_action dflags dflags Err.SevDump noSrcSpan defaultDumpStyle
+  = log_action dflags dflags NoReason Err.SevDump noSrcSpan defaultDumpStyle
         (lint_banner "warnings" (ppr pass) $$ Err.pprMessageBag warns)
 
   | otherwise = return ()
@@ -324,7 +324,8 @@ lintInteractiveExpr what hsc_env expr
     dflags = hsc_dflags hsc_env
 
     display_lint_err err
-      = do { log_action dflags dflags Err.SevDump noSrcSpan defaultDumpStyle
+      = do { log_action dflags dflags NoReason Err.SevDump
+               noSrcSpan defaultDumpStyle
                (vcat [ lint_banner "errors" (text what)
                      , err
                      , text "*** Offending Program ***"
@@ -590,10 +591,7 @@ lintCoreExpr :: CoreExpr -> LintM OutType
 -- If you edit this function, you may need to update the GHC formalism
 -- See Note [GHC Formalism]
 lintCoreExpr (Var var)
-  = do  { checkL (not (var == oneTupleDataConId))
-                 (text "Illegal one-tuple")
-
-        ; checkL (isId var && not (isCoVar var))
+  = do  { checkL (isId var && not (isCoVar var))
                  (text "Non term variable" <+> ppr var)
 
         ; checkDeadIdOcc var
@@ -1714,10 +1712,6 @@ lookupIdInScope id
                               ; return id } }
   where
     out_of_scope = pprBndr LetBind id <+> text "is out of scope"
-
-
-oneTupleDataConId :: Id -- Should not happen
-oneTupleDataConId = dataConWorkId (tupleDataCon Boxed 1)
 
 lintTyCoVarInScope :: Var -> LintM ()
 lintTyCoVarInScope v = lintInScope (text "is out of scope") v

@@ -906,7 +906,8 @@ is as follows. If the do-expression has the following form: ::
 
 where none of the variables defined by ``p1...pn`` are mentioned in ``E1...En``,
 then the expression will only require ``Applicative``. Otherwise, the expression
-will require ``Monad``.
+will require ``Monad``. The block may return a pure expression ``E`` depending
+upon the results ``p1...pn`` with either ``return`` or ``pure``.
 
 
 .. _applicative-do-pitfall:
@@ -3515,8 +3516,11 @@ would generate the following instance::
 
 The algorithm for :ghc-flag:`-XDeriveFoldable` is adapted from the :ghc-flag:`-XDeriveFunctor`
 algorithm, but it generates definitions for ``foldMap`` and ``foldr`` instead
-of ``fmap``. Here are the differences between the generated code in each
-extension:
+of ``fmap``. In addition, :ghc-flag:`-XDeriveFoldable` filters out all
+constructor arguments on the RHS expression whose types do not mention the last
+type parameter, since those arguments do not need to be folded over.
+
+Here are the differences between the generated code in each extension:
 
 #. When a bare type variable ``a`` is encountered, :ghc-flag:`-XDeriveFunctor` would
    generate ``f a`` for an ``fmap`` definition. :ghc-flag:`-XDeriveFoldable` would
@@ -3526,10 +3530,6 @@ extension:
    contain ``a``, is encountered, :ghc-flag:`-XDeriveFunctor` recursively calls
    ``fmap`` on it. Similarly, :ghc-flag:`-XDeriveFoldable` would recursively call
    ``foldr`` and ``foldMap``.
-
-#. When a type that does not mention ``a`` is encountered, :ghc-flag:`-XDeriveFunctor`
-   leaves it alone. On the other hand, :ghc-flag:`-XDeriveFoldable` would generate
-   ``z`` (the state value) for ``foldr`` and ``mempty`` for ``foldMap``.
 
 #. :ghc-flag:`-XDeriveFunctor` puts everything back together again at the end by
    invoking the constructor. :ghc-flag:`-XDeriveFoldable`, however, builds up a value
@@ -3596,12 +3596,15 @@ would generate the following ``Traversable`` instance::
 
     instance Traversable Example where
       traverse f (Ex a1 a2 a3 a4)
-        = fmap Ex (f a1) <*> traverse f a3
+        = fmap (\b1 b3 -> Ex b1 a2 b3 a4) (f a1) <*> traverse f a3
 
 The algorithm for :ghc-flag:`-XDeriveTraversable` is adapted from the
 :ghc-flag:`-XDeriveFunctor` algorithm, but it generates a definition for ``traverse``
-instead of ``fmap``. Here are the differences between the generated code in
-each extension:
+instead of ``fmap``. In addition, :ghc-flag:`-XDeriveTraversable` filters out
+all constructor arguments on the RHS expression whose types do not mention the
+last type parameter, since those arguments do not produce any effects in a
+traversal. Here are the differences between the generated code in each
+extension:
 
 #. When a bare type variable ``a`` is encountered, both :ghc-flag:`-XDeriveFunctor` and
    :ghc-flag:`-XDeriveTraversable` would generate ``f a`` for an ``fmap`` and
@@ -3611,10 +3614,6 @@ each extension:
    contain ``a``, is encountered, :ghc-flag:`-XDeriveFunctor` recursively calls
    ``fmap`` on it. Similarly, :ghc-flag:`-XDeriveTraversable` would recursively call
    ``traverse``.
-
-#. When a type that does not mention ``a`` is encountered, :ghc-flag:`-XDeriveFunctor`
-   leaves it alone. On the other hand, :ghc-flag:`-XDeriveTraversable` would call
-   ``pure`` on the value of that type.
 
 #. :ghc-flag:`-XDeriveFunctor` puts everything back together again at the end by
    invoking the constructor. :ghc-flag:`-XDeriveTraversable` does something similar,
@@ -10817,13 +10816,13 @@ add a new case (t): ::
 That leaves let expressions, whose translation is given in `Section
 3.12 <http://www.haskell.org/onlinereport/exps.html#sect3.12>`__ of the
 Haskell Report.
-Replace these rules with the following ones, where ``v`` stands for a
-variable:
+Replace the "Translation" there with the following one.  Given
+``let { bind1 ... bindn } in body``:
 
 .. admonition:: FORCE
 
-    Replace any binding ``!p = e`` with ``v = e; p = v`` and replace
-    ``e0`` with ``v seq e0``, where ``v`` is fresh. This translation works fine if
+    Replace any binding ``!p = e`` with ``v = case e of p -> (x1, ..., xn); (x1, ..., xn) = v`` and replace
+    ``body`` with ``v seq body``, where ``v`` is fresh. This translation works fine if
     ``p`` is already a variable ``x``, but can obviously be optimised by not
     introducing a fresh variable ``v``.
 
@@ -10866,41 +10865,43 @@ Here is a simple non-recursive case: ::
 
 Same again, only with a pattern binding: ::
 
-    let !(x,y) = if blob then (factorial p, factorial q) else (0,0)
-    in body
+    let !(Just x, Left y) = e in body
 
     ===> (FORCE)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
             (x,y) = v
         in v `seq` body
 
     ===> (SPLIT)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
             x = case v of (x,y) -> x
             y = case v of (x,y) -> y
         in v `seq` body
 
     ===> (inline seq, float x,y bindings inwards)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
         in case v of v -> let x = case v of (x,y) -> x
-                                y = case v of (x,y) -> y
-                            in body
+                              y = case v of (x,y) -> y
+                          in body
 
     ===> (fluff up v's pattern; this is a standard Core optimisation)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
         in case v of v@(p,q) -> let x = case v of (x,y) -> x
                                     y = case v of (x,y) -> y
                                 in body
 
     ===> (case of known constructor)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
         in case v of v@(p,q) -> let x = p
                                     y = q
                                 in body
 
-    ===> (inline x,y)
-        let v = if blob then (factorial p, factorial q) else (0,0)
-        in case v of (p,q) -> body[p/x, q/y]
+    ===> (inline x,y, v)
+        case (case e of (Just x, Left y) -> (x,y) of
+            (p,q) -> body[p/x, q/y]
+
+    ===> (case of case)
+        case e of (Just x, Left y) -> body[p/x, q/y]
 
 The final form is just what we want: a simple case expression.
 
@@ -11045,11 +11046,11 @@ Using static pointers
 
 Each reference is given a key which can be used to locate it at runtime
 with
-:base-ref:`unsafeLookupStaticPtr <GHC.StaticPtr.html#v%3AunsafeLookupStaticPtr>`
+:base-ref:`unsafeLookupStaticPtr <GHC-StaticPtr.html#v%3AunsafeLookupStaticPtr>`
 which uses a global and immutable table called the Static Pointer Table.
 The compiler includes entries in this table for all static forms found
 in the linked modules. The value can be obtained from the reference via
-:base-ref:`deRefStaticPtr <GHC.StaticPtr.html#v%3AdeRefStaticPtr>`.
+:base-ref:`deRefStaticPtr <GHC-StaticPtr.html#v%3AdeRefStaticPtr>`.
 
 The body ``e`` of a ``static e`` expression must be a closed expression.
 That is, there can be no free variables occurring in ``e``, i.e. lambda-
@@ -11082,7 +11083,23 @@ Informally, if we have a closed expression ::
 
 the static form is of type ::
 
-    static e :: (Typeable a_1, ... , Typeable a_n) => StaticPtr t
+    static e :: (IsStatic p, Typeable a_1, ... , Typeable a_n) => p t
+
+
+A static form determines a value of type ``StaticPtr t``, but just
+like ``OverloadedLists`` and ``OverloadedStrings``, this literal
+expression is overloaded to allow lifting a ``StaticPtr`` into another
+type implicitly, via the ``IsStatic`` class: ::
+
+    class IsStatic p where
+        fromStaticPtr :: StaticPtr a -> p a
+
+The only predefined instance is the obvious one that does nothing: ::
+
+    instance IsStatic StaticPtr where
+        fromStaticPtr sptr = sptr
+
+See :base-ref:`IsStatic <GHC-StaticPtr.html#t%3AIsStatic>`.
 
 Furthermore, type ``t`` is constrained to have a ``Typeable`` instance.
 The following are therefore illegal: ::

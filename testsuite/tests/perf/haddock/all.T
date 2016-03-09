@@ -5,7 +5,7 @@
 test('haddock.base',
      [unless(in_tree_compiler(), skip), req_haddock
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 27812188000, 5)
+          [(wordsize(64), 31112113880, 5)
             # 2012-08-14: 5920822352 (amd64/Linux)
             # 2012-09-20: 5829972376 (amd64/Linux)
             # 2012-10-08: 5902601224 (amd64/Linux)
@@ -28,6 +28,7 @@ test('haddock.base',
             # 2015-12-11: 11119767632 (amd64/Linux) - TypeInType (see #11196)
             # 2015-12-17: 26282821104 (x86_64/Linux) - Update Haddock to master
             # 2015-12-17: 27812188000 (x86_64/Linux) - Move Data.Functor.* into base
+            # 2015-03-02: 31112113880 (x86_64/Linux) - More creep
 
           ,(platform('i386-unknown-mingw32'), 4434804940, 5)
             # 2013-02-10:                     3358693084 (x86/Windows)
@@ -50,7 +51,7 @@ test('haddock.base',
 test('haddock.Cabal',
      [unless(in_tree_compiler(), skip), req_haddock
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 10519532424, 5)
+          [(wordsize(64), 11123698216, 5)
             # 2012-08-14: 3255435248 (amd64/Linux)
             # 2012-08-29: 3324606664 (amd64/Linux, new codegen)
             # 2012-10-08: 3373401360 (amd64/Linux)
@@ -74,6 +75,7 @@ test('haddock.Cabal',
             # 2015-12-11: 8114833312 (amd64/Linux) - TypeInType (See #11196)
             # 2015-12-17: 9982130512 (amd64/Linux) - Update Haddock to master
             # 2015-12-22: 10519532424 (amd64/Linux) - Lots of new Semigroup instances in Cabal
+            # 2015-03-08: 11123698216 (amd64/Linux) - Cabal update
 
           ,(platform('i386-unknown-mingw32'), 3293415576, 5)
             # 2012-10-30:                     1733638168 (x86/Windows)
