@@ -120,4 +120,4 @@
 	url = http://git.haskell.org/arcanist-external-json-linter.git
 [submodule "libraries/edenmodules"]
 	path = libraries/edenmodules
-	url = git://james.mathematik.uni-marburg.de/edenmodules.git
+	url = git://hex.mathematik.uni-marburg.de/edenmodules.git
