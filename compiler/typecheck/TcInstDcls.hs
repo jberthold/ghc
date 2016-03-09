@@ -447,7 +447,7 @@ tcInstDecls1 tycl_decls inst_decls deriv_decls
            if isHsBootOrSig (tcg_src env)
              then
                do warn <- woptM Opt_WarnDerivingTypeable
-                  when warn $ addWarnTc $ vcat
+                  when warn $ addWarnTc (Reason Opt_WarnDerivingTypeable) $ vcat
                     [ ppTypeable <+> text "instances in .hs-boot files are ignored"
                     , text "This warning will become an error in future versions of the compiler"
                     ]
@@ -684,12 +684,13 @@ tcDataFamInstDecl mb_clsinfo
                                              axiom_name eta_tvs [] fam_tc eta_pats
                                              (mkTyConApp rep_tc (mkTyVarTys eta_tvs))
                     parent = DataFamInstTyCon axiom fam_tc pats'
-                    rep_tc_kind = mkPiTypesPreferFunTy full_tvs liftedTypeKind
+                    ty_binders = mkTyBindersPreferAnon full_tvs liftedTypeKind
+
 
                       -- NB: Use the full_tvs from the pats. See bullet toward
                       -- the end of Note [Data type families] in TyCon
                     rep_tc   = mkAlgTyCon rep_tc_name
-                                          rep_tc_kind
+                                          ty_binders liftedTypeKind
                                           full_tvs
                                           (map (const Nominal) full_tvs)
                                           (fmap unLoc cType) stupid_theta
@@ -1275,7 +1276,7 @@ tcMethods dfun_id clas tyvars dfun_ev_vars inst_tys
         error_rhs dflags = L inst_loc $ HsApp error_fun (error_msg dflags)
         error_fun    = L inst_loc $
                        wrapId (mkWpTyApps
-                                [ getLevity "tcInstanceMethods.tc_default" meth_tau
+                                [ getRuntimeRep "tcInstanceMethods.tc_default" meth_tau
                                 , meth_tau])
                               nO_METHOD_BINDING_ERROR_ID
         error_msg dflags = L inst_loc (HsLit (HsStringPrim ""
@@ -1570,7 +1571,7 @@ derivBindCtxt sel_id clas tys
 warnUnsatisfiedMinimalDefinition :: ClassMinimalDef -> TcM ()
 warnUnsatisfiedMinimalDefinition mindef
   = do { warn <- woptM Opt_WarnMissingMethods
-       ; warnTc warn message
+       ; warnTc (Reason Opt_WarnMissingMethods) warn message
        }
   where
     message = vcat [text "No explicit implementation for"

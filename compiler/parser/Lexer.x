@@ -155,8 +155,8 @@ $binit     = 0-1
 $octit     = 0-7
 $hexit     = [$decdigit A-F a-f]
 
-$modifier  = \x07 -- Trick Alex into handling Unicode. See alexGetByte.
-$idchar    = [$small $large $digit $modifier \']
+$uniidchar = \x07 -- Trick Alex into handling Unicode. See alexGetByte.
+$idchar    = [$small $large $digit $uniidchar \']
 
 $pragmachar = [$small $large $digit]
 
@@ -970,24 +970,35 @@ ifExtension pred bits _ _ _ = pred bits
 multiline_doc_comment :: Action
 multiline_doc_comment span buf _len = withLexedDocType (worker "")
   where
-    worker commentAcc input docType oneLine = case alexGetChar' input of
+    worker commentAcc input docType checkNextLine = case alexGetChar' input of
       Just ('\n', input')
-        | oneLine -> docCommentEnd input commentAcc docType buf span
-        | otherwise -> case checkIfCommentLine input' of
-          Just input -> worker ('\n':commentAcc) input docType False
+        | checkNextLine -> case checkIfCommentLine input' of
+          Just input -> worker ('\n':commentAcc) input docType checkNextLine
           Nothing -> docCommentEnd input commentAcc docType buf span
-      Just (c, input) -> worker (c:commentAcc) input docType oneLine
+        | otherwise -> docCommentEnd input commentAcc docType buf span
+      Just (c, input) -> worker (c:commentAcc) input docType checkNextLine
       Nothing -> docCommentEnd input commentAcc docType buf span
 
+    -- Check if the next line of input belongs to this doc comment as well.
+    -- A doc comment continues onto the next line when the following
+    -- conditions are met:
+    --   * The line starts with "--"
+    --   * The line doesn't start with "---".
+    --   * The line doesn't start with "-- $", because that would be the
+    --     start of a /new/ named haddock chunk (#10398).
+    checkIfCommentLine :: AlexInput -> Maybe AlexInput
     checkIfCommentLine input = check (dropNonNewlineSpace input)
       where
-        check input = case alexGetChar' input of
-          Just ('-', input) -> case alexGetChar' input of
-            Just ('-', input) -> case alexGetChar' input of
-              Just (c, _) | c /= '-' -> Just input
-              _ -> Nothing
-            _ -> Nothing
-          _ -> Nothing
+        check input = do
+          ('-', input) <- alexGetChar' input
+          ('-', input) <- alexGetChar' input
+          (c, after_c) <- alexGetChar' input
+          case c of
+            '-' -> Nothing
+            ' ' -> case alexGetChar' after_c of
+                     Just ('$', _) -> Nothing
+                     _ -> Just input
+            _   -> Just input
 
         dropNonNewlineSpace input = case alexGetChar' input of
           Just (c, input')
@@ -1051,15 +1062,17 @@ withLexedDocType :: (AlexInput -> (String -> Token) -> Bool -> P (RealLocated To
 withLexedDocType lexDocComment = do
   input@(AI _ buf) <- getInput
   case prevChar buf ' ' of
-    '|' -> lexDocComment input ITdocCommentNext False
-    '^' -> lexDocComment input ITdocCommentPrev False
+    -- The `Bool` argument to lexDocComment signals whether or not the next
+    -- line of input might also belong to this doc comment.
+    '|' -> lexDocComment input ITdocCommentNext True
+    '^' -> lexDocComment input ITdocCommentPrev True
     '$' -> lexDocComment input ITdocCommentNamed True
     '*' -> lexDocSection 1 input
     _ -> panic "withLexedDocType: Bad doc type"
  where
     lexDocSection n input = case alexGetChar' input of
       Just ('*', input) -> lexDocSection (n+1) input
-      Just (_,   _)     -> lexDocComment input (ITdocSection n) True
+      Just (_,   _)     -> lexDocComment input (ITdocSection n) False
       Nothing -> do setInput input; lexToken -- eof reached, lex it normally
 
 -- RULES pragmas turn on the forall and '.' keywords, and we turn them
@@ -1874,10 +1887,10 @@ alexGetByte (AI loc s)
         symbol          = '\x04'
         space           = '\x05'
         other_graphic   = '\x06'
-        modifier        = '\x07'
+        uniidchar       = '\x07'
 
         adj_c
-          | c <= '\x06' = non_graphic
+          | c <= '\x07' = non_graphic
           | c <= '\x7f' = c
           -- Alex doesn't handle Unicode, so when Unicode
           -- character is encountered we output these values
@@ -1891,9 +1904,9 @@ alexGetByte (AI loc s)
                   UppercaseLetter       -> upper
                   LowercaseLetter       -> lower
                   TitlecaseLetter       -> upper
-                  ModifierLetter        -> modifier -- see #10196
+                  ModifierLetter        -> uniidchar -- see #10196
                   OtherLetter           -> lower -- see #1103
-                  NonSpacingMark        -> other_graphic
+                  NonSpacingMark        -> uniidchar -- see #7650
                   SpacingCombiningMark  -> other_graphic
                   EnclosingMark         -> other_graphic
                   DecimalNumber         -> digit
@@ -2193,7 +2206,8 @@ mkPState flags buf loc =
 addWarning :: WarningFlag -> SrcSpan -> SDoc -> P ()
 addWarning option srcspan warning
  = P $ \s@PState{messages=(ws,es), dflags=d} ->
-       let warning' = mkWarnMsg d srcspan alwaysQualify warning
+       let warning' = makeIntoWarning (Reason option) $
+                      mkWarnMsg d srcspan alwaysQualify warning
            ws' = if wopt option d then ws `snocBag` warning' else ws
        in POk s{messages=(ws', es)} ()
 
@@ -2216,7 +2230,8 @@ mkTabWarning PState{tab_first=tf, tab_count=tc, dflags=d} =
                 <> middle
                 <> text "."
                 $+$ text "Please use spaces instead."
-  in fmap (\s -> mkWarnMsg d (RealSrcSpan s) alwaysQualify message) tf
+  in fmap (\s -> makeIntoWarning (Reason Opt_WarnTabs) $
+                 mkWarnMsg d (RealSrcSpan s) alwaysQualify message) tf
 
 getMessages :: PState -> Messages
 getMessages p@PState{messages=(ws,es)} =

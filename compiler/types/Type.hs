@@ -41,7 +41,7 @@ module Type (
         splitForAllTy_maybe, splitForAllTys, splitForAllTy,
         splitPiTy_maybe, splitPiTys, splitPiTy,
         splitNamedPiTys,
-        mkPiType, mkPiTypes, mkPiTypesPreferFunTy,
+        mkPiType, mkPiTypes, mkTyBindersPreferAnon,
         piResultTy, piResultTys,
         applyTysX, dropForAlls,
 
@@ -58,7 +58,6 @@ module Type (
         splitPiTysInvisible, filterOutInvisibleTypes,
         filterOutInvisibleTyVars, partitionInvisibles,
         synTyConResKind,
-        tyConBinders,
 
         -- Analyzing types
         TyCoMapper(..), mapType, mapCoercion,
@@ -103,9 +102,9 @@ module Type (
         -- (Lifting and boxity)
         isUnliftedType, isUnboxedTupleType, isAlgType, isClosedAlgType,
         isPrimitiveType, isStrictType,
-        isLevityTy, isLevityVar, isLevityKindedTy,
-        dropLevityArgs,
-        getLevity, getLevityFromKind,
+        isRuntimeRepTy, isRuntimeRepVar, isRuntimeRepKindedTy,
+        dropRuntimeRepArgs,
+        getRuntimeRep, getRuntimeRepFromKind,
 
         -- * Main data types representing Kinds
         Kind,
@@ -114,7 +113,7 @@ module Type (
         typeKind,
 
         -- ** Common Kind
-        liftedTypeKind, unliftedTypeKind,
+        liftedTypeKind,
 
         -- * Type free variables
         tyCoVarsOfType, tyCoVarsOfTypes, tyCoVarsOfTypeAcc,
@@ -143,7 +142,7 @@ module Type (
         tyConsOfType,
 
         -- * Type representation for the code generator
-        typePrimRep, typeRepArity,
+        typePrimRep, typeRepArity, kindPrimRep, tyConPrimRep,
 
         -- * Main type substitution data types
         TvSubstEnv,     -- Representation widely visible
@@ -310,7 +309,8 @@ coreView (TyConApp tc tys) | Just (tenv, rhs, tys') <- expandSynTyCon_maybe tc t
 coreView _ = Nothing
 
 -- | Like 'coreView', but it also "expands" @Constraint@ to become
--- @TYPE Lifted@.
+-- @TYPE PtrRepLifted@.
+{-# INLINE coreViewOneStarKind #-}
 coreViewOneStarKind :: Type -> Maybe Type
 coreViewOneStarKind ty
   | Just ty' <- coreView ty   = Just ty'
@@ -327,14 +327,26 @@ expandTypeSynonyms :: Type -> Type
 -- 'expandTypeSynonyms' only expands out type synonyms mentioned in the type,
 -- not in the kinds of any TyCon or TyVar mentioned in the type.
 expandTypeSynonyms ty
-  = go (mkEmptyTCvSubst (mkTyCoInScopeSet [ty] [])) ty
+  = go (mkEmptyTCvSubst in_scope) ty
   where
+    in_scope = mkInScopeSet (tyCoVarsOfType ty)
+
     go subst (TyConApp tc tys)
-      | Just (tenv, rhs, tys') <- expandSynTyCon_maybe tc tys
-      = let subst' = unionTCvSubst subst (mkTvSubstPrs tenv) in
-        go subst' (mkAppTys rhs tys')
+      | Just (tenv, rhs, tys') <- expandSynTyCon_maybe tc expanded_tys
+      = let subst' = mkTvSubst in_scope (mkVarEnv tenv)
+            -- Make a fresh substitution; rhs has nothing to
+            -- do with anything that has happened so far
+            -- NB: if you make changes here, be sure to build an
+            --     /idempotent/ substitution, even in the nested case
+            --        type T a b = a -> b
+            --        type S x y = T y x
+            -- (Trac #11665)
+        in  mkAppTys (go subst' rhs) tys'
       | otherwise
-      = TyConApp tc (map (go subst) tys)
+      = TyConApp tc expanded_tys
+      where
+        expanded_tys = (map (go subst) tys)
+
     go _     (LitTy l)     = LitTy l
     go subst (TyVarTy tv)  = substTyVar subst tv
     go subst (AppTy t1 t2) = mkAppTy (go subst t1) (go subst t2)
@@ -1077,27 +1089,28 @@ mkCastTy ty co = -- NB: don't check if the coercion "from" type matches here;
       = split_apps (t2:args) t1 co
     split_apps args (TyConApp tc tc_args) co
       | mightBeUnsaturatedTyCon tc
-      = affix_co (tyConKind tc) (mkTyConTy tc) (tc_args `chkAppend` args) co
+      = affix_co (tyConBinders tc) (mkTyConTy tc) (tc_args `chkAppend` args) co
       | otherwise -- not decomposable... but it may still be oversaturated
       = let (non_decomp_args, decomp_args) = splitAt (tyConArity tc) tc_args
             saturated_tc = mkTyConApp tc non_decomp_args
         in
-        affix_co (typeKind saturated_tc) saturated_tc (decomp_args `chkAppend` args) co
+        affix_co (fst $ splitPiTys $ typeKind saturated_tc)
+                 saturated_tc (decomp_args `chkAppend` args) co
 
     split_apps args (ForAllTy (Anon arg) res) co
-      = affix_co (tyConKind funTyCon) (mkTyConTy funTyCon)
+      = affix_co (tyConBinders funTyCon) (mkTyConTy funTyCon)
                  (arg : res : args) co
     split_apps args ty co
-      = affix_co (typeKind ty) ty args co
+      = affix_co (fst $ splitPiTys $ typeKind ty)
+                 ty args co
 
     -- having broken everything apart, this figures out the point at which there
     -- are no more dependent quantifications, and puts the cast there
     affix_co _ ty [] co = no_double_casts ty co
-    affix_co kind ty args co
+    affix_co bndrs ty args co
       -- if kind contains any dependent quantifications, we can't push.
       -- apply arguments until it doesn't
-      = let (bndrs, _inner_ki) = splitPiTys kind
-            (no_dep_bndrs, some_dep_bndrs) = spanEnd isAnonBinder bndrs
+      = let (no_dep_bndrs, some_dep_bndrs) = spanEnd isAnonBinder bndrs
             (some_dep_args, rest_args) = splitAtList some_dep_bndrs args
             dep_subst = zipTyBinderSubst some_dep_bndrs some_dep_args
             used_no_dep_bndrs = takeList rest_args no_dep_bndrs
@@ -1212,10 +1225,10 @@ repType ty
       | isUnboxedTupleTyCon tc
       = if null tys
          then UnaryRep voidPrimTy -- See Note [Nullary unboxed tuple]
-         else UbxTupleRep (concatMap (flattenRepType . go rec_nts) non_levity_tys)
+         else UbxTupleRep (concatMap (flattenRepType . go rec_nts) non_rr_tys)
       where
-          -- See Note [Unboxed tuple levity vars] in TyCon
-        non_levity_tys = dropLevityArgs tys
+          -- See Note [Unboxed tuple RuntimeRep vars] in TyCon
+        non_rr_tys = dropRuntimeRepArgs tys
 
     go rec_nts (CastTy ty _)
       = go rec_nts ty
@@ -1230,16 +1243,31 @@ repType ty
 
 -- | Discovers the primitive representation of a more abstract 'UnaryType'
 typePrimRep :: UnaryType -> PrimRep
-typePrimRep ty
-  = case repType ty of
-      UbxTupleRep _ -> pprPanic "typePrimRep: UbxTupleRep" (ppr ty)
-      UnaryRep rep -> go rep
-    where go (TyConApp tc _)   = tyConPrimRep tc
-          go (ForAllTy _ _)    = PtrRep
-          go (AppTy _ _)       = PtrRep      -- See Note [AppTy rep]
-          go (TyVarTy _)       = PtrRep
-          go (CastTy ty _)     = go ty
-          go _                 = pprPanic "typePrimRep: UnaryRep" (ppr ty)
+typePrimRep ty = kindPrimRep (typeKind ty)
+
+-- | Find the primitive representation of a 'TyCon'. Defined here to
+-- avoid module loops. Call this only on unlifted tycons.
+tyConPrimRep :: TyCon -> PrimRep
+tyConPrimRep tc = kindPrimRep res_kind
+  where
+    res_kind = tyConResKind tc
+
+-- | Take a kind (of shape @TYPE rr@) and produce the 'PrimRep' of values
+-- of types of this kind.
+kindPrimRep :: Kind -> PrimRep
+kindPrimRep ki | Just ki' <- coreViewOneStarKind ki = kindPrimRep ki'
+kindPrimRep (TyConApp typ [runtime_rep])
+  = ASSERT( typ `hasKey` tYPETyConKey )
+    go runtime_rep
+  where
+    go rr | Just rr' <- coreView rr = go rr'
+    go (TyConApp rr_dc args)
+      | RuntimeRep fun <- tyConRuntimeRepInfo rr_dc
+      = fun args
+    go rr = pprPanic "kindPrimRep.go" (ppr rr)
+kindPrimRep ki = WARN( True
+                     , text "kindPrimRep defaulting to PtrRep on" <+> ppr ki )
+                 PtrRep  -- this can happen legitimately for, e.g., Any
 
 typeRepArity :: Arity -> Type -> RepArity
 typeRepArity 0 _ = 0
@@ -1250,7 +1278,8 @@ typeRepArity n ty = case repType ty of
 isVoidTy :: Type -> Bool
 -- True if the type has zero width
 isVoidTy ty = case repType ty of
-                UnaryRep (TyConApp tc _) -> isVoidRep (tyConPrimRep tc)
+                UnaryRep (TyConApp tc _) -> isUnliftedTyCon tc &&
+                                            isVoidRep (tyConPrimRep tc)
                 _                        -> False
 
 {-
@@ -1273,10 +1302,6 @@ mkForAllTy = ForAllTy
 mkNamedForAllTy :: TyVar -> VisibilityFlag -> Type -> Type
 mkNamedForAllTy tv vis = ASSERT( isTyVar tv )
                          ForAllTy (Named tv vis)
-
--- | Wraps foralls over the type using the provided 'TyVar's from left to right
-mkForAllTys :: [TyBinder] -> Type -> Type
-mkForAllTys tyvars ty = foldr ForAllTy ty tyvars
 
 -- | Like mkForAllTys, but assumes all variables are dependent and invisible,
 -- a common case
@@ -1309,23 +1334,23 @@ mkPiType v ty
 
 mkPiTypes vs ty = foldr mkPiType ty vs
 
--- | Given a list of type-level vars, makes ForAllTys, preferring
+-- | Given a list of type-level vars and a result type, makes TyBinders, preferring
 -- anonymous binders if the variable is, in fact, not dependent.
 -- All binders are /visible/.
-mkPiTypesPreferFunTy :: [TyVar] -> Type -> Type
-mkPiTypesPreferFunTy vars inner_ty = fst $ go vars inner_ty
+mkTyBindersPreferAnon :: [TyVar] -> Type -> [TyBinder]
+mkTyBindersPreferAnon vars inner_ty = fst $ go vars inner_ty
   where
-    go :: [TyVar] -> Type -> (Type, VarSet) -- also returns the free vars
-    go []     ty = (ty, tyCoVarsOfType ty)
-    go (v:vs) ty | v `elemVarSet` fvs
-                 = ( mkForAllTy (Named v Visible) qty
+    go :: [TyVar] -> Type -> ([TyBinder], VarSet) -- also returns the free vars
+    go [] ty = ([], tyCoVarsOfType ty)
+    go (v:vs) ty |  v `elemVarSet` fvs
+                 = ( Named v Visible : binders
                    , fvs `delVarSet` v `unionVarSet` kind_vars )
                  | otherwise
-                 = ( mkForAllTy (Anon (tyVarKind v)) qty
+                 = ( Anon (tyVarKind v) : binders
                    , fvs `unionVarSet` kind_vars )
       where
-        (qty, fvs) = go vs ty
-        kind_vars  = tyCoVarsOfType $ tyVarKind v
+        (binders, fvs) = go vs ty
+        kind_vars      = tyCoVarsOfType $ tyVarKind v
 
 -- | Take a ForAllTy apart, returning the list of tyvars and the result type.
 -- This always succeeds, even if it returns only an empty list. Note that the
@@ -1453,9 +1478,6 @@ splitPiTysInvisible ty = split ty ty []
 
      split orig_ty _ bndrs
        = (reverse bndrs, orig_ty)
-
-tyConBinders :: TyCon -> [TyBinder]
-tyConBinders = fst . splitPiTys . tyConKind
 
 applyTysX :: [TyVar] -> Type -> [Type] -> Type
 -- applyTyxX beta-reduces (/\tvs. body_ty) arg_tys
@@ -1917,25 +1939,26 @@ isUnliftedType (ForAllTy (Named {}) ty) = isUnliftedType ty
 isUnliftedType (TyConApp tc _)          = isUnliftedTyCon tc
 isUnliftedType _                        = False
 
--- | Extract the levity classifier of a type. Panics if this is not possible.
-getLevity :: String   -- ^ Printed in case of an error
-          -> Type -> Type
-getLevity err ty = getLevityFromKind err (typeKind ty)
+-- | Extract the RuntimeRep classifier of a type. Panics if this is not possible.
+getRuntimeRep :: String   -- ^ Printed in case of an error
+              -> Type -> Type
+getRuntimeRep err ty = getRuntimeRepFromKind err (typeKind ty)
 
--- | Extract the levity classifier of a type from its kind.
--- For example, getLevityFromKind * = Lifted; getLevityFromKind # = Unlifted.
+-- | Extract the RuntimeRep classifier of a type from its kind.
+-- For example, getRuntimeRepFromKind * = PtrRepLifted;
+--              getRuntimeRepFromKind # = PtrRepUnlifted.
 -- Panics if this is not possible.
-getLevityFromKind :: String  -- ^ Printed in case of an error
-                  -> Type -> Type
-getLevityFromKind err = go
+getRuntimeRepFromKind :: String  -- ^ Printed in case of an error
+                      -> Type -> Type
+getRuntimeRepFromKind err = go
   where
     go k | Just k' <- coreViewOneStarKind k = go k'
     go k
       | Just (tc, [arg]) <- splitTyConApp_maybe k
       , tc `hasKey` tYPETyConKey
       = arg
-    go k = pprPanic "getLevity" (text err $$
-                                 ppr k <+> dcolon <+> ppr (typeKind k))
+    go k = pprPanic "getRuntimeRep" (text err $$
+                                     ppr k <+> dcolon <+> ppr (typeKind k))
 
 isUnboxedTupleType :: Type -> Bool
 isUnboxedTupleType ty = case tyConAppTyCon_maybe ty of
@@ -2063,40 +2086,79 @@ cmpTypes ts1 ts2 = cmpTypesX rn_env ts1 ts2
   where
     rn_env = mkRnEnv2 (mkInScopeSet (tyCoVarsOfTypes (ts1 ++ ts2)))
 
+-- | An ordering relation between two 'Type's (known below as @t1 :: k1@
+-- and @t2 :: k2@)
+data TypeOrdering = TLT  -- ^ @t1 < t2@
+                  | TEQ  -- ^ @t1 ~ t2@ and there are no casts in either,
+                         -- therefore we can conclude @k1 ~ k2@
+                  | TEQX -- ^ @t1 ~ t2@ yet one of the types contains a cast so
+                         -- they may differ in kind.
+                  | TGT  -- ^ @t1 > t2@
+                  deriving (Eq, Ord, Enum, Bounded)
+
 cmpTypeX :: RnEnv2 -> Type -> Type -> Ordering  -- Main workhorse
     -- See Note [Non-trivial definitional equality] in TyCoRep
-cmpTypeX env orig_t1 orig_t2 = go env k1 k2 `thenCmp` go env orig_t1 orig_t2
+cmpTypeX env orig_t1 orig_t2 =
+    case go env orig_t1 orig_t2 of
+      -- If there are casts then we also need to do a comparison of the kinds of
+      -- the types being compared
+      TEQX          -> toOrdering $ go env k1 k2
+      ty_ordering   -> toOrdering ty_ordering
   where
     k1 = typeKind orig_t1
     k2 = typeKind orig_t2
 
-    go env t1 t2 | Just t1' <- coreViewOneStarKind t1 = go env t1' t2
-    go env t1 t2 | Just t2' <- coreViewOneStarKind t2 = go env t1 t2'
+    toOrdering :: TypeOrdering -> Ordering
+    toOrdering TLT  = LT
+    toOrdering TEQ  = EQ
+    toOrdering TEQX = EQ
+    toOrdering TGT  = GT
+
+    liftOrdering :: Ordering -> TypeOrdering
+    liftOrdering LT = TLT
+    liftOrdering EQ = TEQ
+    liftOrdering GT = TGT
+
+    thenCmpTy :: TypeOrdering -> TypeOrdering -> TypeOrdering
+    thenCmpTy TEQ  rel  = rel
+    thenCmpTy TEQX rel  = hasCast rel
+    thenCmpTy rel  _    = rel
+
+    hasCast :: TypeOrdering -> TypeOrdering
+    hasCast TEQ = TEQX
+    hasCast rel = rel
+
+    -- Returns both the resulting ordering relation between the two types
+    -- and whether either contains a cast.
+    go :: RnEnv2 -> Type -> Type -> TypeOrdering
+    go env t1 t2
+      | Just t1' <- coreViewOneStarKind t1 = go env t1' t2
+      | Just t2' <- coreViewOneStarKind t2 = go env t1 t2'
 
     go env (TyVarTy tv1)       (TyVarTy tv2)
-      = rnOccL env tv1 `compare` rnOccR env tv2
+      = liftOrdering $ rnOccL env tv1 `compare` rnOccR env tv2
     go env (ForAllTy (Named tv1 _) t1) (ForAllTy (Named tv2 _) t2)
       = go env (tyVarKind tv1) (tyVarKind tv2)
-        `thenCmp` go (rnBndr2 env tv1 tv2) t1 t2
+        `thenCmpTy` go (rnBndr2 env tv1 tv2) t1 t2
         -- See Note [Equality on AppTys]
     go env (AppTy s1 t1) ty2
       | Just (s2, t2) <- repSplitAppTy_maybe ty2
-      = go env s1 s2 `thenCmp` go env t1 t2
+      = go env s1 s2 `thenCmpTy` go env t1 t2
     go env ty1 (AppTy s2 t2)
       | Just (s1, t1) <- repSplitAppTy_maybe ty1
-      = go env s1 s2 `thenCmp` go env t1 t2
+      = go env s1 s2 `thenCmpTy` go env t1 t2
     go env (ForAllTy (Anon s1) t1) (ForAllTy (Anon s2) t2)
-      = go env s1 s2 `thenCmp` go env t1 t2
+      = go env s1 s2 `thenCmpTy` go env t1 t2
     go env (TyConApp tc1 tys1) (TyConApp tc2 tys2)
-      = (tc1 `cmpTc` tc2) `thenCmp` gos env tys1 tys2
-    go _   (LitTy l1)          (LitTy l2)          = compare l1 l2
-    go env (CastTy t1 _)       t2                  = go env t1 t2
-    go env t1                  (CastTy t2 _)       = go env t1 t2
-    go _   (CoercionTy {})     (CoercionTy {})     = EQ
+      = liftOrdering (tc1 `cmpTc` tc2) `thenCmpTy` gos env tys1 tys2
+    go _   (LitTy l1)          (LitTy l2)          = liftOrdering (compare l1 l2)
+    go env (CastTy t1 _)       t2                  = hasCast $ go env t1 t2
+    go env t1                  (CastTy t2 _)       = hasCast $ go env t1 t2
+    go _   (CoercionTy {})     (CoercionTy {})     = TEQ
 
         -- Deal with the rest: TyVarTy < CoercionTy < AppTy < LitTy < TyConApp < ForAllTy
     go _ ty1 ty2
-      = (get_rank ty1) `compare` (get_rank ty2)
+      = liftOrdering $ (get_rank ty1) `compare` (get_rank ty2)
       where get_rank :: Type -> Int
             get_rank (CastTy {})
               = pprPanic "cmpTypeX.get_rank" (ppr [ty1,ty2])
@@ -2108,15 +2170,17 @@ cmpTypeX env orig_t1 orig_t2 = go env k1 k2 `thenCmp` go env orig_t1 orig_t2
             get_rank (ForAllTy (Anon {}) _)  = 6
             get_rank (ForAllTy (Named {}) _) = 7
 
-    gos _   []         []         = EQ
-    gos _   []         _          = LT
-    gos _   _          []         = GT
-    gos env (ty1:tys1) (ty2:tys2) = go env ty1 ty2 `thenCmp` gos env tys1 tys2
+    gos :: RnEnv2 -> [Type] -> [Type] -> TypeOrdering
+    gos _   []         []         = TEQ
+    gos _   []         _          = TLT
+    gos _   _          []         = TGT
+    gos env (ty1:tys1) (ty2:tys2) = go env ty1 ty2 `thenCmpTy` gos env tys1 tys2
 
 -------------
 cmpTypesX :: RnEnv2 -> [Type] -> [Type] -> Ordering
 cmpTypesX _   []        []        = EQ
-cmpTypesX env (t1:tys1) (t2:tys2) = cmpTypeX env t1 t2 `thenCmp` cmpTypesX env tys1 tys2
+cmpTypesX env (t1:tys1) (t2:tys2) = cmpTypeX env t1 t2
+                                      `thenCmp` cmpTypesX env tys1 tys2
 cmpTypesX _   []        _         = LT
 cmpTypesX _   _         []        = GT
 

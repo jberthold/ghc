@@ -906,7 +906,8 @@ is as follows. If the do-expression has the following form: ::
 
 where none of the variables defined by ``p1...pn`` are mentioned in ``E1...En``,
 then the expression will only require ``Applicative``. Otherwise, the expression
-will require ``Monad``.
+will require ``Monad``. The block may return a pure expression ``E`` depending
+upon the results ``p1...pn`` with either ``return`` or ``pure``.
 
 
 .. _applicative-do-pitfall:
@@ -10815,13 +10816,13 @@ add a new case (t): ::
 That leaves let expressions, whose translation is given in `Section
 3.12 <http://www.haskell.org/onlinereport/exps.html#sect3.12>`__ of the
 Haskell Report.
-Replace these rules with the following ones, where ``v`` stands for a
-variable:
+Replace the "Translation" there with the following one.  Given
+``let { bind1 ... bindn } in body``:
 
 .. admonition:: FORCE
 
-    Replace any binding ``!p = e`` with ``v = e; p = v`` and replace
-    ``e0`` with ``v seq e0``, where ``v`` is fresh. This translation works fine if
+    Replace any binding ``!p = e`` with ``v = case e of p -> (x1, ..., xn); (x1, ..., xn) = v`` and replace
+    ``body`` with ``v seq body``, where ``v`` is fresh. This translation works fine if
     ``p`` is already a variable ``x``, but can obviously be optimised by not
     introducing a fresh variable ``v``.
 
@@ -10864,41 +10865,43 @@ Here is a simple non-recursive case: ::
 
 Same again, only with a pattern binding: ::
 
-    let !(x,y) = if blob then (factorial p, factorial q) else (0,0)
-    in body
+    let !(Just x, Left y) = e in body
 
     ===> (FORCE)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
             (x,y) = v
         in v `seq` body
 
     ===> (SPLIT)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
             x = case v of (x,y) -> x
             y = case v of (x,y) -> y
         in v `seq` body
 
     ===> (inline seq, float x,y bindings inwards)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
         in case v of v -> let x = case v of (x,y) -> x
-                                y = case v of (x,y) -> y
-                            in body
+                              y = case v of (x,y) -> y
+                          in body
 
     ===> (fluff up v's pattern; this is a standard Core optimisation)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
         in case v of v@(p,q) -> let x = case v of (x,y) -> x
                                     y = case v of (x,y) -> y
                                 in body
 
     ===> (case of known constructor)
-        let v = if blob then (factorial p, factorial q) else (0,0)
+        let v = case e of (Just x, Left y) -> (x,y)
         in case v of v@(p,q) -> let x = p
                                     y = q
                                 in body
 
-    ===> (inline x,y)
-        let v = if blob then (factorial p, factorial q) else (0,0)
-        in case v of (p,q) -> body[p/x, q/y]
+    ===> (inline x,y, v)
+        case (case e of (Just x, Left y) -> (x,y) of
+            (p,q) -> body[p/x, q/y]
+
+    ===> (case of case)
+        case e of (Just x, Left y) -> body[p/x, q/y]
 
 The final form is just what we want: a simple case expression.
 
@@ -11043,11 +11046,11 @@ Using static pointers
 
 Each reference is given a key which can be used to locate it at runtime
 with
-:base-ref:`unsafeLookupStaticPtr <GHC.StaticPtr.html#v%3AunsafeLookupStaticPtr>`
+:base-ref:`unsafeLookupStaticPtr <GHC-StaticPtr.html#v%3AunsafeLookupStaticPtr>`
 which uses a global and immutable table called the Static Pointer Table.
 The compiler includes entries in this table for all static forms found
 in the linked modules. The value can be obtained from the reference via
-:base-ref:`deRefStaticPtr <GHC.StaticPtr.html#v%3AdeRefStaticPtr>`.
+:base-ref:`deRefStaticPtr <GHC-StaticPtr.html#v%3AdeRefStaticPtr>`.
 
 The body ``e`` of a ``static e`` expression must be a closed expression.
 That is, there can be no free variables occurring in ``e``, i.e. lambda-
@@ -11080,7 +11083,23 @@ Informally, if we have a closed expression ::
 
 the static form is of type ::
 
-    static e :: (Typeable a_1, ... , Typeable a_n) => StaticPtr t
+    static e :: (IsStatic p, Typeable a_1, ... , Typeable a_n) => p t
+
+
+A static form determines a value of type ``StaticPtr t``, but just
+like ``OverloadedLists`` and ``OverloadedStrings``, this literal
+expression is overloaded to allow lifting a ``StaticPtr`` into another
+type implicitly, via the ``IsStatic`` class: ::
+
+    class IsStatic p where
+        fromStaticPtr :: StaticPtr a -> p a
+
+The only predefined instance is the obvious one that does nothing: ::
+
+    instance IsStatic StaticPtr where
+        fromStaticPtr sptr = sptr
+
+See :base-ref:`IsStatic <GHC-StaticPtr.html#t%3AIsStatic>`.
 
 Furthermore, type ``t`` is constrained to have a ``Typeable`` instance.
 The following are therefore illegal: ::

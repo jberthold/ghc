@@ -171,8 +171,8 @@ def checkDynAsm(actual_file, normaliser):
 # These should have extra_clean() arguments, but I need
 # to somehow extract out the name of DLLs to do that
 
-test('T5435_v_asm', normal, run_command, ['$MAKE -s --no-print-directory T5435_v_asm'])
-test('T5435_v_gcc', normal, run_command, ['$MAKE -s --no-print-directory T5435_v_gcc'])
+test('T5435_v_asm', when(arch('powerpc64'), expect_broken(11259)), run_command, ['$MAKE -s --no-print-directory T5435_v_asm'])
+test('T5435_v_gcc', when(arch('powerpc64'), expect_broken(11259)), run_command, ['$MAKE -s --no-print-directory T5435_v_gcc'])
 test('T5435_dyn_asm', check_stdout(checkDynAsm), run_command, ['$MAKE -s --no-print-directory T5435_dyn_asm'])
 test('T5435_dyn_gcc', normal , run_command, ['$MAKE -s --no-print-directory T5435_dyn_gcc'])
 
@@ -221,15 +221,16 @@ test('T7815', [ multi_cpu_race,
 #   ffishutdown: Main_dul: interrupted
 test('ffishutdown', [ ignore_output, only_ways(['threaded1','threaded2']) ], compile_and_run, [''])
 
-test('T7919', [extra_clean(['T7919A.o','T7919A.hi',
-                            'T7919A.dyn_o','T7919A.dyn_hi']),
-               when(fast(),skip) ],
-             compile_and_run, [config.ghc_th_way_flags])
+test('T7919',
+     [extra_clean(['T7919A.o','T7919A.hi', 'T7919A.dyn_o','T7919A.dyn_hi']),
+      when(fast(), skip), omit_ways(prof_ways)],
+     compile_and_run, [config.ghc_th_way_flags])
 
 test('T8035', normal, compile_and_run, [''])
 
 test('linker_unload',
-     [ extra_clean(['Test.o','Test.hi', 'linker_unload']) ],
+     [ when(arch('powerpc64'), expect_broken(11259)),
+       extra_clean(['Test.o','Test.hi', 'linker_unload']) ],
      run_command,
      ['$MAKE -s --no-print-directory linker_unload'])
 

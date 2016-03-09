@@ -310,7 +310,8 @@ tcRnModuleTcRnM hsc_env hsc_src
                                          implicit_prelude import_decls } ;
 
         whenWOptM Opt_WarnImplicitPrelude $
-             when (notNull prel_imports) $ addWarn (implicitPreludeWarn) ;
+             when (notNull prel_imports) $
+                  addWarn (Reason Opt_WarnImplicitPrelude) (implicitPreludeWarn) ;
 
         tcg_env <- {-# SCC "tcRnImports" #-}
                    tcRnImports hsc_env (prel_imports ++ import_decls) ;
@@ -1286,7 +1287,7 @@ tcPreludeClashWarn warnFlag name = do
     ; traceTc "tcPreludeClashWarn/prelude_functions"
                 (hang (ppr name) 4 (sep [ppr clashingElts]))
 
-    ; let warn_msg x = addWarnAt (nameSrcSpan (gre_name x)) (hsep
+    ; let warn_msg x = addWarnAt (Reason warnFlag) (nameSrcSpan (gre_name x)) (hsep
               [ text "Local definition of"
               , (quotes . ppr . nameOccName . gre_name) x
               , text "clashes with a future Prelude name." ]
@@ -1397,7 +1398,7 @@ tcMissingParentClassWarn warnFlag isName shouldName
            -- <should>" e.g. "Foo is an instance of Monad but not Applicative"
            ; let instLoc = srcLocSpan . nameSrcLoc $ getName isInst
                  warnMsg (Just name:_) =
-                      addWarnAt instLoc $
+                      addWarnAt (Reason warnFlag) instLoc $
                            hsep [ (quotes . ppr . nameOccName) name
                                 , text "is an instance of"
                                 , (ppr . nameOccName . className) isClass
@@ -1915,7 +1916,7 @@ tcGhciStmts stmts
                        (noLoc $ ExplicitList unitTy Nothing (map mk_item ids)) ;
             mk_item id = let ty_args = [idType id, unitTy] in
                          nlHsApp (nlHsTyApp unsafeCoerceId
-                                   (map (getLevity "tcGhciStmts") ty_args ++ ty_args))
+                                   (map (getRuntimeRep "tcGhciStmts") ty_args ++ ty_args))
                                  (nlHsVar id) ;
             stmts = tc_stmts ++ [noLoc (mkLastStmt ret_expr)]
         } ;

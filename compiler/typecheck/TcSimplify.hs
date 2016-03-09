@@ -18,6 +18,7 @@ module TcSimplify(
 import Bag
 import Class         ( Class, classKey, classTyCon )
 import DynFlags      ( WarningFlag ( Opt_WarnMonomorphism )
+                     , WarnReason ( Reason )
                      , DynFlags( solverIterations ) )
 import Inst
 import ListSetOps
@@ -37,7 +38,7 @@ import TcSMonad  as TcS
 import TcType
 import TrieMap       () -- DV: for now
 import Type
-import TysWiredIn    ( liftedDataConTy )
+import TysWiredIn    ( ptrRepLiftedTy )
 import Unify         ( tcMatchTy )
 import Util
 import Var
@@ -742,7 +743,7 @@ decideQuantification apply_mr sigs name_taus constraints
            -- Warn about the monomorphism restriction
        ; warn_mono <- woptM Opt_WarnMonomorphism
        ; let mr_bites = constrained_tvs `intersectsVarSet` zonked_tkvs
-       ; warnTc (warn_mono && mr_bites) $
+       ; warnTc (Reason Opt_WarnMonomorphism) (warn_mono && mr_bites) $
          hang (text "The Monomorphism Restriction applies to the binding"
                <> plural bndrs <+> text "for" <+> pp_bndrs)
              2 (text "Consider giving a type signature for"
@@ -1488,24 +1489,24 @@ promoteTyVarTcS tclvl tv
   | otherwise
   = return ()
 
--- | If the tyvar is a levity var, set it to Lifted. Returns whether or
+-- | If the tyvar is a RuntimeRep var, set it to PtrRepLifted. Returns whether or
 -- not this happened.
 defaultTyVar :: TcTyVar -> TcM ()
 -- Precondition: MetaTyVars only
 -- See Note [DefaultTyVar]
 defaultTyVar the_tv
-  | isLevityVar the_tv
-  = do { traceTc "defaultTyVar levity" (ppr the_tv)
-       ; writeMetaTyVar the_tv liftedDataConTy }
+  | isRuntimeRepVar the_tv
+  = do { traceTc "defaultTyVar RuntimeRep" (ppr the_tv)
+       ; writeMetaTyVar the_tv ptrRepLiftedTy }
 
   | otherwise = return ()    -- The common case
 
 -- | Like 'defaultTyVar', but in the TcS monad.
 defaultTyVarTcS :: TcTyVar -> TcS Bool
 defaultTyVarTcS the_tv
-  | isLevityVar the_tv
-  = do { traceTcS "defaultTyVarTcS levity" (ppr the_tv)
-       ; unifyTyVar the_tv liftedDataConTy
+  | isRuntimeRepVar the_tv
+  = do { traceTcS "defaultTyVarTcS RuntimeRep" (ppr the_tv)
+       ; unifyTyVar the_tv ptrRepLiftedTy
        ; return True }
   | otherwise
   = return False  -- the common case
@@ -1591,13 +1592,13 @@ There are two caveats:
 Note [DefaultTyVar]
 ~~~~~~~~~~~~~~~~~~~
 defaultTyVar is used on any un-instantiated meta type variables to
-default any levity variables to Lifted.  This is important
+default any RuntimeRep variables to PtrRepLifted.  This is important
 to ensure that instance declarations match.  For example consider
 
      instance Show (a->b)
      foo x = show (\_ -> True)
 
-Then we'll get a constraint (Show (p ->q)) where p has kind ArgKind,
+Then we'll get a constraint (Show (p ->q)) where p has kind (TYPE r),
 and that won't match the typeKind (*) in the instance decl.  See tests
 tc217 and tc175.
 
@@ -1607,7 +1608,7 @@ hand.  However we aren't ready to default them fully to () or
 whatever, because the type-class defaulting rules have yet to run.
 
 An alternate implementation would be to emit a derived constraint setting
-the levity variable to Lifted, but this seems unnecessarily indirect.
+the RuntimeRep variable to PtrRepLifted, but this seems unnecessarily indirect.
 
 Note [Promote _and_ default when inferring]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

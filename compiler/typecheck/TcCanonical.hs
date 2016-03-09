@@ -866,12 +866,13 @@ can_eq_app ev NomEq s1 t1 s2 t2
 
 -----------------------
 -- | Break apart an equality over a casted type
+-- looking like   (ty1 |> co1) ~ ty2   (modulo a swap-flag)
 canEqCast :: Bool         -- are both types flat?
           -> CtEvidence
           -> EqRel
           -> SwapFlag
-          -> TcType -> Coercion   -- LHS (res. RHS), the casted type
-          -> TcType -> TcType     -- RHS (res. LHS), both normal and pretty
+          -> TcType -> Coercion   -- LHS (res. RHS), ty1 |> co1
+          -> TcType -> TcType     -- RHS (res. LHS), ty2 both normal and pretty
           -> TcS (StopOrContinue Ct)
 canEqCast flat ev eq_rel swapped ty1 co1 ty2 ps_ty2
   = do { traceTcS "Decomposing cast" (vcat [ ppr ev
@@ -1134,7 +1135,7 @@ canDecomposableTyConAppOK ev eq_rel tc tys1 tys2
 
       -- the following makes a better distinction between "kind" and "type"
       -- in error messages
-    (bndrs, _) = splitPiTys (tyConKind tc)
+    bndrs      = tyConBinders tc
     kind_loc   = toKindLoc loc
     is_kinds   = map isNamedBinder bndrs
     new_locs | Just KindLevel <- ctLocTypeOrKind_maybe loc
@@ -1962,10 +1963,8 @@ unify_derived loc role    orig_ty1 orig_ty2
                 Nothing   -> bale_out }
     go _ _ = bale_out
 
-     -- no point in having *boxed* deriveds.
     bale_out = emitNewDerivedEq loc role orig_ty1 orig_ty2
 
 maybeSym :: SwapFlag -> TcCoercion -> TcCoercion
 maybeSym IsSwapped  co = mkTcSymCo co
 maybeSym NotSwapped co = co
-

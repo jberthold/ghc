@@ -12,6 +12,7 @@
 {-# LANGUAGE ExplicitNamespaces     #-}
 {-# LANGUAGE MultiParamTypeClasses  #-}
 {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE Trustworthy            #-}
 
 -----------------------------------------------------------------------------
 -- |
@@ -63,7 +64,7 @@ class a ~~ b => (a :: k) ~ (b :: k)
   -- no fixity.
 
   -- It's tempting to put functional dependencies on (~), but it's not
-  -- necessary because the functional-depedency coverage check looks
+  -- necessary because the functional-dependency coverage check looks
   -- through superclasses, and (~#) is handled in that check.
 
 instance {-# INCOHERENT #-} a ~~ b => a ~ b

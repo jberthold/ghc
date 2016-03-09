@@ -325,9 +325,10 @@ We return a (bogus) EWildPat in each case.
 -}
 
 rnExpr EWildPat        = return (hsHoleExpr, emptyFVs)   -- "_" is just a hole
-rnExpr e@(EAsPat {})   = patSynErr e
-rnExpr e@(EViewPat {}) = patSynErr e
-rnExpr e@(ELazyPat {}) = patSynErr e
+rnExpr e@(EAsPat {})   =
+  patSynErr e (text "Did you mean to enable TypeApplications?")
+rnExpr e@(EViewPat {}) = patSynErr e empty
+rnExpr e@(ELazyPat {}) = patSynErr e empty
 
 {-
 ************************************************************************
@@ -678,8 +679,8 @@ rnStmtsWithPostProcessing ctxt rnBody ppStmts stmts thing_inside
 -- | maybe rearrange statements according to the ApplicativeDo transformation
 postProcessStmtsForApplicativeDo
   :: HsStmtContext Name
-  -> [(LStmt Name (LHsExpr Name), FreeVars)]
-  -> RnM ([LStmt Name (LHsExpr Name)], FreeVars)
+  -> [(ExprLStmt Name, FreeVars)]
+  -> RnM ([ExprLStmt Name], FreeVars)
 postProcessStmtsForApplicativeDo ctxt stmts
   = do {
        -- rearrange the statements using ApplicativeStmt if
@@ -1430,8 +1431,8 @@ dsDo {(arg_1 | ... | arg_n); stmts} expr =
 -- Note [ApplicativeDo].
 rearrangeForApplicativeDo
   :: HsStmtContext Name
-  -> [(LStmt Name (LHsExpr Name), FreeVars)]
-  -> RnM ([LStmt Name (LHsExpr Name)], FreeVars)
+  -> [(ExprLStmt Name, FreeVars)]
+  -> RnM ([ExprLStmt Name], FreeVars)
 
 rearrangeForApplicativeDo _ [] = return ([], emptyNameSet)
 rearrangeForApplicativeDo ctxt stmts0 = do
@@ -1445,10 +1446,10 @@ rearrangeForApplicativeDo ctxt stmts0 = do
 -- | The ApplicativeDo transformation.
 ado
   :: HsStmtContext Name
-  -> [(LStmt Name (LHsExpr Name), FreeVars)] -- ^ input statements
-  -> [LStmt Name (LHsExpr Name)]             -- ^ the "tail"
+  -> [(ExprLStmt Name, FreeVars)] -- ^ input statements
+  -> [ExprLStmt Name]             -- ^ the "tail"
   -> FreeVars                                -- ^ free variables of the tail
-  -> RnM ( [LStmt Name (LHsExpr Name)]       -- ( output statements,
+  -> RnM ( [ExprLStmt Name]       -- ( output statements,
          , FreeVars )                        -- , things we needed
                                              --    e.g. <$>, <*>, join )
 
@@ -1491,10 +1492,10 @@ ado ctxt stmts tail tail_fvs =
 -- two halves.
 adoSegment
   :: HsStmtContext Name
-  -> [(LStmt Name (LHsExpr Name), FreeVars)]
-  -> [LStmt Name (LHsExpr Name)]
+  -> [(ExprLStmt Name, FreeVars)]
+  -> [ExprLStmt Name]
   -> FreeVars
-  -> RnM ( [LStmt Name (LHsExpr Name)], FreeVars )
+  -> RnM ( [ExprLStmt Name], FreeVars )
 adoSegment ctxt stmts tail tail_fvs
  = do {  -- choose somewhere to put a bind
         let (before,after) = splitSegment stmts
@@ -1509,7 +1510,7 @@ adoSegment ctxt stmts tail tail_fvs
 adoSegmentArg
   :: HsStmtContext Name
   -> FreeVars
-  -> [(LStmt Name (LHsExpr Name), FreeVars)]
+  -> [(ExprLStmt Name, FreeVars)]
   -> RnM (ApplicativeArg Name Name, FreeVars)
 adoSegmentArg _ _ [(L _ (BindStmt pat exp _ _ _),_)] =
   return (ApplicativeArgOne pat exp, emptyFVs)
@@ -1532,8 +1533,8 @@ adoSegmentArg ctxt tail_fvs stmts =
 -- | Divide a sequence of statements into segments, where no segment
 -- depends on any variables defined by a statement in another segment.
 segments
-  :: [(LStmt Name (LHsExpr Name), FreeVars)]
-  -> [[(LStmt Name (LHsExpr Name), FreeVars)]]
+  :: [(ExprLStmt Name, FreeVars)]
+  -> [[(ExprLStmt Name, FreeVars)]]
 segments stmts = map fst $ merge $ reverse $ map reverse $ walk (reverse stmts)
   where
     allvars = mkNameSet (concatMap (collectStmtBinders.unLoc.fst) stmts)
@@ -1549,33 +1550,48 @@ segments stmts = map fst $ merge $ reverse $ map reverse $ walk (reverse stmts)
           _otherwise -> (seg,all_lets) : rest
       where
         rest = merge segs
-        all_lets = all (not . isBindStmt . fst) seg
+        all_lets = all (isLetStmt . fst) seg
 
+    -- walk splits the statement sequence into segments, traversing
+    -- the sequence from the back to the front, and keeping track of
+    -- the set of free variables of the current segment.  Whenever
+    -- this set of free variables is empty, we have a complete segment.
+    walk :: [(ExprLStmt Name, FreeVars)] -> [[(ExprLStmt Name, FreeVars)]]
     walk [] = []
     walk ((stmt,fvs) : stmts) = ((stmt,fvs) : seg) : walk rest
-      where (seg,rest) = chunter (fvs `intersectNameSet` allvars) stmts
+      where (seg,rest) = chunter fvs' stmts
+            (_, fvs') = stmtRefs stmt fvs
 
     chunter _ [] = ([], [])
     chunter vars ((stmt,fvs) : rest)
        | not (isEmptyNameSet vars)
        = ((stmt,fvs) : chunk, rest')
        where (chunk,rest') = chunter vars' rest
-             evars = fvs `intersectNameSet` allvars
-             pvars = mkNameSet (collectStmtBinders (unLoc stmt))
+             (pvars, evars) = stmtRefs stmt fvs
              vars' = (vars `minusNameSet` pvars) `unionNameSet` evars
     chunter _ rest = ([], rest)
 
-    isBindStmt (L _ BindStmt{}) = True
-    isBindStmt _ = False
+    stmtRefs stmt fvs
+      | isLetStmt stmt = (pvars, fvs' `minusNameSet` pvars)
+      | otherwise      = (pvars, fvs')
+      where fvs' = fvs `intersectNameSet` allvars
+            pvars = mkNameSet (collectStmtBinders (unLoc stmt))
+
+isLetStmt :: LStmt a b -> Bool
+isLetStmt (L _ LetStmt{}) = True
+isLetStmt _ = False
 
 -- | Find a "good" place to insert a bind in an indivisible segment.
 -- This is the only place where we use heuristics.  The current
 -- heuristic is to peel off the first group of independent statements
 -- and put the bind after those.
 splitSegment
-  :: [(LStmt Name (LHsExpr Name), FreeVars)]
-  -> ( [(LStmt Name (LHsExpr Name), FreeVars)]
-     , [(LStmt Name (LHsExpr Name), FreeVars)] )
+  :: [(ExprLStmt Name, FreeVars)]
+  -> ( [(ExprLStmt Name, FreeVars)]
+     , [(ExprLStmt Name, FreeVars)] )
+splitSegment [one,two] = ([one],[two])
+  -- there is no choice when there are only two statements; this just saves
+  -- some work in a common case.
 splitSegment stmts
   | Just (lets,binds,rest) <- slurpIndependentStmts stmts
   =  if not (null lets)
@@ -1629,8 +1645,8 @@ mkApplicativeStmt
   :: HsStmtContext Name
   -> [ApplicativeArg Name Name]         -- ^ The args
   -> Bool                               -- ^ True <=> need a join
-  -> [LStmt Name (LHsExpr Name)]        -- ^ The body statements
-  -> RnM ([LStmt Name (LHsExpr Name)], FreeVars)
+  -> [ExprLStmt Name]        -- ^ The body statements
+  -> RnM ([ExprLStmt Name], FreeVars)
 mkApplicativeStmt ctxt args need_join body_stmts
   = do { (fmap_op, fvs1) <- lookupStmtName ctxt fmapName
        ; (ap_op, fvs2) <- lookupStmtName ctxt apAName
@@ -1649,7 +1665,7 @@ mkApplicativeStmt ctxt args need_join body_stmts
 
 -- | Given the statements following an ApplicativeStmt, determine whether
 -- we need a @join@ or not, and remove the @return@ if necessary.
-needJoin :: [LStmt Name (LHsExpr Name)] -> (Bool, [LStmt Name (LHsExpr Name)])
+needJoin :: [ExprLStmt Name] -> (Bool, [ExprLStmt Name])
 needJoin [] = (False, [])  -- we're in an ApplicativeArg
 needJoin [L loc (LastStmt e _ t)]
  | Just arg <- isReturnApp e = (False, [L loc (LastStmt arg True t)])
@@ -1663,7 +1679,7 @@ isReturnApp (L _ (HsApp f arg))
   | otherwise = Nothing
  where
   is_return (L _ (HsPar e)) = is_return e
-  is_return (L _ (HsVar (L _ r))) = r == returnMName
+  is_return (L _ (HsVar (L _ r))) = r == returnMName || r == pureAName
        -- TODO: I don't know how to get this right for rebindable syntax
   is_return _ = False
 isReturnApp _ = Nothing
@@ -1839,10 +1855,10 @@ sectionErr expr
   = hang (text "A section must be enclosed in parentheses")
        2 (text "thus:" <+> (parens (ppr expr)))
 
-patSynErr :: HsExpr RdrName -> RnM (HsExpr Name, FreeVars)
-patSynErr e = do { addErr (sep [text "Pattern syntax in expression context:",
+patSynErr :: HsExpr RdrName -> SDoc -> RnM (HsExpr Name, FreeVars)
+patSynErr e explanation = do { addErr (sep [text "Pattern syntax in expression context:",
                                 nest 4 (ppr e)] $$
-                           text "Did you mean to enable TypeApplications?")
+                                  explanation)
                  ; return (EWildPat, emptyFVs) }
 
 badIpBinds :: Outputable a => SDoc -> a -> SDoc

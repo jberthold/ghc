@@ -22,7 +22,7 @@ module TcType (
   -- Types
   TcType, TcSigmaType, TcRhoType, TcTauType, TcPredType, TcThetaType,
   TcTyVar, TcTyVarSet, TcDTyVarSet, TcTyCoVarSet, TcDTyCoVarSet,
-  TcKind, TcCoVar, TcTyCoVar, TcTyBinder,
+  TcKind, TcCoVar, TcTyCoVar, TcTyBinder, TcTyCon,
 
   ExpType(..), ExpSigmaType, ExpRhoType, mkCheckExpType,
 
@@ -121,7 +121,7 @@ module TcType (
   --------------------------------
   -- Rexported from Kind
   Kind, typeKind,
-  unliftedTypeKind, liftedTypeKind,
+  liftedTypeKind,
   constraintKind,
   isLiftedTypeKind, isUnliftedTypeKind, classifiesTypeWithValues,
 
@@ -140,7 +140,7 @@ module TcType (
   mkClassPred,
   isDictLikeTy,
   tcSplitDFunTy, tcSplitDFunHead, tcSplitMethodTy,
-  isLevityVar, isLevityPolymorphic, isLevityPolymorphic_maybe,
+  isRuntimeRepVar, isRuntimeRepPolymorphic,
   isVisibleBinder, isInvisibleBinder,
 
   -- Type substitutions
@@ -269,6 +269,7 @@ type TcTyCoVar = Var    -- Either a TcTyVar or a CoVar
         -- a cannot occur inside a MutTyVar in T; that is,
         -- T is "flattened" before quantifying over a
 type TcTyBinder = TyBinder
+type TcTyCon = TyCon   -- these can be the TcTyCon constructor
 
 -- These types do not have boxy type variables in them
 type TcPredType     = PredType
@@ -374,16 +375,26 @@ Similarly consider
 When doing kind inference on {S,T} we don't want *skolems* for k1,k2,
 because they end up unifying; we want those SigTvs again.
 
-Note [TyVars and TcTyVars]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [TyVars and TcTyVars during type checking]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The Var type has constructors TyVar and TcTyVar.  They are used
 as follows:
 
-* TcTyVar: used only during type checking.  Should never appear
+* TcTyVar: used /only/ during type checking.  Should never appear
   afterwards.  May contain a mutable field, in the MetaTv case.
 
-* TyVar: can appear any time.  During type checking they behave
-  precisely like (SkolemTv False) = vanillaSkolemTv
+* TyVar: is never seen by the constraint solver, except locally
+  inside a type like (forall a. [a] ->[a]), where 'a' is a TyVar.
+  We instantiate these with TcTyVars before exposing the type
+  to the constraint solver.
+
+I have swithered about the latter invariant, excluding TyVars from the
+constraint solver.  It's not strictly essential, and indeed
+(historically but still there) Var.tcTyVarDetails returns
+vanillaSkolemTv for a TyVar.
+
+But ultimately I want to seeparate Type from TcType, and in that case
+we would need to enforce the separation.
 -}
 
 -- A TyVarDetails is inside a TyVar
@@ -837,7 +848,8 @@ allBoundVariabless = mapUnionVarSet allBoundVariables
 
 isTouchableOrFmv :: TcLevel -> TcTyVar -> Bool
 isTouchableOrFmv ctxt_tclvl tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl, mtv_info = info }
         -> ASSERT2( checkTcLevelInvariant ctxt_tclvl tv_tclvl,
                     ppr tv $$ ppr tv_tclvl $$ ppr ctxt_tclvl )
@@ -848,22 +860,20 @@ isTouchableOrFmv ctxt_tclvl tv
 
 isTouchableMetaTyVar :: TcLevel -> TcTyVar -> Bool
 isTouchableMetaTyVar ctxt_tclvl tv
-  | isTyVar tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl }
         -> ASSERT2( checkTcLevelInvariant ctxt_tclvl tv_tclvl,
                     ppr tv $$ ppr tv_tclvl $$ ppr ctxt_tclvl )
            tv_tclvl `sameDepthAs` ctxt_tclvl
       _ -> False
-  | otherwise = False
 
 isFloatedTouchableMetaTyVar :: TcLevel -> TcTyVar -> Bool
 isFloatedTouchableMetaTyVar ctxt_tclvl tv
-  | isTyVar tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
       MetaTv { mtv_tclvl = tv_tclvl } -> tv_tclvl `strictlyDeeperThan` ctxt_tclvl
       _ -> False
-  | otherwise = False
 
 isImmutableTyVar :: TyVar -> Bool
 isImmutableTyVar tv
@@ -878,48 +888,49 @@ isTyConableTyVar tv
         -- True of a meta-type variable that can be filled in
         -- with a type constructor application; in particular,
         -- not a SigTv
-  | isTyVar tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
         MetaTv { mtv_info = SigTv } -> False
         _                           -> True
-  | otherwise = True
 
 isFmvTyVar tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
         MetaTv { mtv_info = FlatMetaTv } -> True
         _                                -> False
 
 -- | True of both given and wanted flatten-skolems (fak and usk)
 isFlattenTyVar tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
         FlatSkol {}                      -> True
         MetaTv { mtv_info = FlatMetaTv } -> True
         _                                -> False
 
 -- | True of FlatSkol skolems only
 isFskTyVar tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
         FlatSkol {} -> True
         _           -> False
 
 isSkolemTyVar tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
         MetaTv {} -> False
         _other    -> True
 
 isOverlappableTyVar tv
-  | isTyVar tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
         SkolemTv overlappable -> overlappable
         _                     -> False
-  | otherwise = False
 
 isMetaTyVar tv
-  | isTyVar tv
-  = case tcTyVarDetails tv of
+  = ASSERT2( isTcTyVar tv, ppr tv )
+    case tcTyVarDetails tv of
         MetaTv {} -> True
         _         -> False
-  | otherwise = False
 
 -- isAmbiguousTyVar is used only when reporting type errors
 -- It picks out variables that are unbound, namely meta
@@ -927,12 +938,10 @@ isMetaTyVar tv
 -- RtClosureInspect.zonkRTTIType.  These are "ambiguous" in
 -- the sense that they stand for an as-yet-unknown type
 isAmbiguousTyVar tv
-  | isTyVar tv
   = case tcTyVarDetails tv of
         MetaTv {}     -> True
         RuntimeUnk {} -> True
         _             -> False
-  | otherwise = False
 
 isMetaTyVarTy :: TcType -> Bool
 isMetaTyVarTy (TyVarTy tv) = isMetaTyVar tv
@@ -1375,9 +1384,8 @@ tc_eq_type view_fun orig_ty1 orig_ty2 = go Visible orig_env orig_ty1 orig_ty2
        -- the repeat Visible is necessary because tycons can legitimately
        -- be oversaturated
       where
-        k          = tyConKind tc
-        (bndrs, _) = splitPiTys k
-        viss       = map binderVisibility bndrs
+        bndrs = tyConBinders tc
+        viss  = map binderVisibility bndrs
 
     check :: VisibilityFlag -> Bool -> Maybe VisibilityFlag
     check _   True  = Nothing

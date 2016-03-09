@@ -148,9 +148,33 @@ pprWordArray :: CLabel -> [CmmStatic] -> SDoc
 pprWordArray lbl ds
   = sdocWithDynFlags $ \dflags ->
     hcat [ pprLocalness lbl, text "StgWord"
-         , space, ppr lbl, text "[] = {" ]
+         , space, ppr lbl, text "[]"
+         -- See Note [StgWord alignment]
+         , pprAlignment (wordWidth dflags)
+         , text "= {" ]
     $$ nest 8 (commafy (pprStatics dflags ds))
     $$ text "};"
+
+pprAlignment :: Width -> SDoc
+pprAlignment words =
+     text "__attribute__((aligned(" <> int (widthInBytes words) <> text ")))"
+
+-- Note [StgWord alignment]
+-- C codegen builds static closures as StgWord C arrays (pprWordArray).
+-- Their real C type is 'StgClosure'. Macros like UNTAG_CLOSURE assume
+-- pointers to 'StgClosure' are aligned at pointer size boundary:
+--  4 byte boundary on 32 systems
+--  and 8 bytes on 64-bit systems
+-- see TAG_MASK and TAG_BITS definition and usage.
+--
+-- It's a reasonable assumption also known as natural alignment.
+-- Although some architectures have different alignment rules.
+-- One of known exceptions is m68k (Trac #11395, comment:16) where:
+--   __alignof__(StgWord) == 2, sizeof(StgWord) == 4
+--
+-- Thus we explicitly increase alignment by using
+--    __attribute__((aligned(4)))
+-- declaration.
 
 --
 -- has to be static, if it isn't globally visible
@@ -240,7 +264,7 @@ pprStmt stmt =
           -- We also need to cast mem primops to prevent conflicts with GCC
           -- builtins (see bug #5967).
           | Just _align <- machOpMemcpyishAlign op
-          = (text ";EF_(" <> fn <> char ')' <> semi) $$
+          = (text ";EFF_(" <> fn <> char ')' <> semi) $$
             pprForeignCall fn cconv hresults hargs
           | otherwise
           = pprCall fn cconv hresults hargs
@@ -981,7 +1005,8 @@ pprExternDecl _in_srt lbl
         hcat [ visibility, label_type lbl,
                lparen, ppr lbl, text ");" ]
  where
-  label_type lbl | isCFunctionLabel lbl = text "F_"
+  label_type lbl | isForeignLabel lbl && isCFunctionLabel lbl = text "FF_"
+                 | isCFunctionLabel lbl = text "F_"
                  | otherwise            = text "I_"
 
   visibility

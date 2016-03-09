@@ -43,6 +43,11 @@ warningsOptions =
          , flagType = DynamicFlag
          , flagReverse = "-Wno-unrecognised-warning-flags"
          }
+  , flag { flagName = "-fshow-warning-groups"
+         , flagDescription = "show which group an emitted warning belongs to."
+         , flagType = DynamicFlag
+         , flagReverse = "-fno-show-warning-groups"
+         }
   , flag { flagName = "-fdefer-type-errors"
          , flagDescription =
            "Turn type errors into warnings, :ref:`deferring the error until "++
@@ -141,16 +146,31 @@ warningsOptions =
          }
   , flag { flagName = "-Wmissing-exported-sigs"
          , flagDescription =
+           "*(deprecated)* "++
            "warn about top-level functions without signatures, only if they "++
            "are exported. takes precedence over -Wmissing-signatures"
          , flagType = DynamicFlag
          , flagReverse = "-Wno-missing-exported-sigs"
          }
+  , flag { flagName = "-Wmissing-exported-signatures"
+         , flagDescription =
+           "warn about top-level functions without signatures, only if they "++
+           "are exported. takes precedence over -Wmissing-signatures"
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-missing-exported-signatures"
+         }
   , flag { flagName = "-Wmissing-local-sigs"
          , flagDescription =
+           "*(deprecated)* "++
            "warn about polymorphic local bindings without signatures"
          , flagType = DynamicFlag
          , flagReverse = "-Wno-missing-local-sigs"
+         }
+  , flag { flagName = "-Wmissing-local-signatures"
+         , flagDescription =
+           "warn about polymorphic local bindings without signatures"
+         , flagType = DynamicFlag
+         , flagReverse = "-Wno-missing-local-signatures"
          }
   , flag { flagName = "-Wmissing-monadfail-instances"
          , flagDescription =

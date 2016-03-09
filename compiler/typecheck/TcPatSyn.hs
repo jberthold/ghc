@@ -19,7 +19,7 @@ import TcRnMonad
 import TcEnv
 import TcMType
 import TysPrim
-import TysWiredIn  ( levityTy )
+import TysWiredIn  ( runtimeRepTy )
 import Name
 import SrcLoc
 import PatSyn
@@ -119,9 +119,17 @@ tcPatSynSig name sig_ty
                  ; return ( (univ_tvs, req, ex_tvs, prov, arg_tys, body_ty)
                           , bound_tvs) }
 
+       -- Kind generalisation; c.f. kindGeneralise
+       ; let free_kvs = tyCoVarsOfTelescope (implicit_tvs ++ univ_tvs ++ ex_tvs) $
+                        tyCoVarsOfTypes (body_ty : req ++ prov ++ arg_tys)
+
+       ; kvs <- quantifyTyVars emptyVarSet (Pair free_kvs emptyVarSet)
+
        -- These are /signatures/ so we zonk to squeeze out any kind
-       -- unification variables.
+       -- unification variables.  Do this after quantifyTyVars which may
+       -- default kind variables to *.
        -- ToDo: checkValidType?
+       ; traceTc "about zonk" empty
        ; implicit_tvs <- mapM zonkTcTyCoVarBndr implicit_tvs
        ; univ_tvs     <- mapM zonkTcTyCoVarBndr univ_tvs
        ; ex_tvs       <- mapM zonkTcTyCoVarBndr ex_tvs
@@ -129,12 +137,6 @@ tcPatSynSig name sig_ty
        ; prov         <- zonkTcTypes prov
        ; arg_tys      <- zonkTcTypes arg_tys
        ; body_ty      <- zonkTcType  body_ty
-
-       -- Kind generalisation; c.f. kindGeneralise
-       ; let free_kvs = tyCoVarsOfTelescope (implicit_tvs ++ univ_tvs ++ ex_tvs) $
-                        tyCoVarsOfTypes (body_ty : req ++ prov ++ arg_tys)
-
-       ; kvs <- quantifyTyVars emptyVarSet (Pair free_kvs emptyVarSet)
 
        -- Complain about:  pattern P :: () => forall x. x -> P x
        -- The renamer thought it was fine, but the existential 'x'
@@ -151,13 +153,13 @@ tcPatSynSig name sig_ty
              (extra_univ, extra_ex) = partition (`elemVarSet` univ_fvs) $
                                       kvs ++ implicit_tvs
        ; traceTc "tcTySig }" $
-         vcat [ text "implicit_tvs" <+> ppr implicit_tvs
-              , text "kvs" <+> ppr kvs
-              , text "extra_univ" <+> ppr extra_univ
-              , text "univ_tvs" <+> ppr univ_tvs
+         vcat [ text "implicit_tvs" <+> ppr_tvs implicit_tvs
+              , text "kvs" <+> ppr_tvs kvs
+              , text "extra_univ" <+> ppr_tvs extra_univ
+              , text "univ_tvs" <+> ppr_tvs univ_tvs
               , text "req" <+> ppr req
-              , text "extra_ex" <+> ppr extra_ex
-              , text "ex_tvs" <+> ppr ex_tvs
+              , text "extra_ex" <+> ppr_tvs extra_ex
+              , text "ex_tvs" <+> ppr_tvs ex_tvs
               , text "prov" <+> ppr prov
               , text "arg_tys" <+> ppr arg_tys
               , text "body_ty" <+> ppr body_ty ]
@@ -168,6 +170,11 @@ tcPatSynSig name sig_ty
                       , patsig_prov     = prov
                       , patsig_arg_tys  = arg_tys
                       , patsig_body_ty  = body_ty }) }
+  where
+
+ppr_tvs :: [TyVar] -> SDoc
+ppr_tvs tvs = braces (vcat [ ppr tv <+> dcolon <+> ppr (tyVarKind tv)
+                           | tv <- tvs])
 
 
 {-
@@ -216,13 +223,13 @@ tcInferPatSynDecl PSB{ psb_id = lname@(L _ name), psb_args = details,
 tcCheckPatSynDecl :: PatSynBind Name Name
                   -> TcPatSynInfo
                   -> TcM (LHsBinds Id, TcGblEnv)
-tcCheckPatSynDecl PSB{ psb_id = lname@(L _ name), psb_args = details
-                     , psb_def = lpat, psb_dir = dir }
+tcCheckPatSynDecl psb@PSB{ psb_id = lname@(L _ name), psb_args = details
+                         , psb_def = lpat, psb_dir = dir }
                   TPSI{ patsig_univ_tvs = univ_tvs, patsig_prov = prov_theta
                       , patsig_ex_tvs   = ex_tvs,   patsig_req  = req_theta
                       , patsig_arg_tys  = arg_tys,  patsig_body_ty = pat_ty }
   = addPatSynCtxt lname $
-    do { let origin     = PatOrigin -- TODO
+    do { let origin     = ProvCtxtOrigin psb
              skol_info  = SigSkol (PatSynCtxt name) (mkCheckExpType $
                                                      mkFunTys arg_tys pat_ty)
              decl_arity = length arg_names
@@ -251,6 +258,8 @@ tcCheckPatSynDecl PSB{ psb_id = lname@(L _ name), psb_args = details
                                     else newMetaSigTyVars ex_tvs
                     -- See the "Existential type variables" part of
                     -- Note [Checking against a pattern signature]
+              ; traceTc "tcpatsyn1" (vcat [ ppr v <+> dcolon <+> ppr (tyVarKind v) | v <- ex_tvs])
+              ; traceTc "tcpatsyn2" (vcat [ ppr v <+> dcolon <+> ppr (tyVarKind v) | v <- ex_tvs'])
               ; prov_dicts <- mapM (emitWanted origin)
                   (substTheta (extendTCvInScopeList subst univ_tvs) prov_theta)
                   -- Add the free vars of 'prov_theta' to the in_scope set to
@@ -463,13 +472,13 @@ tcPatSynMatcher has_sig (L loc name) lpat
                 (univ_tvs, req_theta, req_ev_binds, req_dicts)
                 (ex_tvs, ex_tys, prov_theta, prov_dicts)
                 (args, arg_tys) pat_ty
-  = do { lev_uniq <- newUnique
-       ; tv_uniq  <- newUnique
-       ; let lev_name = mkInternalName lev_uniq (mkTyVarOcc "rlev") loc
+  = do { rr_uniq <- newUnique
+       ; tv_uniq <- newUnique
+       ; let rr_name  = mkInternalName rr_uniq (mkTyVarOcc "rep") loc
              tv_name  = mkInternalName tv_uniq (mkTyVarOcc "r") loc
-             lev_tv   = mkTcTyVar lev_name levityTy   (SkolemTv False)
-             lev      = mkTyVarTy lev_tv
-             res_tv   = mkTcTyVar tv_name  (tYPE lev) (SkolemTv False)
+             rr_tv    = mkTcTyVar rr_name runtimeRepTy (SkolemTv False)
+             rr       = mkTyVarTy rr_tv
+             res_tv   = mkTcTyVar tv_name  (tYPE rr) (SkolemTv False)
              is_unlifted = null args && null prov_dicts
              res_ty = mkTyVarTy res_tv
              (cont_args, cont_arg_tys)
@@ -487,7 +496,7 @@ tcPatSynMatcher has_sig (L loc name) lpat
        ; fail         <- newSysLocalId (fsLit "fail")  fail_ty
 
        ; let matcher_tau   = mkFunTys [pat_ty, cont_ty, fail_ty] res_ty
-             matcher_sigma = mkInvSigmaTy (lev_tv:res_tv:univ_tvs) req_theta matcher_tau
+             matcher_sigma = mkInvSigmaTy (rr_tv:res_tv:univ_tvs) req_theta matcher_tau
              matcher_id    = mkExportedVanillaId matcher_name matcher_sigma
                              -- See Note [Exported LocalIds] in Id
 
@@ -517,7 +526,7 @@ tcPatSynMatcher has_sig (L loc name) lpat
                        , mg_res_ty = res_ty
                        , mg_origin = Generated
                        }
-             match = mkMatch [] (mkHsLams (lev_tv:res_tv:univ_tvs) req_dicts body')
+             match = mkMatch [] (mkHsLams (rr_tv:res_tv:univ_tvs) req_dicts body')
                              (noLoc EmptyLocalBinds)
              mg = MG{ mg_alts = L (getLoc match) [match]
                     , mg_arg_tys = []
@@ -813,15 +822,30 @@ tcPatToExpr args = go
     lhsVars = mkNameSet (map unLoc args)
 
     go :: LPat Name -> Maybe (LHsExpr Name)
-    go (L loc (ConPatIn (L _ con) info))
-      = do { exprs <- mapM go (hsConPatArgs info)
-           ; return $ L loc $
-             foldl (\x y -> HsApp (L loc x) y) (HsVar (L loc con)) exprs }
+    go (L loc (ConPatIn con info))
+      = case info of
+          PrefixCon ps  -> mkPrefixConExpr con ps
+          InfixCon l r  -> mkPrefixConExpr con [l,r]
+          RecCon fields -> L loc <$> mkRecordConExpr con fields
 
     go (L _ (SigPatIn pat _)) = go pat
         -- See Note [Type signatures and the builder expression]
 
-    go (L loc p) = fmap (L loc) $ go1 p
+    go (L loc p) = L loc <$> go1 p
+
+    -- Make a prefix con for prefix and infix patterns for simplicity
+    mkPrefixConExpr :: Located Name -> [LPat Name] -> Maybe (LHsExpr Name)
+    mkPrefixConExpr con pats = do
+      exprs <- traverse go pats
+      return $ foldl (\x y -> L (combineLocs x y) (HsApp x y))
+                     (L (getLoc con) (HsVar con))
+                     exprs
+
+
+    mkRecordConExpr :: Located Name -> HsRecFields Name (LPat Name) -> Maybe (HsExpr Name)
+    mkRecordConExpr con fields = do
+      exprFields <- traverse go fields
+      return $ RecordCon con PlaceHolder noPostTcExpr exprFields
 
     go1 :: Pat Name -> Maybe (HsExpr Name)
     go1   (VarPat (L l var))

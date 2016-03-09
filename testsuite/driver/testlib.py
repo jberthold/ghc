@@ -494,6 +494,13 @@ def normalise_drive_letter(name, opts):
     # Windows only. Change D:\\ to C:\\.
     _normalise_fun(name, opts, lambda str: re.sub(r'[A-Z]:\\', r'C:\\', str))
 
+def keep_prof_callstacks(name, opts):
+    """Keep profiling callstacks.
+
+    Use together with `only_ways(prof_ways)`.
+    """
+    opts.keep_prof_callstacks = True
+
 def join_normalisers(*a):
     """
     Compose functions, flattening sequences.
@@ -1569,6 +1576,14 @@ def check_hp_ok(name):
         return(False)
 
 def check_prof_ok(name, way):
+    (_, expected_prof_file) = find_expected_file(name, 'prof.sample')
+    expected_prof_path = in_testdir(expected_prof_file)
+
+    # Check actual prof file only if we have an expected prof file to
+    # compare it with.
+    if not os.path.exists(expected_prof_path):
+        return True
+
     actual_prof_file = add_suffix(name, 'prof')
     actual_prof_path = in_testdir(actual_prof_file)
 
@@ -1580,16 +1595,9 @@ def check_prof_ok(name, way):
         print(actual_prof_path + " is empty")
         return(False)
 
-    (_, expected_prof_file) = find_expected_file(name, 'prof.sample')
-    expected_prof_path = in_testdir(expected_prof_file)
-
-    # sample prof file is not required
-    if not os.path.exists(expected_prof_path):
-        return True
-    else:
-        return compare_outputs(way, 'prof', normalise_prof,
-                               expected_prof_file, actual_prof_file,
-                               whitespace_normaliser=normalise_whitespace)
+    return compare_outputs(way, 'prof', normalise_prof,
+                            expected_prof_file, actual_prof_file,
+                            whitespace_normaliser=normalise_whitespace)
 
 # Compare expected output to actual output, and optionally accept the
 # new output. Returns true if output matched or was accepted, false
@@ -1640,9 +1648,13 @@ def compare_outputs(way, kind, normaliser, expected_file, actual_file,
                               way in getTestOpts().expect_fail_for):
             if_verbose(1, 'Test is expected to fail. Not accepting new output.')
             return 0
-        elif config.accept:
+        elif config.accept and actual_raw:
             if_verbose(1, 'Accepting new output.')
             write_file(expected_path, actual_raw)
+            return 1
+        elif config.accept:
+            if_verbose(1, 'No output. Deleting {0}.'.format(expected_path))
+            rm_no_fail(expected_path)
             return 1
         else:
             return 0
@@ -1669,15 +1681,21 @@ def normalise_whitespace( str ):
 
 callSite_re = re.compile(r', called at (.+):[\d]+:[\d]+ in [\w\-\.]+:')
 
-def normalise_callstacks(str):
+def normalise_callstacks(s):
+    opts = getTestOpts()
     def repl(matches):
         location = matches.group(1)
         location = normalise_slashes_(location)
         return ', called at {0}:<line>:<column> in <package-id>:'.format(location)
     # Ignore line number differences in call stacks (#10834).
-    str1 = re.sub(callSite_re, repl, str)
+    s = re.sub(callSite_re, repl, s)
     # Ignore the change in how we identify implicit call-stacks
-    return str1.replace('from ImplicitParams', 'from HasCallStack')
+    s = s.replace('from ImplicitParams', 'from HasCallStack')
+    if not opts.keep_prof_callstacks:
+        # Don't output prof callstacks. Test output should be
+        # independent from the WAY we run the test.
+        s = re.sub(r'CallStack \(from -prof\):(\n  .*)*\n?', '', s)
+    return s
 
 tyCon_re = re.compile(r'TyCon\s*\d+L?\#\#\s*\d+L?\#\#\s*', flags=re.MULTILINE)
 
@@ -2293,4 +2311,8 @@ def printFailingTestInfosSummary(file, testInfos):
     file.write('\n')
 
 def modify_lines(s, f):
-    return '\n'.join([f(l) for l in s.splitlines()])
+    s = '\n'.join([f(l) for l in s.splitlines()])
+    if s and s[-1] != '\n':
+        # Prevent '\ No newline at end of file' warnings when diffing.
+        s += '\n'
+    return s

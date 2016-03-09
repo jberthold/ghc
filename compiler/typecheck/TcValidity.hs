@@ -216,13 +216,10 @@ checkAmbiguity ctxt ty
 
 wantAmbiguityCheck :: UserTypeCtxt -> Bool
 wantAmbiguityCheck ctxt
-  = case ctxt of
-      GhciCtxt -> False  -- Allow ambiguous types in GHCi's :kind command
-                         -- E.g.   type family T a :: *  -- T :: forall k. k -> *
-                         -- Then :k T should work in GHCi, not complain that
-                         -- (T k) is ambiguous!
-      _ -> True
-
+  = case ctxt of  -- See Note [When we don't check for ambiguity]
+      GhciCtxt     -> False
+      TySynCtxt {} -> False
+      _            -> True
 
 checkUserTypeError :: Type -> TcM ()
 -- Check to see if the type signature mentions "TypeError blah"
@@ -247,7 +244,26 @@ checkUserTypeError = check
                      ; failWithTcM (env1, pprUserTypeErrorTy tidy_msg) }
 
 
-{-
+{- Note [When we don't check for ambiguity]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In a few places we do not want to check a user-specified type for ambiguity
+
+* GhciCtxt: Allow ambiguous types in GHCi's :kind command
+  E.g.   type family T a :: *  -- T :: forall k. k -> *
+  Then :k T should work in GHCi, not complain that
+  (T k) is ambiguous!
+
+* TySynCtxt: type T a b = C a b => blah
+  It may be that when we /use/ T, we'll give an 'a' or 'b' that somehow
+  cure the ambiguity.  So we defer the ambiguity check to the use site.
+
+  There is also an implementation reason (Trac #11608).  In the RHS of
+  a type synonym we don't (currently) instantiate 'a' and 'b' with
+  TcTyVars before calling checkValidType, so we get asertion failures
+  from doing an ambiguity check on a type with TyVars in it.  Fixing this
+  would not be hard, but let's wait till there's a reason.
+
+
 ************************************************************************
 *                                                                      *
           Checking validity of a user-defined type
@@ -472,12 +488,11 @@ check_type env ctxt rank ty
   where
     (tvs, theta, tau) = tcSplitSigmaTy ty
     tau_kind          = typeKind tau
+    (env', _)         = tidyTyCoVarBndrs env tvs
 
     phi_kind | null theta = tau_kind
              | otherwise  = liftedTypeKind
         -- If there are any constraints, the kind is *. (#11405)
-
-    (env', _)         = tidyTyCoVarBndrs env tvs
 
 check_type _ _ _ (TyVarTy _) = return ()
 
@@ -684,8 +699,9 @@ check_valid_theta _ _ []
   = return ()
 check_valid_theta env ctxt theta
   = do { dflags <- getDynFlags
-       ; warnTcM (wopt Opt_WarnDuplicateConstraints dflags &&
-                  notNull dups) (dupPredWarn env dups)
+       ; warnTcM (Reason Opt_WarnDuplicateConstraints)
+                 (wopt Opt_WarnDuplicateConstraints dflags && notNull dups)
+                 (dupPredWarn env dups)
        ; traceTc "check_valid_theta" (ppr theta)
        ; mapM_ (check_pred_ty env dflags ctxt) theta }
   where
@@ -945,7 +961,7 @@ tyConArityErr tc tks
 
     -- tc_type_arity = number of *type* args expected
     -- tc_type_args  = number of *type* args encountered
-    tc_type_arity = count isVisibleBinder $ fst $ splitPiTys (tyConKind tc)
+    tc_type_arity = count isVisibleBinder $ tyConBinders tc
     tc_type_args  = length vis_tks
 
 arityErr :: Outputable a => String -> a -> Int -> Int -> SDoc
@@ -1455,7 +1471,7 @@ checkValidCoAxiom ax@(CoAxiom { co_ax_tc = fam_tc, co_ax_branches = branches })
     --   (b) failure of injectivity
     check_branch_compat prev_branches cur_branch
       | cur_branch `isDominatedBy` prev_branches
-      = do { addWarnAt (coAxBranchSpan cur_branch) $
+      = do { addWarnAt NoReason (coAxBranchSpan cur_branch) $
              inaccessibleCoAxBranch ax cur_branch
            ; return prev_branches }
       | otherwise
@@ -1583,7 +1599,7 @@ checkValidFamPats mb_clsinfo fam_tc tvs cvs ty_pats
        ; checkConsistentFamInst mb_clsinfo fam_tc tvs ty_pats }
   where
      fam_arity = tyConArity fam_tc
-     fam_bndrs = take fam_arity $ fst $ splitPiTys (tyConKind fam_tc)
+     fam_bndrs = tyConBinders fam_tc
 
 
 checkValidTypePat :: Type -> TcM ()
