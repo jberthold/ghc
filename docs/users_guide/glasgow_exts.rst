@@ -385,11 +385,15 @@ instance, the binary integer literal ``0b11001001`` will be desugared into
 Pattern guards
 --------------
 
-Pattern guards (Glasgow extension) The discussion that follows is an
-abbreviated version of Simon Peyton Jones's original
-`proposal <http://research.microsoft.com/~simonpj/Haskell/guards.html>`__.
-(Note that the proposal was written before pattern guards were
-implemented, so refers to them as unimplemented.)
+.. ghc-flag:: -XPatternGuards
+
+   Enable pattern matches in guards.
+
+The discussion that follows is an abbreviated version of Simon Peyton Jones's
+original `proposal
+<http://research.microsoft.com/~simonpj/Haskell/guards.html>`__. (Note that the
+proposal was written before pattern guards were implemented, so refers to them
+as unimplemented.)
 
 Suppose we have an abstract data type of finite maps, with a lookup
 operation: ::
@@ -1873,7 +1877,15 @@ The following syntax is stolen:
 
     Stolen by: :ghc-flag:`-XImplicitParams`
 
-``[|``, ``[e|``, ``[p|``, ``[d|``, ``[t|``, ``$(``, ``$$(``, ``[||``, ``[e||``, ``$varid``, ``$$varid``
+``[|``, ``[e|``, ``[p|``, ``[d|``, ``[t|``, ``[||``, ``[e||``
+    .. index::
+       single: Quasi-quotes
+
+    Stolen by: :ghc-flag:`-XQuasiQuotes`. Moreover, this introduces an ambiguity
+    with list comprehension syntax. See
+    :ref:`quasi-quotes-list-comprehension-ambiguity` for details.
+
+``$(``, ``$$(``, ``$varid``, ``$$varid``
     .. index::
        single: Template Haskell
 
@@ -9984,6 +9996,24 @@ Here are the salient features
 -  Unlike normal declaration splices of the form ``$(...)``, declaration
    quasi-quotes do not cause a declaration group break. See
    :ref:`th-syntax` for more information.
+
+.. _quasi-quotes-list-comprehension-ambiguity:
+
+.. warning::
+
+    .. index::
+        single: quasi-quotes; ambiguity with list comprehensions
+        single: list comprehensions; ambiguity with quasi-quotes
+
+    :ghc-flag:`-XQuasiQuotes` introduces an unfortunate ambiguity with list
+    comprehension syntax. Consider the following, ::
+
+        let x = [v| v <- [0..10]]
+
+    Without :ghc-flag:`-XQuasiQuotes` this is parsed as a list comprehension.
+    With :ghc-flag:`-XQuasiQuotes` this is parsed as a quasi-quote; however,
+    this parse will fail due to the lack of a closing ``|]``. See
+    :ghc-ticket:`11679`.
 
 The example below shows quasi-quotation in action. The quoter ``expr``
 is bound to a value of type ``QuasiQuoter`` defined in module ``Expr``.
