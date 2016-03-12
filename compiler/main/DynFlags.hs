@@ -485,6 +485,7 @@ data GeneralFlag
    | Opt_Hpc
    | Opt_FlatCache
    | Opt_ExternalInterpreter
+   | Opt_OptimalApplicativeDo
 
    -- PreInlining is on by default. The option is there just to see how
    -- bad things get if you turn it off!
@@ -1046,9 +1047,10 @@ opt_i dflags = sOpt_i (settings dflags)
 -- | The directory for this version of ghc in the user's app directory
 -- (typically something like @~/.ghc/x86_64-linux-7.6.3@)
 --
-versionedAppDir :: DynFlags -> IO FilePath
+versionedAppDir :: DynFlags -> MaybeT IO FilePath
 versionedAppDir dflags = do
-  appdir <- getAppUserDataDirectory (programName dflags)
+  -- Make sure we handle the case the HOME isn't set (see #11678)
+  appdir <- tryMaybeT $ getAppUserDataDirectory (programName dflags)
   return $ appdir </> versionedFilePath dflags
 
 -- | A filepath like @x86_64-linux-7.6.3@ with the platform string to use when
@@ -3395,6 +3397,7 @@ fFlagsDeps = [
   flagSpec "loopification"                    Opt_Loopification,
   flagSpec "omit-interface-pragmas"           Opt_OmitInterfacePragmas,
   flagSpec "omit-yields"                      Opt_OmitYields,
+  flagSpec "optimal-applicative-do"           Opt_OptimalApplicativeDo,
   flagSpec "pedantic-bottoms"                 Opt_PedanticBottoms,
   flagSpec "pre-inlining"                     Opt_SimplPreInlining,
   flagGhciSpec "print-bind-contents"          Opt_PrintBindContents,
@@ -4386,7 +4389,7 @@ interpretPackageEnv dflags = do
 
     namedEnvPath :: String -> MaybeT IO FilePath
     namedEnvPath name = do
-     appdir <- liftMaybeT $ versionedAppDir dflags
+     appdir <- versionedAppDir dflags
      return $ appdir </> "environments" </> name
 
     probeEnvName :: String -> MaybeT IO FilePath
@@ -4446,7 +4449,7 @@ interpretPackageEnv dflags = do
     findLocalEnvFile :: MaybeT IO FilePath
     findLocalEnvFile = do
         curdir  <- liftMaybeT getCurrentDirectory
-        homedir <- liftMaybeT getHomeDirectory
+        homedir <- tryMaybeT getHomeDirectory
         let probe dir | isDrive dir || dir == homedir
                       = mzero
             probe dir = do
