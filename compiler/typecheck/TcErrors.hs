@@ -1149,7 +1149,7 @@ reportEqErr :: ReportErrCtxt -> Report
             -> Maybe SwapFlag   -- Nothing <=> not sure
             -> TcType -> TcType -> TcM ErrMsg
 reportEqErr ctxt report ct oriented ty1 ty2
-  = mkErrorMsgFromCt ctxt ct (mconcat [misMatch, eqInfo, report])
+  = mkErrorMsgFromCt ctxt ct (mconcat [misMatch, report, eqInfo])
   where misMatch = important $ misMatchOrCND ctxt ct oriented ty1 ty2
         eqInfo = important $ mkEqInfoMsg ct ty1 ty2
 
@@ -1179,7 +1179,20 @@ mkTyVarEqErr dflags ctxt report ct oriented tv1 ty2
                            hang (text "Occurs check: cannot construct the infinite" <+> what <> colon)
                               2 (sep [ppr ty1, char '~', ppr ty2])
              extra2 = important $ mkEqInfoMsg ct ty1 ty2
-       ; mkErrorMsgFromCt ctxt ct $ mconcat [occCheckMsg, extra2, report] }
+
+             interesting_tyvars
+               = filter (not . isEmptyVarSet . tyCoVarsOfType . tyVarKind) $
+                 filter isTyVar $
+                 varSetElems $
+                 tyCoVarsOfType ty1 `unionVarSet` tyCoVarsOfType ty2
+             extra3 = relevant_bindings $
+                      ppWhen (not (null interesting_tyvars)) $
+                      hang (text "Type variable kinds:") 2 $
+                      vcat (map (tyvar_binding . tidyTyVarOcc (cec_tidy ctxt))
+                                interesting_tyvars)
+
+             tyvar_binding tv = ppr tv <+> dcolon <+> ppr (tyVarKind tv)
+       ; mkErrorMsgFromCt ctxt ct $ mconcat [occCheckMsg, extra2, extra3, report] }
 
   | OC_Forall <- occ_check_expand
   = do { let msg = vcat [ text "Cannot instantiate unification variable"
@@ -1276,12 +1289,19 @@ mkEqInfoMsg ct ty1 ty2
               = snd (mkAmbigMsg False ct)
               | otherwise = empty
 
-    invis_msg | Just vis <- tcEqTypeVis ty1 ty2
+    -- better to check the exp/act types in the CtOrigin than the actual
+    -- mismatched types for suggestion about -fprint-explicit-kinds
+    (act_ty, exp_ty) = case ctOrigin ct of
+      TypeEqOrigin { uo_actual = act
+                   , uo_expected = Check exp } -> (act, exp)
+      _                                        -> (ty1, ty2)
+
+    invis_msg | Just vis <- tcEqTypeVis act_ty exp_ty
               , vis /= Visible
               = sdocWithDynFlags $ \dflags ->
                 if gopt Opt_PrintExplicitKinds dflags
-                then text "Use -fprint-explicit-kinds to see the kind arguments"
-                else empty
+                then empty
+                else text "Use -fprint-explicit-kinds to see the kind arguments"
 
               | otherwise
               = empty

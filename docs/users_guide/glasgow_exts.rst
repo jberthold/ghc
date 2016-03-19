@@ -105,6 +105,9 @@ machine-addition that we all know and love—usually one instruction.
 Primitive (unboxed) types cannot be defined in Haskell, and are
 therefore built into the language and compiler. Primitive types are
 always unlifted; that is, a value of a primitive type cannot be bottom.
+(Note: a "boxed" type means that a value is represented by a pointer to a heap
+object; a "lifted" type means that terms of that type may be bottom. See
+the next paragraph for an example.)
 We use the convention (but it is only a convention) that primitive
 types, values, and operations have a ``#`` suffix (see
 :ref:`magic-hash`). For some primitive types we have special syntax for
@@ -113,28 +116,49 @@ literals, also described in the `same section <#magic-hash>`__.
 Primitive values are often represented by a simple bit-pattern, such as
 ``Int#``, ``Float#``, ``Double#``. But this is not necessarily the case:
 a primitive value might be represented by a pointer to a heap-allocated
-object. Examples include ``Array#``, the type of primitive arrays. A
+object. Examples include ``Array#``, the type of primitive arrays. Thus,
+``Array#`` is an unlifted, boxed type. A
 primitive array is heap-allocated because it is too big a value to fit
 in a register, and would be too expensive to copy around; in a sense, it
 is accidental that it is represented by a pointer. If a pointer
 represents a primitive value, then it really does point to that value:
-no unevaluated thunks, no indirections…nothing can be at the other end
+no unevaluated thunks, no indirections. Nothing can be at the other end
 of the pointer than the primitive value. A numerically-intensive program
 using unboxed types can go a *lot* faster than its “standard”
 counterpart—we saw a threefold speedup on one example.
 
-There are some restrictions on the use of primitive types:
+Unboxed type kinds
+------------------
 
--  The main restriction is that you can't pass a primitive value to a
-   polymorphic function or store one in a polymorphic data type. This
-   rules out things like ``[Int#]`` (i.e. lists of primitive integers).
-   The reason for this restriction is that polymorphic arguments and
-   constructor fields are assumed to be pointers: if an unboxed integer
-   is stored in one of these, the garbage collector would attempt to
-   follow it, leading to unpredictable space leaks. Or a ``seq``
-   operation on the polymorphic component may attempt to dereference the
-   pointer, with disastrous results. Even worse, the unboxed value might
-   be larger than a pointer (``Double#`` for instance).
+Because unboxed types are represented without the use of pointers, we
+cannot store them in use a polymorphic datatype at an unboxed type.
+For example, the ``Just`` node
+of ``Just 42#`` would have to be different from the ``Just`` node of
+``Just 42``; the former stores an integer directly, while the latter
+stores a pointer. GHC currently does not support this variety of ``Just``
+nodes (nor for any other datatype). Accordingly, the *kind* of an unboxed
+type is different from the kind of a boxed type.
+
+The Haskell Report describes that ``*`` is the kind of ordinary datatypes,
+such as ``Int``. Furthermore, type constructors can have kinds with arrows;
+for example, ``Maybe`` has kind ``* -> *``. Unboxed types have a kind that
+specifies their runtime representation. For example, the type ``Int#`` has
+kind ``TYPE 'IntRep`` and ``Double#`` has kind ``TYPE 'DoubleRep``. These
+kinds say that the runtime representation of an ``Int#`` is a machine integer,
+and the runtime representation of a ``Double#`` is a machine double-precision
+floating point. In constrast, the kind ``*`` is actually just a synonym
+for ``TYPE 'PtrRepLifted``. More details of the ``TYPE`` mechanisms appear in
+the `section on runtime representation polymorphism <#runtime-rep>`__.
+
+Given that ``Int#``'s kind is not ``*``, it then it follows that
+``Maybe Int#`` is disallowed. Similarly, because type variables tend
+to be of kind ``*`` (for example, in ``(.) :: (b -> c) -> (a -> b) -> a -> c``,
+all the type variables have kind ``*``), polymorphism tends not to work
+over primitive types. Stepping back, this makes some sense, because
+a polymorphic function needs to manipulate the pointers to its data,
+and most primitive types are unboxed.
+
+There are some restrictions on the use of primitive types:
 
 -  You cannot define a newtype whose representation type (the argument
    type of the data constructor) is an unboxed type. Thus, this is
@@ -1770,72 +1794,6 @@ In addition, with :ghc-flag:`-XPatternSynonyms` you can prefix the name of a
 data constructor in an import or export list with the keyword
 ``pattern``, to allow the import or export of a data constructor without
 its parent type constructor (see :ref:`patsyn-impexp`).
-
-.. _visible-type-application:
-
-Visible type application
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. ghc-flag:: -XTypeApplications
-
-    :implies: :ghc-flag:`-XAllowAmbiguousTypes`
-    :since: 8.0.1
-
-    Allow the use of type application syntax.
-
-The :ghc-flag:`-XTypeApplications` extension allows you to use
-*visible type application* in expressions. Here is an
-example: ``show (read @Int "5")``. The ``@Int``
-is the visible type application; it specifies the value of the type variable
-in ``read``'s type.
-
-A visible type application is preceded with an ``@``
-sign. (To disambiguate the syntax, the ``@`` must be
-preceded with a non-identifier letter, usually a space. For example,
-``read@Int 5`` would not parse.) It can be used whenever
-the full polymorphic type of the function is known. If the function
-is an identifier (the common case), its type is considered known only when
-the identifier has been given a type signature. If the identifier does
-not have a type signature, visible type application cannot be used.
-
-Here are the details:
-
-- If an identifier's type signature does not include an
-  explicit ``forall``, the type variable arguments appear
-  in the left-to-right order in which the variables appear in the type.
-  So, ``foo :: Monad m => a b -> m (a c)``
-  will have its type variables
-  ordered as ``m, a, b, c``.
-
-- If any of the variables depend on other variables (that is, if some
-  of the variables are *kind* variables), the variables are reordered
-  so that kind variables come before type variables, preserving the
-  left-to-right order as much as possible. That is, GHC performs a
-  stable topological sort on the variables.
-
-  For example: if we have ``bar :: Proxy (a :: (j, k)) -> b``, then
-  the variables are ordered ``j``, ``k``, ``a``, ``b``.
-
-- Class methods' type arguments include the class type
-  variables, followed by any variables an individual method is polymorphic
-  in. So, ``class Monad m where return :: a -> m a`` means
-  that ``return``'s type arguments are ``m, a``.
-
-- With the :ghc-flag:`-XRankNTypes` extension
-  (:ref:`universal-quantification`), it is possible to declare
-  type arguments somewhere other than the beginning of a type. For example,
-  we can have ``pair :: forall a. a -> forall b. b -> (a, b)``
-  and then say ``pair @Bool True @Char`` which would have
-  type ``Char -> (Bool, Char)``.
-
-- Partial type signatures (:ref:`partial-type-signatures`)
-  work nicely with visible type
-  application. If you want to specify only the second type argument to
-  ``wurble``, then you can say ``wurble @_ @Int``.
-  The first argument is a wildcard, just like in a partial type signature.
-  However, if used in a visible type application, it is *not*
-  necessary to specify :ghc-flag:`-XPartialTypeSignatures` and your
-  code will not generate a warning informing you of the omitted type.
 
 .. _syntax-stolen:
 
@@ -6919,324 +6877,6 @@ Note that for the purpose of injectivity check in bullets (4) and (5)
 GHC uses a special variant of unification algorithm that treats type
 family applications as possibly unifying with anything.
 
-.. _kind-polymorphism:
-
-Kind polymorphism
-=================
-
-.. ghc-flag:: -XPolyKinds
-
-    :implies: :ghc-flag:`-XKindSignatures`
-    :since: 7.4.1
-
-    Allow kind polymorphic types.
-
-This section describes *kind polymorphism*, and extension enabled by
-:ghc-flag:`-XPolyKinds`. It is described in more detail in the paper `Giving
-Haskell a Promotion <http://dreixel.net/research/pdf/ghp.pdf>`__, which
-appeared at TLDI 2012.
-
-Overview of kind polymorphism
------------------------------
-
-Currently there is a lot of code duplication in the way ``Typeable`` is
-implemented (:ref:`deriving-typeable`): ::
-
-    class Typeable (t :: *) where
-      typeOf :: t -> TypeRep
-
-    class Typeable1 (t :: * -> *) where
-      typeOf1 :: t a -> TypeRep
-
-    class Typeable2 (t :: * -> * -> *) where
-      typeOf2 :: t a b -> TypeRep
-
-Kind polymorphism (with :ghc-flag:`-XPolyKinds`) allows us to merge all these
-classes into one: ::
-
-    data Proxy t = Proxy
-
-    class Typeable t where
-      typeOf :: Proxy t -> TypeRep
-
-    instance Typeable Int  where typeOf _ = TypeRep
-    instance Typeable []   where typeOf _ = TypeRep
-
-Note that the datatype ``Proxy`` has kind ``forall k. k -> *`` (inferred
-by GHC), and the new ``Typeable`` class has kind
-``forall k. k -> Constraint``.
-
-Note the following specific points:
-
--  Generally speaking, with :ghc-flag:`-XPolyKinds`, GHC will infer a
-   polymorphic kind for un-decorated declarations, whenever possible.
-   For example, in GHCi ::
-
-       ghci> :set -XPolyKinds
-       ghci> data T m a = MkT (m a)
-       ghci> :k T
-       T :: (k -> *) -> k -> *
-
--  GHC does not usually print explicit ``forall``\ s, including kind
-   ``forall``\ s. You can make GHC show them explicitly with
-   :ghc-flag:`-fprint-explicit-foralls` (see :ref:`options-help`): ::
-
-       ghci> :set -XPolyKinds
-       ghci> :set -fprint-explicit-foralls
-       ghci> data T m a = MkT (m a)
-       ghci> :k T
-       T :: forall (k :: BOX). (k -> *) -> k -> *
-
--  Just as in the world of terms, you can restrict polymorphism using a
-   kind signature (sometimes called a kind annotation) ::
-
-       data T m (a :: *) = MkT (m a)
-       -- GHC now infers kind   T :: (* -> *) -> * -> *
-
-   NB: :ghc-flag:`-XPolyKinds` implies :ghc-flag:`-XKindSignatures` (see
-   :ref:`kinding`).
-
--  The source language does not support an explicit ``forall`` for kind
-   variables. Instead, when binding a type variable, you can simply
-   mention a kind variable in a kind annotation for that type-variable
-   binding, thus: ::
-
-       data T (m :: k -> *) a = MkT (m a)
-       -- GHC now infers kind   T :: forall k. (k -> *) -> k -> *
-
--  The (implicit) kind "forall" is placed just outside the outermost
-   type-variable binding whose kind annotation mentions the kind
-   variable. For example ::
-
-       f1 :: (forall a m. m a -> Int) -> Int
-                -- f1 :: forall (k::BOX).
-                --       (forall (a::k) (m::k->*). m a -> Int)
-                --       -> Int
-
-       f2 :: (forall (a::k) m. m a -> Int) -> Int
-                -- f2 :: (forall (k::BOX) (a::k) (m::k->*). m a -> Int)
-                --       -> Int
-
-   Here in ``f1`` there is no kind annotation mentioning the polymorphic
-   kind variable, so ``k`` is generalised at the top level of the
-   signature for ``f1``. But in the case of of ``f2`` we give a kind
-   annotation in the ``forall (a:k)`` binding, and GHC therefore puts
-   the kind ``forall`` right there too. This design decision makes
-   default case (``f1``) as polymorphic as possible; remember that a
-   *more* polymorphic argument type (as in ``f2`` makes the overall
-   function *less* polymorphic, because there are fewer acceptable
-   arguments.
-
-.. note::
-
-   These rules are a bit indirect and clumsy. Perhaps GHC should
-   allow explicit kind quantification. But the implicit quantification
-   (e.g. in the declaration for data type T above) is certainly very
-   convenient, and it is not clear what the syntax for explicit
-   quantification should be.
-
-Principles of kind inference
-----------------------------
-
-Generally speaking, when :ghc-flag:`-XPolyKinds` is on, GHC tries to infer the
-most general kind for a declaration. For example: ::
-
-    data T f a = MkT (f a)   -- GHC infers:
-                             -- T :: forall k. (k->*) -> k -> *
-
-In this case the definition has a right-hand side to inform kind
-inference. But that is not always the case. Consider ::
-
-    type family F a
-
-Type family declarations have no right-hand side, but GHC must still
-infer a kind for ``F``. Since there are no constraints, it could infer
-``F :: forall k1 k2. k1 -> k2``, but that seems *too* polymorphic. So
-GHC defaults those entirely-unconstrained kind variables to ``*`` and we
-get ``F :: * -> *``. You can still declare ``F`` to be kind-polymorphic
-using kind signatures: ::
-
-    type family F1 a               -- F1 :: * -> *
-    type family F2 (a :: k)        -- F2 :: forall k. k -> *
-    type family F3 a :: k          -- F3 :: forall k. * -> k
-    type family F4 (a :: k1) :: k  -- F4 :: forall k1 k2. k1 -> k2
-
-The general principle is this:
-
--  *When there is a right-hand side, GHC infers the most polymorphic
-   kind consistent with the right-hand side.* Examples: ordinary data
-   type and GADT declarations, class declarations. In the case of a
-   class declaration the role of "right hand side" is played by the
-   class method signatures.
-
--  *When there is no right hand side, GHC defaults argument and result
-   kinds to ``*``, except when directed otherwise by a kind signature*.
-   Examples: data and type family declarations.
-
-This rule has occasionally-surprising consequences (see
-:ghc-ticket:`10132`. ::
-
-    class C a where    -- Class declarations are generalised
-                       -- so C :: forall k. k -> Constraint
-      data D1 a        -- No right hand side for these two family
-      type F1 a        -- declarations, but the class forces (a :: k)
-                       -- so   D1, F1 :: forall k. k -> *
-
-    data D2 a   -- No right-hand side so D2 :: * -> *
-    type F2 a   -- No right-hand side so F2 :: * -> *
-
-The kind-polymorphism from the class declaration makes ``D1``
-kind-polymorphic, but not so ``D2``; and similarly ``F1``, ``F1``.
-
-.. _complete-kind-signatures:
-
-Polymorphic kind recursion and complete kind signatures
--------------------------------------------------------
-
-Just as in type inference, kind inference for recursive types can only
-use *monomorphic* recursion. Consider this (contrived) example: ::
-
-    data T m a = MkT (m a) (T Maybe (m a))
-    -- GHC infers kind  T :: (* -> *) -> * -> *
-
-The recursive use of ``T`` forced the second argument to have kind
-``*``. However, just as in type inference, you can achieve polymorphic
-recursion by giving a *complete kind signature* for ``T``. A complete
-kind signature is present when all argument kinds and the result kind
-are known, without any need for inference. For example: ::
-
-    data T (m :: k -> *) :: k -> * where
-      MkT :: m a -> T Maybe (m a) -> T m a
-
-The complete user-supplied kind signature specifies the polymorphic kind
-for ``T``, and this signature is used for all the calls to ``T``
-including the recursive ones. In particular, the recursive use of ``T``
-is at kind ``*``.
-
-What exactly is considered to be a "complete user-supplied kind
-signature" for a type constructor? These are the forms:
-
--  For a datatype, every type variable must be annotated with a kind. In
-   a GADT-style declaration, there may also be a kind signature (with a
-   top-level ``::`` in the header), but the presence or absence of this
-   annotation does not affect whether or not the declaration has a
-   complete signature. ::
-
-       data T1 :: (k -> *) -> k -> *       where ...
-       -- Yes  T1 :: forall k. (k->*) -> k -> *
-
-       data T2 (a :: k -> *) :: k -> *     where ...
-       -- Yes  T2 :: forall k. (k->*) -> k -> *
-
-       data T3 (a :: k -> *) (b :: k) :: * where ...
-       -- Yes  T3 :: forall k. (k->*) -> k -> *
-
-       data T4 (a :: k -> *) (b :: k)      where ...
-       -- Yes  T4 :: forall k. (k->*) -> k -> *
-
-       data T5 a (b :: k) :: *             where ...
-       -- No  kind is inferred
-
-       data T6 a b                         where ...
-       -- No  kind is inferred
-
--  For a class, every type variable must be annotated with a kind.
-
--  For a type synonym, every type variable and the result type must all
-   be annotated with kinds: ::
-
-       type S1 (a :: k) = (a :: k)    -- Yes   S1 :: forall k. k -> k
-       type S2 (a :: k) = a           -- No    kind is inferred
-       type S3 (a :: k) = Proxy a     -- No    kind is inferred
-
-   Note that in ``S2`` and ``S3``, the kind of the right-hand side is
-   rather apparent, but it is still not considered to have a complete
-   signature -- no inference can be done before detecting the signature.
-
--  An open type or data family declaration *always* has a complete
-   user-specified kind signature; un-annotated type variables default to
-   kind ``*``: ::
-
-       data family D1 a               -- D1 :: * -> *
-       data family D2 (a :: k)        -- D2 :: forall k. k -> *
-       data family D3 (a :: k) :: *   -- D3 :: forall k. k -> *
-       type family S1 a :: k -> *     -- S1 :: forall k. * -> k -> *
-
-       class C a where                -- C  :: k -> Constraint
-         type AT a b                  -- AT :: k -> * -> *
-
-   In the last example, the variable ``a`` has an implicit kind variable
-   annotation from the class declaration. It keeps its polymorphic kind
-   in the associated type declaration. The variable ``b``, however, gets
-   defaulted to ``*``.
-
--  A closed type family has a complete signature when all of its type
-   variables are annotated and a return kind (with a top-level ``::``)
-   is supplied.
-
-Kind inference in closed type families
---------------------------------------
-
-Although all open type families are considered to have a complete
-user-specified kind signature, we can relax this condition for closed
-type families, where we have equations on which to perform kind
-inference. GHC will infer kinds for the arguments and result types of a
-closed type family.
-
-GHC supports *kind-indexed* type families, where the family matches both
-on the kind and type. GHC will *not* infer this behaviour without a
-complete user-supplied kind signature, as doing so would sometimes infer
-non-principal types.
-
-For example: ::
-
-    type family F1 a where
-      F1 True  = False
-      F1 False = True
-      F1 x     = x
-    -- F1 fails to compile: kind-indexing is not inferred
-
-    type family F2 (a :: k) where
-      F2 True  = False
-      F2 False = True
-      F2 x     = x
-    -- F2 fails to compile: no complete signature
-
-    type family F3 (a :: k) :: k where
-      F3 True  = False
-      F3 False = True
-      F3 x     = x
-    -- OK
-
-Kind inference in class instance declarations
----------------------------------------------
-
-Consider the following example of a poly-kinded class and an instance
-for it: ::
-
-    class C a where
-      type F a
-
-    instance C b where
-      type F b = b -> b
-
-In the class declaration, nothing constrains the kind of the type ``a``,
-so it becomes a poly-kinded type variable ``(a :: k)``. Yet, in the
-instance declaration, the right-hand side of the associated type
-instance ``b -> b`` says that ``b`` must be of kind ``*``. GHC could
-theoretically propagate this information back into the instance head,
-and make that instance declaration apply only to type of kind ``*``, as
-opposed to types of any kind. However, GHC does *not* do this.
-
-In short: GHC does *not* propagate kind information from the members of
-a class instance declaration into the instance declaration head.
-
-This lack of kind inference is simply an engineering problem within GHC,
-but getting it to work would make a substantial change to the inference
-infrastructure, and it's not clear the payoff is worth it. If you want
-to restrict ``b``\ 's kind in the instance above, just use a kind
-signature in the instance head.
-
 .. _promotion:
 
 Datatype promotion
@@ -7259,9 +6899,9 @@ Motivation
 
 Standard Haskell has a rich type language. Types classify terms and
 serve to avoid many common programming mistakes. The kind language,
-however, is relatively simple, distinguishing only lifted types (kind
-``*``), type constructors (e.g. kind ``* -> * -> *``), and unlifted
-types (:ref:`glasgow-unboxed`). In particular when using advanced type
+however, is relatively simple, distinguishing only regular types (kind
+``*``) and type constructors (e.g. kind ``* -> * -> *``).
+In particular when using advanced type
 system features, such as type families (:ref:`type-families`) or GADTs
 (:ref:`gadt`), this simple kind system is insufficient, and fails to
 prevent simple errors. Consider the example of type-level natural
@@ -7274,7 +6914,7 @@ numbers, and length-indexed vectors: ::
       Nil  :: Vec a Ze
       Cons :: a -> Vec a n -> Vec a (Su n)
 
-The kind of ``Vec`` is ``* -> * -> *``. This means that eg.
+The kind of ``Vec`` is ``* -> * -> *``. This means that, e.g.,
 ``Vec Int Char`` is a well-kinded type, even though this is not what we
 intend when defining length-indexed vectors.
 
@@ -7283,8 +6923,8 @@ With :ghc-flag:`-XDataKinds`, the example above can then be rewritten to: ::
     data Nat = Ze | Su Nat
 
     data Vec :: * -> Nat -> * where
-      Nil  :: Vec a Ze
-      Cons :: a -> Vec a n -> Vec a (Su n)
+      Nil  :: Vec a 'Ze
+      Cons :: a -> Vec a n -> Vec a ('Su n)
 
 With the improved kind of ``Vec``, things like ``Vec Int Char`` are now
 ill-kinded, and GHC will report an error.
@@ -7292,11 +6932,11 @@ ill-kinded, and GHC will report an error.
 Overview
 --------
 
-With :ghc-flag:`-XDataKinds`, GHC automatically promotes every suitable datatype
-to be a kind, and its (value) constructors to be type constructors. The
+With :ghc-flag:`-XDataKinds`, GHC automatically promotes every datatype
+to be a kind and its (value) constructors to be type constructors. The
 following types ::
 
-    data Nat = Ze | Su Nat
+    data Nat = Zero | Succ Nat
 
     data List a = Nil | Cons a (List a)
 
@@ -7304,31 +6944,28 @@ following types ::
 
     data Sum a b = L a | R b
 
-give rise to the following kinds and type constructors: ::
+give rise to the following kinds and type constructors (where promoted
+constructors are prefixed by a tick ``'``): ::
 
-    Nat :: BOX
-    Ze :: Nat
-    Su :: Nat -> Nat
+    Nat :: *
+    'Zero :: Nat
+    'Succ :: Nat -> Nat
 
-    List k :: BOX
-    Nil  :: List k
-    Cons :: k -> List k -> List k
+    List :: * -> *
+    'Nil  :: forall k. List k
+    'Cons :: forall k. k -> List k -> List k
 
-    Pair k1 k2 :: BOX
-    Pair :: k1 -> k2 -> Pair k1 k2
+    Pair  :: * -> * -> *
+    'Pair :: forall k1 k2. k1 -> k2 -> Pair k1 k2
 
-    Sum k1 k2 :: BOX
-    L :: k1 -> Sum k1 k2
-    R :: k2 -> Sum k1 k2
-
-where ``BOX`` is the (unique) sort that classifies kinds. Note that
-``List``, for instance, does not get sort ``BOX -> BOX``, because we do
-not further classify kinds; all kinds have sort ``BOX``.
+    Sum :: * -> * -> *
+    'L :: k1 -> Sum k1 k2
+    'R :: k2 -> Sum k1 k2
 
 The following restrictions apply to promotion:
 
--  We promote ``data`` types and ``newtypes``, but not type synonyms, or
-   type/data families (:ref:`type-families`).
+-  We promote ``data`` types and ``newtypes``; type synonyms and
+   type/data families are not promoted (:ref:`type-families`).
 
 -  We only promote types whose kinds are of the form
    ``* -> ... -> * -> *``. In particular, we do not promote
@@ -7340,33 +6977,49 @@ The following restrictions apply to promotion:
    involve constraints, mention type or data families, or involve types
    that are not promotable.
 
+The flag :ghc-flag:`-XTypeInType` (which implies :ghc-flag:`-XDataKinds`)
+relaxes some of these restrictions, allowing:
+
+-  Promotion of type synonyms and type families, but not data families.
+   GHC's type theory just isn't up to the task of promoting data families,
+   which requires full dependent types.
+
+-  All datatypes, even those with rich kinds, get promoted. For example: ::
+
+     data Proxy a = Proxy
+     data App f a = MkApp (f a)   -- App :: forall k. (k -> *) -> k -> *
+     x = Proxy :: Proxy ('MkApp ('Just 'True))
+
 .. _promotion-syntax:
 
 Distinguishing between types and constructors
 ---------------------------------------------
 
-Since constructors and types share the same namespace, with promotion
-you can get ambiguous type names: ::
+In the examples above, all promoted constructors are prefixed with a single
+quote mark ``'``. This mark tells GHC to look in the data constructor namespace
+for a name, not the type (constructor) namespace. Consider ::
 
-    data P          -- 1
+    data P = MkP    -- 1
 
     data Prom = P   -- 2
 
-    type T = P      -- 1 or promoted 2?
+We can thus distinguish the type ``P`` (which has a constructor ``MkP``)
+from the promoted data constructor ``'P`` (of kind ``Prom``).
 
-In these cases, if you want to refer to the promoted constructor, you
-should prefix its name with a quote: ::
+As a convenience, GHC allows you to omit the quote mark when the name is
+unambiguous. However, our experience has shown that the quote mark helps
+to make code more readable and less error-prone. GHC thus supports
+:ghc-flag:`-Wunticked-promoted-constructors` that will warn you if you
+use a promoted data constructor without a preceding quote mark.
 
-    type T1 = P     -- 1
+Just as in the case of Template Haskell (:ref:`th-syntax`), GHC gets
+confused if you put a quote mark before a data constructor whose second
+character is a quote mark. In this case, just put a space between the
+promotion quote and the data constructor: ::
 
-    type T2 = 'P    -- promoted 2
-
-Note that promoted datatypes give rise to named kinds. Since these can
-never be ambiguous, we do not allow quotes in kind names.
-
-Just as in the case of Template Haskell (:ref:`th-syntax`), there is no
-way to quote a data constructor or type constructor whose second
-character is a single quote.
+  data T = A'
+  type S = 'A'   -- ERROR: looks like a character
+  type R = ' A'  -- OK: promoted `A'`
 
 .. _promoted-lists-and-tuples:
 
@@ -7428,10 +7081,11 @@ not mentioned in the arguments, and thus it would seem that an instance
 would have to return a member of ``k`` *for any* ``k``. However, this is
 not the case. The type family ``UnEx`` is a kind-indexed type family.
 The return kind ``k`` is an implicit parameter to ``UnEx``. The
-elaborated definitions are as follows: ::
+elaborated definitions are as follows (where implicit parameters are
+denoted by braces): ::
 
-    type family UnEx (k :: BOX) (ex :: Ex) :: k
-    type instance UnEx k (MkEx k x) = x
+    type family UnEx {k :: *} (ex :: Ex) :: k
+    type instance UnEx {k} (MkEx @k x) = x
 
 Thus, the instance triggers only when the implicit parameter to ``UnEx``
 matches the implicit parameter to ``MkEx``. Because ``k`` is actually a
@@ -7440,16 +7094,657 @@ above code is valid.
 
 See also :ghc-ticket:`7347`.
 
-Promoting type operators
+.. _type-in-type:
+.. _kind-polymorphism:
+
+Kind polymorphism and Type-in-Type
+==================================
+
+.. ghc-flag: -XTypeInType
+
+    :implies: :ghc-flag:`-XPolyKinds`, :ghc-flag:`-XDataKinds`, :ghc-flag:`-XKindSignatures`
+    :since: 8.0.1
+
+    Allow kinds to be as intricate as types, allowing explicit quantification
+    over kind variables, higher-rank kinds, and the use of type synonyms and
+    families in kinds, among other features.
+
+.. ghc-flag:: -XPolyKinds
+
+    :implies: :ghc-flag:`-XKindSignatures`
+    :since: 7.4.1
+
+    Allow kind polymorphic types.
+
+This section describes GHC's kind system, as it appears in version 8.0 and beyond.
+The kind system as described here is always in effect, with or without extensions,
+although it is a conservative extension beyond standard Haskell. The extensions
+above simply enable syntax and tweak the inference algorithm to allow users to
+take advantage of the extra expressiveness of GHC's kind system.
+
+The difference between :ghc-flag:`-XTypeInType` and :ghc-flag:`-XPolyKinds`
+---------------------------------------------------------------------------
+
+It is natural to consider :ghc-flag:`-XTypeInType` as an extension of
+:ghc-flag:`-XPolyKinds`. The latter simply enables fewer features of GHC's
+rich kind system than does the former. The need for two separate extensions
+stems from their history: :ghc-flag:`-XPolyKinds` was introduced for GHC 7.4,
+when it was experimental and temperamental. The wrinkles were smoothed out for
+GHC 7.6. :ghc-flag:`-XTypeInType` was introduced for GHC 8.0, and is currently
+experimental and temperamental, with the wrinkles to be smoothed out in due
+course. The intent of having the two extensions is that users can rely on
+:ghc-flag:`-XPolyKinds` to work properly while being duly sceptical of
+:ghc-flag:`-XTypeInType`. In particular, we recommend enabling
+:ghc-flag:`-dcore-lint` whenever using :ghc-flag:`-XTypeInType`; that flag
+turns on a set of internal checks within GHC that will discover bugs in the
+implementation of :ghc-flag:`-XTypeInType`. Please report bugs at `our bug
+tracker <https://ghc.haskell.org/trac/ghc/wiki/ReportABug>`__.
+
+Although we have tried to allow the new behavior only when
+:ghc-flag:`-XTypeInType` is enabled, some particularly thorny cases may have
+slipped through. It is thus possible that some construct is available in GHC
+8.0 with :ghc-flag:`-XPolyKinds` that was not possible in GHC 7.x. If you spot
+such a case, you are welcome to submit that as a bug as well. We flag
+newly-available capabilities below.
+
+Overview of kind polymorphism
+-----------------------------
+
+Consider inferring the kind for ::
+
+  data App f a = MkApp (f a)
+
+In Haskell 98, the inferred kind for ``App`` is ``(* -> *) -> * -> *``.
+But this is overly specific, because another suitable Haskell 98 kind for
+``App`` is ``((* -> *) -> *) -> (* -> *) -> *``, where the kind assigned
+to ``a`` is ``* -> *``. Indeed, without kind signatures
+(:ghc-flag:`-XKindSignatures`), it is necessary to use a dummy constructor
+to get a Haskell compiler to infer the second kind. With kind polymorphism
+(:ghc-flag:`-XPolyKinds`), GHC infers the kind ``forall k. (k -> *) -> k -> *``
+for ``App``, which is its most general kind.
+
+Thus, the chief benefit of kind polymorphism is that we can now infer these
+most general kinds and use ``App`` at a variety of kinds: ::
+
+  App Maybe Int   -- `k` is instantiated to *
+
+  data T a = MkT (a Int)    -- `a` is inferred to have kind (* -> *)
+  App T Maybe     -- `k` is instantiated to (* -> *)
+
+Overview of Type-in-Type
 ------------------------
 
-Type operators are *not* promoted to the kind level. Why not? Because
-``*`` is a kind, parsed the way identifiers are. Thus, if a programmer
-tried to write ``Either * Bool``, would it be ``Either`` applied to
-``*`` and ``Bool``? Or would it be ``*`` applied to ``Either`` and
-``Bool``. To avoid this quagmire, we simply forbid promoting type
-operators to the kind level.
+GHC 8 extends the idea of kind polymorphism by declaring that types and kinds
+are indeed one and the same. Nothing within GHC distinguishes between types
+and kinds. Another way of thinking about this is that the type ``Bool`` and
+the "promoted kind" ``Bool`` are actually identical. (Note that term
+``True`` and the type ``'True`` are still distinct, because the former can
+be used in expressions and the latter in types.) This lack of distinction
+between types and kinds is a hallmark of dependently typed languages.
+Full dependently typed languages also remove the difference between expressions
+and types, but doing that in GHC is a story for another day.
 
+One simplification allowed by combining types and kinds is that the type
+of ``*`` is just ``*``. It is true that the ``* :: *`` axiom can lead to
+non-termination, but this is not a problem in GHC, as we already have other
+means of non-terminating programs in both types and expressions. This
+decision (among many, many others) *does* mean that despite the expressiveness
+of GHC's type system, a "proof" you write in Haskell is not an irrefutable
+mathematical proof. GHC promises only partial correctness, that if your
+programs compile and run to completion, their results indeed have the types
+assigned. It makes no claim about programs that do not finish in a finite
+amount of time.
+
+To learn more about this decision and the design of GHC under the hood
+please see the `paper <http://www.seas.upenn.edu/~sweirich/papers/fckinds.pdf>`__
+introducing this kind system to GHC/Haskell.
+
+Principles of kind inference
+----------------------------
+
+Generally speaking, when :ghc-flag:`-XPolyKinds` is on, GHC tries to infer the
+most general kind for a declaration.
+In this case the definition has a right-hand side to inform kind
+inference. But that is not always the case. Consider ::
+
+    type family F a
+
+Type family declarations have no right-hand side, but GHC must still
+infer a kind for ``F``. Since there are no constraints, it could infer
+``F :: forall k1 k2. k1 -> k2``, but that seems *too* polymorphic. So
+GHC defaults those entirely-unconstrained kind variables to ``*`` and we
+get ``F :: * -> *``. You can still declare ``F`` to be kind-polymorphic
+using kind signatures: ::
+
+    type family F1 a                -- F1 :: * -> *
+    type family F2 (a :: k)         -- F2 :: forall k. k -> *
+    type family F3 a :: k           -- F3 :: forall k. * -> k
+    type family F4 (a :: k1) :: k2  -- F4 :: forall k1 k2. k1 -> k2
+
+The general principle is this:
+
+-  *When there is a right-hand side, GHC infers the most polymorphic
+   kind consistent with the right-hand side.* Examples: ordinary data
+   type and GADT declarations, class declarations. In the case of a
+   class declaration the role of "right hand side" is played by the
+   class method signatures.
+
+-  *When there is no right hand side, GHC defaults argument and result
+   kinds to ``*``, except when directed otherwise by a kind signature*.
+   Examples: data and open type family declarations.
+
+This rule has occasionally-surprising consequences (see
+:ghc-ticket:`10132`. ::
+
+    class C a where    -- Class declarations are generalised
+                       -- so C :: forall k. k -> Constraint
+      data D1 a        -- No right hand side for these two family
+      type F1 a        -- declarations, but the class forces (a :: k)
+                       -- so   D1, F1 :: forall k. k -> *
+
+    data D2 a   -- No right-hand side so D2 :: * -> *
+    type F2 a   -- No right-hand side so F2 :: * -> *
+
+The kind-polymorphism from the class declaration makes ``D1``
+kind-polymorphic, but not so ``D2``; and similarly ``F1``, ``F1``.
+
+.. index::
+   single: CUSK
+   single: complete user-supplied kind signature
+
+.. _complete-kind-signatures:
+
+Complete user-supplied kind signatures and polymorphic recursion
+----------------------------------------------------------------
+
+Just as in type inference, kind inference for recursive types can only
+use *monomorphic* recursion. Consider this (contrived) example: ::
+
+    data T m a = MkT (m a) (T Maybe (m a))
+    -- GHC infers kind  T :: (* -> *) -> * -> *
+
+The recursive use of ``T`` forced the second argument to have kind
+``*``. However, just as in type inference, you can achieve polymorphic
+recursion by giving a *complete user-supplied kind signature* (or CUSK)
+for ``T``. A CUSK is present when all argument kinds and the result kind
+are known, without any need for inference. For example: ::
+
+    data T (m :: k -> *) :: k -> * where
+      MkT :: m a -> T Maybe (m a) -> T m a
+
+The complete user-supplied kind signature specifies the polymorphic kind
+for ``T``, and this signature is used for all the calls to ``T``
+including the recursive ones. In particular, the recursive use of ``T``
+is at kind ``*``.
+
+What exactly is considered to be a "complete user-supplied kind
+signature" for a type constructor? These are the forms:
+
+-  For a datatype, every type variable must be annotated with a kind. In
+   a GADT-style declaration, there may also be a kind signature (with a
+   top-level ``::`` in the header), but the presence or absence of this
+   annotation does not affect whether or not the declaration has a
+   complete signature. ::
+
+       data T1 :: (k -> *) -> k -> *       where ...
+       -- Yes;  T1 :: forall k. (k->*) -> k -> *
+
+       data T2 (a :: k -> *) :: k -> *     where ...
+       -- Yes;  T2 :: forall k. (k->*) -> k -> *
+
+       data T3 (a :: k -> *) (b :: k) :: * where ...
+       -- Yes;  T3 :: forall k. (k->*) -> k -> *
+
+       data T4 (a :: k -> *) (b :: k)      where ...
+       -- Yes;  T4 :: forall k. (k->*) -> k -> *
+
+       data T5 a (b :: k) :: *             where ...
+       -- No;  kind is inferred
+
+       data T6 a b                         where ...
+       -- No;  kind is inferred
+
+-  For a datatype with a top-level ``::`` when :ghc-flag:`-XTypeInType`
+   is in effect: all kind variables introduced after the ``::`` must
+   be explicitly quantified. ::
+
+     -- -XTypeInType is on
+     data T1 :: k -> *            -- No CUSK: `k` is not explicitly quantified
+     data T2 :: forall k. k -> *  -- CUSK: `k` is bound explicitly
+     data T3 :: forall (k :: *). k -> *   -- still a CUSK
+
+   Note that the first example would indeed have a CUSK without
+   :ghc-flag:`-XTypeInType`.
+
+-  For a class, every type variable must be annotated with a kind.
+
+-  For a type synonym, every type variable and the result type must all
+   be annotated with kinds: ::
+
+       type S1 (a :: k) = (a :: k)    -- Yes   S1 :: forall k. k -> k
+       type S2 (a :: k) = a           -- No    kind is inferred
+       type S3 (a :: k) = Proxy a     -- No    kind is inferred
+
+   Note that in ``S2`` and ``S3``, the kind of the right-hand side is
+   rather apparent, but it is still not considered to have a complete
+   signature -- no inference can be done before detecting the signature.
+
+-  An un-associated open type or data family declaration *always* has a CUSK;
+   un-annotated type variables default to
+   kind ``*``: ::
+
+       data family D1 a               -- D1 :: * -> *
+       data family D2 (a :: k)        -- D2 :: forall k. k -> *
+       data family D3 (a :: k) :: *   -- D3 :: forall k. k -> *
+       type family S1 a :: k -> *     -- S1 :: forall k. * -> k -> *
+
+-  An associated type or data family declaration has a CUSK precisely if
+   its enclosing class has a CUSK. ::
+       
+       class C a where                -- no CUSK
+         type AT a b                  -- no CUSK, b is defaulted
+
+       class D (a :: k) where         -- yes CUSK
+         type AT2 a b                 -- yes CUSK, b is defaulted
+
+-  A closed type family has a complete signature when all of its type
+   variables are annotated and a return kind (with a top-level ``::``)
+   is supplied.
+
+With :ghc-flag:`-XTypeInType` enabled, it is possible to write a datatype
+that syntactically has a CUSK (according to the rules above)
+but actually requires some inference. As a very contrived example, consider ::
+
+  data Proxy a           -- Proxy :: forall k. k -> *
+  data X (a :: Proxy k)
+
+According to the rules above ``X`` has a CUSK. Yet, what is the kind of ``k``?
+It is impossible to know. This code is thus rejected as masquerading as having
+a CUSK, but not really. If you wish ``k`` to be polykinded, it is straightforward
+to specify this: ::
+
+  data X (a :: Proxy (k1 :: k2))
+
+The above definition is indeed fully fixed, with no masquerade.
+
+Kind inference in closed type families
+--------------------------------------
+
+Although all open type families are considered to have a complete
+user-supplied kind signature, we can relax this condition for closed
+type families, where we have equations on which to perform kind
+inference. GHC will infer kinds for the arguments and result types of a
+closed type family.
+
+GHC supports *kind-indexed* type families, where the family matches both
+on the kind and type. GHC will *not* infer this behaviour without a
+complete user-supplied kind signature, as doing so would sometimes infer
+non-principal types. Indeed, we can see kind-indexing as a form
+of polymorphic recursion, where a type is used at a kind other than
+its most general in its own definition.
+
+For example: ::
+
+    type family F1 a where
+      F1 True  = False
+      F1 False = True
+      F1 x     = x
+    -- F1 fails to compile: kind-indexing is not inferred
+
+    type family F2 (a :: k) where
+      F2 True  = False
+      F2 False = True
+      F2 x     = x
+    -- F2 fails to compile: no complete signature
+
+    type family F3 (a :: k) :: k where
+      F3 True  = False
+      F3 False = True
+      F3 x     = x
+    -- OK
+
+Kind inference in class instance declarations
+---------------------------------------------
+
+Consider the following example of a poly-kinded class and an instance
+for it: ::
+
+    class C a where
+      type F a
+
+    instance C b where
+      type F b = b -> b
+
+In the class declaration, nothing constrains the kind of the type ``a``,
+so it becomes a poly-kinded type variable ``(a :: k)``. Yet, in the
+instance declaration, the right-hand side of the associated type
+instance ``b -> b`` says that ``b`` must be of kind ``*``. GHC could
+theoretically propagate this information back into the instance head,
+and make that instance declaration apply only to type of kind ``*``, as
+opposed to types of any kind. However, GHC does *not* do this.
+
+In short: GHC does *not* propagate kind information from the members of
+a class instance declaration into the instance declaration head.
+
+This lack of kind inference is simply an engineering problem within GHC,
+but getting it to work would make a substantial change to the inference
+infrastructure, and it's not clear the payoff is worth it. If you want
+to restrict ``b``\ 's kind in the instance above, just use a kind
+signature in the instance head.
+
+Kind inference in type signatures
+---------------------------------
+
+When kind-checking a type, GHC considers only what is written in that
+type when figuring out how to generalise the type's kind.
+
+For example,
+consider these definitions (with :ghc-flag:`-XScopedTypeVariables`): ::
+
+  data Proxy a    -- Proxy :: forall k. k -> *
+  p :: forall a. Proxy a
+  p = Proxy :: Proxy (a :: *)
+
+GHC reports an error, saying that the kind of ``a`` should be a kind variable
+``k``, not ``*``. This is because, by looking at the type signature
+``forall a. Proxy a``, GHC assumes ``a``'s kind should be generalised, not
+restricted to be ``*``. The function definition is then rejected for being
+more specific than its type signature.
+
+Explicit kind quantification
+----------------------------
+
+Enabled by :ghc-flag:`-XTypeInType`, GHC now supports explicit kind quantification,
+as in these examples: ::
+  
+  data Proxy :: forall k. k -> *
+  f :: (forall k (a :: k). Proxy a -> ()) -> Int
+
+Note that the second example has a ``forall`` that binds both a kind ``k`` and
+a type variable ``a`` of kind ``k``. In general, there is no limit to how
+deeply nested this sort of dependency can work. However, the dependency must
+be well-scoped: ``forall (a :: k) k. ...`` is an error.
+
+For backward compatibility, kind variables *do not* need to be bound explicitly,
+even if the type starts with ``forall``.
+
+Accordingly, the rule for kind quantification in higher-rank contexts has
+changed slightly. In GHC 7, if a kind variable was mentioned for the first
+time in the kind of a variable bound in a non-top-level ``forall``, the kind
+variable was bound there, too.
+That is, in ``f :: (forall (a :: k). ...) -> ...``, the ``k`` was bound
+by the same ``forall`` as the ``a``. In GHC 8, however, all kind variables
+mentioned in a type are bound at the outermost level. If you want one bound
+in a higher-rank ``forall``, include it explicitly.
+
+Kind-indexed GADTs
+------------------
+
+Consider the type ::
+
+  data G (a :: k) where
+    GInt    :: G Int
+    GMaybe  :: G Maybe
+
+This datatype ``G`` is GADT-like in both its kind and its type. Suppose you
+have ``g :: G a``, where ``a :: k``. Then pattern matching to discover that
+``g`` is in fact ```GMaybe`` tells you both that ``k ~ (* -> *)`` and
+``a ~ Maybe``. The definition for ``G`` requires that :ghc-flag:`-XTypeInType`
+be in effect, but pattern-matching on ``G`` requires no extension beyond
+:ghc-flag:`-XGADTs`. That this works is actually a straightforward extension
+of regular GADTs and a consequence of the fact that kinds and types are the
+same.
+
+Note that the datatype ``G`` is used at different kinds in its body, and
+therefore that kind-indexed GADTs use a form of polymorphic recursion.
+It is thus only possible to use this feature if you have provided a
+complete user-supplied kind signature
+for the datatype (:ref:`complete-kind-signatures`).
+
+Constraints in kinds
+--------------------
+
+As kinds and types are the same, kinds can now (with :ghc-flag:`-XTypeInType`)
+contain type constraints. Only equality constraints are currently supported,
+however. We expect this to extend to other constraints in the future.
+
+Here is an example of a constrained kind: ::
+
+  type family IsTypeLit a where
+    IsTypeLit Nat    = 'True
+    IsTypeLit Symbol = 'True
+    IsTypeLit a      = 'False
+
+  data T :: forall a. (IsTypeLit a ~ 'True) => a -> * where
+    MkNat    :: T 42
+    MkSymbol :: T "Don't panic!"
+
+The declarations above are accepted. However, if we add ``MkOther :: T Int``,
+we get an error that the equality constraint is not satisfied; ``Int`` is
+not a type literal. Note that explicitly quantifying with ``forall a`` is
+not necessary here.
+
+The kind ``*``
+--------------
+
+The kind ``*`` classifies ordinary types. Without :ghc-flag:`-XTypeInType`,
+this identifier is always in scope when writing a kind. However, with
+:ghc-flag:`-XTypeInType`, a user may wish to use ``*`` in a type or a
+type operator ``*`` in a kind. To make this all more manageable, ``*``
+becomes an (almost) ordinary name with :ghc-flag:`-XTypeInType` enabled.
+So as not to cause naming collisions, it is not imported by default;
+you must ``import Data.Kind`` to get ``*`` (but only with :ghc-flag:`-XTypeInType`
+enabled).
+
+The only way ``*`` is unordinary is in its parsing. In order to be backward
+compatible, ``*`` is parsed as if it were an alphanumeric idenfifier; note
+that we do not write ``Int :: (*)`` but just plain ``Int :: *``. Due to the
+bizarreness with which ``*`` is parsed-and the fact that it is the only such
+operator in GHC-there are some corner cases that are
+not handled. We are aware of two:
+
+- In a Haskell-98-style data constructor, you must put parentheses around
+  ``*``, like this: ::
+
+    data Universe = Ty (*) | Num Int | ...
+
+- In an import/export list, you must put parentheses around ``*``, like this: ::
+
+    import Data.Kind ( type (*) )
+
+  Note that the keyword ``type`` there is just to disambiguate the import
+  from a term-level ``(*)``. (:ref:`explicit-namespaces`)
+
+The ``Data.Kind`` module also exports ``Type`` as a synonym for ``*``.
+Now that type synonyms work in kinds, it is conceivable that we will deprecate
+``*`` when there is a good migration story for everyone to use ``Type``.
+If you like neither of these names, feel free to write your own synonym: ::
+
+  type Set = *   -- silly Agda programmers...
+
+All the affordances for ``*`` also apply to ``★``, the Unicode variant
+of ``*``.
+
+Inferring dependency in datatype declarations
+---------------------------------------------
+
+If a type variable ``a`` in a datatype, class, or type family declaration
+depends on another such variable ``k`` in the same declaration, two properties
+must hold:
+
+-  ``a`` must appear after ``k`` in the declaration, and
+
+-  ``k`` must appear explicitly in the kind of *some* type variable in that
+   declaration.
+
+The first bullet simply means that the dependency must be well-scoped. The
+second bullet concerns GHC's ability to infer dependency. Inferring this
+dependency is difficult, and GHC currently requires the dependency to be
+made explicit, meaning that ``k`` must appear in the kind of a type variable,
+making it obvious to GHC that dependency is intended. For example: ::
+
+  data Proxy k (a :: k)            -- OK: dependency is "obvious"
+  data Proxy2 k a = P (Proxy k a)  -- ERROR: dependency is unclear
+
+In the second declaration, GHC cannot immediately tell that ``k`` should
+be a dependent variable, and so the declaration is rejected.
+
+It is conceivable that this restriction will be relaxed in the future,
+but it is (at the time of writing) unclear if the difficulties around this
+scenario are theoretical (inferring this dependency would mean our type
+system does not have principal types) or merely practical (inferring this
+dependency is hard, given GHC's implementation). So, GHC takes the easy
+way out and requires a little help from the user.
+
+Kind defaulting without :ghc-flag:`-XPolyKinds`
+-----------------------------------------------
+
+Without :ghc-flag:`-XPolyKinds` or :ghc-flag:`-XTypeInType` enabled, GHC
+refuses to generalise over kind variables. It thus defaults kind variables
+to ``*`` when possible; when this is not possible, an error is issued.
+
+Here is an example of this in action: ::
+
+  {-# LANGUAGE TypeInType #-}
+  data Proxy a = P   -- inferred kind: Proxy :: k -> *
+  data Compose f g x = MkCompose (f (g x))
+    -- inferred kind: Compose :: (b -> *) -> (a -> b) -> a -> *
+
+  -- separate module having imported the first
+  {-# LANGUAGE NoPolyKinds, DataKinds #-}
+  z = Proxy :: Proxy 'MkCompose
+
+In the last line, we use the promoted constructor ``'MkCompose``, which has
+kind ::
+  
+  forall (a :: *) (b :: *) (f :: b -> *) (g :: a -> b) (x :: a).
+    f (g x) -> Compose f g x
+
+Now we must infer a type for ``z``. To do so without generalising over kind
+variables, we must default the kind variables of ``'MkCompose``. We can
+easily default ``a`` and ``b`` to ``*``, but ``f`` and ``g`` would be ill-kinded
+if defaulted. The definition for ``z`` is thus an error.
+
+Pretty-printing in the presence of kind polymorphism
+----------------------------------------------------
+
+With kind polymorphism, there is quite a bit going on behind the scenes that
+may be invisible to a Haskell programmer. GHC supports several flags that
+control how types are printed in error messages and at the GHCi prompt.
+See :ref:`pretty-printing-types` for the details. If you are using
+kind polymorphism and are confused as to why GHC is rejecting (or accepting)
+your program, we encourage you to turn on these flags, especially
+:ghc-flag:`-fprint-explicit-kinds`.
+
+.. index::
+   single: TYPE
+   single: runtime representation polymorphism
+   
+.. _runtime-rep:
+
+Runtime representation polymorphism
+===================================
+
+In order to allow full flexibility in how kinds are used, it is necessary
+to use the kind system to differentiate between boxed, lifted types
+(normal, everyday types like ``Int`` and ``[Bool]``) and unboxed, primitive
+types (:ref:`primitives`) like ``Int#``. We thus have so-called representation
+polymorphism.
+
+.. note::
+   For quite some time, this idea was known as *levity* polymorphism, when
+   it differentiated between only lifted and unlifted types. Now that it
+   differentiates between any runtime representations, the name has been
+   changed. But anything you've read or heard about levity polymorphism
+   likely applies to the story told here -- this is just a small generalisation.
+
+Here are the key definitions, all available from ``GHC.Exts``: ::
+
+  TYPE :: RuntimeRep -> *   -- highly magical, built into GHC
+
+  data RuntimeRep = PtrRepLifted     -- for things like `Int`
+                  | PtrRepUnlifted   -- for things like `Array#`
+                  | IntRep           -- for things like `Int#`
+                  | ...
+  
+  type * = TYPE PtrRepLifted    -- * is just an ordinary type synonym
+
+The idea is that we have a new fundamental type constant ``TYPE``, which
+is parameterised by a ``RuntimeRep``. We thus get ``Int# :: TYPE 'IntRep``
+and ``Bool :: TYPE 'PtrRepLifted``. Anything with a type of the form
+``TYPE x`` can appear to either side of a function arrow ``->``. We can
+thus say that ``->`` has type
+``TYPE r1 -> TYPE r2 -> TYPE 'PtrRepLifted``. The result is always lifted
+because all functions are lifted in GHC.
+
+No representation-polymorphic variables
+---------------------------------------
+
+If GHC didn't have to compile programs that run in the real world, that
+would be the end of the story. But representation polymorphism can cause
+quite a bit of trouble for GHC's code generator. Consider ::
+
+  bad :: forall (r1 :: RuntimeRep) (r2 :: RuntimeRep)
+                (a :: TYPE r1) (b :: TYPE r2).
+         (a -> b) -> a -> b
+  bad f x = f x
+
+This seems like a generalisation of the standard ``$`` operator. If we
+think about compiling this to runnable code, though, problems appear.
+In particular, when we call ``bad``, we must somehow pass ``x`` into
+``bad``. How wide (that is, how many bits) is ``x``? Is it a pointer?
+What kind of register (floating-point or integral) should ``x`` go in?
+It's all impossible to say, because ``x``'s type, ``TYPE r2`` is
+representation polymorphic. We thus forbid such constructions, via the
+following straightforward rule:
+
+    No variable may have a representation-polymorphic type.
+
+This eliminates ``bad`` because the variable ``x`` would have a
+representation-polymorphic type.
+
+However, not all is lost. We can still do this: ::
+
+  ($) :: forall r (a :: *) (b :: TYPE r).
+         (a -> b) -> a -> b
+  f $ x = f x
+
+Here, only ``b`` is representation polymorphic. There are no variables
+with a representation polymorphic type. And the code generator has no
+trouble with this. Indeed, this is the true type of GHC's ``$`` operator,
+slightly more general than the Haskell 98 version.
+
+Representation-polymorphic bottoms
+----------------------------------
+
+We can use representation polymorphism to good effect with ``error``
+and ``undefined``, whose types are given here: ::
+
+  undefined :: forall (r :: RuntimeRep) (a :: TYPE r).
+               HasCallStack => a
+  error :: forall (r :: RuntimeRep) (a :: TYPE r).
+           HasCallStack => String -> a
+
+These functions do not bind a representation-polymorphic variable, and
+so are accepted. Their polymorphism allows users to use these to conveniently
+stub out functions that return unboxed types.
+
+Printing representation-polymorphic types
+-----------------------------------------
+
+.. ghc-flag:: -Wprint-explicit-runtime-rep
+
+  Print ``RuntimeRep`` parameters as they appear; otherwise, they are
+  defaulted to ``'PtrRepLifted``.
+
+Most GHC users will not need to worry about representation polymorphism
+or unboxed types. For these users, see the representation polymorphism
+in the type of ``$`` is unhelpful. And thus, by default, it is suppressed,
+by supposing all type variables of type ``RuntimeType`` to be ``'PtrRepLifted``
+when printing, and printing ``TYPE 'PtrRepLifted`` as ``*``.
+
+Should you wish to see representation polymorphism in your types, enable
+the flag :ghc-flag:`-fprint-explicit-runtime-reps`.
 
 .. _type-level-literals:
 
@@ -7611,6 +7906,34 @@ by an FD type family ``F a1 .. an`` and a superclass context equality
 dependency. In class instances, we define the type instances of FD
 families in accordance with the class head. Method signatures are not
 affected by that process.
+
+.. index::
+   pair: Type equality constraints; kind heterogeneous
+
+Heterogeneous equality
+----------------------
+
+GHC also supports *kind-heterogeneous* equality, which relates two types of
+potentially different kinds. Heterogeneous equality is spelled ``~~``. Here
+are the kinds of ``~`` and ``~~`` to better understand their difference: ::
+
+  (~)  :: forall k. k -> k -> Constraint
+  (~~) :: forall k1 k2. k1 -> k2 -> Constraint
+
+Users will most likely want ``~``, but ``~~`` is available if GHC cannot know,
+a priori, that the two types of interest have the same kind. Evidence that
+``(a :: k1) ~~ (b :: k2)`` tells GHC both that ``k1`` and ``k2`` are the same
+and that ``a`` and ``b`` are the same.
+
+Because ``~`` is the more common equality relation, GHC prints out ``~~`` like
+``~`` unless :ghc-flag:`-fprint-equality-relations` is set.
+
+Unlifted heterogeneous equality
+-------------------------------
+
+Internal to GHC is yet a third equality relation ``(~#)``. It is heterogeneous
+(like ``~~``) and is used only internally. It may appear in error messages
+and other output only when :ghc-flag:`-fprint-equality-relations` is enabled.
 
 .. _coercible:
 
@@ -8309,6 +8632,83 @@ The flag :ghc-flag:`-XMonoLocalBinds` is implied by :ghc-flag:`-XTypeFamilies`
 and :ghc-flag:`-XGADTs`. You can switch it off again with
 :ghc-flag:`-XNoMonoLocalBinds <-XMonoLocalBinds>` but type inference becomes
 less predicatable if you do so. (Read the papers!)
+
+.. _visible-type-application:
+
+Visible type application
+========================
+
+.. ghc-flag:: -XTypeApplications
+
+    :implies: :ghc-flag:`-XAllowAmbiguousTypes`
+    :since: 8.0.1
+
+    Allow the use of type application syntax.
+
+The :ghc-flag:`-XTypeApplications` extension allows you to use
+*visible type application* in expressions. Here is an
+example: ``show (read @Int "5")``. The ``@Int``
+is the visible type application; it specifies the value of the type variable
+in ``read``'s type.
+
+A visible type application is preceded with an ``@``
+sign. (To disambiguate the syntax, the ``@`` must be
+preceded with a non-identifier letter, usually a space. For example,
+``read@Int 5`` would not parse.) It can be used whenever
+the full polymorphic type of the function is known. If the function
+is an identifier (the common case), its type is considered known only when
+the identifier has been given a type signature. If the identifier does
+not have a type signature, visible type application cannot be used.
+
+Here are the details:
+
+- If an identifier's type signature does not include an
+  explicit ``forall``, the type variable arguments appear
+  in the left-to-right order in which the variables appear in the type.
+  So, ``foo :: Monad m => a b -> m (a c)``
+  will have its type variables
+  ordered as ``m, a, b, c``.
+
+- If any of the variables depend on other variables (that is, if some
+  of the variables are *kind* variables), the variables are reordered
+  so that kind variables come before type variables, preserving the
+  left-to-right order as much as possible. That is, GHC performs a
+  stable topological sort on the variables.
+
+  For example: if we have ``bar :: Proxy (a :: (j, k)) -> b``, then
+  the variables are ordered ``j``, ``k``, ``a``, ``b``.
+
+- Visible type application is available to instantiate only user-specified
+  type variables. This means that in ``data Proxy a = Proxy``, the unmentioned
+  kind variable used in ``a``'s kind is *not* available for visible type
+  application.
+
+- Class methods' type arguments include the class type
+  variables, followed by any variables an individual method is polymorphic
+  in. So, ``class Monad m where return :: a -> m a`` means
+  that ``return``'s type arguments are ``m, a``.
+
+- With the :ghc-flag:`-XRankNTypes` extension
+  (:ref:`universal-quantification`), it is possible to declare
+  type arguments somewhere other than the beginning of a type. For example,
+  we can have ``pair :: forall a. a -> forall b. b -> (a, b)``
+  and then say ``pair @Bool True @Char`` which would have
+  type ``Char -> (Bool, Char)``.
+
+- Partial type signatures (:ref:`partial-type-signatures`)
+  work nicely with visible type
+  application. If you want to specify only the second type argument to
+  ``wurble``, then you can say ``wurble @_ @Int``.
+  The first argument is a wildcard, just like in a partial type signature.
+  However, if used in a visible type application, it is *not*
+  necessary to specify :ghc-flag:`-XPartialTypeSignatures` and your
+  code will not generate a warning informing you of the omitted type.
+
+- When printing types with :ghc-flag:`-fprint-explicit-foralls` enabled,
+  type variables not available for visible type application are printed
+  in braces. Thus, if you write ``myLength = length`` without a type
+  signature, ``myLength``'s inferred type will be
+  ``forall {f} {a}. Foldable f => f a -> Int``.
 
 .. _implicit-parameters:
 
