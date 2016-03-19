@@ -73,7 +73,7 @@ module Coercion (
         lookupCoVar,
         substCo, substCos, substCoVar, substCoVars, substCoWith,
         substCoVarBndr,
-        extendTCvSubstAndInScope, getCvSubstEnv,
+        extendTvSubstAndInScope, getCvSubstEnv,
 
         -- ** Lifting
         liftCoSubst, liftCoSubstTyVar, liftCoSubstWith, liftCoSubstWithEx,
@@ -891,7 +891,7 @@ mkLRCo lr co           = LRCo lr co
 -- | Instantiates a 'Coercion'.
 mkInstCo :: Coercion -> Coercion -> Coercion
 mkInstCo (ForAllCo tv _kind_co body_co) (Refl _ arg)
-  = substCoWith [tv] [arg] body_co
+  = substCoWithUnchecked [tv] [arg] body_co
 mkInstCo co arg = InstCo co arg
 
 -- This could work harder to produce Refl coercions, but that would be
@@ -1720,7 +1720,7 @@ coercionKind co = go co
       = let Pair _ k2          = go k_co
             tv2                = setTyVarKind tv1 k2
             Pair ty1 ty2       = go co
-            ty2' = substTyWith [tv1] [TyVarTy tv2 `mk_cast_ty` mkSymCo k_co] ty2 in
+            ty2' = substTyWithUnchecked [tv1] [TyVarTy tv2 `mk_cast_ty` mkSymCo k_co] ty2 in
         mkNamedForAllTy <$> Pair tv1 tv2 <*> pure Invisible <*> Pair ty1 ty2'
     go (CoVarCo cv)         = toPair $ coVarTypes cv
     go (AxiomInstCo ax ind cos)
@@ -1769,7 +1769,7 @@ coercionKind co = go co
     -- Collect up all the arguments and apply all at once
     -- See Note [Nested InstCos]
     go_app (InstCo co arg) args = go_app co (arg:args)
-    go_app co              args = applyTys <$> go co <*> (sequenceA $ map go args)
+    go_app co              args = piResultTys <$> go co <*> (sequenceA $ map go args)
 
     -- The real mkCastTy is too slow, and we can easily have nested ForAllCos.
     mk_cast_ty :: Type -> Coercion -> Type
@@ -1795,7 +1795,7 @@ coercionKindRole = go
       = let Pair _ k2          = coercionKind k_co
             tv2                = setTyVarKind tv1 k2
             (Pair ty1 ty2, r)  = go co
-            ty2' = substTyWith [tv1] [TyVarTy tv2 `mkCastTy` mkSymCo k_co] ty2 in
+            ty2' = substTyWithUnchecked [tv1] [TyVarTy tv2 `mkCastTy` mkSymCo k_co] ty2 in
         (mkNamedForAllTy <$> Pair tv1 tv2 <*> pure Invisible <*> Pair ty1 ty2', r)
     go (CoVarCo cv) = (toPair $ coVarTypes cv, coVarRole cv)
     go co@(AxiomInstCo ax _ _) = (coercionKind co, coAxiomRole ax)
@@ -1834,7 +1834,7 @@ coercionKindRole = go
     go_app (InstCo co arg) args = go_app co (arg:args)
     go_app co              args
       = let (pair, r) = go co in
-        (applyTys <$> pair <*> (sequenceA $ map coercionKind args), r)
+        (piResultTys <$> pair <*> (sequenceA $ map coercionKind args), r)
 
 -- | Retrieve the role from a coercion.
 coercionRole :: Coercion -> Role
@@ -1855,8 +1855,7 @@ If we deal with the InstCos one at a time, we'll do this:
    1.  Find the kind of (g @ ty1 .. @ ty99) : forall a100. phi'
    2.  Substitute phi'[ ty100/a100 ], a single tyvar->type subst
 But this is a *quadratic* algorithm, and the blew up Trac #5631.
-So it's very important to do the substitution simultaneously.
-
-cf Type.applyTys (which in fact we call here)
+So it's very important to do the substitution simultaneously;
+cf Type.piResultTys (which in fact we call here).
 
 -}

@@ -9,7 +9,7 @@ This module is an extension of @HsSyn@ syntax, for use in the type
 checker.
 -}
 
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, TupleSections #-}
 
 module TcHsSyn (
         mkHsConApp, mkHsDictLet, mkHsApp,
@@ -26,7 +26,7 @@ module TcHsSyn (
         zonkTopBndrs, zonkTyBndrsX,
         emptyZonkEnv, mkEmptyZonkEnv,
         zonkTcTypeToType, zonkTcTypeToTypes, zonkTyVarOcc,
-        zonkCoToCo
+        zonkCoToCo, zonkTcKindToKind
   ) where
 
 #include "HsVersions.h"
@@ -41,6 +41,7 @@ import TcEvidence
 import TysPrim
 import TysWiredIn
 import Type
+import TyCoRep  ( TyBinder(..) )
 import Coercion
 import ConLike
 import DataCon
@@ -325,6 +326,15 @@ zonkTyBndrX env tv
        ; let tv' = mkTyVar (tyVarName tv) ki
        ; return (extendTyZonkEnv1 env tv', tv') }
 
+zonkTyBinders :: ZonkEnv -> [TcTyBinder] -> TcM (ZonkEnv, [TyBinder])
+zonkTyBinders = mapAccumLM zonkTyBinder
+
+zonkTyBinder :: ZonkEnv -> TcTyBinder -> TcM (ZonkEnv, TyBinder)
+zonkTyBinder env (Anon ty) = (env, ) <$> (Anon <$> zonkTcTypeToType env ty)
+zonkTyBinder env (Named tv vis)
+  = do { (env', tv') <- zonkTyBndrX env tv
+       ; return (env', Named tv' vis) }
+
 zonkTopExpr :: HsExpr TcId -> TcM (HsExpr Id)
 zonkTopExpr e = zonkExpr emptyZonkEnv e
 
@@ -596,6 +606,11 @@ zonkExpr env (HsApp e1 e2)
        new_e2 <- zonkLExpr env e2
        return (HsApp new_e1 new_e2)
 
+zonkExpr env (HsAppTypeOut e t)
+  = do new_e <- zonkLExpr env e
+       return (HsAppTypeOut new_e t)
+       -- NB: the type is an HsType; can't zonk that!
+
 zonkExpr _ e@(HsRnBracketOut _ _)
   = pprPanic "zonkExpr: HsRnBracketOut" (ppr e)
 
@@ -758,9 +773,6 @@ zonkExpr env (HsWrap co_fn expr)
 
 zonkExpr _ (HsUnboundVar v)
   = return (HsUnboundVar v)
-
-  -- nothing to do here. The payload is an LHsType, not a Type.
-zonkExpr _ e@(HsTypeOut {}) = return e
 
 zonkExpr _ expr = pprPanic "zonkExpr" (ppr expr)
 
@@ -1578,6 +1590,14 @@ zonkTcTypeToType = mapType zonk_tycomapper
 zonkTcTypeToTypes :: ZonkEnv -> [TcType] -> TcM [Type]
 zonkTcTypeToTypes env tys = mapM (zonkTcTypeToType env) tys
 
+-- | Used during kind-checking in TcTyClsDecls, where it's more convenient
+-- to keep the binders and result kind separate.
+zonkTcKindToKind :: [TcTyBinder] -> TcKind -> TcM ([TyBinder], Kind)
+zonkTcKindToKind binders res_kind
+  = do { (env, binders') <- zonkTyBinders emptyZonkEnv binders
+       ; res_kind' <- zonkTcTypeToType env res_kind
+       ; return (binders', res_kind') }
+
 zonkCoToCo :: ZonkEnv -> Coercion -> TcM Coercion
 zonkCoToCo = mapCoercion zonk_tycomapper
 
@@ -1600,7 +1620,7 @@ zonkTypeZapping :: UnboundTyVarZonker
 -- It zaps unbound type variables to (), or some other arbitrary type
 -- Works on both types and kinds
 zonkTypeZapping tv
-  = do { let ty | isLevityVar tv = liftedDataConTy
-                | otherwise      = anyTypeOfKind (tyVarKind tv)
+  = do { let ty | isRuntimeRepVar tv = ptrRepLiftedTy
+                | otherwise          = anyTypeOfKind (tyVarKind tv)
        ; writeMetaTyVar tv ty
        ; return ty }

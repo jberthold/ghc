@@ -97,7 +97,7 @@ exprType (Lit lit)           = literalType lit
 exprType (Coercion co)       = coercionType co
 exprType (Let bind body)
   | NonRec tv rhs <- bind    -- See Note [Type bindings]
-  , Type ty <- rhs           = substTyWith [tv] [ty] (exprType body)
+  , Type ty <- rhs           = substTyWithUnchecked [tv] [ty] (exprType body)
   | otherwise                = exprType body
 exprType (Case _ _ ty _)     = ty
 exprType (Cast _ co)         = pSnd (coercionKind co)
@@ -175,15 +175,15 @@ applyTypeToArgs e op_ty args
                                   = go res_ty args
     go _ _ = pprPanic "applyTypeToArgs" panic_msg
 
-    -- go_ty_args: accumulate type arguments so we can instantiate all at once
+    -- go_ty_args: accumulate type arguments so we can
+    -- instantiate all at once with piResultTys
     go_ty_args op_ty rev_tys (Type ty : args)
        = go_ty_args op_ty (ty:rev_tys) args
     go_ty_args op_ty rev_tys (Coercion co : args)
        = go_ty_args op_ty (mkCoercionTy co : rev_tys) args
     go_ty_args op_ty rev_tys args
-       = go (applyTysD panic_msg_w_hdr op_ty (reverse rev_tys)) args
+       = go (piResultTys op_ty (reverse rev_tys)) args
 
-    panic_msg_w_hdr = hang (text "applyTypeToArgs") 2 panic_msg
     panic_msg = vcat [ text "Expression:" <+> pprCoreExpr e
                      , text "Type:" <+> ppr op_ty
                      , text "Args:" <+> ppr args ]
@@ -1564,7 +1564,7 @@ dataConInstPat fss uniqs con inst_tys
                                        (zip3 ex_tvs ex_fss ex_uniqs)
 
     mk_ex_var :: TCvSubst -> (TyVar, FastString, Unique) -> (TCvSubst, TyVar)
-    mk_ex_var subst (tv, fs, uniq) = (Type.extendTCvSubst subst tv
+    mk_ex_var subst (tv, fs, uniq) = (Type.extendTvSubst subst tv
                                        (mkTyVarTy new_tv)
                                      , new_tv)
       where

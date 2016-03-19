@@ -922,9 +922,9 @@ Note [Flavours with roles]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 The system described in Note [inert_eqs: the inert equalities]
 discusses an abstract
-set of flavours. In GHC, flavours have three components: the flavour proper,
-taken from {Wanted, Derived, Given}; the equality relation (often called
-role), taken from {NomEq, ReprEq}; and the levity, taken from {Lifted, Unlifted}.
+set of flavours. In GHC, flavours have two components: the flavour proper,
+taken from {Wanted, Derived, Given} and the equality relation (often called
+role), taken from {NomEq, ReprEq}.
 When substituting w.r.t. the inert set,
 as described in Note [inert_eqs: the inert equalities],
 we must be careful to respect all components of a flavour.
@@ -2886,7 +2886,7 @@ instFlexiTcS tvs = wrapTcS (mapAccumLM inst_one emptyTCvSubst tvs)
      inst_one subst tv
          = do { ty' <- instFlexiTcSHelper (tyVarName tv)
                                           (substTyUnchecked subst (tyVarKind tv))
-              ; return (extendTCvSubst subst tv ty', ty') }
+              ; return (extendTvSubst subst tv ty', ty') }
 
 instFlexiTcSHelper :: Name -> Kind -> TcM TcType
 instFlexiTcSHelper tvname kind
@@ -3091,7 +3091,7 @@ deferTcSForAllEq :: Role -- Nominal or Representational
 deferTcSForAllEq role loc kind_cos (bndrs1,body1) (bndrs2,body2)
  = do { let tvs1'  = zipWithEqual "deferTcSForAllEq"
                        mkCastTy (mkTyVarTys tvs1) kind_cos
-            body2' = substTyWith tvs2 tvs1' body2
+            body2' = substTyWithUnchecked tvs2 tvs1' body2
       ; (subst, skol_tvs) <- wrapTcS $ TcM.tcInstSkolTyVars tvs1
       ; let phi1  = Type.substTyUnchecked subst body1
             phi2  = Type.substTyUnchecked subst body2'

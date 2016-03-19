@@ -37,9 +37,10 @@ module TyCoRep (
 
         -- Functions over types
         mkTyConTy, mkTyVarTy, mkTyVarTys,
-        mkFunTy, mkFunTys,
+        mkFunTy, mkFunTys, mkForAllTys,
         isLiftedTypeKind, isUnliftedTypeKind,
-        isCoercionType, isLevityTy, isLevityVar,
+        isCoercionType, isRuntimeRepTy, isRuntimeRepVar,
+        isRuntimeRepKindedTy, dropRuntimeRepArgs,
         sameVis,
 
         -- Functions over binders
@@ -82,17 +83,22 @@ module TyCoRep (
         getCvSubstEnv, getTCvInScope, isInScope, notElemTCvSubst,
         setTvSubstEnv, setCvSubstEnv, zapTCvSubst,
         extendTCvInScope, extendTCvInScopeList, extendTCvInScopeSet,
-        extendTCvSubst, extendTCvSubstAndInScope, extendTCvSubstList,
-        extendTCvSubstBinder,
+        extendTCvSubst,
+        extendCvSubst, extendCvSubstWithClone,
+        extendTvSubst, extendTvSubstWithClone,
+        extendTvSubstList, extendTvSubstAndInScope,
+        extendTvSubstBinder,
         unionTCvSubst, zipTyEnv, zipCoEnv, mkTyCoInScopeSet,
         zipTvSubst, zipCvSubst,
         zipTyBinderSubst,
         mkTvSubstPrs,
 
-        substTelescope,
         substTyWith, substTyWithCoVars, substTysWith, substTysWithCoVars,
         substCoWith,
-        substTy, substTyAddInScope, substTyUnchecked,
+        substTy, substTyAddInScope,
+        substTyUnchecked, substTysUnchecked, substThetaUnchecked,
+        substTyWithBindersUnchecked, substTyWithUnchecked,
+        substCoUnchecked, substCoWithUnchecked,
         substTyWithBinders, substTyWithInScope,
         substTys, substTheta,
         lookupTyVar, substTyVarBndr,
@@ -120,7 +126,8 @@ module TyCoRep (
 import {-# SOURCE #-} DataCon( dataConTyCon, dataConFullSig
                               , DataCon, eqSpecTyVar )
 import {-# SOURCE #-} Type( isPredTy, isCoercionTy, mkAppTy
-                          , partitionInvisibles, coreView )
+                          , tyCoVarsOfTypesWellScoped, varSetElemsWellScoped
+                          , partitionInvisibles, coreView, typeKind )
    -- Transitively pulls in a LOT of stuff, better to break the loop
 
 import {-# SOURCE #-} Coercion
@@ -235,8 +242,8 @@ data TyLit
 -- ('Named') or nondependent ('Anon'). They may also be visible or not.
 -- See also Note [TyBinder]
 data TyBinder
-  = Named TyVar VisibilityFlag
-  | Anon Type   -- visibility is determined by the type (Constraint vs. *)
+  = Named TyVar VisibilityFlag  -- Always a TyVar (not CoVar or Id)
+  | Anon Type   -- Visibility is determined by the type (Constraint vs. *)
     deriving (Data.Typeable, Data.Data)
 
 -- | Is something required to appear in source Haskell ('Visible'),
@@ -346,6 +353,58 @@ relation, ignores casts and coercion arguments, as long as the
 two types have the same kind. This allows us to be a little sloppier
 in keeping track of coercions, which is a good thing. It also means
 that eqType does not depend on eqCoercion, which is also a good thing.
+
+Why is this sensible? That is, why is something different than α-equivalence
+appropriate for the implementation of eqType?
+
+Anything smaller than ~ and homogeneous is an appropriate definition for
+equality. The type safety of FC depends only on ~. Let's say η : τ ~ σ. Any
+expression of type τ can be transmuted to one of type σ at any point by
+casting. The same is true of types of type τ. So in some sense, τ and σ are
+interchangeable.
+
+But let's be more precise. If we examine the typing rules of FC (say, those in
+http://www.cis.upenn.edu/~eir/papers/2015/equalities/equalities-extended.pdf)
+there are several places where the same metavariable is used in two different
+premises to a rule. (For example, see Ty_App.) There is an implicit equality
+check here. What definition of equality should we use? By convention, we use
+α-equivalence. Take any rule with one (or more) of these implicit equality
+checks. Then there is an admissible rule that uses ~ instead of the implicit
+check, adding in casts as appropriate.
+
+The only problem here is that ~ is heterogeneous. To make the kinds work out
+in the admissible rule that uses ~, it is necessary to homogenize the
+coercions. That is, if we have η : (τ : κ1) ~ (σ : κ2), then we don't use η;
+we use η |> kind η, which is homogeneous.
+
+The effect of this all is that eqType, the implementation of the implicit
+equality check, can use any homogeneous relation that is smaller than ~, as
+those rules must also be admissible.
+
+What would go wrong if we insisted on the casts matching? See the beginning of
+Section 8 in the unpublished paper above. Theoretically, nothing at all goes
+wrong. But in practical terms, getting the coercions right proved to be
+nightmarish. And types would explode: during kind-checking, we often produce
+reflexive kind coercions. When we try to cast by these, mkCastTy just discards
+them. But if we used an eqType that distinguished between Int and Int |> <*>,
+then we couldn't discard -- the output of kind-checking would be enormous,
+and we would need enormous casts with lots of CoherenceCo's to straighten
+them out.
+
+Would anything go wrong if eqType respected type families? No, not at all. But
+that makes eqType rather hard to implement.
+
+Thus, the guideline for eqType is that it should be the largest
+easy-to-implement relation that is still smaller than ~ and homogeneous. The
+precise choice of relation is somewhat incidental, as long as the smart
+constructors and destructors in Type respect whatever relation is chosen.
+
+Another helpful principle with eqType is this:
+
+ ** If (t1 eqType t2) then I can replace t1 by t2 anywhere. **
+
+This principle also tells us that eqType must relate only types with the
+same kinds.
 
 Note [VisibilityFlag]
 ~~~~~~~~~~~~~~~~~~~~~
@@ -459,6 +518,10 @@ mkFunTy arg res = ForAllTy (Anon arg) res
 mkFunTys :: [Type] -> Type -> Type
 mkFunTys tys ty = foldr mkFunTy ty tys
 
+-- | Wraps foralls over the type using the provided 'TyVar's from left to right
+mkForAllTys :: [TyBinder] -> Type -> Type
+mkForAllTys tyvars ty = foldr ForAllTy ty tyvars
+
 -- | Does this type classify a core Coercion?
 isCoercionType :: Type -> Bool
 isCoercionType (TyConApp tc tys)
@@ -508,26 +571,47 @@ mkTyConTy tycon = TyConApp tycon []
 Some basic functions, put here to break loops eg with the pretty printer
 -}
 
+-- | This version considers Constraint to be distinct from *.
 isLiftedTypeKind :: Kind -> Bool
 isLiftedTypeKind ki | Just ki' <- coreView ki = isLiftedTypeKind ki'
-isLiftedTypeKind (TyConApp tc [TyConApp lev []])
-  = tc `hasKey` tYPETyConKey && lev `hasKey` liftedDataConKey
+isLiftedTypeKind (TyConApp tc [TyConApp ptr_rep []])
+  =  tc      `hasKey` tYPETyConKey
+  && ptr_rep `hasKey` ptrRepLiftedDataConKey
 isLiftedTypeKind _                = False
 
 isUnliftedTypeKind :: Kind -> Bool
 isUnliftedTypeKind ki | Just ki' <- coreView ki = isUnliftedTypeKind ki'
-isUnliftedTypeKind (TyConApp tc [TyConApp lev []])
-  = tc `hasKey` tYPETyConKey && lev `hasKey` unliftedDataConKey
+isUnliftedTypeKind (TyConApp tc [TyConApp ptr_rep []])
+  | tc       `hasKey` tYPETyConKey
+  , ptr_rep  `hasKey` ptrRepLiftedDataConKey
+  = False
+isUnliftedTypeKind (TyConApp tc [arg])
+  = tc `hasKey` tYPETyConKey && isEmptyVarSet (tyCoVarsOfType arg)
+      -- all other possibilities are unlifted
 isUnliftedTypeKind _ = False
 
--- | Is this the type 'Levity'?
-isLevityTy :: Type -> Bool
-isLevityTy (TyConApp tc []) = tc `hasKey` levityTyConKey
-isLevityTy _                = False
+-- | Is this the type 'RuntimeRep'?
+isRuntimeRepTy :: Type -> Bool
+isRuntimeRepTy ty | Just ty' <- coreView ty = isRuntimeRepTy ty'
+isRuntimeRepTy (TyConApp tc []) = tc `hasKey` runtimeRepTyConKey
+isRuntimeRepTy _ = False
 
--- | Is a tyvar of type 'Levity'?
-isLevityVar :: TyVar -> Bool
-isLevityVar = isLevityTy . tyVarKind
+-- | Is this a type of kind RuntimeRep? (e.g. PtrRep)
+isRuntimeRepKindedTy :: Type -> Bool
+isRuntimeRepKindedTy = isRuntimeRepTy . typeKind
+
+-- | Is a tyvar of type 'RuntimeRep'?
+isRuntimeRepVar :: TyVar -> Bool
+isRuntimeRepVar = isRuntimeRepTy . tyVarKind
+
+-- | Drops prefix of RuntimeRep constructors in 'TyConApp's. Useful for e.g.
+-- dropping 'PtrRep arguments of unboxed tuple TyCon applications:
+--
+--   dropRuntimeRepArgs [ 'PtrRepLifted, 'PtrRepUnlifted
+--                      , String, Int# ] == [String, Int#]
+--
+dropRuntimeRepArgs :: [Type] -> [Type]
+dropRuntimeRepArgs = dropWhile isRuntimeRepKindedTy
 
 {-
 %************************************************************************
@@ -1472,7 +1556,7 @@ CoercionTy.
 
 Note [The substitution invariant]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When calling substTy subst ty it should be the case that
+When calling (substTy subst ty) it should be the case that
 the in-scope set in the substitution is a superset of both:
 
   * The free vars of the range of the substitution
@@ -1579,39 +1663,50 @@ extendTCvInScopeSet :: TCvSubst -> VarSet -> TCvSubst
 extendTCvInScopeSet (TCvSubst in_scope tenv cenv) vars
   = TCvSubst (extendInScopeSetSet in_scope vars) tenv cenv
 
-extendSubstEnvs :: (TvSubstEnv, CvSubstEnv) -> Var -> Type
-                -> (TvSubstEnv, CvSubstEnv)
-extendSubstEnvs (tenv, cenv) v ty
+extendTCvSubst :: TCvSubst -> TyCoVar -> Type -> TCvSubst
+extendTCvSubst subst v ty
   | isTyVar v
-  = ASSERT( not $ isCoercionTy ty )
-    (extendVarEnv tenv v ty, cenv)
-
-    -- NB: v might *not* be a proper covar, because it might be lifted.
-    -- This happens in tcCoercionToCoercion
+  = extendTvSubst subst v ty
   | CoercionTy co <- ty
-  = (tenv, extendVarEnv cenv v co)
+  = extendCvSubst subst v co
   | otherwise
-  = pprPanic "extendSubstEnvs" (ppr v <+> text "|->" <+> ppr ty)
+  = pprPanic "extendTCvSubst" (ppr v <+> text "|->" <+> ppr ty)
 
-extendTCvSubst :: TCvSubst -> Var -> Type -> TCvSubst
-extendTCvSubst (TCvSubst in_scope tenv cenv) tv ty
-  = TCvSubst in_scope tenv' cenv'
-  where (tenv', cenv') = extendSubstEnvs (tenv, cenv) tv ty
+extendTvSubst :: TCvSubst -> TyVar -> Type -> TCvSubst
+extendTvSubst (TCvSubst in_scope tenv cenv) tv ty
+  = TCvSubst in_scope (extendVarEnv tenv tv ty) cenv
 
-extendTCvSubstAndInScope :: TCvSubst -> TyCoVar -> Type -> TCvSubst
+extendTvSubstWithClone :: TCvSubst -> TyVar -> TyVar -> TCvSubst
+-- Adds a new tv -> tv mapping, /and/ extends the in-scope set
+extendTvSubstWithClone (TCvSubst in_scope tenv cenv) tv tv'
+  = TCvSubst (extendInScopeSet in_scope tv')
+             (extendVarEnv tenv tv (mkTyVarTy tv'))
+             cenv
+
+extendCvSubst :: TCvSubst -> CoVar -> Coercion -> TCvSubst
+extendCvSubst (TCvSubst in_scope tenv cenv) v co
+  = TCvSubst in_scope tenv (extendVarEnv cenv v co)
+
+extendCvSubstWithClone :: TCvSubst -> CoVar -> CoVar -> TCvSubst
+extendCvSubstWithClone (TCvSubst in_scope tenv cenv) cv cv'
+  = TCvSubst (extendInScopeSet in_scope cv')
+             tenv
+             (extendVarEnv cenv cv (mkCoVarCo cv'))
+
+extendTvSubstAndInScope :: TCvSubst -> TyVar -> Type -> TCvSubst
 -- Also extends the in-scope set
-extendTCvSubstAndInScope (TCvSubst in_scope tenv cenv) tv ty
+extendTvSubstAndInScope (TCvSubst in_scope tenv cenv) tv ty
   = TCvSubst (in_scope `extendInScopeSetSet` tyCoVarsOfType ty)
-             tenv' cenv'
-  where (tenv', cenv') = extendSubstEnvs (tenv, cenv) tv ty
+             (extendVarEnv tenv tv ty)
+             cenv
 
-extendTCvSubstList :: TCvSubst -> [Var] -> [Type] -> TCvSubst
-extendTCvSubstList subst tvs tys
-  = foldl2 extendTCvSubst subst tvs tys
+extendTvSubstList :: TCvSubst -> [Var] -> [Type] -> TCvSubst
+extendTvSubstList subst tvs tys
+  = foldl2 extendTvSubst subst tvs tys
 
-extendTCvSubstBinder :: TCvSubst -> TyBinder -> Type -> TCvSubst
-extendTCvSubstBinder env (Anon {})    _  = env
-extendTCvSubstBinder env (Named tv _) ty = extendTCvSubst env tv ty
+extendTvSubstBinder :: TCvSubst -> TyBinder -> Type -> TCvSubst
+extendTvSubstBinder env (Anon {})    _  = env
+extendTvSubstBinder env (Named tv _) ty = extendTvSubst env tv ty
 
 unionTCvSubst :: TCvSubst -> TCvSubst -> TCvSubst
 -- Works when the ranges are disjoint
@@ -1753,23 +1848,27 @@ ForAllCo tv (sym h) (sym g[tv |-> tv |> sym h])
 
 -}
 
--- | Create a substitution from tyvars to types, but later types may depend
--- on earlier ones. Return the substed types and the built substitution.
-substTelescope :: [TyCoVar] -> [Type] -> ([Type], TCvSubst)
-substTelescope = go_subst emptyTCvSubst
-  where
-    go_subst :: TCvSubst -> [TyCoVar] -> [Type] -> ([Type], TCvSubst)
-    go_subst subst [] [] = ([], subst)
-    go_subst subst (tv:tvs) (k:ks)
-      = let k' = substTy subst k in
-        liftFst (k' :) $ go_subst (extendTCvSubst subst tv k') tvs ks
-    go_subst _ _ _ = panic "substTelescope"
-
-
 -- | Type substitution, see 'zipTvSubst'
-substTyWith :: [TyVar] -> [Type] -> Type -> Type
+substTyWith ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    [TyVar] -> [Type] -> Type -> Type
+-- Works only if the domain of the substitution is a
+-- superset of the type being substituted into
 substTyWith tvs tys = ASSERT( length tvs == length tys )
-                      substTyUnchecked (zipTvSubst tvs tys)
+                      substTy (zipTvSubst tvs tys)
+
+-- | Type substitution, see 'zipTvSubst'. Disables sanity checks.
+-- The problems that the sanity checks in substTy catch are described in
+-- Note [The substitution invariant].
+-- The goal of #11371 is to migrate all the calls of substTyUnchecked to
+-- substTy and remove this function. Please don't use in new code.
+substTyWithUnchecked :: [TyVar] -> [Type] -> Type -> Type
+substTyWithUnchecked tvs tys
+  = ASSERT( length tvs == length tys )
+    substTyUnchecked (zipTvSubst tvs tys)
 
 -- | Substitute tyvars within a type using a known 'InScopeSet'.
 -- Pre-condition: the 'in_scope' set should satisfy Note [The substitution
@@ -1782,9 +1881,26 @@ substTyWithInScope in_scope tvs tys ty =
   where tenv = zipTyEnv tvs tys
 
 -- | Coercion substitution, see 'zipTvSubst'
-substCoWith :: [TyVar] -> [Type] -> Coercion -> Coercion
+substCoWith ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    [TyVar] -> [Type] -> Coercion -> Coercion
 substCoWith tvs tys = ASSERT( length tvs == length tys )
                       substCo (zipTvSubst tvs tys)
+
+-- | Coercion substitution, see 'zipTvSubst'. Disables sanity checks.
+-- The problems that the sanity checks in substCo catch are described in
+-- Note [The substitution invariant].
+-- The goal of #11371 is to migrate all the calls of substCoUnchecked to
+-- substCo and remove this function. Please don't use in new code.
+substCoWithUnchecked :: [TyVar] -> [Type] -> Coercion -> Coercion
+substCoWithUnchecked tvs tys
+  = ASSERT( length tvs == length tys )
+    substCoUnchecked (zipTvSubst tvs tys)
+
+
 
 -- | Substitute covars within a type
 substTyWithCoVars :: [CoVar] -> [Coercion] -> Type -> Type
@@ -1802,9 +1918,25 @@ substTysWithCoVars cvs cos = ASSERT( length cvs == length cos )
 
 -- | Type substitution using 'Binder's. Anonymous binders
 -- simply ignore their matching type.
-substTyWithBinders :: [TyBinder] -> [Type] -> Type -> Type
+substTyWithBinders ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    [TyBinder] -> [Type] -> Type -> Type
 substTyWithBinders bndrs tys = ASSERT( length bndrs == length tys )
-                               substTyUnchecked (zipTyBinderSubst bndrs tys)
+                               substTy (zipTyBinderSubst bndrs tys)
+
+-- | Type substitution using 'Binder's disabling the sanity checks.
+-- Anonymous binders simply ignore their matching type.
+-- The problems that the sanity checks in substTy catch are described in
+-- Note [The substitution invariant].
+-- The goal of #11371 is to migrate all the calls of substTyUnchecked to
+-- substTy and remove this function. Please don't use in new code.
+substTyWithBindersUnchecked :: [TyBinder] -> [Type] -> Type -> Type
+substTyWithBindersUnchecked bndrs tys
+  = ASSERT( length bndrs == length tys )
+    substTyUnchecked (zipTyBinderSubst bndrs tys)
 
 -- | Substitute within a 'Type' after adding the free variables of the type
 -- to the in-scope set. This is useful for the case when the free variables
@@ -1826,57 +1958,104 @@ isValidTCvSubst (TCvSubst in_scope tenv cenv) =
   tenvFVs = tyCoVarsOfTypes $ varEnvElts tenv
   cenvFVs = tyCoVarsOfCos $ varEnvElts cenv
 
+-- | This checks if the substitution satisfies the invariant from
+-- Note [The substitution invariant].
+checkValidSubst ::
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    TCvSubst -> [Type] -> [Coercion] -> a -> a
+checkValidSubst subst@(TCvSubst in_scope tenv cenv) tys cos a
+  = ASSERT2( isValidTCvSubst subst,
+             text "in_scope" <+> ppr in_scope $$
+             text "tenv" <+> ppr tenv $$
+             text "tenvFVs"
+               <+> ppr (tyCoVarsOfTypes $ varEnvElts tenv) $$
+             text "cenv" <+> ppr cenv $$
+             text "cenvFVs"
+               <+> ppr (tyCoVarsOfCos $ varEnvElts cenv) $$
+             text "tys" <+> ppr tys $$
+             text "cos" <+> ppr cos )
+    ASSERT2( tysCosFVsInScope,
+             text "in_scope" <+> ppr in_scope $$
+             text "tenv" <+> ppr tenv $$
+             text "cenv" <+> ppr cenv $$
+             text "tys" <+> ppr tys $$
+             text "cos" <+> ppr cos $$
+             text "needInScope" <+> ppr needInScope )
+    a
+  where
+  substDomain = varEnvKeys tenv ++ varEnvKeys cenv
+  needInScope = (tyCoVarsOfTypes tys `unionVarSet` tyCoVarsOfCos cos)
+                  `delListFromUFM_Directly` substDomain
+  tysCosFVsInScope = needInScope `varSetInScope` in_scope
+
+
 -- | Substitute within a 'Type'
 -- The substitution has to satisfy the invariants described in
 -- Note [The substitution invariant].
-
 substTy ::
 -- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
 #if __GLASGOW_HASKELL__ > 710
     (?callStack :: CallStack) =>
 #endif
     TCvSubst -> Type  -> Type
-substTy subst@(TCvSubst in_scope tenv cenv) ty
+substTy subst ty
   | isEmptyTCvSubst subst = ty
-  | otherwise = ASSERT2( isValidTCvSubst subst,
-                         text "in_scope" <+> ppr in_scope $$
-                         text "tenv" <+> ppr tenv $$
-                         text "tenvFVs"
-                           <+> ppr (tyCoVarsOfTypes $ varEnvElts tenv) $$
-                         text "cenv" <+> ppr cenv $$
-                         text "cenvFVs"
-                           <+> ppr (tyCoVarsOfCos $ varEnvElts cenv) $$
-                         text "ty" <+> ppr ty )
-                ASSERT2( typeFVsInScope,
-                         text "in_scope" <+> ppr in_scope $$
-                         text "tenv" <+> ppr tenv $$
-                         text "cenv" <+> ppr cenv $$
-                         text "ty" <+> ppr ty $$
-                         text "needInScope" <+> ppr needInScope )
-                subst_ty subst ty
-  where
-  substDomain = varEnvKeys tenv ++ varEnvKeys cenv
-  needInScope = tyCoVarsOfType ty `delListFromUFM_Directly` substDomain
-  typeFVsInScope = needInScope `varSetInScope` in_scope
+  | otherwise = checkValidSubst subst [ty] [] $ subst_ty subst ty
 
 -- | Substitute within a 'Type' disabling the sanity checks.
 -- The problems that the sanity checks in substTy catch are described in
 -- Note [The substitution invariant].
 -- The goal of #11371 is to migrate all the calls of substTyUnchecked to
 -- substTy and remove this function. Please don't use in new code.
-substTyUnchecked :: TCvSubst -> Type  -> Type
+substTyUnchecked :: TCvSubst -> Type -> Type
 substTyUnchecked subst ty
                  | isEmptyTCvSubst subst = ty
                  | otherwise             = subst_ty subst ty
 
 -- | Substitute within several 'Type's
-substTys :: TCvSubst -> [Type] -> [Type]
-substTys subst tys | isEmptyTCvSubst subst = tys
-                   | otherwise             = map (subst_ty subst) tys
+-- The substitution has to satisfy the invariants described in
+-- Note [The substitution invariant].
+substTys ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    TCvSubst -> [Type] -> [Type]
+substTys subst tys
+  | isEmptyTCvSubst subst = tys
+  | otherwise = checkValidSubst subst tys [] $ map (subst_ty subst) tys
+
+-- | Substitute within several 'Type's disabling the sanity checks.
+-- The problems that the sanity checks in substTys catch are described in
+-- Note [The substitution invariant].
+-- The goal of #11371 is to migrate all the calls of substTysUnchecked to
+-- substTys and remove this function. Please don't use in new code.
+substTysUnchecked :: TCvSubst -> [Type] -> [Type]
+substTysUnchecked subst tys
+                 | isEmptyTCvSubst subst = tys
+                 | otherwise             = map (subst_ty subst) tys
 
 -- | Substitute within a 'ThetaType'
-substTheta :: TCvSubst -> ThetaType -> ThetaType
+-- The substitution has to satisfy the invariants described in
+-- Note [The substitution invariant].
+substTheta ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    TCvSubst -> ThetaType -> ThetaType
 substTheta = substTys
+
+-- | Substitute within a 'ThetaType' disabling the sanity checks.
+-- The problems that the sanity checks in substTys catch are described in
+-- Note [The substitution invariant].
+-- The goal of #11371 is to migrate all the calls of substThetaUnchecked to
+-- substTheta and remove this function. Please don't use in new code.
+substThetaUnchecked :: TCvSubst -> ThetaType -> ThetaType
+substThetaUnchecked = substTysUnchecked
+
 
 subst_ty :: TCvSubst -> Type -> Type
 -- subst_ty is the main workhorse for type substitution
@@ -1896,7 +2075,7 @@ subst_ty subst ty
     go (ForAllTy (Anon arg) res)
                          = (ForAllTy $! (Anon $! go arg)) $! go res
     go (ForAllTy (Named tv vis) ty)
-                         = case substTyVarBndr subst tv of
+                         = case substTyVarBndrUnchecked subst tv of
                              (subst', tv') ->
                                (ForAllTy $! ((Named $! tv') vis)) $!
                                             (subst_ty subst' ty)
@@ -1921,14 +2100,40 @@ lookupTyVar (TCvSubst _ tenv _) tv
     lookupVarEnv tenv tv
 
 -- | Substitute within a 'Coercion'
-substCo :: TCvSubst -> Coercion -> Coercion
-substCo subst co | isEmptyTCvSubst subst = co
-                 | otherwise             = subst_co subst co
+-- The substitution has to satisfy the invariants described in
+-- Note [The substitution invariant].
+substCo ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    TCvSubst -> Coercion -> Coercion
+substCo subst co
+  | isEmptyTCvSubst subst = co
+  | otherwise = checkValidSubst subst [] [co] $ subst_co subst co
+
+-- | Substitute within a 'Coercion' disabling sanity checks.
+-- The problems that the sanity checks in substCo catch are described in
+-- Note [The substitution invariant].
+-- The goal of #11371 is to migrate all the calls of substCoUnchecked to
+-- substCo and remove this function. Please don't use in new code.
+substCoUnchecked :: TCvSubst -> Coercion -> Coercion
+substCoUnchecked subst co
+  | isEmptyTCvSubst subst = co
+  | otherwise = subst_co subst co
 
 -- | Substitute within several 'Coercion's
-substCos :: TCvSubst -> [Coercion] -> [Coercion]
-substCos subst cos | isEmptyTCvSubst subst = cos
-                   | otherwise             = map (substCo subst) cos
+-- The substitution has to satisfy the invariants described in
+-- Note [The substitution invariant].
+substCos ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    TCvSubst -> [Coercion] -> [Coercion]
+substCos subst cos
+  | isEmptyTCvSubst subst = cos
+  | otherwise = checkValidSubst subst [] cos $ map (subst_co subst) cos
 
 subst_co :: TCvSubst -> Coercion -> Coercion
 subst_co subst co
@@ -1943,7 +2148,7 @@ subst_co subst co
                                in  args' `seqList` mkTyConAppCo r tc args'
     go (AppCo co arg)        = (mkAppCo $! go co) $! go arg
     go (ForAllCo tv kind_co co)
-      = case substForAllCoBndr subst tv kind_co of { (subst', tv', kind_co') ->
+      = case substForAllCoBndrUnchecked subst tv kind_co of { (subst', tv', kind_co') ->
           ((mkForAllCo $! tv') $! kind_co') $! subst_co subst' co }
     go (CoVarCo cv)          = substCoVar subst cv
     go (AxiomInstCo con ind cos) = mkAxiomInstCo con ind $! map go cos
@@ -1973,6 +2178,15 @@ subst_co subst co
 substForAllCoBndr :: TCvSubst -> TyVar -> Coercion -> (TCvSubst, TyVar, Coercion)
 substForAllCoBndr subst
   = substForAllCoBndrCallback False (substCo subst) subst
+
+-- | Like 'substForAllCoBndr', but disables sanity checks.
+-- The problems that the sanity checks in substCo catch are described in
+-- Note [The substitution invariant].
+-- The goal of #11371 is to migrate all the calls of substCoUnchecked to
+-- substCo and remove this function. Please don't use in new code.
+substForAllCoBndrUnchecked :: TCvSubst -> TyVar -> Coercion -> (TCvSubst, TyVar, Coercion)
+substForAllCoBndrUnchecked subst
+  = substForAllCoBndrCallback False (substCoUnchecked subst) subst
 
 -- See Note [Sym and ForAllCo]
 substForAllCoBndrCallback :: Bool  -- apply sym to binder?
@@ -2011,8 +2225,21 @@ substCoVars subst cvs = map (substCoVar subst) cvs
 lookupCoVar :: TCvSubst -> Var  -> Maybe Coercion
 lookupCoVar (TCvSubst _ _ cenv) v = lookupVarEnv cenv v
 
-substTyVarBndr :: TCvSubst -> TyVar -> (TCvSubst, TyVar)
-substTyVarBndr = substTyVarBndrCallback substTyUnchecked
+substTyVarBndr ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if __GLASGOW_HASKELL__ > 710
+    (?callStack :: CallStack) =>
+#endif
+    TCvSubst -> TyVar -> (TCvSubst, TyVar)
+substTyVarBndr = substTyVarBndrCallback substTy
+
+-- | Like 'substTyVarBndr' but disables sanity checks.
+-- The problems that the sanity checks in substTy catch are described in
+-- Note [The substitution invariant].
+-- The goal of #11371 is to migrate all the calls of substTyUnchecked to
+-- substTy and remove this function. Please don't use in new code.
+substTyVarBndrUnchecked :: TCvSubst -> TyVar -> (TCvSubst, TyVar)
+substTyVarBndrUnchecked = substTyVarBndrCallback substTyUnchecked
 
 -- | Substitute a tyvar in a binding position, returning an
 -- extended subst and a new tyvar.
@@ -2467,11 +2694,14 @@ pprTyTcApp p tc tys
   = text "(TypeError ...)"   -- Suppress detail unles you _really_ want to see
 
   | tc `hasKey` tYPETyConKey
-  , [TyConApp lev_tc []] <- tys
-  = if | lev_tc `hasKey` liftedDataConKey   ->
-           unicodeSyntax (char '★') (char '*')
-       | lev_tc `hasKey` unliftedDataConKey -> char '#'
-       | otherwise                          -> ppr_deflt
+  , [TyConApp ptr_rep []] <- tys
+  , ptr_rep `hasKey` ptrRepLiftedDataConKey
+  = unicodeSyntax (char '★') (char '*')
+
+  | tc `hasKey` tYPETyConKey
+  , [TyConApp ptr_rep []] <- tys
+  , ptr_rep `hasKey` ptrRepUnliftedDataConKey
+  = char '#'
 
   | otherwise
   = ppr_deflt
@@ -2479,27 +2709,33 @@ pprTyTcApp p tc tys
     ppr_deflt = pprTcAppTy p ppr_type tc tys
 
 pprTcAppTy :: TyPrec -> (TyPrec -> Type -> SDoc) -> TyCon -> [Type] -> SDoc
-pprTcAppTy = pprTcApp id
+pprTcAppTy p pp tc tys
+  = getPprStyle $ \style -> pprTcApp style id p pp tc tys
 
 pprTcAppCo :: TyPrec -> (TyPrec -> Coercion -> SDoc)
            -> TyCon -> [Coercion] -> SDoc
-pprTcAppCo = pprTcApp (pFst . coercionKind)
+pprTcAppCo p pp tc cos
+  = getPprStyle $ \style ->
+    pprTcApp style (pFst . coercionKind) p pp tc cos
 
-pprTcApp :: (a -> Type) -> TyPrec -> (TyPrec -> a -> SDoc) -> TyCon -> [a] -> SDoc
+pprTcApp :: PprStyle
+         -> (a -> Type) -> TyPrec -> (TyPrec -> a -> SDoc) -> TyCon -> [a] -> SDoc
 -- Used for both types and coercions, hence polymorphism
-pprTcApp _ _ pp tc [ty]
+pprTcApp _ _ _ pp tc [ty]
   | tc `hasKey` listTyConKey = pprPromotionQuote tc <> brackets   (pp TopPrec ty)
   | tc `hasKey` parrTyConKey = pprPromotionQuote tc <> paBrackets (pp TopPrec ty)
 
-pprTcApp to_type p pp tc tys
-  | Just sort <- tyConTuple_maybe tc
+pprTcApp style to_type p pp tc tys
+  | not (debugStyle style)
+  , Just sort <- tyConTuple_maybe tc
   , let arity = tyConArity tc
   , arity == length tys
   , let num_to_drop = case sort of UnboxedTuple -> arity `div` 2
                                    _            -> 0
   = pprTupleApp p pp tc sort (drop num_to_drop tys)
 
-  | Just dc <- isPromotedDataCon_maybe tc
+  | not (debugStyle style)
+  , Just dc <- isPromotedDataCon_maybe tc
   , let dc_tc = dataConTyCon dc
   , Just tup_sort <- tyConTuple_maybe dc_tc
   , let arity = tyConArity dc_tc    -- E.g. 3 for (,,) k1 k2 k3 t1 t2 t3
@@ -2510,7 +2746,6 @@ pprTcApp to_type p pp tc tys
 
   | otherwise
   = sdocWithDynFlags $ \dflags ->
-    getPprStyle $ \style ->
     pprTcApp_help to_type p pp tc tys dflags style
   where
 
@@ -2657,7 +2892,7 @@ tidyFreeTyCoVars :: TidyEnv -> TyCoVarSet -> TidyEnv
 -- ^ Add the free 'TyVar's to the env in tidy form,
 -- so that we can tidy the type they are free in
 tidyFreeTyCoVars (full_occ_env, var_env) tyvars
-  = fst (tidyOpenTyCoVars (full_occ_env, var_env) (varSetElems tyvars))
+  = fst (tidyOpenTyCoVars (full_occ_env, var_env) (varSetElemsWellScoped tyvars))
 
         ---------------
 tidyOpenTyCoVars :: TidyEnv -> [TyCoVar] -> (TidyEnv, [TyCoVar])
@@ -2671,13 +2906,15 @@ tidyOpenTyCoVar :: TidyEnv -> TyCoVar -> (TidyEnv, TyCoVar)
 tidyOpenTyCoVar env@(_, subst) tyvar
   = case lookupVarEnv subst tyvar of
         Just tyvar' -> (env, tyvar')              -- Already substituted
-        Nothing     -> tidyTyCoVarBndr env tyvar  -- Treat it as a binder
+        Nothing     ->
+          let env' = tidyFreeTyCoVars env (tyCoVarsOfType (tyVarKind tyvar)) in
+          tidyTyCoVarBndr env' tyvar  -- Treat it as a binder
 
 ---------------
 tidyTyVarOcc :: TidyEnv -> TyVar -> TyVar
-tidyTyVarOcc (_, subst) tv
+tidyTyVarOcc env@(_, subst) tv
   = case lookupVarEnv subst tv of
-        Nothing  -> tv
+        Nothing  -> updateTyVarKind (tidyType env) tv
         Just tv' -> tv'
 
 ---------------
@@ -2703,19 +2940,21 @@ tidyType env (CoercionTy co)      = CoercionTy $! (tidyCo env co)
 ---------------
 -- | Grabs the free type variables, tidies them
 -- and then uses 'tidyType' to work over the type itself
-tidyOpenType :: TidyEnv -> Type -> (TidyEnv, Type)
-tidyOpenType env ty
-  = (env', tidyType (trimmed_occ_env, var_env) ty)
+tidyOpenTypes :: TidyEnv -> [Type] -> (TidyEnv, [Type])
+tidyOpenTypes env tys
+  = (env', tidyTypes (trimmed_occ_env, var_env) tys)
   where
-    (env'@(_, var_env), tvs') = tidyOpenTyCoVars env (tyCoVarsOfTypeList ty)
+    (env'@(_, var_env), tvs') = tidyOpenTyCoVars env $
+                                tyCoVarsOfTypesWellScoped tys
     trimmed_occ_env = initTidyOccEnv (map getOccName tvs')
       -- The idea here was that we restrict the new TidyEnv to the
-      -- _free_ vars of the type, so that we don't gratuitously rename
-      -- the _bound_ variables of the type.
+      -- _free_ vars of the types, so that we don't gratuitously rename
+      -- the _bound_ variables of the types.
 
 ---------------
-tidyOpenTypes :: TidyEnv -> [Type] -> (TidyEnv, [Type])
-tidyOpenTypes env tys = mapAccumL tidyOpenType env tys
+tidyOpenType :: TidyEnv -> Type -> (TidyEnv, Type)
+tidyOpenType env ty = let (env', [ty']) = tidyOpenTypes env [ty] in
+                      (env', ty')
 
 ---------------
 -- | Calls 'tidyType' on a top-level type (i.e. with an empty tidying environment)

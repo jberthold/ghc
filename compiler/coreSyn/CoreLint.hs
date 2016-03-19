@@ -910,7 +910,7 @@ lintCoreAlt scrut_ty alt_ty alt@(DataAlt con, args, rhs)
         -- type variables of the data constructor
         -- We've already check
       lintL (tycon == dataConTyCon con) (mkBadConMsg tycon con)
-    ; let con_payload_ty = applyTys (dataConRepType con) tycon_arg_tys
+    ; let con_payload_ty = piResultTys (dataConRepType con) tycon_arg_tys
 
         -- And now bring the new binders into scope
     ; lintBinders args $ \ args' -> do
@@ -986,8 +986,8 @@ lintAndScopeId id linterF
                 (text "Non-local Id binder" <+> ppr id)
                 -- See Note [Checking for global Ids]
        ; (ty, k) <- lintInTy (idType id)
-       ; lintL (not (isLevityPolymorphic k))
-           (text "Levity polymorphic binder:" <+>
+       ; lintL (not (isRuntimeRepPolymorphic k))
+           (text "RuntimeRep-polymorphic binder:" <+>
                  (ppr id <+> dcolon <+> parens (ppr ty <+> dcolon <+> ppr k)))
        ; let id' = setIdType id ty
        ; addInScopeVar id' $ (linterF id') }
@@ -1282,7 +1282,7 @@ lintCoercion (ForAllCo tv1 kind_co co)
        ; (k3, k4, t1, t2, r) <- addInScopeVar tv1 $ lintCoercion co
        ; let tyl = mkNamedForAllTy tv1 Invisible t1
              tyr = mkNamedForAllTy tv2 Invisible $
-                   substTyWith [tv1] [TyVarTy tv2 `mkCastTy` mkSymCo kind_co] t2
+                   substTyWithUnchecked [tv1] [TyVarTy tv2 `mkCastTy` mkSymCo kind_co] t2
        ; return (k3, k4, tyl, tyr, r) }
 
 lintCoercion (CoVarCo cv)
@@ -1682,7 +1682,7 @@ addInScopeVar var m
 extendSubstL :: TyVar -> Type -> LintM a -> LintM a
 extendSubstL tv ty m
   = LintM $ \ env errs ->
-    unLintM m (env { le_subst = Type.extendTCvSubst (le_subst env) tv ty }) errs
+    unLintM m (env { le_subst = Type.extendTvSubst (le_subst env) tv ty }) errs
 
 updateTCvSubst :: TCvSubst -> LintM a -> LintM a
 updateTCvSubst subst' m

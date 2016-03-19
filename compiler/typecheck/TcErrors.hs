@@ -29,8 +29,8 @@ import DataCon
 import TcEvidence
 import Name
 import RdrName ( lookupGRE_Name, GlobalRdrEnv, mkRdrUnqual )
-import PrelNames ( typeableClassName, hasKey
-                 , liftedDataConKey, unliftedDataConKey )
+import PrelNames ( typeableClassName, hasKey, ptrRepLiftedDataConKey
+                 , ptrRepUnliftedDataConKey )
 import Id
 import Var
 import VarSet
@@ -1170,7 +1170,20 @@ mkTyVarEqErr dflags ctxt report ct oriented tv1 ty2
                            hang (text "Occurs check: cannot construct the infinite" <+> what <> colon)
                               2 (sep [ppr ty1, char '~', ppr ty2])
              extra2 = important $ mkEqInfoMsg ct ty1 ty2
-       ; mkErrorMsgFromCt ctxt ct $ mconcat [occCheckMsg, extra2, report] }
+
+             interesting_tyvars
+               = filter (not . isEmptyVarSet . tyCoVarsOfType . tyVarKind) $
+                 filter isTyVar $
+                 varSetElems $
+                 tyCoVarsOfType ty1 `unionVarSet` tyCoVarsOfType ty2
+             extra3 = relevant_bindings $
+                      ppWhen (not (null interesting_tyvars)) $
+                      hang (text "Type variable kinds:") 2 $
+                      vcat (map (tyvar_binding . tidyTyVarOcc (cec_tidy ctxt))
+                                interesting_tyvars)
+
+             tyvar_binding tv = ppr tv <+> dcolon <+> ppr (tyVarKind tv)
+       ; mkErrorMsgFromCt ctxt ct $ mconcat [occCheckMsg, extra2, extra3, report] }
 
   | OC_Forall <- occ_check_expand
   = do { let msg = vcat [ text "Cannot instantiate unification variable"
@@ -1377,12 +1390,22 @@ misMatchMsg ct oriented ty1 ty2
   | Just NotSwapped <- oriented
   = misMatchMsg ct (Just IsSwapped) ty2 ty1
 
+  -- These next two cases are when we're about to report, e.g., that
+  -- 'PtrRepLifted doesn't match 'VoidRep. Much better just to say
+  -- lifted vs. unlifted
+  | Just (tc1, []) <- splitTyConApp_maybe ty1
+  , tc1 `hasKey` ptrRepLiftedDataConKey
+  = lifted_vs_unlifted
+
+  | Just (tc2, []) <- splitTyConApp_maybe ty2
+  , tc2 `hasKey` ptrRepLiftedDataConKey
+  = lifted_vs_unlifted
+
   | Just (tc1, []) <- splitTyConApp_maybe ty1
   , Just (tc2, []) <- splitTyConApp_maybe ty2
-  , (tc1 `hasKey` liftedDataConKey && tc2 `hasKey` unliftedDataConKey) ||
-    (tc2 `hasKey` liftedDataConKey && tc1 `hasKey` unliftedDataConKey)
-  = addArising orig $
-    text "Couldn't match a lifted type with an unlifted type"
+  ,    (tc1 `hasKey` ptrRepLiftedDataConKey && tc2 `hasKey` ptrRepUnliftedDataConKey)
+    || (tc1 `hasKey` ptrRepUnliftedDataConKey && tc2 `hasKey` ptrRepLiftedDataConKey)
+  = lifted_vs_unlifted
 
   | otherwise  -- So now we have Nothing or (Just IsSwapped)
                -- For some reason we treat Nothing like IsSwapped
@@ -1416,6 +1439,10 @@ misMatchMsg ct oriented ty1 ty2
     add_space s1 s2 | null s1   = s2
                     | null s2   = s1
                     | otherwise = s1 ++ (' ' : s2)
+
+    lifted_vs_unlifted
+      = addArising orig $
+        text "Couldn't match a lifted type with an unlifted type"
 
 mkExpectedActualMsg :: Type -> Type -> CtOrigin -> Maybe TypeOrKind -> Bool
                     -> (Bool, Maybe SwapFlag, SDoc)

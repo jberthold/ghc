@@ -22,7 +22,7 @@ module TcType (
   -- Types
   TcType, TcSigmaType, TcRhoType, TcTauType, TcPredType, TcThetaType,
   TcTyVar, TcTyVarSet, TcDTyVarSet, TcTyCoVarSet, TcDTyCoVarSet,
-  TcKind, TcCoVar, TcTyCoVar, TcTyBinder,
+  TcKind, TcCoVar, TcTyCoVar, TcTyBinder, TcTyCon,
 
   ExpType(..), ExpSigmaType, ExpRhoType, mkCheckExpType,
 
@@ -87,6 +87,7 @@ module TcType (
   orphNamesOfTypes, orphNamesOfCoCon,
   getDFunTyKey,
   evVarPred_maybe, evVarPred,
+  anonymiseTyBinders,
 
   ---------------------------------
   -- Predicate types
@@ -121,7 +122,7 @@ module TcType (
   --------------------------------
   -- Rexported from Kind
   Kind, typeKind,
-  unliftedTypeKind, liftedTypeKind,
+  liftedTypeKind,
   constraintKind,
   isLiftedTypeKind, isUnliftedTypeKind, classifiesTypeWithValues,
 
@@ -131,7 +132,7 @@ module TcType (
 
   mkForAllTy, mkForAllTys, mkInvForAllTys, mkSpecForAllTys, mkNamedForAllTy,
   mkFunTy, mkFunTys,
-  mkTyConApp, mkAppTy, mkAppTys, applyTys,
+  mkTyConApp, mkAppTy, mkAppTys,
   mkTyConTy, mkTyVarTy,
   mkTyVarTys,
   mkNamedBinder,
@@ -140,7 +141,7 @@ module TcType (
   mkClassPred,
   isDictLikeTy,
   tcSplitDFunTy, tcSplitDFunHead,
-  isLevityVar, isLevityPolymorphic, isLevityPolymorphic_maybe,
+  isRuntimeRepVar, isRuntimeRepPolymorphic,
   isVisibleBinder, isInvisibleBinder,
 
   -- Type substitutions
@@ -149,11 +150,15 @@ module TcType (
   zipTvSubst,
   mkTvSubstPrs, notElemTCvSubst, unionTCvSubst,
   getTvSubstEnv, setTvSubstEnv, getTCvInScope, extendTCvInScope,
-  extendTCvInScopeList, extendTCvInScopeSet, extendTCvSubstAndInScope,
+  extendTCvInScopeList, extendTCvInScopeSet, extendTvSubstAndInScope,
   Type.lookupTyVar, Type.extendTCvSubst, Type.substTyVarBndr,
-  extendTCvSubstList, isInScope, mkTCvSubst, mkTvSubst, zipTyEnv, zipCoEnv,
+  Type.extendTvSubst,
+  isInScope, mkTCvSubst, mkTvSubst, zipTyEnv, zipCoEnv,
   Type.substTy, substTys, substTyWith, substTyWithCoVars,
-  substTyAddInScope, substTyUnchecked,
+  substTyAddInScope,
+  substTyUnchecked, substTysUnchecked, substThetaUnchecked,
+  substTyWithBindersUnchecked, substTyWithUnchecked,
+  substCoUnchecked, substCoWithUnchecked,
   substTheta,
 
   isUnliftedType,       -- Source types are always lifted
@@ -221,6 +226,7 @@ import Control.Monad (liftM, ap)
 import Control.Applicative (Applicative(..), (<$>) )
 #endif
 import Data.Functor.Identity
+import Data.List ( mapAccumR )
 
 {-
 ************************************************************************
@@ -268,6 +274,7 @@ type TcTyCoVar = Var    -- Either a TcTyVar or a CoVar
         -- a cannot occur inside a MutTyVar in T; that is,
         -- T is "flattened" before quantifying over a
 type TcTyBinder = TyBinder
+type TcTyCon = TyCon   -- these can be the TcTyCon constructor
 
 -- These types do not have boxy type variables in them
 type TcPredType     = PredType
@@ -1365,9 +1372,8 @@ tc_eq_type view_fun orig_ty1 orig_ty2 = go Visible orig_env orig_ty1 orig_ty2
        -- the repeat Visible is necessary because tycons can legitimately
        -- be oversaturated
       where
-        k          = tyConKind tc
-        (bndrs, _) = splitPiTys k
-        viss       = map binderVisibility bndrs
+        bndrs = tyConBinders tc
+        viss  = map binderVisibility bndrs
 
     check :: VisibilityFlag -> Bool -> Maybe VisibilityFlag
     check _   True  = Nothing
@@ -2341,3 +2347,28 @@ sizeType = go
 
 sizeTypes :: [Type] -> TypeSize
 sizeTypes tys = sum (map sizeType tys)
+
+{-
+************************************************************************
+*                                                                      *
+       Binders
+*                                                                      *
+************************************************************************
+-}
+
+-- | Given a list of binders and a type they bind in, turn any
+-- superfluous Named binders into Anon ones.
+anonymiseTyBinders :: [TyBinder] -> Type -> [TyBinder]
+anonymiseTyBinders binders res_ty = binders'
+  where
+    (_, binders') = mapAccumR go (tyCoVarsOfTypeAcc res_ty) binders
+
+    go :: FV -> TyBinder -> (FV, TyBinder)
+    go fv (Named tv Visible)
+      | not (tv `elemVarSet` runFVSet fv)
+      = ( (tv `FV.delFV` fv) `unionFV` tyCoVarsOfTypeAcc kind
+        , Anon kind )
+      where
+        kind = tyVarKind tv
+
+    go fv binder = (tyCoVarsBndrAcc binder fv, binder)
