@@ -1203,13 +1203,13 @@ data TcIdSigBndr   -- See Note [Complete and partial type signatures]
 
 data TcPatSynInfo
   = TPSI {
-        patsig_name     :: Name,
-        patsig_univ_tvs :: [TcTyVar],
-        patsig_req      :: TcThetaType,
-        patsig_ex_tvs   :: [TcTyVar],
-        patsig_prov     :: TcThetaType,
-        patsig_arg_tys  :: [TcSigmaType],
-        patsig_body_ty  :: TcSigmaType
+        patsig_name       :: Name,
+        patsig_univ_bndrs :: [TcTyBinder],
+        patsig_req        :: TcThetaType,
+        patsig_ex_bndrs   :: [TcTyBinder],
+        patsig_prov       :: TcThetaType,
+        patsig_arg_tys    :: [TcSigmaType],
+        patsig_body_ty    :: TcSigmaType
     }
 
 findScopedTyVars  -- See Note [Binding scoped type variables]
@@ -2577,6 +2577,11 @@ data SkolemInfo
             ExpType             -- a programmer-supplied type signature
                                 -- Location of the binding site is on the TyVar
 
+  | PatSynSigSkol Name  -- Bound by a programmer-supplied type signature of a pattern
+                        -- synonym. Here we cannot use a SigSkol, see
+                        -- Note [Patterns synonyms and the data type Type] in
+                        -- basicTypes\PatSyn.hs
+
   | ClsSkol Class       -- Bound at a class decl
 
   | DerivSkol Type      -- Bound by a 'deriving' clause;
@@ -2640,6 +2645,8 @@ pprSkolInfo (InferSkol ids)   = sep [ text "the inferred type of"
                                     , vcat [ ppr name <+> dcolon <+> ppr ty
                                            | (name,ty) <- ids ]]
 pprSkolInfo (UnifyForAllSkol ty) = text "the type" <+> ppr ty
+pprSkolInfo (PatSynSigSkol name) = text "the type signature of pattern synonym"
+                                   <+> quotes (ppr name)
 
 -- UnkSkol
 -- For type variables the others are dealt with by pprSkolTvBinding.
@@ -2713,6 +2720,9 @@ data CtOrigin
   | ExprSigOrigin       -- e :: ty
   | PatSigOrigin        -- p :: ty
   | PatOrigin           -- Instantiating a polytyped pattern at a constructor
+  | ProvCtxtOrigin      -- The "provided" context of a pattern synonym signature
+        (PatSynBind Name Name) -- Information about the pattern synonym, in particular
+                               -- the name and the right-hand side
   | RecordUpdOrigin
   | ViewPatOrigin
 
@@ -2948,6 +2958,10 @@ pprCtOrigin (Shouldn'tHappenOrigin note)
     vcat [ text "<< This should not appear in error messages. If you see this"
          , text "in an error message, please report a bug mentioning" <+> quotes (text note) <+> text "at"
          , text "https://ghc.haskell.org/trac/ghc/wiki/ReportABug >>" ]
+
+pprCtOrigin (ProvCtxtOrigin PSB{ psb_id = (L _ name) })
+  = hang (ctoHerald <+> text "the \"provided\" constraints claimed by")
+       2 (text "the signature of" <+> quotes (ppr name))
 
 pprCtOrigin simple_origin
   = ctoHerald <+> pprCtO simple_origin

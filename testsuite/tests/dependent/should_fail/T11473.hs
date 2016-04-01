@@ -1,6 +1,7 @@
 {-# LANGUAGE PolyKinds, TypeFamilies, MagicHash, DataKinds, TypeInType, RankNTypes #-}
 
 module T11473 where
+
 import GHC.Exts
 import GHC.Types
 
@@ -14,7 +15,13 @@ class BoxIt (a :: TYPE lev) where
 instance BoxIt Char# where boxed x = C# x
 instance BoxIt Char  where boxed = id
 
--- This should be an error: there is no way we can produce code for both Lifted
--- and Unlifted levities
-hello :: forall (lev :: Levity). forall (a :: TYPE lev). BoxIt a => a -> Boxed a
+hello :: forall (r :: RuntimeRep). forall (a :: TYPE r). BoxIt a => a -> Boxed a
 hello x = boxed x
+{-# NOINLINE hello #-}
+
+main :: IO ()
+main = do
+    print $ boxed 'c'#
+    print $ boxed 'c'
+    print $ hello 'c'
+    print $ hello 'c'#

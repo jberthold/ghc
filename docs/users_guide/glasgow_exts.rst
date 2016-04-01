@@ -652,6 +652,8 @@ n+k patterns
 
 .. ghc-flag:: -XNPlusKPatterns
 
+    :since: 6.12
+
     Enable use of ``n+k`` patterns.
 
 .. _recursive-do-notation:
@@ -1174,6 +1176,12 @@ Monad comprehensions
 .. index::
    single: monad comprehensions
 
+.. ghc-flag:: -XMonadComprehensions
+
+    :since: 7.2
+
+    Enable list comprehension syntax for arbitrary monads.
+
 Monad comprehensions generalise the list comprehension notation,
 including parallel comprehensions (:ref:`parallel-list-comprehensions`)
 and transform comprehensions (:ref:`generalised-list-comprehensions`) to
@@ -1241,7 +1249,7 @@ Monad comprehensions support:
                             return y)
           return (x+y)
 
-All these features are enabled by default if the ``MonadComprehensions``
+All these features are enabled by default if the :ghc-flag:`-XMonadComprehensions`
 extension is enabled. The types and more detailed examples on how to use
 comprehensions are explained in the previous chapters
 :ref:`generalised-list-comprehensions` and
@@ -1252,14 +1260,14 @@ comprehensions.
 .. note::
     Even though most of these examples are using the list monad, monad
     comprehensions work for any monad. The ``base`` package offers all
-    necessary instances for lists, which make ``MonadComprehensions``
+    necessary instances for lists, which make :ghc-flag:`-XMonadComprehensions`
     backward compatible to built-in, transform and parallel list
     comprehensions.
 
 More formally, the desugaring is as follows. We write ``D[ e | Q]`` to
 mean the desugaring of the monad comprehension ``[ e | Q]``:
 
-::
+.. code-block:: none
 
     Expressions: e
     Declarations: d
@@ -1461,6 +1469,8 @@ Tuple sections
 --------------
 
 .. ghc-flag:: -XTupleSections
+
+    :since: 6.12
 
     Allow the use of tuple section syntax
 
@@ -1725,6 +1735,8 @@ Safe imports
               -XUnsafe
     :noindex:
 
+    :since: 7.2
+
     Declare the Safe Haskell state of the current module.
 
 With the :ghc-flag:`-XSafe`, :ghc-flag:`-XTrustworthy` and :ghc-flag:`-XUnsafe`
@@ -1840,8 +1852,9 @@ The following syntax is stolen:
        single: Quasi-quotes
 
     Stolen by: :ghc-flag:`-XQuasiQuotes`. Moreover, this introduces an ambiguity
-    with list comprehension syntax. See
-    :ref:`quasi-quotes-list-comprehension-ambiguity` for details.
+    with list comprehension syntax. See the
+    :ref:`discussion on quasi-quoting <quasi-quotes-list-comprehension-ambiguity>`
+    for details.
 
 ``$(``, ``$$(``, ``$varid``, ``$$varid``
     .. index::
@@ -2357,6 +2370,8 @@ Declaring data types with explicit constructor signatures
 ---------------------------------------------------------
 
 .. ghc-flag:: -XGADTSyntax
+
+    :since: 7.2
 
     Allow the use of GADT syntax in data type definitions (but not GADTs
     themselves; for this see :ghc-flag:`-XGADTs`)
@@ -3246,17 +3261,25 @@ Deriving instances of extra classes (``Data``, etc.)
 
 .. ghc-flag:: -XDeriveGeneric
 
+    :since: 7.2
+
     Allow automatic deriving of instances for the ``Generic`` typeclass.
 
 .. ghc-flag:: -XDeriveFunctor
+
+    :since: 6.12
 
     Allow automatic deriving of instances for the ``Functor`` typeclass.
 
 .. ghc-flag:: -XDeriveFoldable
 
+    :since: 6.12
+
     Allow automatic deriving of instances for the ``Foldable`` typeclass.
 
 .. ghc-flag:: -XDeriveTraversable
+
+    :since: 6.12
 
     :implies: :ghc-flag:`-XDeriveFoldable`, :ghc-flag:`-XDeriveFunctor`
 
@@ -4010,9 +4033,8 @@ Pattern synonyms
     Allow the definition of pattern synonyms.
 
 Pattern synonyms are enabled by the flag :ghc-flag:`-XPatternSynonyms`, which is
-required for defining them, but *not* for using them. More information
-and examples of view patterns can be found on the
-`Wiki page <PatternSynonyms>`.
+required for defining them, but *not* for using them. More information and
+examples of view patterns can be found on the `Wiki page <PatternSynonyms>`.
 
 Pattern synonyms enable giving names to parametrized pattern schemes.
 They can also be thought of as abstract constructors that don't have a
@@ -4279,21 +4301,21 @@ it is assigned a *pattern type* of the form ::
 
       pattern P :: CReq => CProv => t1 -> t2 -> ... -> tN -> t
 
-where ⟨CProv⟩ and ⟨CReq⟩ are type contexts, and ⟨t1⟩, ⟨t2⟩, ..., ⟨tN⟩
+where ⟨CReq⟩ and ⟨CProv⟩ are type contexts, and ⟨t1⟩, ⟨t2⟩, ..., ⟨tN⟩
 and ⟨t⟩ are types. Notice the unusual form of the type, with two
-contexts ⟨CProv⟩ and ⟨CReq⟩:
+contexts ⟨CReq⟩ and ⟨CProv⟩:
+
+-  ⟨CReq⟩ are the constraints *required* to match the pattern.
 
 -  ⟨CProv⟩ are the constraints *made available (provided)* by a
    successful pattern match.
-
--  ⟨CReq⟩ are the constraints *required* to match the pattern.
 
 For example, consider ::
 
     data T a where
       MkT :: (Show b) => a -> b -> T a
 
-    f1 :: (Eq a, Num a) => T a -> String
+    f1 :: (Num a, Eq a) => T a -> String
     f1 (MkT 42 x) = show x
 
     pattern ExNumPat :: (Num a, Eq a) => (Show b) => b -> T a
@@ -4316,8 +4338,13 @@ Exactly the same reasoning applies to ``ExNumPat``: matching against
 
 Note also the following points
 
--  In the common case where ``Prov`` is empty, ``()``, it can be omitted
-   altogether.
+-  In the common case where ``CProv`` is empty, (i.e., ``()``), it can be
+   omitted altogether in the above pattern type signature for ``P``.
+
+-  However, if ``CProv`` is non-empty, while ``CReq`` is, the above pattern type
+   signature for ``P`` must be specified as ::
+
+     P :: () => CProv => t1 -> t2 -> .. -> tN -> t
 
 -  You may specify an explicit *pattern signature*, as we did for
    ``ExNumPat`` above, to specify the type of a pattern, just as you can
@@ -4378,7 +4405,7 @@ Note also the following points
    then be rejected.
 
    In short, if you want GADT-like behaviour for pattern synonyms, then
-   (unlike unlike concrete data constructors like ``S1``) you must write
+   (unlike concrete data constructors like ``S1``) you must write
    its type with explicit provided equalities. For a concrete data
    constructor like ``S1`` you can write its type signature as either
    ``S1 :: Bool -> S Bool`` or ``S1 :: (b~Bool) => Bool -> S b``; the
@@ -4527,6 +4554,8 @@ Default method signatures
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. ghc-flag:: -XDefaultSignatures
+
+    :since: 7.2
 
     Allows the definition of default method signatures in class definitions.
 
@@ -7083,7 +7112,7 @@ See also :ghc-ticket:`7347`.
 Kind polymorphism and Type-in-Type
 ==================================
 
-.. ghc-flag: -XTypeInType
+.. ghc-flag:: -XTypeInType
 
     :implies: :ghc-flag:`-XPolyKinds`, :ghc-flag:`-XDataKinds`, :ghc-flag:`-XKindSignatures`
     :since: 8.0.1
@@ -7614,14 +7643,14 @@ Pretty-printing in the presence of kind polymorphism
 With kind polymorphism, there is quite a bit going on behind the scenes that
 may be invisible to a Haskell programmer. GHC supports several flags that
 control how types are printed in error messages and at the GHCi prompt.
-See :ref:`pretty-printing-types` for the details. If you are using
-kind polymorphism and are confused as to why GHC is rejecting (or accepting)
-your program, we encourage you to turn on these flags, especially
-:ghc-flag:`-fprint-explicit-kinds`.
+See the :ref:`discussion of type pretty-printing options <pretty-printing-types>`
+for further details. If you are using kind polymorphism and are confused as to
+why GHC is rejecting (or accepting) your program, we encourage you to turn on
+these flags, especially :ghc-flag:`-fprint-explicit-kinds`.
 
 .. index::
    single: TYPE
-   single: runtime representation polymorphism
+   single: representation polymorphism
    
 .. _runtime-rep:
 
@@ -8021,6 +8050,8 @@ Explicit universal quantification (forall)
 ------------------------------------------
 
 .. ghc-flag:: -XExplicitForAll
+
+    :since: 6.12
 
     Allow use of the ``forall`` keyword in places where universal quantification
     is implicit.
@@ -8561,6 +8592,8 @@ Let-generalisation
 
 .. ghc-flag:: -XMonoLocalBinds
 
+    :since: 6.12
+
     Infer less polymorphic types for local bindings by default.
 
 An ML-style language usually generalises the type of any ``let``\-bound or
@@ -8623,7 +8656,6 @@ Visible type application
 
 .. ghc-flag:: -XTypeApplications
 
-    :implies: :ghc-flag:`-XAllowAmbiguousTypes`
     :since: 8.0.1
 
     Allow the use of type application syntax.
@@ -8692,6 +8724,22 @@ Here are the details:
   in braces. Thus, if you write ``myLength = length`` without a type
   signature, ``myLength``'s inferred type will be
   ``forall {f} {a}. Foldable f => f a -> Int``.
+
+- Data constructors declared with GADT syntax follow different rules
+  for the time being; it is expected that these will be brought in line
+  with other declarations in the future. The rules for GADT
+  data constructors are as follows:
+
+     * All kind and type variables are considered specified and available for
+       visible type application.
+
+     * Universal variables always come first, in precisely the order they
+       appear in the type delcaration. Universal variables that are
+       constrained by a GADT return type are not included in the data constructor.
+
+     * Existential variables come next. Their order is determined by a user-
+       written `forall`; or, if there is none, by taking the left-to-right order
+       in the data constructor's type and doing a stable topological sort.
 
 .. _implicit-parameters:
 
@@ -8896,7 +8944,6 @@ Arbitrary-rank polymorphism
 ===========================
 
 .. ghc-flag:: -XRankNTypes
-
 
     :implies: :ghc-flag:`-XExplicitForAll`
 
@@ -9107,7 +9154,7 @@ argument of constructor ``T1`` and that tells GHC all it needs to know.
 Implicit quantification
 -----------------------
 
-GHC performs implicit quantification as follows. At the top level
+GHC performs implicit quantification as follows. At the outermost level
 (only) of user-written types, if and only if there is no explicit
 ``forall``, GHC finds all the type variables mentioned in the type that
 are not already in scope, and universally quantifies them. For example,
@@ -9125,7 +9172,9 @@ the following pairs are equivalent: ::
                     h x y = y
                  in ...
 
-Notice that GHC does *not* find the inner-most possible quantification
+Notice that GHC always adds implicit quantfiers *at the outermost level*
+of a user-written type; it
+does *not* find the inner-most possible quantification
 point. For example: ::
 
       f :: (a -> a) -> Int
@@ -9136,15 +9185,26 @@ point. For example: ::
 
 
       g :: (Ord a => a -> a) -> Int
-               -- MEANS the illegal type
+               -- MEANS
       g :: forall a. (Ord a => a -> a) -> Int
                -- NOT
       g :: (forall a. Ord a => a -> a) -> Int
 
-The latter produces an illegal type, which you might think is silly, but
-at least the rule is simple. If you want the latter type, you can write
+If you want the latter type, you can write
 your ``forall``\s explicitly. Indeed, doing so is strongly advised for
 rank-2 types.
+
+Sometimes there *is* no "outermost level", in which case no
+implicit quanification happens: ::
+
+      data PackMap a b s t = PackMap (Monad f => (a -> f b) -> s -> f t)
+
+This is rejected because there is no "outermost level" for the types on the RHS
+(it would obviously be terrible to add extra parameters to ``PackMap``),
+so no implicit quantificaiton happens, and the declaration is rejected
+(with "``f`` is out of scope").  Solution: use an explicit ``forall``: ::
+
+      data PackMap a b s t = PackMap (forall f. Monad f => (a -> f b) -> s -> f t)
 
 .. _impredicative-polymorphism:
 
@@ -9820,11 +9880,12 @@ Syntax
 .. ghc-flag:: -XTemplateHaskell
 
     :implies: :ghc-flag:`-XTemplateHaskellQuotes`
-    :since: 8.0.1
 
     Enable Template Haskell's splice and quotation syntax.
 
 .. ghc-flag:: -XTemplateHaskellQuotes
+
+    :since: 8.0.1
 
     Enable only Template Haskell's quotation syntax.
 

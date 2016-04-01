@@ -593,11 +593,11 @@ See also the ``--help``, ``--version``, ``--numeric-version``, and
 
     ``-v1``
         Minimal verbosity: print one line per compilation (this is the
-        default when ``--make`` or ``--interactive`` is on).
+        default when :ghc-flag:`--make` or :ghc-flag:`--interactive` is on).
 
     ``-v2``
         Print the name of each compilation phase as it is executed.
-        (equivalent to ``-dshow-passes``).
+        (equivalent to :ghc-flag:`-dshow-passes`).
 
     ``-v3``
         The same as ``-v2``, except that in addition the full command
@@ -683,6 +683,22 @@ messages and in GHCi:
         ghci> :set -fprint-explicit-foralls
         ghci> :t MkT
         MkT :: forall (k :: BOX) (a :: k). T k a
+
+.. ghc-flag:: -fprint-explicit-runtime-reps
+
+    When :ghc-flag:`-fprint-explicit-runtime-reps` is enabled, GHC prints
+    ``RuntimeRep`` type variables for runtime-representation-polymorphic types.
+    Otherwise GHC will default these to ``PtrRepLifted``. For example,
+
+    .. code-block:: none
+
+        ghci> :t ($)
+        ($) :: (a -> b) -> a -> b
+        ghci> :set -fprint-explicit-runtime-reps
+        ghci> :t ($)
+        ($)
+          :: forall (r :: GHC.Types.RuntimeRep) a (b :: TYPE r).
+             (a -> b) -> a -> b
 
 .. ghc-flag:: -fprint-explicit-coercions
 

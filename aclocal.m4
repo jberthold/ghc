@@ -594,15 +594,10 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         ;;
 
     powerpc-ibm-aix*)
-        # On IBM AIX, we need to workaround XCOFF's limitations. Specifically,
-        # there's a TOC which only supports at most 16k entries (see
-        # http://www.ibm.com/developerworks/rational/library/overview-toc-aix/
-        # for more details), and by using `-mminimal-toc` we use up only one TOC
-        # entry per translation unit, at the cost of an additional pointer
-        # indirection. However, see note in `compiler/ghc.mk` about `Parser.hs`.
-        # Finally, we need `-D_THREAD_SAFE` to unlock a thread-local `errno`.
-        $2="$$2 -mminimal-toc -D_THREAD_SAFE"
-        $3="$$3 -mminimal-toc -D_THREAD_SAFE"
+        # We need `-D_THREAD_SAFE` to unlock the thread-local `errno`.
+        $2="$$2 -D_THREAD_SAFE"
+        $3="$$3 -D_THREAD_SAFE -Wl,-bnotextro"
+        $4="$$4 -bnotextro"
         $5="$$5 -D_THREAD_SAFE"
         ;;
 
@@ -2058,22 +2053,19 @@ AC_DEFUN([FIND_GHC_BOOTSTRAP_PROG],[
 # $2 = the with option name
 # $3 = the command to look for
 AC_DEFUN([FIND_GCC],[
-    if test "$TargetOS_CPP" = "darwin" &&
-       test "$XCodeVersion1" -eq 4 &&
-       test "$XCodeVersion2" -lt 2
-    then
-        # In Xcode 4.1, 'gcc-4.2' is the gcc legacy backend (rather
-        # than the LLVM backend). We prefer the legacy gcc, but in
-        # Xcode 4.2 'gcc-4.2' was removed.
-        FP_ARG_WITH_PATH_GNU_PROG([$1], [gcc-4.2], [gcc-4.2])
-    elif test "$windows" = YES
+    if test "$windows" = YES
     then
         $1="$CC"
     else
         FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [$2], [$3])
+        # fallback to CC if set and no --with-$2=... was used
+        if test -z "$With_$2" -a -n "$CC"
+        then
+            With_$2="$CC"
+            $1="$CC"
         # From Xcode 5 on/, OS X command line tools do not include gcc
         # anymore. Use clang.
-        if test -z "$$1"
+        elif test -z "$$1"
         then
             FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [clang], [clang])
         fi

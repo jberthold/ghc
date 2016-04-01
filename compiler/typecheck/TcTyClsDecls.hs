@@ -33,6 +33,7 @@ import TcClassDcl
 import TcUnify
 import TcHsType
 import TcMType
+import TysWiredIn ( unitTy )
 import TcType
 import FamInst
 import FamInstEnv
@@ -320,15 +321,14 @@ kcTyClGroup (TyClGroup { group_tyclds = decls })
                  kc_res_kind = tyConResKind tc
            ; kvs <- kindGeneralize (mkForAllTys kc_binders kc_res_kind)
            ; (kc_binders', kc_res_kind') <- zonkTcKindToKind kc_binders kc_res_kind
-           ; let kc_binders'' = anonymiseTyBinders kc_binders' kc_res_kind'
 
                       -- Make sure kc_kind' has the final, zonked kind variables
            ; traceTc "Generalise kind" $
              vcat [ ppr name, ppr kc_binders, ppr kc_res_kind
-                  , ppr kvs, ppr kc_binders'', ppr kc_res_kind' ]
+                  , ppr kvs, ppr kc_binders', ppr kc_res_kind' ]
 
            ; return (mkTcTyCon name
-                               (map (mkNamedBinder Invisible) kvs ++ kc_binders'')
+                               (mkNamedBinders Invisible kvs ++ kc_binders')
                                kc_res_kind'
                                (mightBeUnsaturatedTyCon tc)) }
 
@@ -904,8 +904,9 @@ tcDataDefn rec_info     -- Knot-tied; don't look at this eagerly
                      , dd_ctxt = ctxt, dd_kindSig = mb_ksig
                      , dd_cons = cons })
  =  do { (extra_tvs, extra_bndrs, real_res_kind) <- tcDataKindSig res_kind
-       ; let final_tvs  = tvs `chkAppend` extra_tvs
-             roles      = rti_roles rec_info tc_name
+       ; let final_bndrs  = tycon_binders `chkAppend` extra_bndrs
+             final_tvs    = tvs `chkAppend` extra_tvs
+             roles        = rti_roles rec_info tc_name
 
        ; stupid_tc_theta <- solveEqualities $ tcHsContext ctxt
        ; stupid_theta    <- zonkTcTypeToTypes emptyZonkEnv
@@ -921,7 +922,8 @@ tcDataDefn rec_info     -- Knot-tied; don't look at this eagerly
 
        ; tycon <- fixM $ \ tycon -> do
              { let res_ty = mkTyConApp tycon (mkTyVarTys final_tvs)
-             ; data_cons <- tcConDecls new_or_data tycon (final_tvs, res_ty) cons
+             ; data_cons <- tcConDecls new_or_data tycon
+                                       (final_tvs, final_bndrs, res_ty) cons
              ; tc_rhs    <- mk_tc_rhs is_boot tycon data_cons
              ; tc_rep_nm <- newTyConRepName tc_name
              ; return (mkAlgTyCon tc_name (tycon_binders `chkAppend` extra_bndrs)
@@ -1245,8 +1247,8 @@ tcFamTyPats fam_shape@(name,_,_,_) mb_clsinfo pats kind_checker thing_inside
             -- them into skolems, so that we don't subsequently
             -- replace a meta kind var with (Any *)
             -- Very like kindGeneralize
-       ; qtkvs <- quantifyTyVars emptyVarSet $
-                                 splitDepVarsOfTypes typats
+       ; vars  <- zonkTcTypesAndSplitDepVars typats
+       ; qtkvs <- quantifyZonkedTyVars emptyVarSet vars
 
        ; MASSERT( isEmptyVarSet $ coVarsOfTypes typats )
            -- This should be the case, because otherwise the solveEqualities
@@ -1392,20 +1394,23 @@ consUseGadtSyntax _                           = False
                  -- All constructors have same shape
 
 -----------------------------------
-tcConDecls :: NewOrData -> TyCon -> ([TyVar], Type)
+tcConDecls :: NewOrData -> TyCon -> ([TyVar], [TyBinder], Type)
            -> [LConDecl Name] -> TcM [DataCon]
-tcConDecls new_or_data rep_tycon (tmpl_tvs, res_tmpl)
+  -- Why both the tycon tyvars and binders? Because the tyvars
+  -- have all the names and the binders have the visibilities.
+tcConDecls new_or_data rep_tycon (tmpl_tvs, tmpl_bndrs, res_tmpl)
   = concatMapM $ addLocM $
-    tcConDecl new_or_data rep_tycon tmpl_tvs res_tmpl
+    tcConDecl new_or_data rep_tycon tmpl_tvs tmpl_bndrs res_tmpl
 
 tcConDecl :: NewOrData
           -> TyCon             -- Representation tycon. Knot-tied!
-          -> [TyVar] -> Type   -- Return type template (with its template tyvars)
-                               --    (tvs, T tys), where T is the family TyCon
+          -> [TyVar] -> [TyBinder] -> Type
+                 -- Return type template (with its template tyvars)
+                 --    (tvs, T tys), where T is the family TyCon
           -> ConDecl Name
           -> TcM [DataCon]
 
-tcConDecl new_or_data rep_tycon tmpl_tvs res_tmpl
+tcConDecl new_or_data rep_tycon tmpl_tvs tmpl_bndrs res_tmpl
           (ConDeclH98 { con_name = name
                       , con_qvars = hs_qvars, con_cxt = hs_ctxt
                       , con_details = hs_details })
@@ -1415,41 +1420,62 @@ tcConDecl new_or_data rep_tycon tmpl_tvs res_tmpl
                Nothing -> ([], [])
                Just (HsQTvs { hsq_implicit = kvs, hsq_explicit = tvs })
                        -> (kvs, tvs)
-       ; (_, (ctxt, arg_tys, field_lbls, stricts))
+       ; (imp_tvs, (exp_tvs, ctxt, arg_tys, field_lbls, stricts))
            <- solveEqualities $
               tcImplicitTKBndrs hs_kvs $
-              tcExplicitTKBndrs hs_tvs $ \ _ ->
+              tcExplicitTKBndrs hs_tvs $ \ exp_tvs ->
               do { traceTc "tcConDecl" (ppr name <+> text "tvs:" <+> ppr hs_tvs)
                  ; ctxt <- tcHsContext (fromMaybe (noLoc []) hs_ctxt)
                  ; btys <- tcConArgs new_or_data hs_details
                  ; field_lbls <- lookupConstructorFields (unLoc name)
                  ; let (arg_tys, stricts) = unzip btys
-                       bound_vars = allBoundVariabless ctxt `unionVarSet`
-                                    allBoundVariabless arg_tys
-                 ; return ((ctxt, arg_tys, field_lbls, stricts), bound_vars)
+                       bound_vars  = allBoundVariabless ctxt `unionVarSet`
+                                     allBoundVariabless arg_tys
+                 ; return ((exp_tvs, ctxt, arg_tys, field_lbls, stricts), bound_vars)
                  }
+         -- imp_tvs are user-written kind variables, without an explicit binding site
+         -- exp_tvs have binding sites
+         -- the kvs below are those kind variables entirely unmentioned by the user
+         --   and discovered only by generalization
 
              -- Kind generalisation
-       ; tkvs <- quantifyTyVars (mkVarSet tmpl_tvs)
-                                (splitDepVarsOfTypes (ctxt++arg_tys))
+       ; let all_user_tvs = imp_tvs ++ exp_tvs
+       ; vars <- zonkTcTypeAndSplitDepVars (mkSpecForAllTys all_user_tvs $
+                                            mkFunTys ctxt $
+                                            mkFunTys arg_tys $
+                                            unitTy)
+                 -- That type is a lie, of course. (It shouldn't end in ()!)
+                 -- And we could construct a proper result type from the info
+                 -- at hand. But the result would mention only the tmpl_tvs,
+                 -- and so it just creates more work to do it right. Really,
+                 -- we're doing this to get the right behavior around removing
+                 -- any vars bound in exp_binders.
+
+       ; kvs <- quantifyZonkedTyVars (mkVarSet tmpl_tvs) vars
 
              -- Zonk to Types
-       ; (ze, qtkvs) <- zonkTyBndrsX emptyZonkEnv tkvs
-       ; arg_tys     <- zonkTcTypeToTypes ze arg_tys
-       ; ctxt        <- zonkTcTypeToTypes ze ctxt
+       ; (ze, qkvs)      <- zonkTyBndrsX emptyZonkEnv kvs
+       ; (ze, user_qtvs) <- zonkTyBndrsX ze all_user_tvs
+       ; arg_tys         <- zonkTcTypeToTypes ze arg_tys
+       ; ctxt            <- zonkTcTypeToTypes ze ctxt
 
        ; fam_envs <- tcGetFamInstEnvs
 
        -- Can't print univ_tvs, arg_tys etc, because we are inside the knot here
        ; traceTc "tcConDecl 2" (ppr name $$ ppr field_lbls)
        ; let
+           ex_tvs     = qkvs ++ user_qtvs
+           ex_binders = mkNamedBinders Invisible qkvs ++
+                        mkNamedBinders Specified user_qtvs
            buildOneDataCon (L _ name) = do
              { is_infix <- tcConIsInfixH98 name hs_details
              ; rep_nm   <- newTyConRepName name
 
              ; buildDataCon fam_envs name is_infix rep_nm
                             stricts Nothing field_lbls
-                            tmpl_tvs qtkvs [{- no eq_preds -}] ctxt arg_tys
+                            tmpl_tvs tmpl_bndrs
+                            ex_tvs ex_binders
+                            [{- no eq_preds -}] ctxt arg_tys
                             res_tmpl rep_tycon
                   -- NB:  we put data_tc, the type constructor gotten from the
                   --      constructor type signature into the data constructor;
@@ -1459,17 +1485,21 @@ tcConDecl new_or_data rep_tycon tmpl_tvs res_tmpl
        ; mapM buildOneDataCon [name]
        }
 
-tcConDecl _new_or_data rep_tycon tmpl_tvs res_tmpl
+tcConDecl _new_or_data rep_tycon tmpl_tvs _tmpl_bndrs res_tmpl
           (ConDeclGADT { con_names = names, con_type = ty })
   = addErrCtxt (dataConCtxtName names) $
     do { traceTc "tcConDecl 1" (ppr names)
-       ; (ctxt, stricts, field_lbls, arg_tys, res_ty,hs_details)
+       ; (user_tvs, ctxt, stricts, field_lbls, arg_tys, res_ty,hs_details)
            <- tcGadtSigType (ppr names) (unLoc $ head names) ty
-       ; tkvs <- quantifyTyVars emptyVarSet
-                                (splitDepVarsOfTypes (res_ty:ctxt++arg_tys))
+
+       ; vars <- zonkTcTypeAndSplitDepVars (mkSpecForAllTys user_tvs $
+                                            mkFunTys ctxt $
+                                            mkFunTys arg_tys $
+                                            res_ty)
+       ; tkvs <- quantifyZonkedTyVars emptyVarSet vars
 
              -- Zonk to Types
-       ; (ze, qtkvs) <- zonkTyBndrsX emptyZonkEnv tkvs
+       ; (ze, qtkvs) <- zonkTyBndrsX emptyZonkEnv (tkvs ++ user_tvs)
        ; arg_tys <- zonkTcTypeToTypes ze arg_tys
        ; ctxt    <- zonkTcTypeToTypes ze ctxt
        ; res_ty  <- zonkTcTypeToType ze res_ty
@@ -1479,6 +1509,10 @@ tcConDecl _new_or_data rep_tycon tmpl_tvs res_tmpl
              -- NB: this is a /lazy/ binding, so we pass five thunks to buildDataCon
              --     without yet forcing the guards in rejigConRes
              -- See Note [Checking GADT return types]
+
+             -- See Note [Wrong visibility for GADTs]
+             univ_bndrs = mkNamedBinders Specified univ_tvs
+             ex_bndrs   = mkNamedBinders Specified ex_tvs
 
        ; fam_envs <- tcGetFamInstEnvs
 
@@ -1492,7 +1526,7 @@ tcConDecl _new_or_data rep_tycon tmpl_tvs res_tmpl
              ; buildDataCon fam_envs name is_infix
                             rep_nm
                             stricts Nothing field_lbls
-                            univ_tvs ex_tvs eq_preds
+                            univ_tvs univ_bndrs ex_tvs ex_bndrs eq_preds
                             (substTys arg_subst ctxt)
                             (substTys arg_subst arg_tys)
                             (substTy  arg_subst res_ty')
@@ -1507,16 +1541,16 @@ tcConDecl _new_or_data rep_tycon tmpl_tvs res_tmpl
 
 
 tcGadtSigType :: SDoc -> Name -> LHsSigType Name
-              -> TcM ( [PredType],[HsSrcBang], [FieldLabel], [Type], Type
+              -> TcM ( [TcTyVar], [PredType],[HsSrcBang], [FieldLabel], [Type], Type
                      , HsConDetails (LHsType Name)
                                     (Located [LConDeclField Name]) )
 tcGadtSigType doc name ty@(HsIB { hsib_vars = vars })
   = do { let (hs_details', res_ty', cxt, gtvs) = gadtDeclDetails ty
        ; (hs_details, res_ty) <- updateGadtResult failWithTc doc hs_details' res_ty'
-       ; (_, (ctxt, arg_tys, res_ty, field_lbls, stricts))
+       ; (imp_tvs, (exp_tvs, ctxt, arg_tys, res_ty, field_lbls, stricts))
            <- solveEqualities $
               tcImplicitTKBndrs vars $
-              tcExplicitTKBndrs gtvs $ \ _ ->
+              tcExplicitTKBndrs gtvs $ \ exp_tvs ->
               do { ctxt <- tcHsContext cxt
                  ; btys <- tcConArgs DataType hs_details
                  ; ty' <- tcHsLiftedType res_ty
@@ -1525,9 +1559,9 @@ tcGadtSigType doc name ty@(HsIB { hsib_vars = vars })
                        bound_vars = allBoundVariabless ctxt `unionVarSet`
                                     allBoundVariabless arg_tys
 
-                 ; return ((ctxt, arg_tys, ty', field_lbls, stricts), bound_vars)
+                 ; return ((exp_tvs, ctxt, arg_tys, ty', field_lbls, stricts), bound_vars)
                  }
-       ; return (ctxt, stricts, field_lbls, arg_tys, res_ty, hs_details)
+       ; return (imp_tvs ++ exp_tvs, ctxt, stricts, field_lbls, arg_tys, res_ty, hs_details)
        }
 
 tcConIsInfixH98 :: Name
@@ -1551,8 +1585,6 @@ tcConIsInfixGADT con details
                   -> do { fix_env <- getFixityEnv
                         ; return (con `elemNameEnv` fix_env) }
                | otherwise -> return False
-
-
 
 tcConArgs :: NewOrData -> HsConDeclDetails Name
           -> TcM [(TcType, HsSrcBang)]
@@ -1580,6 +1612,58 @@ tcConArg new_or_data bty
         ; return (arg_ty, getBangStrictness bty) }
 
 {-
+Note [Wrong visibility for GADTs]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+GADT tyvars shouldn't all be specified, but it's hard to do much better, as
+described in #11721, which is duplicated here for convenience:
+
+Consider
+
+  data X a where
+    MkX :: b -> Proxy a -> X a
+
+According to the rules around specified vs. generalized variables around
+TypeApplications, the type of MkX should be
+
+  MkX :: forall {k} (b :: *) (a :: k). b -> Proxy a -> X a
+
+A few things to note:
+
+  * The k isn't available for TypeApplications (that's why it's in braces),
+    because it is not user-written.
+
+  * The b is quantified before the a, because b comes before a in the
+    user-written type signature for MkX.
+
+Both of these bullets are currently violated. GHCi reports MkX's type as
+
+  MkX :: forall k (a :: k) b. b -> Proxy a -> X a
+
+It turns out that this is a hard to fix. The problem is that GHC expects data
+constructors to have their universal variables followed by their existential
+variables, always. And yet that's violated in the desired type for MkX.
+Furthermore, given the way that GHC deals with GADT return types ("rejigging",
+in technical parlance), it's inconvenient to get the specified/generalized
+distinction correct.
+
+Given time constraints, I'm afraid fixing this all won't make it for 8.0.
+
+Happily, there is are easy-to-articulate rules governing GHC's current (wrong)
+behavior. In a GADT-syntax data constructor:
+
+  * All kind and type variables are considered specified and available for
+    visible type application.
+
+  * Universal variables always come first, in precisely the order they appear
+    in the tycon. Note that universals that are constrained by a GADT return
+    type are missing from the datacon.
+
+  * Existential variables come next. Their order is determined by a
+    user-written forall; or, if there is none, by taking the left-to-right
+    order in the datacon's type and doing a stable topological sort. (This
+    stable topological sort step is the same as for other user-written type
+    signatures.)
+
 Note [Infix GADT constructors]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We do not currently have syntax to declare an infix constructor in GADT syntax,
@@ -1664,8 +1748,6 @@ rejigConRes tmpl_tvs res_tmpl dc_tvs res_ty
         (arg_subst, substed_ex_tvs)
           = mapAccumL substTyVarBndr kind_subst raw_ex_tvs
 
-       -- don't use substCoVarBndr because we don't want fresh uniques!
-       -- substed_ex_tvs and raw_eq_cvs may dependent on one another
         substed_eqs = map (substEqSpec arg_subst) raw_eqs
     in
     (univ_tvs, substed_ex_tvs, substed_eqs, res_ty, arg_subst)
@@ -1827,6 +1909,7 @@ mkGADTVars tmpl_tvs dc_tvs subst
   = choose [] [] empty_subst empty_subst tmpl_tvs
   where
     in_scope = mkInScopeSet (mkVarSet tmpl_tvs `unionVarSet` mkVarSet dc_tvs)
+               `unionInScope` getTCvInScope subst
     empty_subst = mkEmptyTCvSubst in_scope
 
     choose :: [TyVar]           -- accumulator of univ tvs, reversed
@@ -1848,12 +1931,12 @@ mkGADTVars tmpl_tvs dc_tvs subst
             ,  tyVarKind r_tv `eqType` (substTy t_sub (tyVarKind t_tv))
             -> -- simple, well-kinded variable substitution.
                choose (r_tv:univs) eqs
-                      (extendTvSubst t_sub t_tv r_ty)
-                      (extendTvSubst r_sub r_tv r_ty)
+                      (extendTvSubst t_sub t_tv r_ty')
+                      (extendTvSubst r_sub r_tv r_ty')
                       t_tvs
             where
               r_tv1  = setTyVarName r_tv (choose_tv_name r_tv t_tv)
-              r_ty   = mkTyVarTy r_tv1
+              r_ty'  = mkTyVarTy r_tv1
 
                -- not a simple substitution. make an equality predicate
           _ -> choose (t_tv':univs) (mkEqSpec t_tv' r_ty : eqs)
@@ -2082,11 +2165,13 @@ checkFieldCompat fld con1 con2 res1 res2 fty1 fty2
 -- produces the appropriate error message.
 checkValidTyConTyVars :: TyCon -> TcM ()
 checkValidTyConTyVars tc
-  = when duplicate_vars $
-    do { -- strip off the duplicates and look for ill-scoped things
+  = do { -- strip off the duplicates and look for ill-scoped things
          -- but keep the *last* occurrence of each variable, as it's
          -- most likely the one the user wrote
-         let stripped_tvs = reverse $ nub $ reverse tvs
+         let stripped_tvs | duplicate_vars
+                          = reverse $ nub $ reverse tvs
+                          | otherwise
+                          = tvs
              vis_tvs      = filterOutInvisibleTyVars tc tvs
              extra | not (vis_tvs `equalLength` stripped_tvs)
                    = text "NB: Implicitly declared kind variables are put first."
@@ -2096,11 +2181,12 @@ checkValidTyConTyVars tc
          `and_if_that_doesn't_error`
            -- This triggers on test case dependent/should_fail/InferDependency
            -- It reports errors around Note [Dependent LHsQTyVars] in TcHsType
-         addErr (vcat [ text "Invalid declaration for" <+>
-                        quotes (ppr tc) <> semi <+> text "you must explicitly"
-                      , text "declare which variables are dependent on which others."
-                      , hang (text "Inferred variable kinds:")
-                        2 (vcat (map pp_tv stripped_tvs)) ]) }
+         when duplicate_vars (
+          addErr (vcat [ text "Invalid declaration for" <+>
+                         quotes (ppr tc) <> semi <+> text "you must explicitly"
+                       , text "declare which variables are dependent on which others."
+                       , hang (text "Inferred variable kinds:")
+                         2 (vcat (map pp_tv stripped_tvs)) ])) }
   where
     tvs = tyConTyVars tc
     duplicate_vars = sizeVarSet (mkVarSet tvs) < length tvs

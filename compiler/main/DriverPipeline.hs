@@ -1633,16 +1633,32 @@ mkExtraObj dflags extn xs
  = do cFile <- newTempName dflags extn
       oFile <- newTempName dflags "o"
       writeFile cFile xs
-      let rtsDetails = getPackageDetails dflags rtsUnitId
-          pic_c_flags = picCCOpts dflags
+      ccInfo <- liftIO $ getCompilerInfo dflags
       SysTools.runCc dflags
-                     ([Option        "-c",
-                       FileOption "" cFile,
-                       Option        "-o",
-                       FileOption "" oFile]
-                      ++ map (FileOption "-I") (includeDirs rtsDetails)
-                      ++ map Option pic_c_flags)
+                ([Option        "-c",
+                  FileOption "" cFile,
+                  Option        "-o",
+                  FileOption "" oFile]
+                 ++ if extn /= "s"
+                        then cOpts
+                        else asmOpts ccInfo)
       return oFile
+    where
+      -- Pass a different set of options to the C compiler depending one whether
+      -- we're compiling C or assembler. When compiling C, we pass the usual
+      -- set of include directories and PIC flags.
+      cOpts = map Option (picCCOpts dflags)
+                    ++ map (FileOption "-I")
+                            (includeDirs $ getPackageDetails dflags rtsUnitId)
+
+      -- When compiling assembler code, we drop the usual C options, and if the
+      -- compiler is Clang, we add an extra argument to tell Clang to ignore
+      -- unused command line options. See trac #11684.
+      asmOpts ccInfo =
+            if any (ccInfo ==) [Clang, AppleClang, AppleClang51]
+                then [Option "-Qunused-arguments"]
+                else []
+
 
 -- When linking a binary, we need to create a C main() function that
 -- starts everything off.  This used to be compiled statically as part
@@ -2293,13 +2309,14 @@ doCpp dflags raw input_fn output_fn = do
     let uids = explicitPackages (pkgState dflags)
         pkgs = catMaybes (map (lookupPackage dflags) uids)
     mb_macro_include <-
-        -- Only generate if we have (1) we have set -hide-all-packages
-        -- (so we don't generate a HUGE macro file of things we don't
-        -- care about but are exposed) and (2) we actually have packages
-        -- to write macros for!
-        if gopt Opt_HideAllPackages dflags && not (null pkgs)
+        if not (null pkgs) && gopt Opt_VersionMacros dflags
             then do macro_stub <- newTempName dflags "h"
                     writeFile macro_stub (generatePackageVersionMacros pkgs)
+                    -- Include version macros for every *exposed* package.
+                    -- Without -hide-all-packages and with a package database
+                    -- size of 1000 packages, it takes cpp an estimated 2
+                    -- milliseconds to process this file. See Trac #10970
+                    -- comment 8.
                     return [SysTools.FileOption "-include" macro_stub]
             else return []
 
@@ -2347,8 +2364,8 @@ getBackendDefs _ =
 
 generatePackageVersionMacros :: [PackageConfig] -> String
 generatePackageVersionMacros pkgs = concat
-  [ "/* package " ++ sourcePackageIdString pkg ++ " */\n"
-  ++ generateMacros "" pkgname version
+  -- Do not add any C-style comments. See Trac #3389.
+  [ generateMacros "" pkgname version
   | pkg <- pkgs
   , let version = packageVersion pkg
         pkgname = map fixchar (packageNameString pkg)

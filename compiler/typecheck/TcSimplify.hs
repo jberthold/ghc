@@ -133,10 +133,12 @@ simpl_top wanteds
       = return wc
       | otherwise
       = do { free_tvs <- TcS.zonkTyCoVarsAndFV (tyCoVarsOfWC wc)
-           ; let meta_tvs = varSetElems (filterVarSet isMetaTyVar free_tvs)
+           ; let meta_tvs = varSetElems $
+                            filterVarSet (isTyVar <&&> isMetaTyVar) free_tvs
                    -- zonkTyCoVarsAndFV: the wc_first_go is not yet zonked
                    -- filter isMetaTyVar: we might have runtime-skolems in GHCi,
                    -- and we definitely don't want to try to assign to those!
+                   -- the isTyVar needs to weed out coercion variables
 
            ; defaulted <- mapM defaultTyVarTcS meta_tvs   -- Has unification side effects
            ; if or defaulted
@@ -525,8 +527,8 @@ simplifyInfer :: TcLevel               -- Used when generating the constraints
 simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
   | isEmptyWC wanteds
   = do { gbl_tvs <- tcGetGlobalTyCoVars
-       ; qtkvs <- quantify_tvs sigs gbl_tvs $
-                  splitDepVarsOfTypes (map snd name_taus)
+       ; dep_vars <- zonkTcTypesAndSplitDepVars (map snd name_taus)
+       ; qtkvs <- quantify_tvs sigs gbl_tvs dep_vars
        ; traceTc "simplifyInfer: empty WC" (ppr name_taus $$ ppr qtkvs)
        ; return (qtkvs, [], emptyTcEvBinds) }
 
@@ -804,6 +806,8 @@ quantify_tvs :: [TcIdSigInfo]
              -> TcM [TcTyVar]
 -- See Note [Which type variables to quantify]
 quantify_tvs sigs mono_tvs (Pair tau_kvs tau_tvs)
+   -- NB: don't use quantifyZonkedTyVars because the sig stuff might
+   -- be unzonked
   = quantifyTyVars (mono_tvs `delVarSetList` sig_qtvs)
                    (Pair tau_kvs
                          (tau_tvs `extendVarSetList` sig_qtvs
@@ -1303,9 +1307,9 @@ warnRedundantGivens (SigSkol ctxt _)
        FunSigCtxt _ warn_redundant -> warn_redundant
        ExprSigCtxt                 -> True
        _                           -> False
-  -- To think about: do we want to report redundant givens for
-  -- pattern synonyms, PatSynCtxt? c.f Trac #9953, comment:21.
 
+  -- To think about: do we want to report redundant givens for
+  -- pattern synonyms, PatSynSigSkol? c.f Trac #9953, comment:21.
 warnRedundantGivens (InstSkol {}) = True
 warnRedundantGivens _             = False
 

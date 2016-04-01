@@ -462,12 +462,17 @@ test('T365',
 test('T9360a', normal, run_command, ['{compiler} --interactive -e "" -ignore-dot-ghci'])
 test('T9360b', normal, run_command, ['{compiler} -e "" --interactive -ignore-dot-ghci'])
 
-test('T10970', normal, compile_and_run, ['-hide-all-packages -package base -package containers'])
-test('T10970a', normal, compile_and_run, [''])
+test('T10970', normal, compile_and_run, [''])
 test('T4931', normal, compile_and_run, [''])
 test('T11182', normal, compile_and_run, [''])
 test('T11381', normal, compile_fail, [''])
 test('T11429a', normal, compile, ['-Wunrecognised-warning-flags -Wfoobar'])
 test('T11429b', normal, compile, ['-Wno-unrecognised-warning-flags -Wfoobar'])
 test('T11429c', normal, compile_fail, ['-Wunrecognised-warning-flags -Werror -Wfoobar'])
+test('T11763', normal, compile_and_run, ['-fno-version-macros'])
 
+test('T10320',
+     [ ignore_output
+     , extra_clean(['T10320', 'T10320.o', 'T10320.hi'])],
+     run_command,
+     ['$MAKE -s --no-print-directory T10320'])

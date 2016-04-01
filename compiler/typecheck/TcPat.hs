@@ -747,9 +747,14 @@ tcDataConPat penv (L con_span con_name) data_con pat_ty arg_pats thing_inside
 
               arg_tys' = substTys tenv arg_tys
 
-        ; traceTc "tcConPat" (vcat [ ppr con_name, ppr univ_tvs, ppr ex_tvs
+        ; traceTc "tcConPat" (vcat [ ppr con_name
+                                   , pprTvBndrs univ_tvs
+                                   , pprTvBndrs ex_tvs
                                    , ppr eq_spec
-                                   , ppr ex_tvs', ppr ctxt_res_tys, ppr arg_tys'
+                                   , ppr theta
+                                   , pprTvBndrs ex_tvs'
+                                   , ppr ctxt_res_tys
+                                   , ppr arg_tys'
                                    , ppr arg_pats ])
         ; if null ex_tvs && null eq_spec && null theta
           then do { -- The common case; no class bindings etc
@@ -816,7 +821,7 @@ tcPatSynPat penv (L con_span _) pat_syn pat_ty arg_pats thing_inside
               prov_theta' = substTheta tenv prov_theta
               req_theta'  = substTheta tenv req_theta
 
-        ; wrap <- tcSubTypeO (pe_orig penv) GenSigCtxt ty' pat_ty
+        ; wrap <- tcSubTypeET (pe_orig penv) pat_ty ty'
         ; traceTc "tcPatSynPat" (ppr pat_syn $$
                                  ppr pat_ty $$
                                  ppr ty' $$
@@ -1012,7 +1017,8 @@ addDataConStupidTheta data_con inst_tys
         -- The origin should always report "occurrence of C"
         -- even when C occurs in a pattern
     stupid_theta = dataConStupidTheta data_con
-    tenv = mkTvSubstPrs (dataConUnivTyVars data_con `zip` inst_tys)
+    univ_tvs     = dataConUnivTyVars data_con
+    tenv = zipTvSubst univ_tvs (takeList univ_tvs inst_tys)
          -- NB: inst_tys can be longer than the univ tyvars
          --     because the constructor might have existentials
     inst_theta = substTheta tenv stupid_theta

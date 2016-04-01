@@ -38,6 +38,7 @@ import TyCon
 -- others:
 import HsSyn            -- HsType
 import TcRnMonad        -- TcType, amongst others
+import TcHsSyn     ( checkForRepresentationPolymorphism )
 import FunDeps
 import FamInstEnv  ( isDominatedBy, injectiveBranches,
                      InjectivityCheckResult(..) )
@@ -445,11 +446,33 @@ forAllAllowed ArbitraryRank             = True
 forAllAllowed (LimitedRank forall_ok _) = forall_ok
 forAllAllowed _                         = False
 
+-- The zonker issues errors if it zonks a representation-polymorphic binder
+-- But sometimes it's nice to check a little more eagerly, trying to report
+-- errors earlier.
+representationPolymorphismForbidden :: UserTypeCtxt -> Bool
+representationPolymorphismForbidden = go
+  where
+    go (ConArgCtxt _)        = True     -- A rep-polymorphic datacon won't be useful
+    go (PatSynBuilderCtxt _) = True     -- Similar to previous case
+    go _                     = False    -- Other cases are caught by zonker
+
 ----------------------------------------
 -- | Fail with error message if the type is unlifted
 check_lifted :: TidyEnv -> Type -> TcM ()
+check_lifted _ _ = return ()
+
+{- ------ Legacy comment ---------
+The check_unlifted function seems entirely redundant.  The
+kind system should check for uses of unlifted types.  So I've
+removed the check.  See Trac #11120 comment:19.
+
 check_lifted env ty
   = checkTcM (not (isUnliftedType ty)) (unliftedArgErr env ty)
+
+unliftedArgErr :: TidyEnv -> Type -> (TidyEnv, SDoc)
+unliftedArgErr env ty = (env, sep [text "Illegal unlifted type:", ppr_tidy env ty])
+------ End of legacy comment --------- -}
+
 
 check_type :: TidyEnv -> UserTypeCtxt -> Rank -> Type -> TcM ()
 -- The args say what the *type context* requires, independent
@@ -486,6 +509,8 @@ check_type _ _ _ (TyVarTy _) = return ()
 
 check_type env ctxt rank (ForAllTy (Anon arg_ty) res_ty)
   = do  { check_type env ctxt arg_rank arg_ty
+        ; when (representationPolymorphismForbidden ctxt) $
+          checkForRepresentationPolymorphism empty arg_ty
         ; check_type env ctxt res_rank res_ty }
   where
     (arg_rank, res_rank) = funArgResRank rank
@@ -619,9 +644,8 @@ forAllEscapeErr env ty tau_kind
          2 (vcat [ text "   type:" <+> ppr_tidy env ty
                  , text "of kind:" <+> ppr_tidy env tau_kind ]) )
 
-unliftedArgErr, ubxArgTyErr :: TidyEnv -> Type -> (TidyEnv, SDoc)
-unliftedArgErr  env ty = (env, sep [text "Illegal unlifted type:", ppr_tidy env ty])
-ubxArgTyErr     env ty = (env, sep [text "Illegal unboxed tuple type as function argument:", ppr_tidy env ty])
+ubxArgTyErr :: TidyEnv -> Type -> (TidyEnv, SDoc)
+ubxArgTyErr env ty = (env, sep [text "Illegal unboxed tuple type as function argument:", ppr_tidy env ty])
 
 kindErr :: TidyEnv -> Kind -> (TidyEnv, SDoc)
 kindErr env kind = (env, sep [text "Expecting an ordinary type, but found a type of kind", ppr_tidy env kind])
@@ -843,22 +867,22 @@ check_class_pred env dflags ctxt pred cls tys
 -------------------------
 okIPCtxt :: UserTypeCtxt -> Bool
   -- See Note [Implicit parameters in instance decls]
-okIPCtxt (FunSigCtxt {})    = True
-okIPCtxt (InfSigCtxt {})    = True
-okIPCtxt ExprSigCtxt        = True
-okIPCtxt TypeAppCtxt        = True
-okIPCtxt PatSigCtxt         = True
-okIPCtxt ResSigCtxt         = True
-okIPCtxt GenSigCtxt         = True
-okIPCtxt (ConArgCtxt {})    = True
-okIPCtxt (ForSigCtxt {})    = True  -- ??
-okIPCtxt ThBrackCtxt        = True
-okIPCtxt GhciCtxt           = True
-okIPCtxt SigmaCtxt          = True
-okIPCtxt (DataTyCtxt {})    = True
-okIPCtxt (PatSynCtxt {})    = True
-okIPCtxt (TySynCtxt {})     = True   -- e.g.   type Blah = ?x::Int
-                                     -- Trac #11466
+okIPCtxt (FunSigCtxt {})        = True
+okIPCtxt (InfSigCtxt {})        = True
+okIPCtxt ExprSigCtxt            = True
+okIPCtxt TypeAppCtxt            = True
+okIPCtxt PatSigCtxt             = True
+okIPCtxt ResSigCtxt             = True
+okIPCtxt GenSigCtxt             = True
+okIPCtxt (ConArgCtxt {})        = True
+okIPCtxt (ForSigCtxt {})        = True  -- ??
+okIPCtxt ThBrackCtxt            = True
+okIPCtxt GhciCtxt               = True
+okIPCtxt SigmaCtxt              = True
+okIPCtxt (DataTyCtxt {})        = True
+okIPCtxt (PatSynBuilderCtxt {}) = True
+okIPCtxt (TySynCtxt {})         = True   -- e.g.   type Blah = ?x::Int
+                                         -- Trac #11466
 
 okIPCtxt (ClassSCCtxt {})  = False
 okIPCtxt (InstDeclCtxt {}) = False

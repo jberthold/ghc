@@ -27,6 +27,7 @@ import TyCon
 import Class
 import DataCon
 import TcEvidence
+import HsBinds ( PatSynBind(..) )
 import Name
 import RdrName ( lookupGRE_Name, GlobalRdrEnv, mkRdrUnqual )
 import PrelNames ( typeableClassName, hasKey, ptrRepLiftedDataConKey
@@ -737,11 +738,14 @@ type UserGiven = ([EvVar], SkolemInfo, Bool, RealSrcSpan)
 
 getUserGivens :: ReportErrCtxt -> [UserGiven]
 -- One item for each enclosing implication
-getUserGivens (CEC {cec_encl = ctxt})
+getUserGivens (CEC {cec_encl = implics}) = getUserGivensFromImplics implics
+
+getUserGivensFromImplics :: [Implication] -> [UserGiven]
+getUserGivensFromImplics implics
   = reverse $
     [ (givens, info, no_eqs, tcl_loc env)
     | Implic { ic_given = givens, ic_env = env
-             , ic_no_eqs = no_eqs, ic_info = info } <- ctxt
+             , ic_no_eqs = no_eqs, ic_info = info } <- implics
     , not (null givens) ]
 
 {-
@@ -1140,7 +1144,7 @@ reportEqErr :: ReportErrCtxt -> Report
             -> Maybe SwapFlag   -- Nothing <=> not sure
             -> TcType -> TcType -> TcM ErrMsg
 reportEqErr ctxt report ct oriented ty1 ty2
-  = mkErrorMsgFromCt ctxt ct (mconcat [misMatch, eqInfo, report])
+  = mkErrorMsgFromCt ctxt ct (mconcat [misMatch, report, eqInfo])
   where misMatch = important $ misMatchOrCND ctxt ct oriented ty1 ty2
         eqInfo = important $ mkEqInfoMsg ct ty1 ty2
 
@@ -1280,12 +1284,19 @@ mkEqInfoMsg ct ty1 ty2
               = snd (mkAmbigMsg False ct)
               | otherwise = empty
 
-    invis_msg | Just vis <- tcEqTypeVis ty1 ty2
+    -- better to check the exp/act types in the CtOrigin than the actual
+    -- mismatched types for suggestion about -fprint-explicit-kinds
+    (act_ty, exp_ty) = case ctOrigin ct of
+      TypeEqOrigin { uo_actual = act
+                   , uo_expected = Check exp } -> (act, exp)
+      _                                        -> (ty1, ty2)
+
+    invis_msg | Just vis <- tcEqTypeVis act_ty exp_ty
               , vis /= Visible
               = sdocWithDynFlags $ \dflags ->
                 if gopt Opt_PrintExplicitKinds dflags
-                then text "Use -fprint-explicit-kinds to see the kind arguments"
-                else empty
+                then empty
+                else text "Use -fprint-explicit-kinds to see the kind arguments"
 
               | otherwise
               = empty
@@ -1800,7 +1811,7 @@ mk_dict_err :: ReportErrCtxt -> (Ct, ClsInstLookupResult)
             -> TcM (ReportErrCtxt, SDoc)
 -- Report an overlap error if this class constraint results
 -- from an overlap (returning Left clas), otherwise return (Right pred)
-mk_dict_err ctxt (ct, (matches, unifiers, unsafe_overlapped))
+mk_dict_err ctxt@(CEC {cec_encl = implics}) (ct, (matches, unifiers, unsafe_overlapped))
   | null matches  -- No matches but perhaps several unifiers
   = do { (ctxt, binds_msg, ct) <- relevantBindings True ctxt ct
        ; instEnvs <- tcGetInstEnvs
@@ -1822,8 +1833,16 @@ mk_dict_err ctxt (ct, (matches, unifiers, unsafe_overlapped))
     (clas, tys)   = getClassPredTys pred
     ispecs        = [ispec | (ispec, _) <- matches]
     unsafe_ispecs = [ispec | (ispec, _) <- unsafe_overlapped]
-    givens        = getUserGivens ctxt
+    givens        = getUserGivensFromImplics useful_implics
     all_tyvars    = all isTyVarTy tys
+    useful_implics = filter is_useful_implic implics
+      -- See Note [Useful implications]
+
+    is_useful_implic implic
+      | (PatSynSigSkol name) <- ic_info implic
+      , ProvCtxtOrigin (PSB {psb_id = (L _ name')}) <- orig
+      , name == name' = False
+    is_useful_implic _ = True
 
     is_candidate_inst ty inst
       | [other_ty] <- is_tys inst
@@ -1841,6 +1860,7 @@ mk_dict_err ctxt (ct, (matches, unifiers, unsafe_overlapped))
       = vcat [ no_inst_msg
              , nest 2 extra_note
              , vcat (pp_givens givens)
+             , in_other_words
              , ppWhen (has_ambig_tvs && not (null unifiers && null givens))
                (vcat [ ppUnless lead_with_ambig ambig_msg, binds_msg, potential_msg ])
              , show_fixes (add_to_ctxt_fixes has_ambig_tvs ++ drv_fixes)
@@ -1883,6 +1903,14 @@ mk_dict_err ctxt (ct, (matches, unifiers, unsafe_overlapped))
                  , text "These potential instance" <> plural unifiers
                    <+> text "exist:"]
 
+        in_other_words
+          | not lead_with_ambig
+          , ProvCtxtOrigin PSB{ psb_def = (L _ pat) } <- orig
+          = vcat [ text "In other words, a successful match on the pattern"
+                 , nest 2 $ ppr pat
+                 , text "does not provide the constraint" <+> pprParendType pred ]
+          | otherwise = empty
+
     -- Report "potential instances" only when the constraint arises
     -- directly from the user's use of an overloaded function
     want_potential (TypeEqOrigin {}) = False
@@ -1890,7 +1918,7 @@ mk_dict_err ctxt (ct, (matches, unifiers, unsafe_overlapped))
 
     add_to_ctxt_fixes has_ambig_tvs
       | not has_ambig_tvs && all_tyvars
-      , (orig:origs) <- usefulContext ctxt pred
+      , (orig:origs) <- usefulContext useful_implics pred
       = [sep [ text "add" <+> pprParendType pred
                <+> text "to the context of"
              , nest 2 $ ppr_skol orig $$
@@ -2006,18 +2034,48 @@ from being solved:
   - Lastly, I don't want to mess with error reporting for
     unknown runtime types so we just fall back to the old message there.
 Once these conditions are satisfied, we can safely say that ambiguity prevents
-the constraint from being solved. -}
+the constraint from being solved.
+
+Note [Useful implications]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+In most situations we call all enclosing implications "useful". There is one
+exception, and that is when the constraint that causes the error is from the
+"provided" context of a pattern synonym declaration. Then we only call the
+enclosing implications that are /not/ from the "required" context of the
+declaration "useful".
+
+The reason for this is that a "provided" constraint should be deducible from
+a successful pattern match, not from the "required" context. Constraints that
+are deducible from the "required" context are already available at every usage
+site of the pattern synonym.
+
+This distinction between all and "useful" implications solves two problems.
+First, we never tell the user that we could not deduce a "provided"
+constraint from the "required" context. Second, we never give a possible fix
+that suggests to add a "provided" constraint to the "required" context.
+
+For example, without this distinction the following code gives a bad error
+message (showing both problems):
+
+  pattern Pat :: Eq a => Show a => a -> Maybe a
+  pattern Pat x <- Just x
+
+  error: Could not deduce (Show a) ... from the context: (Eq a)
+         ... Possible fix: add (Show a) to the context of
+         the type signature for pattern synonym `Pat' ...
+
+-}
 
 
-usefulContext :: ReportErrCtxt -> TcPredType -> [SkolemInfo]
-usefulContext ctxt pred
-  = go (cec_encl ctxt)
+usefulContext :: [Implication] -> PredType -> [SkolemInfo]
+usefulContext implics pred
+  = go implics
   where
     pred_tvs = tyCoVarsOfType pred
     go [] = []
     go (ic : ics)
        | implausible ic = rest
-       | otherwise      = ic_info ic : rest
+       | otherwise      = correct_info (ic_info ic) : rest
        where
           -- Stop when the context binds a variable free in the predicate
           rest | any (`elemVarSet` pred_tvs) (ic_skols ic) = []
@@ -2030,7 +2088,11 @@ usefulContext ctxt pred
 
     implausible_info (SigSkol (InfSigCtxt {}) _) = True
     implausible_info _                           = False
-    -- Do not suggest adding constraints to an *inferred* type signature!
+    -- Do not suggest adding constraints to an *inferred* type signature
+
+    correct_info (SigSkol (PatSynBuilderCtxt n) _) = PatSynSigSkol n
+    correct_info info                              = info
+    -- See example 4 in ticket #11667
 
 show_fixes :: [SDoc] -> SDoc
 show_fixes []     = empty

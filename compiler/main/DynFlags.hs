@@ -390,6 +390,7 @@ data GeneralFlag
    | Opt_PrintExplicitForalls
    | Opt_PrintExplicitKinds
    | Opt_PrintExplicitCoercions
+   | Opt_PrintExplicitRuntimeReps
    | Opt_PrintEqualityRelations
    | Opt_PrintUnicodeSyntax
    | Opt_PrintExpandedSynonyms
@@ -430,7 +431,6 @@ data GeneralFlag
    | Opt_CmmSink
    | Opt_CmmElimCommonBlocks
    | Opt_OmitYields
-   | Opt_SimpleListLiterals
    | Opt_FunToThunk               -- allow WwLib.mkWorkerArgs to remove all value lambdas
    | Opt_DictsStrict                     -- be strict in argument dictionaries
    | Opt_DmdTxDictSel              -- use a special demand transformer for dictionary selectors
@@ -487,6 +487,7 @@ data GeneralFlag
    | Opt_Hpc
    | Opt_FlatCache
    | Opt_ExternalInterpreter
+   | Opt_VersionMacros
 
    -- PreInlining is on by default. The option is there just to see how
    -- bad things get if you turn it off!
@@ -3399,6 +3400,7 @@ fFlagsDeps = [
   flagSpec "print-explicit-foralls"           Opt_PrintExplicitForalls,
   flagSpec "print-explicit-kinds"             Opt_PrintExplicitKinds,
   flagSpec "print-explicit-coercions"         Opt_PrintExplicitCoercions,
+  flagSpec "print-explicit-runtime-reps"      Opt_PrintExplicitRuntimeReps,
   flagSpec "print-equality-relations"         Opt_PrintEqualityRelations,
   flagSpec "print-unicode-syntax"             Opt_PrintUnicodeSyntax,
   flagSpec "print-expanded-synonyms"          Opt_PrintExpandedSynonyms,
@@ -3411,7 +3413,6 @@ fFlagsDeps = [
   depFlagSpec' "rewrite-rules"                Opt_EnableRewriteRules
     (useInstead "enable-rewrite-rules"),
   flagSpec "shared-implib"                    Opt_SharedImplib,
-  flagSpec "simple-list-literals"             Opt_SimpleListLiterals,
   flagSpec "spec-constr"                      Opt_SpecConstr,
   flagSpec "specialise"                       Opt_Specialise,
   flagSpec "specialise-aggressively"          Opt_SpecialiseAggressively,
@@ -3424,6 +3425,7 @@ fFlagsDeps = [
   flagSpec "unbox-strict-fields"              Opt_UnboxStrictFields,
   flagSpec "vectorisation-avoidance"          Opt_VectorisationAvoidance,
   flagSpec "vectorise"                        Opt_Vectorise,
+  flagSpec "version-macros"                   Opt_VersionMacros,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups
   ]
@@ -3665,7 +3667,8 @@ defaultFlags settings
       Opt_ProfCountEntries,
       Opt_RPath,
       Opt_SharedImplib,
-      Opt_SimplPreInlining
+      Opt_SimplPreInlining,
+      Opt_VersionMacros
     ]
 
     ++ [f | (ns,f) <- optLevelFlags, 0 `elem` ns]
@@ -3753,7 +3756,6 @@ impliedXFlags
 
     , (LangExt.TemplateHaskell, turnOn, LangExt.TemplateHaskellQuotes)
     , (LangExt.Strict, turnOn, LangExt.StrictData)
-    , (LangExt.TypeApplications, turnOn, LangExt.AllowAmbiguousTypes)
   ]
 
 -- Note [Documenting optimisation flags]
@@ -3773,6 +3775,7 @@ impliedXFlags
 optLevelFlags :: [([Int], GeneralFlag)]
 optLevelFlags -- see Note [Documenting optimisation flags]
   = [ ([0,1,2], Opt_DoLambdaEtaExpansion)
+    , ([0,1,2], Opt_DoEtaReduction)       -- See Note [Eta-reduction in -O0]
     , ([0,1,2], Opt_DmdTxDictSel)
     , ([0,1,2], Opt_LlvmTBAA)
     , ([0,1,2], Opt_VectorisationAvoidance)
@@ -3789,7 +3792,6 @@ optLevelFlags -- see Note [Documenting optimisation flags]
     , ([1,2],   Opt_CmmElimCommonBlocks)
     , ([1,2],   Opt_CmmSink)
     , ([1,2],   Opt_CSE)
-    , ([1,2],   Opt_DoEtaReduction)
     , ([1,2],   Opt_EnableRewriteRules)  -- Off for -O0; see Note [Scoping for Builtin rules]
                                          --              in PrelRules
     , ([1,2],   Opt_FloatIn)
@@ -3810,6 +3812,21 @@ optLevelFlags -- see Note [Documenting optimisation flags]
 --  , ([2],     Opt_StaticArgumentTransformation)
 --   Static Argument Transformation needs investigation. See #9374
     ]
+
+{- Note [Eta-reduction in -O0]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Trac #11562 showed an example which tripped an ASSERT in CoreToStg; a
+function was marked as MayHaveCafRefs when in fact it obviously
+didn't.  Reason was:
+ * Eta reduction wasn't happening in the simplifier, but it was
+   happening in CorePrep, on
+        $fBla = MkDict (/\a. K a)
+ * Result: rhsIsStatic told TidyPgm that $fBla might have CAF refs
+   but the eta-reduced version (MkDict K) obviously doesn't
+Simple solution: just let the simplifier do eta-reduction even in -O0.
+After all, CorePrep does it unconditionally!  Not a big deal, but
+removes an assertion failure. -}
+
 
 -- -----------------------------------------------------------------------------
 -- Standard sets of warning options
@@ -4866,7 +4883,15 @@ makeDynFlagsConsistent dflags
 -- Do not use it if you can help it. You may get the wrong value, or this
 -- panic!
 
-GLOBAL_VAR(v_unsafeGlobalDynFlags, panic "v_unsafeGlobalDynFlags: not initialised", DynFlags)
+-- | This is the value that 'unsafeGlobalDynFlags' takes before it is
+-- initialized.
+defaultGlobalDynFlags :: DynFlags
+defaultGlobalDynFlags =
+    (defaultDynFlags settings) { verbosity = 2 }
+  where
+    settings = panic "v_unsafeGlobalDynFlags: not initialised"
+
+GLOBAL_VAR(v_unsafeGlobalDynFlags, defaultGlobalDynFlags, DynFlags)
 
 unsafeGlobalDynFlags :: DynFlags
 unsafeGlobalDynFlags = unsafePerformIO $ readIORef v_unsafeGlobalDynFlags

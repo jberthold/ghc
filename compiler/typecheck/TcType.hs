@@ -87,7 +87,6 @@ module TcType (
   orphNamesOfTypes, orphNamesOfCoCon,
   getDFunTyKey,
   evVarPred_maybe, evVarPred,
-  anonymiseTyBinders,
 
   ---------------------------------
   -- Predicate types
@@ -181,6 +180,7 @@ module TcType (
   pprKind, pprParendKind, pprSigmaType,
   pprType, pprParendType, pprTypeApp, pprTyThingCategory,
   pprTheta, pprThetaArrowTy, pprClassPred,
+  pprTvBndr, pprTvBndrs,
 
   TypeSize, sizeType, sizeTypes, toposortTyVars
 
@@ -226,7 +226,6 @@ import Control.Monad (liftM, ap)
 import Control.Applicative (Applicative(..), (<$>) )
 #endif
 import Data.Functor.Identity
-import Data.List ( mapAccumR )
 
 {-
 ************************************************************************
@@ -477,8 +476,7 @@ data UserTypeCtxt
   | TypeAppCtxt         -- Visible type application
   | ConArgCtxt Name     -- Data constructor argument
   | TySynCtxt Name      -- RHS of a type synonym decl
-  | PatSynCtxt Name     -- Type sig for a pattern synonym
-                        --   eg  pattern C :: Int -> T
+  | PatSynBuilderCtxt Name -- Type sig for the builder of a bidirectional pattern synonym
   | PatSigCtxt          -- Type sig in pattern
                         --   eg  f (x::t) = ...
                         --   or  (x::t, y) = e
@@ -663,7 +661,6 @@ pprUserTypeCtxt ExprSigCtxt       = text "an expression type signature"
 pprUserTypeCtxt TypeAppCtxt       = text "a type argument"
 pprUserTypeCtxt (ConArgCtxt c)    = text "the type of the constructor" <+> quotes (ppr c)
 pprUserTypeCtxt (TySynCtxt c)     = text "the RHS of the type synonym" <+> quotes (ppr c)
-pprUserTypeCtxt (PatSynCtxt c)    = text "the type signature for pattern synonym" <+> quotes (ppr c)
 pprUserTypeCtxt ThBrackCtxt       = text "a Template Haskell quotation [t|...|]"
 pprUserTypeCtxt PatSigCtxt        = text "a pattern type signature"
 pprUserTypeCtxt ResSigCtxt        = text "a result type signature"
@@ -676,6 +673,9 @@ pprUserTypeCtxt GhciCtxt          = text "a type in a GHCi command"
 pprUserTypeCtxt (ClassSCCtxt c)   = text "the super-classes of class" <+> quotes (ppr c)
 pprUserTypeCtxt SigmaCtxt         = text "the context of a polymorphic type"
 pprUserTypeCtxt (DataTyCtxt tc)   = text "the context of the data type declaration for" <+> quotes (ppr tc)
+pprUserTypeCtxt (PatSynBuilderCtxt n)
+  = vcat [ text "the type signature for bidirectional pattern synonym" <+> quotes (ppr n)
+         , text "when used in an expression context" ]
 
 pprSigCtxt :: UserTypeCtxt -> SDoc -> SDoc -> SDoc
 -- (pprSigCtxt ctxt <extra> <type>)
@@ -694,11 +694,11 @@ pprSigCtxt ctxt extra pp_ty
   where
 
 isSigMaybe :: UserTypeCtxt -> Maybe Name
-isSigMaybe (FunSigCtxt n _) = Just n
-isSigMaybe (ConArgCtxt n)   = Just n
-isSigMaybe (ForSigCtxt n)   = Just n
-isSigMaybe (PatSynCtxt n)   = Just n
-isSigMaybe _                = Nothing
+isSigMaybe (FunSigCtxt n _)      = Just n
+isSigMaybe (ConArgCtxt n)        = Just n
+isSigMaybe (ForSigCtxt n)        = Just n
+isSigMaybe (PatSynBuilderCtxt n) = Just n
+isSigMaybe _                     = Nothing
 
 {-
 ************************************************************************
@@ -1016,13 +1016,13 @@ mkSigmaTy bndrs theta tau = mkForAllTys bndrs (mkPhiTy theta tau)
 
 mkInvSigmaTy :: [TyVar] -> [PredType] -> Type -> Type
 mkInvSigmaTy tyvars
-  = mkSigmaTy (map (mkNamedBinder Invisible) tyvars)
+  = mkSigmaTy (mkNamedBinders Invisible tyvars)
 
 -- | Make a sigma ty where all type variables are "specified". That is,
 -- they can be used with visible type application
 mkSpecSigmaTy :: [TyVar] -> [PredType] -> Type -> Type
 mkSpecSigmaTy tyvars
-  = mkSigmaTy (map (mkNamedBinder Specified) tyvars)
+  = mkSigmaTy (mkNamedBinders Specified tyvars)
 
 mkPhiTy :: [PredType] -> Type -> Type
 mkPhiTy = mkFunTys
@@ -1314,10 +1314,14 @@ tcEqTypeNoKindCheck ty1 ty2
 -- are 'tcEqType'.
 tcEqTypeVis :: TcType -> TcType -> Maybe VisibilityFlag
 tcEqTypeVis ty1 ty2
-  = tc_eq_type coreView ty1 ty2 <!> tc_eq_type coreView ki1 ki2
+  = tc_eq_type coreView ty1 ty2 <!> invis (tc_eq_type coreView ki1 ki2)
   where
     ki1 = typeKind ty1
     ki2 = typeKind ty2
+
+      -- convert Just Visible to Just Invisible
+    invis :: Maybe VisibilityFlag -> Maybe VisibilityFlag
+    invis = fmap (const Invisible)
 
 (<!>) :: Maybe VisibilityFlag -> Maybe VisibilityFlag -> Maybe VisibilityFlag
 Nothing        <!> x            = x
@@ -1356,7 +1360,7 @@ tc_eq_type view_fun orig_ty1 orig_ty2 = go Visible orig_env orig_ty1 orig_ty2
       | Just (s1, t1) <- tcRepSplitAppTy_maybe ty1
       = go vis env s1 s2 <!> go vis env t1 t2
     go vis env (TyConApp tc1 ts1)   (TyConApp tc2 ts2)
-      = check vis (tc1 == tc2) <!> gos (tc_vis tc1) env ts1 ts2
+      = check vis (tc1 == tc2) <!> gos (tc_vis vis tc1) env ts1 ts2
     go vis env (CastTy t1 _)        t2              = go vis env t1 t2
     go vis env t1                   (CastTy t2 _)   = go vis env t1 t2
     go _   _   (CoercionTy {})      (CoercionTy {}) = Nothing
@@ -1367,13 +1371,15 @@ tc_eq_type view_fun orig_ty1 orig_ty2 = go Visible orig_env orig_ty1 orig_ty2
     gos (v:_)  _   _        _        = Just v
     gos _      _   _        _        = panic "tc_eq_type"
 
-    tc_vis :: TyCon -> [VisibilityFlag]
-    tc_vis tc = viss ++ repeat Visible
+    tc_vis :: VisibilityFlag -> TyCon -> [VisibilityFlag]
+    tc_vis Visible tc = viss ++ repeat Visible
        -- the repeat Visible is necessary because tycons can legitimately
        -- be oversaturated
       where
         bndrs = tyConBinders tc
         viss  = map binderVisibility bndrs
+    tc_vis vis _ = repeat vis   -- if we're not in a visible context, our args
+                                -- aren't either
 
     check :: VisibilityFlag -> Bool -> Maybe VisibilityFlag
     check _   True  = Nothing
@@ -1412,6 +1418,10 @@ prefer doing inner expansions first.  For example,
 We have
   occurCheckExpand b (F (G b)) = F Char
 even though we could also expand F to get rid of b.
+
+The two variants of the function are to support TcUnify.checkTauTvUpdate,
+which wants to prevent unification with type families. For more on this
+point, see Note [Prevent unification with type families] in TcUnify.
 
 See also Note [occurCheckExpand] in TcCanonical
 -}
@@ -1470,7 +1480,8 @@ occurCheckExpand dflags tv ty
     -- True => fine
     fast_check (LitTy {})          = True
     fast_check (TyVarTy tv')       = tv /= tv' && fast_check (tyVarKind tv')
-    fast_check (TyConApp tc tys)   = all fast_check tys && (isTauTyCon tc || impredicative)
+    fast_check (TyConApp tc tys)   = all fast_check tys
+                                     && (isTauTyCon tc || impredicative)
     fast_check (ForAllTy (Anon a) r) = fast_check a && fast_check r
     fast_check (AppTy fun arg)     = fast_check fun && fast_check arg
     fast_check (ForAllTy (Named tv' _) ty)
@@ -2347,28 +2358,3 @@ sizeType = go
 
 sizeTypes :: [Type] -> TypeSize
 sizeTypes tys = sum (map sizeType tys)
-
-{-
-************************************************************************
-*                                                                      *
-       Binders
-*                                                                      *
-************************************************************************
--}
-
--- | Given a list of binders and a type they bind in, turn any
--- superfluous Named binders into Anon ones.
-anonymiseTyBinders :: [TyBinder] -> Type -> [TyBinder]
-anonymiseTyBinders binders res_ty = binders'
-  where
-    (_, binders') = mapAccumR go (tyCoVarsOfTypeAcc res_ty) binders
-
-    go :: FV -> TyBinder -> (FV, TyBinder)
-    go fv (Named tv Visible)
-      | not (tv `elemVarSet` runFVSet fv)
-      = ( (tv `FV.delFV` fv) `unionFV` tyCoVarsOfTypeAcc kind
-        , Anon kind )
-      where
-        kind = tyVarKind tv
-
-    go fv binder = (tyCoVarsBndrAcc binder fv, binder)

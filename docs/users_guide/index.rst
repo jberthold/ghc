@@ -7,7 +7,7 @@ Welcome to the GHC Users Guide
 Contents:
 
 .. toctree::
-   :maxdepth: 3
+   :maxdepth: 4
    :numbered:
 
    license
@@ -22,6 +22,7 @@ Contents:
    ffi-chap
    extending_ghc
    gone_wrong
+   debug-info
    utils
    win32-dlls
    bugs

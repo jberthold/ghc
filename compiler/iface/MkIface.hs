@@ -1303,8 +1303,8 @@ patSynToIfaceDecl ps
                 , ifPatMatcher    = to_if_pr (patSynMatcher ps)
                 , ifPatBuilder    = fmap to_if_pr (patSynBuilder ps)
                 , ifPatIsInfix    = patSynIsInfix ps
-                , ifPatUnivTvs    = toIfaceTvBndrs univ_tvs'
-                , ifPatExTvs      = toIfaceTvBndrs ex_tvs'
+                , ifPatUnivBndrs  = map binderToIfaceForAllBndr univ_bndrs'
+                , ifPatExBndrs    = map binderToIfaceForAllBndr ex_bndrs'
                 , ifPatProvCtxt   = tidyToIfaceContext env2 prov_theta
                 , ifPatReqCtxt    = tidyToIfaceContext env2 req_theta
                 , ifPatArgs       = map (tidyToIfaceType env2) args
@@ -1312,9 +1312,11 @@ patSynToIfaceDecl ps
                 , ifFieldLabels   = (patSynFieldLabels ps)
                 }
   where
-    (univ_tvs, req_theta, ex_tvs, prov_theta, args, rhs_ty) = patSynSig ps
-    (env1, univ_tvs') = tidyTyCoVarBndrs emptyTidyEnv univ_tvs
-    (env2, ex_tvs')   = tidyTyCoVarBndrs env1 ex_tvs
+    (_univ_tvs, req_theta, _ex_tvs, prov_theta, args, rhs_ty) = patSynSig ps
+    univ_bndrs = patSynUnivTyBinders ps
+    ex_bndrs   = patSynExTyBinders ps
+    (env1, univ_bndrs') = tidyTyBinders emptyTidyEnv univ_bndrs
+    (env2, ex_bndrs')   = tidyTyBinders env1 ex_bndrs
     to_if_pr (id, needs_dummy) = (idName id, needs_dummy)
 
 --------------------------
@@ -1426,7 +1428,7 @@ tyConToIfaceDecl env tycon
     if_binders  = zipIfaceBinders tc_tyvars (tyConBinders tycon)
     if_res_kind = tidyToIfaceType tc_env1 (tyConResKind tycon)
     if_syn_type ty = tidyToIfaceType tc_env1 ty
-    if_res_var     = getFS `fmap` tyConFamilyResVar_maybe tycon
+    if_res_var     = getOccFS `fmap` tyConFamilyResVar_maybe tycon
 
       -- use these when you don't have tyConTyVars
     (degenerate_binders, degenerate_res_kind)
@@ -1469,7 +1471,7 @@ tyConToIfaceDecl env tycon
         = IfCon   { ifConOcc     = getOccName (dataConName data_con),
                     ifConInfix   = dataConIsInfix data_con,
                     ifConWrapper = isJust (dataConWrapId_maybe data_con),
-                    ifConExTvs   = toIfaceTvBndrs ex_tvs',
+                    ifConExTvs   = map binderToIfaceForAllBndr ex_bndrs',
                     ifConEqSpec  = map (to_eq_spec . eqSpecPair) eq_spec,
                     ifConCtxt    = tidyToIfaceContext con_env2 theta,
                     ifConArgTys  = map (tidyToIfaceType con_env2) arg_tys,
@@ -1480,8 +1482,9 @@ tyConToIfaceDecl env tycon
                     ifConSrcStricts = map toIfaceSrcBang
                                           (dataConSrcBangs data_con)}
         where
-          (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _)
+          (univ_tvs, _ex_tvs, eq_spec, theta, arg_tys, _)
             = dataConFullSig data_con
+          ex_bndrs = dataConExTyBinders data_con
 
           -- Tidy the univ_tvs of the data constructor to be identical
           -- to the tyConTyVars of the type constructor.  This means
@@ -1493,7 +1496,7 @@ tyConToIfaceDecl env tycon
           con_env1 = (fst tc_env1, mkVarEnv (zipEqual "ifaceConDecl" univ_tvs tc_tyvars))
                      -- A bit grimy, perhaps, but it's simple!
 
-          (con_env2, ex_tvs') = tidyTyCoVarBndrs con_env1 ex_tvs
+          (con_env2, ex_bndrs') = tidyTyBinders con_env1 ex_bndrs
           to_eq_spec (tv,ty)  = (toIfaceTyVar (tidyTyVar con_env2 tv), tidyToIfaceType con_env2 ty)
 
     ifaceOverloaded flds = case fsEnvElts flds of
@@ -1527,7 +1530,7 @@ classToIfaceDecl env clas
                    ifFDs    = map toIfaceFD clas_fds,
                    ifATs    = map toIfaceAT clas_ats,
                    ifSigs   = map toIfaceClassOp op_stuff,
-                   ifMinDef = fmap getFS (classMinimalDef clas),
+                   ifMinDef = fmap getOccFS (classMinimalDef clas),
                    ifRec    = boolToRecFlag (isRecursiveTyCon tycon) })
   where
     (clas_tyvars, clas_fds, sc_theta, _, clas_ats, op_stuff)
@@ -1561,8 +1564,8 @@ classToIfaceDecl env clas
     toDmSpec (_, VanillaDM)       = VanillaDM
     toDmSpec (_, GenericDM dm_ty) = GenericDM (tidyToIfaceType env1 dm_ty)
 
-    toIfaceFD (tvs1, tvs2) = (map (getFS . tidyTyVar env1) tvs1,
-                              map (getFS . tidyTyVar env1) tvs2)
+    toIfaceFD (tvs1, tvs2) = (map (getOccFS . tidyTyVar env1) tvs1,
+                              map (getOccFS . tidyTyVar env1) tvs2)
 
 --------------------------
 tidyToIfaceType :: TidyEnv -> Type -> IfaceType
@@ -1588,9 +1591,6 @@ tidyTyClTyCoVarBndr env@(_, subst) tv
 tidyTyVar :: TidyEnv -> TyVar -> TyVar
 tidyTyVar (_, subst) tv = lookupVarEnv subst tv `orElse` tv
    -- TcType.tidyTyVarOcc messes around with FlatSkols
-
-getFS :: NamedThing a => a -> FastString
-getFS x = occNameFS (getOccName x)
 
 --------------------------
 instanceToIfaceInst :: ClsInst -> IfaceClsInst
@@ -1767,7 +1767,7 @@ toIfaceExpr (Lam x b)       = IfaceLam (toIfaceBndr x, toIfaceOneShot x) (toIfac
 toIfaceExpr (App f a)       = toIfaceApp f [a]
 toIfaceExpr (Case s x ty as)
   | null as                 = IfaceECase (toIfaceExpr s) (toIfaceType ty)
-  | otherwise               = IfaceCase (toIfaceExpr s) (getFS x) (map toIfaceAlt as)
+  | otherwise               = IfaceCase (toIfaceExpr s) (getOccFS x) (map toIfaceAlt as)
 toIfaceExpr (Let b e)       = IfaceLet (toIfaceBind b) (toIfaceExpr e)
 toIfaceExpr (Cast e co)     = IfaceCast (toIfaceExpr e) (toIfaceCoercion co)
 toIfaceExpr (Tick t e)
@@ -1798,7 +1798,7 @@ toIfaceBind (Rec prs)    = IfaceRec [(toIfaceLetBndr b, toIfaceExpr r) | (b,r) <
 ---------------------
 toIfaceAlt :: (AltCon, [Var], CoreExpr)
            -> (IfaceConAlt, [FastString], IfaceExpr)
-toIfaceAlt (c,bs,r) = (toIfaceCon c, map getFS bs, toIfaceExpr r)
+toIfaceAlt (c,bs,r) = (toIfaceCon c, map getOccFS bs, toIfaceExpr r)
 
 ---------------------
 toIfaceCon :: AltCon -> IfaceConAlt
@@ -1834,5 +1834,5 @@ toIfaceVar v
     | Just fcall <- isFCallId_maybe v            = IfaceFCall fcall (toIfaceType (idType v))
        -- Foreign calls have special syntax
     | isExternalName name                        = IfaceExt name
-    | otherwise                                  = IfaceLcl (getFS name)
+    | otherwise                                  = IfaceLcl (getOccFS name)
   where name = idName v
