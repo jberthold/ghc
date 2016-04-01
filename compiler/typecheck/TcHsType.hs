@@ -83,7 +83,7 @@ import PrelNames hiding ( wildCardName )
 import Pair
 import qualified GHC.LanguageExtensions as LangExt
 
-import Data.Maybe
+import Maybes
 import Data.List ( partition )
 import Control.Monad
 
@@ -512,7 +512,7 @@ tc_hs_type mode (HsForAllTy { hst_bndrs = hs_tvs, hst_body = ty }) exp_kind
     -- Why exp_kind?  See Note [Body kind of HsForAllTy]
     do { ty' <- tc_lhs_type mode ty exp_kind
        ; let bound_vars = allBoundVariables ty'
-             bndrs      = map (mkNamedBinder Specified) tvs'
+             bndrs      = mkNamedBinders Specified tvs'
        ; return (mkForAllTys bndrs ty', bound_vars) }
 
 tc_hs_type mode (HsQualTy { hst_ctxt = ctxt, hst_body = ty }) exp_kind
@@ -1238,7 +1238,7 @@ kcHsTyVarBndrs cusk open_fam all_kind_vars
        ; when (not (null meta_tvs)) $
          report_non_cusk_tvs (qkvs ++ tvs)
 
-       ; return ( map (mkNamedBinder Specified) good_tvs ++ binders
+       ; return ( mkNamedBinders Specified good_tvs ++ binders
                 , res_kind, stuff ) }}
 
   | otherwise
@@ -1291,7 +1291,7 @@ kcHsTyVarBndrs cusk open_fam all_kind_vars
 
     kc_hs_tv :: HsTyVarBndr Name -> TcM (TcTyVar, Bool)
     kc_hs_tv (UserTyVar (L _ name))
-      = do { tv_pair@(tv, scoped) <- tcHsTyVarName name
+      = do { tv_pair@(tv, scoped) <- tcHsTyVarName Nothing name
 
               -- Open type/data families default their variables to kind *.
            ; when (open_fam && not scoped) $ -- (don't default class tyvars)
@@ -1301,13 +1301,8 @@ kcHsTyVarBndrs cusk open_fam all_kind_vars
            ; return tv_pair }
 
     kc_hs_tv (KindedTyVar (L _ name) lhs_kind)
-      = do { tv_pair@(tv, _) <- tcHsTyVarName name
-           ; kind <- tcLHsKind lhs_kind
-               -- for a scoped variable: make sure annotation is consistent
-               -- for an unscoped variable: unify the meta-tyvar kind
-               -- either way: we can ignore the resulting coercion
-           ; discardResult $ unifyKind (Just (mkTyVarTy tv)) kind (tyVarKind tv)
-           ; return tv_pair }
+      = do { kind <- tcLHsKind lhs_kind
+           ; tcHsTyVarName (Just kind) name }
 
     report_non_cusk_tvs all_tvs
       = do { all_tvs <- mapM zonkTyCoVarKind all_tvs
@@ -1330,7 +1325,7 @@ tcImplicitTKBndrs :: [Name]
                   -> TcM (a, TyVarSet)   -- vars are bound somewhere in the scope
                                          -- see Note [Scope-check inferred kinds]
                   -> TcM ([TcTyVar], a)
-tcImplicitTKBndrs = tcImplicitTKBndrsX tcHsTyVarName
+tcImplicitTKBndrs = tcImplicitTKBndrsX (tcHsTyVarName Nothing)
 
 -- | Convenient specialization
 tcImplicitTKBndrsType :: [Name]
@@ -1414,16 +1409,22 @@ tcHsTyVarBndr (KindedTyVar (L _ name) kind)
   = do { kind <- tcLHsKind kind
        ; return (mkTcTyVar name kind (SkolemTv False)) }
 
--- | Produce a tyvar of the given name (with a meta-tyvar kind). If
--- the name is already in scope, return the scoped variable. The
+-- | Produce a tyvar of the given name (with the kind provided, or
+-- otherwise a meta-var kind). If
+-- the name is already in scope, return the scoped variable, checking
+-- to make sure the known kind matches any kind provided. The
 -- second return value says whether the variable is in scope (True)
 -- or not (False). (Use this for associated types, for example.)
-tcHsTyVarName :: Name -> TcM (TcTyVar, Bool)
-tcHsTyVarName name
+tcHsTyVarName :: Maybe Kind -> Name -> TcM (TcTyVar, Bool)
+tcHsTyVarName m_kind name
   = do { mb_tv <- tcLookupLcl_maybe name
        ; case mb_tv of
-           Just (ATyVar _ tv) -> return (tv, True)
-           _ -> do { kind <- newMetaKindVar
+           Just (ATyVar _ tv)
+             -> do { whenIsJust m_kind $ \ kind ->
+                     discardResult $
+                     unifyKind (Just (mkTyVarTy tv)) kind (tyVarKind tv)
+                   ; return (tv, True) }
+           _ -> do { kind <- maybe newMetaKindVar return m_kind
                    ; return (mkTcTyVar name kind vanillaSkolemTv, False) }}
 
 -- makes a new skolem tv
@@ -1441,7 +1442,7 @@ kindGeneralize :: TcType -> TcM [KindVar]
 kindGeneralize ty
   = do { gbl_tvs <- tcGetGlobalTyCoVars -- Already zonked
        ; kvs <- zonkTcTypeAndFV ty
-       ; quantifyTyVars gbl_tvs (Pair kvs emptyVarSet) }
+       ; quantifyZonkedTyVars gbl_tvs (Pair kvs emptyVarSet) }
 
 {-
 Note [Kind generalisation]
@@ -1745,6 +1746,7 @@ tcTyClTyVars :: Name -> LHsQTyVars Name      -- LHS of the type or class decl
 -- ^ Used for the type variables of a type or class decl
 -- on the second full pass (type-checking/desugaring) in TcTyClDecls.
 -- This is *not* used in the initial-kind run, nor in the "kind-checking" pass.
+-- Accordingly, everything passed to the continuation is fully zonked.
 --
 -- (tcTyClTyVars T [a,b] thing_inside)
 --   where T : forall k1 k2 (a:k1 -> *) (b:k1). k2 -> *

@@ -97,9 +97,9 @@ module TyCoRep (
         substCoWith,
         substTy, substTyAddInScope,
         substTyUnchecked, substTysUnchecked, substThetaUnchecked,
-        substTyWithBindersUnchecked, substTyWithUnchecked,
+        substTyWithUnchecked,
         substCoUnchecked, substCoWithUnchecked,
-        substTyWithBinders, substTyWithInScope,
+        substTyWithInScope,
         substTys, substTheta,
         lookupTyVar, substTyVarBndr,
         substCo, substCos, substCoVar, substCoVars, lookupCoVar,
@@ -118,20 +118,24 @@ module TyCoRep (
         tidyTyVarOcc,
         tidyTopType,
         tidyKind,
-        tidyCo, tidyCos
+        tidyCo, tidyCos,
+        tidyTyBinder, tidyTyBinders
     ) where
 
 #include "HsVersions.h"
 
 import {-# SOURCE #-} DataCon( dataConTyCon, dataConFullSig
-                              , DataCon, eqSpecTyVar )
+                              , dataConUnivTyBinders, dataConExTyBinders
+                              , DataCon, filterEqSpec )
 import {-# SOURCE #-} Type( isPredTy, isCoercionTy, mkAppTy
                           , tyCoVarsOfTypesWellScoped, varSetElemsWellScoped
-                          , partitionInvisibles, coreView, typeKind )
+                          , partitionInvisibles, coreView, typeKind
+                          , eqType )
    -- Transitively pulls in a LOT of stuff, better to break the loop
 
 import {-# SOURCE #-} Coercion
 import {-# SOURCE #-} ConLike ( ConLike(..) )
+import {-# SOURCE #-} TysWiredIn ( ptrRepLiftedTy )
 
 -- friends:
 import Var
@@ -153,7 +157,6 @@ import StaticFlags ( opt_PprStyle_Debug )
 import FastString
 import Pair
 import UniqSupply
-import ListSetOps
 import Util
 import UniqFM
 
@@ -165,15 +168,18 @@ import Data.IORef ( IORef )   -- for CoercionHole
 import GHC.Stack (CallStack)
 #endif
 
-{-
-%************************************************************************
-%*                                                                      *
-\subsection{The data type}
-%*                                                                      *
-%************************************************************************
--}
+{- **********************************************************************
+*                                                                       *
+                        Type
+*                                                                       *
+********************************************************************** -}
 
 -- | The key representation of types within the compiler
+
+type KindOrType = Type -- See Note [Arguments to type constructors]
+
+-- | The key type representing kinds in the compiler.
+type Kind = Type
 
 -- If you edit this type, you may need to update the GHC formalism
 -- See Note [GHC Formalism] in coreSyn/CoreLint.hs
@@ -238,64 +244,8 @@ data TyLit
   | StrTyLit FastString
   deriving (Eq, Ord, Data.Data, Data.Typeable)
 
--- | A 'TyBinder' represents an argument to a function. TyBinders can be dependent
--- ('Named') or nondependent ('Anon'). They may also be visible or not.
--- See also Note [TyBinder]
-data TyBinder
-  = Named TyVar VisibilityFlag  -- Always a TyVar (not CoVar or Id)
-  | Anon Type   -- Visibility is determined by the type (Constraint vs. *)
-    deriving (Data.Typeable, Data.Data)
-
--- | Is something required to appear in source Haskell ('Visible'),
--- permitted by request ('Specified') (visible type application), or
--- prohibited entirely from appearing in source Haskell ('Invisible')?
--- Examples in Note [VisibilityFlag]
-data VisibilityFlag = Visible | Specified | Invisible
-  deriving (Eq, Data.Typeable, Data.Data)
-
--- | Do these denote the same level of visibility? Except that
--- 'Specified' and 'Invisible' are considered the same. Used
--- for printing.
-sameVis :: VisibilityFlag -> VisibilityFlag -> Bool
-sameVis Visible Visible = True
-sameVis Visible _       = False
-sameVis _       Visible = False
-sameVis _       _       = True
-
-instance Binary VisibilityFlag where
-  put_ bh Visible   = putByte bh 0
-  put_ bh Specified = putByte bh 1
-  put_ bh Invisible = putByte bh 2
-
-  get bh = do
-    h <- getByte bh
-    case h of
-      0 -> return Visible
-      1 -> return Specified
-      _ -> return Invisible
-
-type KindOrType = Type -- See Note [Arguments to type constructors]
-
--- | The key type representing kinds in the compiler.
-type Kind = Type
-
-{-
-Note [TyBinder]
-~~~~~~~~~~~~~~~
-This represents the type of binders -- that is, the type of an argument
-to a Pi-type. GHC Core currently supports two different Pi-types:
-a non-dependent function, written with ->, and a dependent compile-time-only
-polytype, written with forall. Both Pi-types classify terms/types that
-take an argument. In other words, if `x` is either a function or a polytype,
-`x arg` makes sense (for an appropriate `arg`). It is thus often convenient
-to group Pi-types together. This is ForAllTy.
-
-The two constructors for TyBinder sort out the two different possibilities.
-`Named` builds a polytype, while `Anon` builds an ordinary function.
-(ForAllTy (Anon arg) res used to be called FunTy arg res.)
-
-Note [The kind invariant]
-~~~~~~~~~~~~~~~~~~~~~~~~~
+{- Note [The kind invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The kinds
    #          UnliftedTypeKind
    OpenKind   super-kind of *, #
@@ -405,53 +355,207 @@ Another helpful principle with eqType is this:
 
 This principle also tells us that eqType must relate only types with the
 same kinds.
-
-Note [VisibilityFlag]
-~~~~~~~~~~~~~~~~~~~~~
-All named binders are equipped with a visibility flag, which says
-whether or not arguments for this binder should be visible (explicit)
-in source Haskell. Historically, all named binders (that is, polytype
-binders) have been Invisible. But now it's more complicated.
-
-Invisible:
- Argument does not ever appear in source Haskell. With visible type
- application, only GHC-generated polytypes have Invisible binders.
- This exactly corresponds to "generalized" variables from the
- Visible Type Applications paper (ESOP'16).
-
- Example: f x = x
- `f` will be inferred to have type `forall a. a -> a`, where `a` is
- Invisible. Note that there is no type annotation for `f`.
-
- Printing: With -fprint-explicit-foralls, Invisible binders are written
- in braces. Otherwise, they are printed like Specified binders.
-
-Specified:
- The argument for this binder may appear in source Haskell only with
- visible type application. Otherwise, it is omitted.
-
- Example: id :: forall a. a -> a
- `a` is a Specified binder, because you can say `id @Int` in source Haskell.
-
- Example: const :: a -> b -> a
- Both `a` and `b` are Specified binders, even though they are not bound
- by an explicit forall.
-
- Printing: a list of Specified binders are put between `forall` and `.`:
- const :: forall a b. a -> b -> a
-
-Visible:
- The argument must be given. Visible binders come up only with TypeInType.
-
- Example: data Proxy k (a :: k) = P
- The kind of Proxy is forall k -> k -> *, where k is a Visible binder.
-
- Printing: As in the example above, Visible binders are put between `forall`
- and `->`. This syntax is not parsed (yet), however.
-
--------------------------------------
-                Note [PredTy]
 -}
+
+{- **********************************************************************
+*                                                                       *
+                  TyBinder and VisibilityFlag
+*                                                                       *
+********************************************************************** -}
+
+-- | A 'TyBinder' represents an argument to a function. TyBinders can be dependent
+-- ('Named') or nondependent ('Anon'). They may also be visible or not.
+-- See Note [TyBinders]
+data TyBinder
+  = Named TyVar VisibilityFlag  -- Always a TyVar (not CoVar or Id)
+  | Anon Type   -- Visibility is determined by the type (Constraint vs. *)
+    deriving (Data.Typeable, Data.Data)
+
+-- | Is something required to appear in source Haskell ('Visible'),
+-- permitted by request ('Specified') (visible type application), or
+-- prohibited entirely from appearing in source Haskell ('Invisible')?
+-- See Note [TyBinders and VisibilityFlags]
+data VisibilityFlag = Visible | Specified | Invisible
+  deriving (Eq, Data.Typeable, Data.Data)
+
+-- | Do these denote the same level of visibility? Except that
+-- 'Specified' and 'Invisible' are considered the same. Used
+-- for printing.
+sameVis :: VisibilityFlag -> VisibilityFlag -> Bool
+sameVis Visible Visible = True
+sameVis Visible _       = False
+sameVis _       Visible = False
+sameVis _       _       = True
+
+{- Note [TyBinders]
+~~~~~~~~~~~~~~~~~~~
+A ForAllTy contains a TyBinder.
+
+A TyBinder represents the type of binders -- that is, the type of an
+argument to a Pi-type. GHC Core currently supports two different
+Pi-types:
+
+ * A non-dependent function,
+   written with ->, e.g. ty1 -> ty2
+   represented as ForAllTy (Anon ty1) ty2
+
+ * A dependent compile-time-only polytype,
+   written with forall, e.g.  forall (a:*). ty
+   represented as ForAllTy (Named a v) ty
+
+Both Pi-types classify terms/types that take an argument. In other
+words, if `x` is either a function or a polytype, `x arg` makes sense
+(for an appropriate `arg`). It is thus often convenient to group
+Pi-types together.  This is ForAllTy.
+
+The two constructors for TyBinder sort out the two different possibilities.
+`Named` builds a polytype, while `Anon` builds an ordinary function.
+(ForAllTy (Anon arg) res used to be called FunTy arg res.)
+
+Note [TyBinders and VisibilityFlags]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A ForAllTy contains a TyBinder.  Each Named TyBinders are equipped
+with a VisibilityFlag, which says whether or not arguments for this
+binder should be visible (explicit) in source Haskell.
+
+-----------------------------------------------------------------------
+                                            Occurrences look like this
+ TyBinder          GHC displays type as     in Haskell souce code
+-----------------------------------------------------------------------
+In the type of a term
+ Anon:             f :: type -> type         Arg required:     f x
+ Named Invisible:  f :: forall {a}. type     Arg not allowed:  f
+ Named Specified:  f :: forall a. type       Arg optional:     f  or  f @Int
+ Named Visible:         Illegal: See Note [No Visible TyBinder in terms]
+
+In the kind of a type
+ Anon:             T :: kind -> kind         Required:            T *
+ Named Invisible:  T :: forall {k}. kind     Arg not allowed:     T
+ Named Specified:  T :: forall k. kind       Arg not allowed[1]:  T
+ Named Visible:    T :: forall k -> kind     Required:            T *
+------------------------------------------------------------------------
+
+[1] In types, in the Specified case, it would make sense to allow
+    optional kind applications, thus (T @*), but we have not
+    yet implemented that
+
+---- Examples of where the different visiblities come from -----
+
+In term declarations:
+
+* Invisible.  Function defn, with no signature:  f1 x = x
+  We infer f1 :: forall {a}. a -> a, with 'a' Invisible
+  It's Invisible because it doesn't appear in any
+  user-written signature for f1
+
+* Specified.  Function defn, with signature (implicit forall):
+     f2 :: a -> a; f2 x = x
+  So f2 gets the type f2 :: forall a. a->a, with 'a' Specified
+  even though 'a' is not bound in the source code by an explicit forall
+
+* Specified.  Function defn, with signature (explicit forall):
+     f3 :: forall a. a -> a; f3 x = x
+  So f3 gets the type f3 :: forall a. a->a, with 'a' Specified
+
+* Invisible/Specified.  Function signature with inferred kind polymorphism.
+     f4 :: a b -> Int
+  So 'f4' get the type f4 :: forall {k} (a:k->*) (b:k). a b -> Int
+  Here 'k' is Invisible (it's not mentioned in the type),
+  but 'a' and 'b' are Specified.
+
+* Specified.  Function signature with explicit kind polymorphism
+     f5 :: a (b :: k) -> Int
+  This time 'k' is Specified, because it is mentioned explicitly,
+  so we get f5 :: forall (k:*) (a:k->*) (b:k). a b -> Int
+
+* Similarly pattern synonyms:
+  Invisible - from inferred types (e.g. no pattern type signature)
+            - or from inferred kind polymorphism
+
+In type declarations:
+
+* Invisible (k)
+     data T1 a b = MkT1 (a b)
+  Here T1's kind is  T1 :: forall {k:*}. (k->*) -> k -> *
+  The kind variable 'k' is Invisible, since it is not mentioned
+
+  Note that 'a' and 'b' correspond to /Anon/ TyBinders in T1's kind,
+  and Anon binders don't have a visibility flag. (Or you could think
+  of Anon having an implicit Visible flag.)
+
+* Specified (k)
+     data T2 (a::k->*) b = MkT (a b)
+  Here T's kind is  T :: forall (k:*). (k->*) -> k -> *
+  The kind vairable 'k' is Specified, since it is mentioned in
+  the signature.
+
+* Visible (k)
+     data T k (a::k->*) b = MkT (a b)
+  Here T's kind is  T :: forall k:* -> (k->*) -> k -> *
+  The kind Visible, since it bound in a positional way in T's declaration
+  Every use of T must be explicitly applied to a kind
+
+* Invisible (k1), Specified (k)
+     data T a b (c :: k) = MkT (a b) (Proxy c)
+  Here T's kind is  T :: forall {k1:*} (k:*). (k1->*) -> k1 -> k -> *
+  So 'k' is Specified, because it appears explicitly,
+  but 'k1' is Invisible, because it does not
+
+---- Printing -----
+
+ We print forall types with enough syntax to tell you their visiblity
+ flag.  But this is not source Haskell, and these types may not all
+ be parsable.
+
+ Specified: a list of Specified binders is written between `forall` and `.`:
+               const :: forall a b. a -> b -> a
+
+ Invisible: with -fprint-explicit-foralls, Invisible binders are written
+            in braces:
+               f :: forall {k} (a:k). S k a -> Int
+            Otherwise, they are printed like Specified binders.
+
+ Visible: binders are put between `forall` and `->`:
+              T :: forall k -> *
+
+---- Other points -----
+
+* In classic Haskell, all named binders (that is, the type variables in
+  a polymorphic function type f :: forall a. a -> a) have been Invisible.
+
+* Invisible variables correspond to "generalized" variables from the
+  Visible Type Applications paper (ESOP'16).
+
+Note [No Visible TyBinder in terms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We don't allow Visible foralls for term variables, including pattern
+synonyms and data constructors.  Why?  Because then an application
+would need a /compulsory/ type argument (possibly without an "@"?),
+thus (f Int); and we don't have concrete syntax for that.
+
+We could change this decision, but Visible, Named TyBinders are rare
+anyway.  (Most are Anons.)
+-}
+
+instance Binary VisibilityFlag where
+  put_ bh Visible   = putByte bh 0
+  put_ bh Specified = putByte bh 1
+  put_ bh Invisible = putByte bh 2
+
+  get bh = do
+    h <- getByte bh
+    case h of
+      0 -> return Visible
+      1 -> return Specified
+      _ -> return Invisible
+
+
+{- **********************************************************************
+*                                                                       *
+                        PredType
+*                                                                       *
+********************************************************************** -}
+
 
 -- | A type of the form @p@ of kind @Constraint@ represents a value whose type is
 -- the Haskell predicate @p@, where a predicate is what occurs before
@@ -491,6 +595,7 @@ The predicate really does turn into a real extra argument to the
 function.  If the argument has type (p :: Constraint) then the predicate p is
 represented by evidence of type p.
 
+
 %************************************************************************
 %*                                                                      *
             Simple constructors
@@ -522,7 +627,9 @@ mkFunTys tys ty = foldr mkFunTy ty tys
 mkForAllTys :: [TyBinder] -> Type -> Type
 mkForAllTys tyvars ty = foldr ForAllTy ty tyvars
 
--- | Does this type classify a core Coercion?
+-- | Does this type classify a core (unlifted) Coercion?
+-- At either role nominal or reprsentational
+--    (t1 ~# t2) or (t1 ~R# t2)
 isCoercionType :: Type -> Bool
 isCoercionType (TyConApp tc tys)
   | (tc `hasKey` eqPrimTyConKey) || (tc `hasKey` eqReprPrimTyConKey)
@@ -1456,7 +1563,7 @@ data TyThing
   | AConLike ConLike
   | ATyCon   TyCon       -- TyCons and classes; see Note [ATyCon for classes]
   | ACoAxiom (CoAxiom Branched)
-  deriving (Eq, Ord)
+  deriving (Eq)
 
 instance Outputable TyThing where
   ppr = pprTyThing
@@ -1944,28 +2051,6 @@ substTysWithCoVars :: [CoVar] -> [Coercion] -> [Type] -> [Type]
 substTysWithCoVars cvs cos = ASSERT( length cvs == length cos )
                              substTys (zipCvSubst cvs cos)
 
--- | Type substitution using 'Binder's. Anonymous binders
--- simply ignore their matching type.
-substTyWithBinders ::
--- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
-#if MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
-    (?callStack :: CallStack) =>
-#endif
-    [TyBinder] -> [Type] -> Type -> Type
-substTyWithBinders bndrs tys = ASSERT( length bndrs == length tys )
-                               substTy (zipTyBinderSubst bndrs tys)
-
--- | Type substitution using 'Binder's disabling the sanity checks.
--- Anonymous binders simply ignore their matching type.
--- The problems that the sanity checks in substTy catch are described in
--- Note [The substitution invariant].
--- The goal of #11371 is to migrate all the calls of substTyUnchecked to
--- substTy and remove this function. Please don't use in new code.
-substTyWithBindersUnchecked :: [TyBinder] -> [Type] -> Type -> Type
-substTyWithBindersUnchecked bndrs tys
-  = ASSERT( length bndrs == length tys )
-    substTyUnchecked (zipTyBinderSubst bndrs tys)
-
 -- | Substitute within a 'Type' after adding the free variables of the type
 -- to the in-scope set. This is useful for the case when the free variables
 -- aren't already in the in-scope set or easily available.
@@ -2397,9 +2482,90 @@ maybeParen ctxt_prec inner_prec pretty
   | otherwise              = parens pretty
 
 ------------------
+
+{-
+Note [Defaulting RuntimeRep variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+RuntimeRep variables are considered by many (most?) users to be little more than
+syntactic noise. When the notion was introduced there was a signficant and
+understandable push-back from those with pedagogy in mind, which argued that
+RuntimeRep variables would throw a wrench into nearly any teach approach since
+they appear in even the lowly ($) function's type,
+
+    ($) :: forall (w :: RuntimeRep) a (b :: TYPE w). (a -> b) -> a -> b
+
+which is significantly less readable than its non RuntimeRep-polymorphic type of
+
+    ($) :: (a -> b) -> a -> b
+
+Moreover, unboxed types don't appear all that often in run-of-the-mill Haskell
+programs, so it makes little sense to make all users pay this syntactic
+overhead.
+
+For this reason it was decided that we would hide RuntimeRep variables for now
+(see #11549). We do this by defaulting all type variables of kind RuntimeRep to
+PtrLiftedRep. This is done in a pass right before pretty-printing
+(defaultRuntimeRepVars, controlled by -fprint-explicit-runtime-reps)
+-}
+
+-- | Default 'RuntimeRep' variables to 'LiftedPtr'. e.g.
+--
+-- @
+-- ($) :: forall (r :: GHC.Types.RuntimeRep) a (b :: TYPE r).
+--        (a -> b) -> a -> b
+-- @
+--
+-- turns in to,
+--
+-- @ ($) :: forall a (b :: *). (a -> b) -> a -> b @
+--
+-- We do this to prevent RuntimeRep variables from incurring a significant
+-- syntactic overhead in otherwise simple type signatures (e.g. ($)). See
+-- Note [Defaulting RuntimeRep variables] and #11549 for further discussion.
+--
+defaultRuntimeRepVars :: Type -> Type
+defaultRuntimeRepVars = defaultRuntimeRepVars' emptyVarSet
+
+defaultRuntimeRepVars' :: TyVarSet  -- ^ the binders which we should default
+                       -> Type -> Type
+-- TODO: Eventually we should just eliminate the Type pretty-printer
+-- entirely and simply use IfaceType; this task is tracked as #11660.
+defaultRuntimeRepVars' subs (ForAllTy (Named var vis) ty)
+  | isRuntimeRepVar var                        =
+    let subs' = extendVarSet subs var
+    in defaultRuntimeRepVars' subs' ty
+  | otherwise                                  =
+    let var' = var { varType = defaultRuntimeRepVars' subs (varType var) }
+    in ForAllTy (Named var' vis) (defaultRuntimeRepVars' subs ty)
+
+defaultRuntimeRepVars' subs (ForAllTy (Anon kind) ty) =
+    ForAllTy (Anon $ defaultRuntimeRepVars' subs kind)
+             (defaultRuntimeRepVars' subs ty)
+
+defaultRuntimeRepVars' subs (TyVarTy var)
+  | var `elemVarSet` subs                      = ptrRepLiftedTy
+
+defaultRuntimeRepVars' subs (TyConApp tc args) =
+    TyConApp tc $ map (defaultRuntimeRepVars' subs) args
+
+defaultRuntimeRepVars' subs (AppTy x y)        =
+    defaultRuntimeRepVars' subs x `AppTy` defaultRuntimeRepVars' subs y
+
+defaultRuntimeRepVars' subs (CastTy ty co)     =
+    CastTy (defaultRuntimeRepVars' subs ty) co
+
+defaultRuntimeRepVars' _    other              = other
+
+eliminateRuntimeRep :: (Type -> SDoc) -> Type -> SDoc
+eliminateRuntimeRep f ty = sdocWithDynFlags $ \dflags ->
+    if gopt Opt_PrintExplicitRuntimeReps dflags
+      then f ty
+      else f (defaultRuntimeRepVars ty)
+
 pprType, pprParendType :: Type -> SDoc
-pprType       ty = ppr_type TopPrec ty
-pprParendType ty = ppr_type TyConPrec ty
+pprType       ty = eliminateRuntimeRep (ppr_type TopPrec) ty
+pprParendType ty = eliminateRuntimeRep (ppr_type TyConPrec) ty
 
 pprTyLit :: TyLit -> SDoc
 pprTyLit = ppr_tylit TopPrec
@@ -2560,7 +2726,8 @@ ppr_fun_tail (ForAllTy (Anon ty1) ty2)
 ppr_fun_tail other_ty = [ppr_type TopPrec other_ty]
 
 pprSigmaType :: Type -> SDoc
-pprSigmaType ty = sdocWithDynFlags $ \dflags -> ppr_sigma_type dflags False ty
+pprSigmaType ty = sdocWithDynFlags $ \dflags ->
+    eliminateRuntimeRep (ppr_sigma_type dflags False) ty
 
 pprUserForAll :: [TyBinder] -> SDoc
 -- Print a user-level forall; see Note [When to print foralls]
@@ -2690,9 +2857,10 @@ pprDataCons = sepWithVBars . fmap pprDataConWithArgs . tyConDataCons
 pprDataConWithArgs :: DataCon -> SDoc
 pprDataConWithArgs dc = sep [forAllDoc, thetaDoc, ppr dc <+> argsDoc]
   where
-    (univ_tvs, ex_tvs, eq_spec, theta, arg_tys, _res_ty) = dataConFullSig dc
-    forAllDoc = pprUserForAll $ map (\tv -> Named tv Specified) $
-                ((univ_tvs `minusList` map eqSpecTyVar eq_spec) ++ ex_tvs)
+    (_univ_tvs, _ex_tvs, eq_spec, theta, arg_tys, _res_ty) = dataConFullSig dc
+    univ_bndrs = dataConUnivTyBinders dc
+    ex_bndrs   = dataConExTyBinders dc
+    forAllDoc = pprUserForAll $ (filterEqSpec eq_spec univ_bndrs ++ ex_bndrs)
     thetaDoc  = pprThetaArrowTy theta
     argsDoc   = hsep (fmap pprParendType arg_tys)
 
@@ -2794,6 +2962,9 @@ pprTcApp_help :: (a -> Type) -> TyPrec -> (TyPrec -> a -> SDoc)
               -> TyCon -> [a] -> DynFlags -> PprStyle -> SDoc
 -- This one has accss to the DynFlags
 pprTcApp_help to_type p pp tc tys dflags style
+  | is_equality
+  = print_equality
+
   | print_prefix
   = pprPrefixApp p pp_tc (map (pp TyConPrec) tys_wo_kinds)
 
@@ -2807,25 +2978,65 @@ pprTcApp_help to_type p pp tc tys dflags style
   = pp_tc   -- Do not wrap *, # in parens
 
   | otherwise
-  = pprPrefixApp p (parens pp_tc) (map (pp TyConPrec) tys_wo_kinds)
+  = pprPrefixApp p (parens (pp_tc)) (map (pp TyConPrec) tys_wo_kinds)
   where
     tc_name = tyConName tc
 
-     -- With the solver working in unlifted equality, it will want to
-     -- to print unlifted equality constraints sometimes. But these are
-     -- confusing to users. So fix them up here.
-    (print_prefix, pp_tc)
-      | (tc `hasKey` eqPrimTyConKey || tc `hasKey` heqTyConKey) && not print_eqs
-      = (False, text "~")
-      | tc `hasKey` eqReprPrimTyConKey && not print_eqs
-      = (True, text "Coercible")
-      | otherwise
-      = (not (isSymOcc (nameOccName tc_name)), ppr tc)
+    is_equality = tc `hasKey` eqPrimTyConKey ||
+                  tc `hasKey` heqTyConKey ||
+                  tc `hasKey` eqReprPrimTyConKey ||
+                  tc `hasKey` eqTyConKey
+                  -- don't include Coercible here, which should be printed
+                  -- normally
 
-    print_eqs    = gopt Opt_PrintEqualityRelations dflags ||
-                   dumpStyle style ||
-                   debugStyle style
+      -- This is all a bit ad-hoc, trying to print out the best representation
+      -- of equalities. If you see a better design, go for it.
+    print_equality = case either_op_msg of
+      Left op ->
+        sep [ parens (pp TyOpPrec ty1 <+> dcolon <+> pp TyOpPrec ki1)
+            , op
+            , parens (pp TyOpPrec ty2 <+> dcolon <+> pp TyOpPrec ki2)]
+      Right msg ->
+        msg
+      where
+        hetero_tc =  tc `hasKey` eqPrimTyConKey
+                  || tc `hasKey` eqReprPrimTyConKey
+                  || tc `hasKey` heqTyConKey
+
+        print_kinds   = gopt Opt_PrintExplicitKinds dflags
+        print_eqs     = gopt Opt_PrintEqualityRelations dflags ||
+                        dumpStyle style ||
+                        debugStyle style
+
+        (ki1, ki2, ty1, ty2)
+          | hetero_tc
+          , [k1, k2, t1, t2] <- tys
+          = (k1, k2, t1, t2)
+          | [k, t1, t2] <- tys  -- we must have (~)
+          = (k, k, t1, t2)
+          | otherwise
+          = pprPanic "print_equality" pp_tc
+
+         -- if "Left", print hetero equality; if "Right" just print that msg
+        either_op_msg
+          | print_eqs
+          = Left pp_tc
+
+          | hetero_tc
+          , print_kinds || not (to_type ki1 `eqType` to_type ki2)
+          = Left $ if tc `hasKey` eqPrimTyConKey
+                   then text "~~"
+                   else pp_tc
+
+          | otherwise
+          = Right $ if tc `hasKey` eqReprPrimTyConKey
+                    then text "Coercible" <+> (sep [ pp TyConPrec ty1
+                                                   , pp TyConPrec ty2 ])
+                    else sep [pp TyOpPrec ty1, text "~", pp TyOpPrec ty2]
+
+    print_prefix = not (isSymOcc (nameOccName tc_name))
     tys_wo_kinds = suppressInvisibles to_type dflags tc tys
+    pp_tc        = ppr tc
 
 ------------------
 -- | Given a 'TyCon',and the args to which it is applied,
@@ -2914,6 +3125,17 @@ tidyTyCoVarBndr tidy_env@(occ_env, subst) tyvar
            then mkTyVarOcc (occNameString occ ++ "0")
            else mkVarOcc   (occNameString occ ++ "0")
          | otherwise         = occ
+
+tidyTyBinder :: TidyEnv -> TyBinder -> (TidyEnv, TyBinder)
+tidyTyBinder tidy_env (Named tv vis)
+  = (tidy_env', Named tv' vis)
+  where
+    (tidy_env', tv') = tidyTyCoVarBndr tidy_env tv
+tidyTyBinder tidy_env (Anon ty)
+  = (tidy_env, Anon $ tidyType tidy_env ty)
+
+tidyTyBinders :: TidyEnv -> [TyBinder] -> (TidyEnv, [TyBinder])
+tidyTyBinders = mapAccumL tidyTyBinder
 
 ---------------
 tidyFreeTyCoVars :: TidyEnv -> TyCoVarSet -> TidyEnv

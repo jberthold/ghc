@@ -122,9 +122,7 @@ if test "$WithGhc" != ""; then
   GhcCanonVersion="$GhcMajVersion$GhcMinVersion2"
 
   BOOTSTRAPPING_GHC_INFO_FIELD([CC_STAGE0],[C compiler command])
-  dnl ToDo, once "ld command" is reliably available.
-  dnl Then, we can remove the LD_STAGE0 hack in mk/build-package-date.mk
-  dnl BOOTSTRAPPING_GHC_INFO_FIELD([LD_STAGE0],[ld command])
+  BOOTSTRAPPING_GHC_INFO_FIELD([LD_STAGE0],[ld command])
   BOOTSTRAPPING_GHC_INFO_FIELD([AR_STAGE0],[ar command])
   BOOTSTRAPPING_GHC_INFO_FIELD([AR_OPTS_STAGE0],[ar flags])
   BOOTSTRAPPING_GHC_INFO_FIELD([ArSupportsAtFile_STAGE0],[ar supports at file])
@@ -253,15 +251,6 @@ AC_ARG_ENABLE(unregisterised,
 [Unregisterised="$UnregisterisedDefault"]
 )
 AC_SUBST(Unregisterised)
-
-AC_ARG_WITH(hc,
-[AC_HELP_STRING([--with-hc=ARG],
-        [Use ARG as the path to the compiler for compiling ordinary
-         Haskell code  (default= value of --with-ghc)])],
-[WithHc="$withval"],
-[WithHc=$WithGhc]
-)
-AC_SUBST(WithHc)
 
 # Requires FPTOOLS_SET_PLATFORM_VARS to be run first.
 FP_FIND_ROOT
@@ -462,6 +451,11 @@ AC_PROG_CPP
 FP_CPP_CMD_WITH_ARGS(HaskellCPPCmd, HaskellCPPArgs)
 AC_SUBST([HaskellCPPCmd])
 AC_SUBST([HaskellCPPArgs])
+
+FP_SET_CFLAGS_C99([CC],[CFLAGS],[CPPFLAGS])
+FP_SET_CFLAGS_C99([CC_STAGE0],[CONF_CC_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
+FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE1],[CONF_CPP_OPTS_STAGE1])
+FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE2],[CONF_CPP_OPTS_STAGE2])
 
 dnl ** Which ld to use?
 dnl --------------------------------------------------------------

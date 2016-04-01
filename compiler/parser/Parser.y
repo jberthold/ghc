@@ -427,8 +427,8 @@ output it generates.
  ')'            { L _ ITcparen }
  '(#'           { L _ IToubxparen }
  '#)'           { L _ ITcubxparen }
- '(|'           { L _ IToparenbar }
- '|)'           { L _ ITcparenbar }
+ '(|'           { L _ (IToparenbar _) }
+ '|)'           { L _ (ITcparenbar _) }
  ';'            { L _ ITsemi }
  ','            { L _ ITcomma }
  '`'            { L _ ITbackquote }
@@ -2151,7 +2151,7 @@ exp10 :: { LHsExpr RdrName }
                                                (mj AnnLet $1:mj AnnIn $3
                                                  :(fst $ unLoc $2)) }
         | '\\' 'lcase' altslist
-            {% ams (sLL $1 $> $ HsLamCase placeHolderType
+            {% ams (sLL $1 $> $ HsLamCase
                                    (mkMatchGroup FromSource (snd $ unLoc $3)))
                    (mj AnnLam $1:mj AnnCase $2:(fst $ unLoc $3)) }
         | 'if' exp optSemi 'then' exp optSemi 'else' exp

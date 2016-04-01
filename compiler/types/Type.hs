@@ -84,7 +84,8 @@ module Type (
 
         -- ** Binders
         sameVis,
-        mkNamedBinder, mkAnonBinder, isNamedBinder, isAnonBinder,
+        mkNamedBinder, mkNamedBinders,
+        mkAnonBinder, isNamedBinder, isAnonBinder,
         isIdLikeBinder, binderVisibility, binderVar_maybe,
         binderVar, binderRelevantType_maybe, caseBinder,
         partitionBinders, partitionBindersIntoBinders,
@@ -166,7 +167,7 @@ module Type (
         substTy, substTys, substTyWith, substTysWith, substTheta,
         substTyAddInScope,
         substTyUnchecked, substTysUnchecked, substThetaUnchecked,
-        substTyWithBindersUnchecked, substTyWithUnchecked,
+        substTyWithUnchecked,
         substCoUnchecked, substCoWithUnchecked,
         substTyVarBndr, substTyVar, substTyVars,
         cloneTyVarBndr, cloneTyVarBndrs, lookupTyVar,
@@ -188,7 +189,8 @@ module Type (
         tidyOpenTyCoVar, tidyOpenTyCoVars,
         tidyTyVarOcc,
         tidyTopType,
-        tidyKind
+        tidyKind,
+        tidyTyBinder, tidyTyBinders
     ) where
 
 #include "HsVersions.h"
@@ -470,6 +472,8 @@ mapType mapper@(TyCoMapper { tcm_smart = smart, tcm_tyvar = tyvar
   where
     go (TyVarTy tv) = tyvar env tv
     go (AppTy t1 t2) = mkappty <$> go t1 <*> go t2
+    go t@(TyConApp _ []) = return t  -- avoid allocation in this exceedingly
+                                     -- common case (mostly, for *)
     go (TyConApp tc tys) = mktyconapp tc <$> mapM go tys
     go (ForAllTy (Anon arg) res) = mkfunty <$> go arg <*> go res
     go (ForAllTy (Named tv vis) inner)
@@ -850,7 +854,7 @@ piResultTy ty arg
           empty_subst = mkEmptyTCvSubst $ mkInScopeSet $
                         tyCoVarsOfTypes [arg,res]
   | otherwise
-  = panic "piResultTys"
+  = pprPanic "piResultTy" (ppr ty $$ ppr arg)
 
 -- | (piResultTys f_ty [ty1, .., tyn]) gives the type of (f ty1 .. tyn)
 --   where f :: f_ty
@@ -885,7 +889,7 @@ piResultTys ty orig_args@(arg:args)
       Named tv _ -> go (extendVarEnv emptyTvSubstEnv tv arg) res args
 
   | otherwise
-  = panic "piResultTys"
+  = pprPanic "piResultTys1" (ppr ty $$ ppr orig_args)
   where
     go :: TvSubstEnv -> Type -> [Type] -> Type
     go tv_env ty [] = substTy (mkTvSubst in_scope tv_env) ty
@@ -907,7 +911,19 @@ piResultTys ty orig_args@(arg:args)
       = piResultTys ty' all_args
 
       | otherwise
-      = panic "piResultTys"
+      = pprPanic "piResultTys2" (ppr ty $$ ppr orig_args $$ ppr all_args)
+
+applyTysX :: [TyVar] -> Type -> [Type] -> Type
+-- applyTyxX beta-reduces (/\tvs. body_ty) arg_tys
+-- Assumes that (/\tvs. body_ty) is closed
+applyTysX tvs body_ty arg_tys
+  = ASSERT2( length arg_tys >= n_tvs, pp_stuff )
+    ASSERT2( tyCoVarsOfType body_ty `subVarSet` mkVarSet tvs, pp_stuff )
+    mkAppTys (substTyWith tvs (take n_tvs arg_tys) body_ty)
+             (drop n_tvs arg_tys)
+  where
+    pp_stuff = vcat [ppr tvs, ppr body_ty, ppr arg_tys]
+    n_tvs = length tvs
 
 {-
 ---------------------------------------------------------------------
@@ -1480,18 +1496,6 @@ splitPiTysInvisible ty = split ty ty []
      split orig_ty _ bndrs
        = (reverse bndrs, orig_ty)
 
-applyTysX :: [TyVar] -> Type -> [Type] -> Type
--- applyTyxX beta-reduces (/\tvs. body_ty) arg_tys
--- Assumes that (/\tvs. body_ty) is closed
-applyTysX tvs body_ty arg_tys
-  = ASSERT2( length arg_tys >= n_tvs, pp_stuff )
-    ASSERT2( tyCoVarsOfType body_ty `subVarSet` mkVarSet tvs, pp_stuff )
-    mkAppTys (substTyWith tvs (take n_tvs arg_tys) body_ty)
-             (drop n_tvs arg_tys)
-  where
-    pp_stuff = vcat [ppr tvs, ppr body_ty, ppr arg_tys]
-    n_tvs = length tvs
-
 {-
 %************************************************************************
 %*                                                                      *
@@ -1503,6 +1507,10 @@ applyTysX tvs body_ty arg_tys
 -- | Make a named binder
 mkNamedBinder :: VisibilityFlag -> Var -> TyBinder
 mkNamedBinder vis var = Named var vis
+
+-- | Make many named binders
+mkNamedBinders :: VisibilityFlag -> [TyVar] -> [TyBinder]
+mkNamedBinders vis = map (mkNamedBinder vis)
 
 -- | Make an anonymous binder
 mkAnonBinder :: Type -> TyBinder
@@ -2294,13 +2302,27 @@ synTyConResKind :: TyCon -> Kind
 synTyConResKind tycon = piResultTys (tyConKind tycon) (mkTyVarTys (tyConTyVars tycon))
 
 -- | Retrieve the free variables in this type, splitting them based
--- on whether the variable was used in a dependent context. It's possible
--- for a variable to be reported twice, if it's used both dependently
--- and non-dependently. (This isn't the most precise analysis, because
+-- on whether the variable was used in a dependent context.
+-- (This isn't the most precise analysis, because
 -- it's used in the typechecking knot. It might list some dependent
 -- variables as also non-dependent.)
 splitDepVarsOfType :: Type -> Pair TyCoVarSet
-splitDepVarsOfType = go
+splitDepVarsOfType ty = Pair dep_vars final_nondep_vars
+  where
+    Pair dep_vars nondep_vars = split_dep_vars ty
+    final_nondep_vars = nondep_vars `minusVarSet` dep_vars
+
+-- | Like 'splitDepVarsOfType', but over a list of types
+splitDepVarsOfTypes :: [Type] -> Pair TyCoVarSet
+splitDepVarsOfTypes tys = Pair dep_vars final_nondep_vars
+  where
+    Pair dep_vars nondep_vars = foldMap split_dep_vars tys
+    final_nondep_vars = nondep_vars `minusVarSet` dep_vars
+
+-- | Worker for 'splitDepVarsOfType'. This might output the same var
+-- in both sets, if it's used in both a type and a kind.
+split_dep_vars :: Type -> Pair TyCoVarSet
+split_dep_vars = go
   where
     go (TyVarTy tv)              = Pair (tyCoVarsOfType $ tyVarKind tv)
                                         (unitVarSet tv)
@@ -2319,10 +2341,6 @@ splitDepVarsOfType = go
     go_co co = let Pair ty1 ty2 = coercionKind co in
                go ty1 `mappend` go ty2  -- NB: the Pairs separate along different
                                         -- dimensions here. Be careful!
-
--- | Like 'splitDepVarsOfType', but over a list of types
-splitDepVarsOfTypes :: [Type] -> Pair TyCoVarSet
-splitDepVarsOfTypes = foldMap splitDepVarsOfType
 
 -- | Retrieve the free variables in this type, splitting them based
 -- on whether they are used visibly or invisibly. Invisible ones come

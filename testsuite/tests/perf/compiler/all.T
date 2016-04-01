@@ -364,7 +364,7 @@ test('T5030',
            #                        of family-applications leads to less sharing, I think
            # 2015-07-11:  201882912 reason unknown
 
-           (wordsize(64), 342331936, 10)]),
+           (wordsize(64), 653710960, 10)]),
              # Previously 530000000 (+/- 10%)
              # 17/1/13:   602993184  (x86_64/Linux)
              #            (new demand analyser)
@@ -382,7 +382,6 @@ test('T5030',
              #                          of family-applications leads to less sharing, I think
              # 2015-03-17 403932600  tweak to solver algorithm
 	     # 2015-12-11 653710960  TypeInType (see #11196)
-	     # 2016-03-14 342331936  unify type families eagerly
 
        only_ways(['normal'])
       ],
@@ -395,7 +394,7 @@ test('T5631',
         # expected value: 392904228 (x86/Linux)
         # 2014-04-04:     346389856 (x86 Windows, 64 bit machine)
         # 2014-12-01:     390199244 (Windows laptop)
-           (wordsize(64), 1198327544, 5)]),
+           (wordsize(64), 1124068664, 5)]),
         # expected value: 774595008 (amd64/Linux):
         # expected value: 735486328 (amd64/Linux) 2012/12/12:
         # expected value: 690742040 (amd64/Linux) Call Arity improvements
@@ -404,6 +403,7 @@ test('T5631',
         # 2015-06-01:     812288344 (amd64/Linux) unknown cause
 	# 2015-12-11:     1128828928 (amd64/Linux) TypeInType (see #11196)
 	# 2015-12-21:     1198327544 (Mac) TypeApplications (will fix with #11196)
+	# 2015-03-18:     1124068664 (Mac) optimize Unify & zonking
        only_ways(['normal'])
       ],
      compile,
@@ -558,7 +558,7 @@ test('T5837',
              # 2014-12-01: 135914136 (Windows laptop, regression see below)
              # 2014-12-08  115905208  Constraint solver perf improvements (esp kick-out)
 
-           (wordsize(64), 43877520, 10)])
+           (wordsize(64), 48507272, 10)])
              # sample: 3926235424 (amd64/Linux, 15/2/2012)
              # 2012-10-02 81879216
              # 2012-09-20 87254264 amd64/Linux
@@ -575,6 +575,8 @@ test('T5837',
              # 2015-03-17 53424304  Mac  Better depth checking; fails earlier
              # 2015-06-09 38834096  Better "improvement"; I'm not sure whey it improves things
 	     # 2015-12-11 43877520  amd64/Linux, TypeInType (see #11196)
+	     # 2016-03-18 48507272  Mac, accept small regression in exchange
+	     #                           for other optimisations
       ],
       compile_fail,['-freduction-depth=50'])
 
@@ -704,12 +706,13 @@ test('T9872c',
 test('T9872d',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 534693648, 5),
+          [(wordsize(64), 506691240, 5),
           # 2014-12-18    796071864   Initally created
           # 2014-12-18    739189056   Reduce type families even more eagerly
           # 2015-01-07    687562440   TrieMap leaf compression
           # 2015-03-17    726679784   tweak to solver; probably flattens more
 	  # 2016-02-08    534693648   Improved a bit by tyConRolesRepresentational
+	  # 2016-03-18    506691240   optimize Unify & zonking
            (wordsize(32), 59651432, 5)
           # some date     328810212
           # 2015-07-11    350369584
@@ -722,12 +725,14 @@ test('T9872d',
 test('T9961',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 745044392, 5),
+          [(wordsize(64), 568526784, 5),
           # 2015-01-12    807117816   Initally created
           # 2015-spring   772510192   Got better
           # 2015-05-22    663978160   Fix for #10370 improves it more
           # 2015-10-28    708680480   x86_64/Linux   Emit Typeable at definition site
           # 2015-12-17    745044392   x86_64/Darwin  Creep upwards
+          # 2016-03-20    519436672   x64_64/Linux   Don't use build desugaring for large lists (#11707)
+          # 2016-03-24    568526784   x64_64/Linux   Add eqInt* variants (#11688)
            (wordsize(32), 375647160, 5)
           ]),
       ],

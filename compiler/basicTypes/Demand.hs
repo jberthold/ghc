@@ -37,7 +37,7 @@ module Demand (
         appIsBottom, isBottomingSig, pprIfaceStrictSig,
         trimCPRInfo, returnsCPR_maybe,
         StrictSig(..), mkStrictSig, mkClosedStrictSig, nopSig, botSig, cprProdSig,
-        isNopSig, splitStrictSig, increaseStrictSigArity,
+        isTopSig, splitStrictSig, increaseStrictSigArity,
 
         seqDemand, seqDemandList, seqDmdType, seqStrictSig,
 
@@ -1239,8 +1239,7 @@ bothDmdType (DmdType fv1 ds1 r1) (fv2, t2)
 
 instance Outputable DmdType where
   ppr (DmdType fv ds res)
-    = hsep [text "DmdType",
-            hcat (map ppr ds) <> ppr res,
+    = hsep [hcat (map ppr ds) <> ppr res,
             if null fv_elts then empty
             else braces (fsep (map pp_elt fv_elts))]
     where
@@ -1262,10 +1261,10 @@ cprProdDmdType :: Arity -> DmdType
 cprProdDmdType arity
   = DmdType emptyDmdEnv [] (vanillaCprProdRes arity)
 
-isNopDmdType :: DmdType -> Bool
-isNopDmdType (DmdType env [] res)
+isTopDmdType :: DmdType -> Bool
+isTopDmdType (DmdType env [] res)
   | isTopRes res && isEmptyVarEnv env = True
-isNopDmdType _                        = False
+isTopDmdType _                        = False
 
 mkDmdType :: DmdEnv -> [Demand] -> DmdResult -> DmdType
 mkDmdType fv ds res = DmdType fv ds res
@@ -1447,7 +1446,7 @@ peelManyCalls n (JD { sd = str, ud = abs })
     go_str n (SCall d') = go_str (n-1) d'
     go_str _ _          = Lazy
 
-    go_abs :: Int -> UseDmd -> Use () -- Many <=> unsaturated, or at least
+    go_abs :: Int -> UseDmd -> Use ()      -- Many <=> unsaturated, or at least
     go_abs 0 _              = Use One ()   --          one UCall Many in the demand
     go_abs n (UCall One d') = go_abs (n-1) d'
     go_abs _ _              = Use Many ()
@@ -1669,8 +1668,8 @@ increaseStrictSigArity :: Int -> StrictSig -> StrictSig
 increaseStrictSigArity arity_increase (StrictSig (DmdType env dmds res))
   = StrictSig (DmdType env (replicate arity_increase topDmd ++ dmds) res)
 
-isNopSig :: StrictSig -> Bool
-isNopSig (StrictSig ty) = isNopDmdType ty
+isTopSig :: StrictSig -> Bool
+isTopSig (StrictSig ty) = isTopDmdType ty
 
 isBottomingSig :: StrictSig -> Bool
 -- True if the signature diverges or throws an exception
@@ -1777,7 +1776,9 @@ argsOneShots (StrictSig (DmdType _ arg_ds _)) n_val_args
     cons [] [] = []
     cons a  as = a:as
 
-argOneShots :: OneShotInfo -> Demand -> [OneShotInfo]
+argOneShots :: OneShotInfo     -- OneShotLam or ProbOneShot,
+            -> Demand          -- depending on saturation
+            -> [OneShotInfo]
 argOneShots one_shot_info (JD { ud = usg })
   = case usg of
       Use _ arg_usg -> go arg_usg

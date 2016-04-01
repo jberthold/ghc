@@ -271,13 +271,10 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         haiku)
             test -z "[$]2" || eval "[$]2=OSHaiku"
             ;;
-        osf3)
-            test -z "[$]2" || eval "[$]2=OSOsf3"
-            ;;
         nto-qnx)
             test -z "[$]2" || eval "[$]2=OSQNXNTO"
             ;;
-        dragonfly|osf1|hpux|linuxaout|freebsd2|gnu|nextstep2|nextstep3|sunos4|ultrix|irix)
+        dragonfly|hpux|linuxaout|freebsd2|gnu|nextstep2|nextstep3|sunos4|ultrix)
             test -z "[$]2" || eval "[$]2=OSUnknown"
             ;;
         aix)
@@ -517,6 +514,48 @@ AC_DEFUN([FP_SETTINGS],
     AC_SUBST(SettingsOptCommand)
 ])
 
+# Helper for cloning a shell variable's state
+AC_DEFUN([FP_COPY_SHELLVAR],
+[if test -n "${$1+set}"; then $2="$$1"; else unset $2; fi ])
+
+# FP_SET_CFLAGS_C99
+# ----------------------------------
+# figure out which CFLAGS are needed to place the compiler into C99 mode
+# $1 is name of CC variable (unmodified)
+# $2 is name of CC flags variable (augmented if needed)
+# $3 is name of CPP flags variable (augmented if needed)
+AC_DEFUN([FP_SET_CFLAGS_C99],
+[
+    dnl save current state of AC_PROG_CC_C99
+    FP_COPY_SHELLVAR([CC],[fp_save_CC])
+    FP_COPY_SHELLVAR([CFLAGS],[fp_save_CFLAGS])
+    FP_COPY_SHELLVAR([CPPFLAGS],[fp_save_CPPFLAGS])
+    FP_COPY_SHELLVAR([ac_cv_prog_cc_c99],[fp_save_cc_c99])
+    dnl set local state
+    CC="$$1"
+    CFLAGS="$$2"
+    CPPFLAGS="$$3"
+    unset ac_cv_prog_cc_c99
+    dnl perform detection
+    _AC_PROG_CC_C99
+    fp_cc_c99="$ac_cv_prog_cc_c99"
+    case "x$ac_cv_prog_cc_c99" in
+      x)   ;; # noop
+      xno) AC_MSG_ERROR([C99-compatible compiler needed]) ;;
+      *)   $2="$$2 $ac_cv_prog_cc_c99"
+           $3="$$3 $ac_cv_prog_cc_c99"
+           ;;
+    esac
+    dnl restore saved state
+    FP_COPY_SHELLVAR([fp_save_CC],[CC])
+    FP_COPY_SHELLVAR([fp_save_CFLAGS],[CFLAGS])
+    FP_COPY_SHELLVAR([fp_save_CPPFLAGS],[CPPFLAGS])
+    FP_COPY_SHELLVAR([fp_save_cc_c99],[ac_cv_prog_cc_c99])
+    dnl cleanup
+    unset fp_save_CC
+    unset fp_save_CFLAGS
+    unset fp_save_cc_c99
+])
 
 # FPTOOLS_SET_C_LD_FLAGS
 # ----------------------------------
@@ -594,15 +633,10 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         ;;
 
     powerpc-ibm-aix*)
-        # On IBM AIX, we need to workaround XCOFF's limitations. Specifically,
-        # there's a TOC which only supports at most 16k entries (see
-        # http://www.ibm.com/developerworks/rational/library/overview-toc-aix/
-        # for more details), and by using `-mminimal-toc` we use up only one TOC
-        # entry per translation unit, at the cost of an additional pointer
-        # indirection. However, see note in `compiler/ghc.mk` about `Parser.hs`.
-        # Finally, we need `-D_THREAD_SAFE` to unlock a thread-local `errno`.
-        $2="$$2 -mminimal-toc -D_THREAD_SAFE"
-        $3="$$3 -mminimal-toc -D_THREAD_SAFE"
+        # We need `-D_THREAD_SAFE` to unlock the thread-local `errno`.
+        $2="$$2 -D_THREAD_SAFE"
+        $3="$$3 -D_THREAD_SAFE -Wl,-bnotextro"
+        $4="$$4 -bnotextro"
         $5="$$5 -D_THREAD_SAFE"
         ;;
 
@@ -819,7 +853,6 @@ case $HostPlatform in
     i386-*2\.@<:@0-9@:>@ | i386-*3\.@<:@0-3@:>@ ) fptools_cv_leading_underscore=yes ;;
     *) fptools_cv_leading_underscore=no ;;
   esac ;;
-alpha-dec-osf*) fptools_cv_leading_underscore=no;;
 i386-unknown-mingw32) fptools_cv_leading_underscore=yes;;
 x86_64-unknown-mingw32) fptools_cv_leading_underscore=no;;
 
@@ -1889,7 +1922,7 @@ case "$1-$2" in
         $3="linux"
         ;;
       # As far as I'm aware, none of these have relevant variants
-      freebsd|netbsd|openbsd|dragonfly|osf1|osf3|hpux|linuxaout|kfreebsdgnu|freebsd2|solaris2|mingw32|darwin|gnu|nextstep2|nextstep3|sunos4|ultrix|irix|haiku)
+      freebsd|netbsd|openbsd|dragonfly|hpux|linuxaout|kfreebsdgnu|freebsd2|solaris2|mingw32|darwin|gnu|nextstep2|nextstep3|sunos4|ultrix|haiku)
         $3="$1"
         ;;
       aix*) # e.g. powerpc-ibm-aix7.1.3.0
@@ -2042,22 +2075,19 @@ AC_DEFUN([FIND_GHC_BOOTSTRAP_PROG],[
 # $2 = the with option name
 # $3 = the command to look for
 AC_DEFUN([FIND_GCC],[
-    if test "$TargetOS_CPP" = "darwin" &&
-       test "$XCodeVersion1" -eq 4 &&
-       test "$XCodeVersion2" -lt 2
-    then
-        # In Xcode 4.1, 'gcc-4.2' is the gcc legacy backend (rather
-        # than the LLVM backend). We prefer the legacy gcc, but in
-        # Xcode 4.2 'gcc-4.2' was removed.
-        FP_ARG_WITH_PATH_GNU_PROG([$1], [gcc-4.2], [gcc-4.2])
-    elif test "$windows" = YES
+    if test "$windows" = YES
     then
         $1="$CC"
     else
         FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [$2], [$3])
+        # fallback to CC if set and no --with-$2=... was used
+        if test -z "$With_$2" -a -n "$CC"
+        then
+            With_$2="$CC"
+            $1="$CC"
         # From Xcode 5 on/, OS X command line tools do not include gcc
         # anymore. Use clang.
-        if test -z "$$1"
+        elif test -z "$$1"
         then
             FP_ARG_WITH_PATH_GNU_PROG_OPTIONAL([$1], [clang], [clang])
         fi

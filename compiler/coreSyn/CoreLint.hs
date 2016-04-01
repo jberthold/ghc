@@ -14,7 +14,7 @@ module CoreLint (
     lintAnnots,
 
     -- ** Debug output
-    CoreLint.showPass, showPassIO, endPass, endPassIO,
+    endPass, endPassIO,
     dumpPassResult,
     CoreLint.dumpIfSet,
  ) where
@@ -175,13 +175,6 @@ These functions are not CoreM monad stuff, but they probably ought to
 be, and it makes a conveneint place.  place for them.  They print out
 stuff before and after core passes, and do Core Lint when necessary.
 -}
-
-showPass :: CoreToDo -> CoreM ()
-showPass pass = do { dflags <- getDynFlags
-                   ; liftIO $ showPassIO dflags pass }
-
-showPassIO :: DynFlags -> CoreToDo -> IO ()
-showPassIO dflags pass = Err.showPass dflags (showPpr dflags pass)
 
 endPass :: CoreToDo -> CoreProgram -> [CoreRule] -> CoreM ()
 endPass pass binds rules
@@ -591,7 +584,7 @@ lintCoreExpr :: CoreExpr -> LintM OutType
 -- If you edit this function, you may need to update the GHC formalism
 -- See Note [GHC Formalism]
 lintCoreExpr (Var var)
-  = do  { checkL (isId var && not (isCoVar var))
+  = do  { checkL (isNonCoVarId var)
                  (text "Non term variable" <+> ppr var)
 
         ; checkDeadIdOcc var
@@ -1297,11 +1290,22 @@ lintCoercion co@(AppCo co1 co2)
 lintCoercion (ForAllCo tv1 kind_co co)
   = do { (_, k2) <- lintStarCoercion kind_co
        ; let tv2 = setTyVarKind tv1 k2
-       ; (k3, k4, t1, t2, r) <- addInScopeVar tv1 $ lintCoercion co
+       ; addInScopeVar tv1 $
+    do {
+       ; (k3, k4, t1, t2, r) <- lintCoercion co
+       ; in_scope <- getInScope
        ; let tyl = mkNamedForAllTy tv1 Invisible t1
+             subst = mkTvSubst in_scope $
+                     -- We need both the free vars of the `t2` and the
+                     -- free vars of the range of the substitution in
+                     -- scope. All the free vars of `t2` and `kind_co` should
+                     -- already be in `in_scope`, because they've been
+                     -- linted and `tv2` has the same unique as `tv1`.
+                     -- See Note [The substitution invariant]
+                     unitVarEnv tv1 (TyVarTy tv2 `mkCastTy` mkSymCo kind_co)
              tyr = mkNamedForAllTy tv2 Invisible $
-                   substTyWithUnchecked [tv1] [TyVarTy tv2 `mkCastTy` mkSymCo kind_co] t2
-       ; return (k3, k4, tyl, tyr, r) }
+                   substTy subst t2
+       ; return (k3, k4, tyl, tyr, r) } }
 
 lintCoercion (CoVarCo cv)
   | not (isCoVar cv)

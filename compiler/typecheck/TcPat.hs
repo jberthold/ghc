@@ -398,8 +398,7 @@ tc_pat penv (ViewPat expr pat _) overall_pat_ty thing_inside
             -- expr_wrap1 :: expr'_inferred "->" (inf_arg_ty -> inf_res_ty)
 
          -- check that overall pattern is more polymorphic than arg type
-        ; let pat_origin = GivenOrigin (SigSkol GenSigCtxt overall_pat_ty)
-        ; expr_wrap2 <- tcSubTypeET pat_origin overall_pat_ty inf_arg_ty
+        ; expr_wrap2 <- tcSubTypeET (pe_orig penv) overall_pat_ty inf_arg_ty
             -- expr_wrap2 :: overall_pat_ty "->" inf_arg_ty
 
          -- pattern must have inf_res_ty
@@ -1017,7 +1016,8 @@ addDataConStupidTheta data_con inst_tys
         -- The origin should always report "occurrence of C"
         -- even when C occurs in a pattern
     stupid_theta = dataConStupidTheta data_con
-    tenv = zipTvSubst (dataConUnivTyVars data_con) inst_tys
+    univ_tvs     = dataConUnivTyVars data_con
+    tenv = zipTvSubst univ_tvs (takeList univ_tvs inst_tys)
          -- NB: inst_tys can be longer than the univ tyvars
          --     because the constructor might have existentials
     inst_theta = substTheta tenv stupid_theta

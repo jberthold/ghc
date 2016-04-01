@@ -68,7 +68,9 @@ module TcMType (
   tidyEvVar, tidyCt, tidySkolemInfo,
   skolemiseUnboundMetaTyVar,
   zonkTcTyVar, zonkTcTyVars, zonkTyCoVarsAndFV, zonkTcTypeAndFV,
-  zonkQuantifiedTyVar, zonkQuantifiedTyVarOrType, quantifyTyVars,
+  zonkTcTypeAndSplitDepVars, zonkTcTypesAndSplitDepVars,
+  zonkQuantifiedTyVar, zonkQuantifiedTyVarOrType,
+  quantifyTyVars, quantifyZonkedTyVars,
   defaultKindVar,
   zonkTcTyCoVarBndr, zonkTcTyBinder, zonkTcType, zonkTcTypes, zonkCo,
   zonkTyCoVarKind, zonkTcTypeMapper,
@@ -391,14 +393,18 @@ checkingExpType err et         = pprPanic "checkingExpType" (text err $$ ppr et)
 tauifyExpType :: ExpType -> TcM ExpType
 -- ^ Turn a (Infer hole) type into a (Check alpha),
 -- where alpha is a fresh unificaiton variable
-tauifyExpType exp_ty = do { ty <- expTypeToType exp_ty
-                          ; return (Check ty) }
+tauifyExpType (Check ty)              = return (Check ty)  -- No-op for (Check ty)
+tauifyExpType (Infer u tc_lvl ki ref) = do { ty <- inferTypeToType u tc_lvl ki ref
+                                           ; return (Check ty) }
 
 -- | Extracts the expected type if there is one, or generates a new
 -- TauTv if there isn't.
 expTypeToType :: ExpType -> TcM TcType
-expTypeToType (Check ty) = return ty
-expTypeToType (Infer u tc_lvl ki ref)
+expTypeToType (Check ty)              = return ty
+expTypeToType (Infer u tc_lvl ki ref) = inferTypeToType u tc_lvl ki ref
+
+inferTypeToType :: Unique -> TcLevel -> Kind -> IORef (Maybe TcType) -> TcM Type
+inferTypeToType u tc_lvl ki ref
   = do { uniq <- newUnique
        ; tv_ref <- newMutVar Flexi
        ; let details = MetaTv { mtv_info = TauTv
@@ -437,7 +443,7 @@ tcInstType inst_tyvars ty
                             return ([], theta, tau)
 
         (tyvars, rho) -> do { (subst, tyvars') <- inst_tyvars tyvars
-                            ; let (theta, tau) = tcSplitPhiTy (substTyUnchecked subst rho)
+                            ; let (theta, tau) = tcSplitPhiTy (substTyAddInScope subst rho)
                             ; return (tyvars', theta, tau) }
 
 tcSkolDFunType :: Type -> TcM ([TcTyVar], TcThetaType, TcType)
@@ -827,22 +833,27 @@ Note that this function can accept covars, but will never return them.
 This is because we never want to infer a quantified covar!
 -}
 
-quantifyTyVars :: TcTyCoVarSet   -- global tvs
-               -> Pair TcTyCoVarSet    -- dependent tvs       We only distinguish
-                                       -- nondependent tvs    between these for
-                                       --                     -XNoPolyKinds
-               -> TcM [TcTyVar]
+quantifyTyVars, quantifyZonkedTyVars
+  :: TcTyCoVarSet   -- global tvs
+  -> Pair TcTyCoVarSet    -- dependent tvs       We only distinguish
+                          -- nondependent tvs    between these for
+                          --                     -XNoPolyKinds
+  -> TcM [TcTyVar]
 -- See Note [quantifyTyVars]
 -- Can be given a mixture of TcTyVars and TyVars, in the case of
 --   associated type declarations. Also accepts covars, but *never* returns any.
+
+-- The zonked variant assumes everything is already zonked.
 
 quantifyTyVars gbl_tvs (Pair dep_tkvs nondep_tkvs)
   = do { dep_tkvs    <- zonkTyCoVarsAndFV dep_tkvs
        ; nondep_tkvs <- (`minusVarSet` dep_tkvs) <$>
                         zonkTyCoVarsAndFV nondep_tkvs
        ; gbl_tvs     <- zonkTyCoVarsAndFV gbl_tvs
+       ; quantifyZonkedTyVars gbl_tvs (Pair dep_tkvs nondep_tkvs) }
 
-       ; let all_cvs    = filterVarSet isCoVar $
+quantifyZonkedTyVars gbl_tvs (Pair dep_tkvs nondep_tkvs)
+  = do { let all_cvs    = filterVarSet isCoVar $
                           dep_tkvs `unionVarSet` nondep_tkvs `minusVarSet` gbl_tvs
              dep_kvs    = varSetElemsWellScoped $
                           dep_tkvs `minusVarSet` gbl_tvs
@@ -1137,6 +1148,11 @@ tcGetGlobalTyCoVars
        ; writeMutVar gtv_var gbl_tvs'
        ; return gbl_tvs' }
 
+-- | Zonk a type without using the smart constructors; the result type
+-- is available for inspection within the type-checking knot.
+zonkTcTypeInKnot :: TcType -> TcM TcType
+zonkTcTypeInKnot = mapType (zonkTcTypeMapper { tcm_smart = False }) ()
+
 zonkTcTypeAndFV :: TcType -> TcM TyCoVarSet
 -- Zonk a type and take its free variables
 -- With kind polymorphism it can be essential to zonk *first*
@@ -1147,7 +1163,17 @@ zonkTcTypeAndFV :: TcType -> TcM TyCoVarSet
 -- NB: This might be called from within the knot, so don't use
 -- smart constructors. See Note [Zonking within the knot] in TcHsType
 zonkTcTypeAndFV ty
-  = tyCoVarsOfType <$> mapType (zonkTcTypeMapper { tcm_smart = False }) () ty
+  = tyCoVarsOfType <$> zonkTcTypeInKnot ty
+
+-- | Zonk a type and call 'splitDepVarsOfType' on it.
+-- Works within the knot.
+zonkTcTypeAndSplitDepVars :: TcType -> TcM (Pair TyCoVarSet)
+zonkTcTypeAndSplitDepVars ty
+  = splitDepVarsOfType <$> zonkTcTypeInKnot ty
+
+zonkTcTypesAndSplitDepVars :: [TcType] -> TcM (Pair TyCoVarSet)
+zonkTcTypesAndSplitDepVars tys
+  = splitDepVarsOfTypes <$> mapM zonkTcTypeInKnot tys
 
 zonkTyCoVar :: TyCoVar -> TcM TcType
 -- Works on TyVars and TcTyVars
@@ -1244,9 +1270,8 @@ zonkCtEvidence ctev@(CtDerived { ctev_pred = pred })
        ; return (ctev { ctev_pred = pred' }) }
 
 zonkSkolemInfo :: SkolemInfo -> TcM SkolemInfo
-zonkSkolemInfo (SigSkol cx ty)  = do { ty  <- readExpType ty
-                                     ; ty' <- zonkTcType ty
-                                     ; return (SigSkol cx (mkCheckExpType ty')) }
+zonkSkolemInfo (SigSkol cx ty)  = do { ty' <- zonkTcType ty
+                                     ; return (SigSkol cx ty') }
 zonkSkolemInfo (InferSkol ntys) = do { ntys' <- mapM do_one ntys
                                      ; return (InferSkol ntys') }
   where
@@ -1432,9 +1457,7 @@ tidyEvVar env var = setVarType var (tidyType env (varType var))
 ----------------
 tidySkolemInfo :: TidyEnv -> SkolemInfo -> SkolemInfo
 tidySkolemInfo env (DerivSkol ty)       = DerivSkol (tidyType env ty)
-tidySkolemInfo env (SigSkol cx ty)      = SigSkol cx (mkCheckExpType $
-                                                      tidyType env $
-                                                      checkingExpType "tidySkolemInfo" ty)
+tidySkolemInfo env (SigSkol cx ty)      = SigSkol cx (tidyType env ty)
 tidySkolemInfo env (InferSkol ids)      = InferSkol (mapSnd (tidyType env) ids)
 tidySkolemInfo env (UnifyForAllSkol ty) = UnifyForAllSkol (tidyType env ty)
 tidySkolemInfo _   info                 = info

@@ -139,6 +139,12 @@ compileOne' m_tc_result mHscMessage
                         m_tc_result mHscMessage
                         hsc_env summary source_modified mb_old_iface (mod_index, nmods)
 
+   let flags = hsc_dflags hsc_env0
+     in do unless (gopt Opt_KeepHiFiles flags) $
+               addFilesToClean flags [ml_hi_file $ ms_location summary]
+           unless (gopt Opt_KeepOFiles flags) $
+               addFilesToClean flags [ml_obj_file $ ms_location summary]
+
    case (status, hsc_lang) of
         (HscUpToDate, _) ->
             ASSERT( isJust maybe_old_linkable || isNoLink (ghcLink dflags) )
@@ -2044,9 +2050,8 @@ linkBinary' staticLink dflags o_files dep_packages = do
     let thread_opts
          | WayThreaded `elem` ways dflags =
             let os = platformOS (targetPlatform dflags)
-            in if os == OSOsf3 then ["-lpthread", "-lexc"]
-               else if os `elem` [OSMinGW32, OSFreeBSD, OSOpenBSD,
-                                  OSNetBSD, OSHaiku, OSQNXNTO, OSiOS, OSDarwin]
+            in if os `elem` [OSMinGW32, OSFreeBSD, OSOpenBSD,
+                             OSNetBSD, OSHaiku, OSQNXNTO, OSiOS, OSDarwin]
                then []
                else ["-lpthread"]
          | otherwise               = []
@@ -2304,13 +2309,14 @@ doCpp dflags raw input_fn output_fn = do
     let uids = explicitPackages (pkgState dflags)
         pkgs = catMaybes (map (lookupPackage dflags) uids)
     mb_macro_include <-
-        -- Only generate if we have (1) we have set -hide-all-packages
-        -- (so we don't generate a HUGE macro file of things we don't
-        -- care about but are exposed) and (2) we actually have packages
-        -- to write macros for!
-        if gopt Opt_HideAllPackages dflags && not (null pkgs)
+        if not (null pkgs) && gopt Opt_VersionMacros dflags
             then do macro_stub <- newTempName dflags "h"
                     writeFile macro_stub (generatePackageVersionMacros pkgs)
+                    -- Include version macros for every *exposed* package.
+                    -- Without -hide-all-packages and with a package database
+                    -- size of 1000 packages, it takes cpp an estimated 2
+                    -- milliseconds to process this file. See Trac #10970
+                    -- comment 8.
                     return [SysTools.FileOption "-include" macro_stub]
             else return []
 
@@ -2358,8 +2364,8 @@ getBackendDefs _ =
 
 generatePackageVersionMacros :: [PackageConfig] -> String
 generatePackageVersionMacros pkgs = concat
-  [ "/* package " ++ sourcePackageIdString pkg ++ " */\n"
-  ++ generateMacros "" pkgname version
+  -- Do not add any C-style comments. See Trac #3389.
+  [ generateMacros "" pkgname version
   | pkg <- pkgs
   , let version = packageVersion pkg
         pkgname = map fixchar (packageNameString pkg)

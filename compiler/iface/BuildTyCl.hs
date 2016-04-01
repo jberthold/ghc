@@ -29,6 +29,7 @@ import MkId
 import Class
 import TyCon
 import Type
+import TyCoRep( TyBinder(..) )
 import Id
 import TcType
 
@@ -111,7 +112,9 @@ buildDataCon :: FamInstEnvs
             -> Maybe [HsImplBang]
                 -- See Note [Bangs on imported data constructors] in MkId
            -> [FieldLabel]             -- Field labels
-           -> [TyVar] -> [TyVar]       -- Univ and ext
+           -> [TyVar] -> [TyBinder]    -- Universals; see
+                                       -- Note [TyBinders in DataCons] in DataCon
+           -> [TyVar] -> [TyBinder]    -- existentials
            -> [EqSpec]                 -- Equality spec
            -> ThetaType                -- Does not include the "stupid theta"
                                        -- or the GADT equalities
@@ -122,8 +125,9 @@ buildDataCon :: FamInstEnvs
 --   a) makes the worker Id
 --   b) makes the wrapper Id if necessary, including
 --      allocating its unique (hence monadic)
+--   c) Sorts out the TyBinders. See Note [TyBinders in DataCons] in DataCon
 buildDataCon fam_envs src_name declared_infix prom_info src_bangs impl_bangs field_lbls
-             univ_tvs ex_tvs eq_spec ctxt arg_tys res_ty rep_tycon
+             univ_tvs univ_bndrs ex_tvs ex_bndrs eq_spec ctxt arg_tys res_ty rep_tycon
   = do  { wrap_name <- newImplicitBinder src_name mkDataConWrapperOcc
         ; work_name <- newImplicitBinder src_name mkDataConWorkerOcc
         -- This last one takes the name of the data constructor in the source
@@ -133,16 +137,16 @@ buildDataCon fam_envs src_name declared_infix prom_info src_bangs impl_bangs fie
         ; traceIf (text "buildDataCon 1" <+> ppr src_name)
         ; us <- newUniqueSupply
         ; dflags <- getDynFlags
-        ; let
-                stupid_ctxt = mkDataConStupidTheta rep_tycon arg_tys univ_tvs
-                data_con = mkDataCon src_name declared_infix prom_info
-                                     src_bangs field_lbls
-                                     univ_tvs ex_tvs eq_spec ctxt
-                                     arg_tys res_ty NoRRI rep_tycon
-                                     stupid_ctxt dc_wrk dc_rep
-                dc_wrk = mkDataConWorkId work_name data_con
-                dc_rep = initUs_ us (mkDataConRep dflags fam_envs wrap_name
-                                                  impl_bangs data_con)
+        ; let dc_bndrs    = mkDataConUnivTyBinders univ_bndrs univ_tvs
+              stupid_ctxt = mkDataConStupidTheta rep_tycon arg_tys univ_tvs
+              data_con = mkDataCon src_name declared_infix prom_info
+                                   src_bangs field_lbls
+                                   univ_tvs dc_bndrs ex_tvs ex_bndrs eq_spec ctxt
+                                   arg_tys res_ty NoRRI rep_tycon
+                                   stupid_ctxt dc_wrk dc_rep
+              dc_wrk = mkDataConWorkId work_name data_con
+              dc_rep = initUs_ us (mkDataConRep dflags fam_envs wrap_name
+                                                impl_bangs data_con)
 
         ; traceIf (text "buildDataCon 2" <+> ppr src_name)
         ; return data_con }
@@ -167,18 +171,81 @@ mkDataConStupidTheta tycon arg_tys univ_tvs
                       tyCoVarsOfType pred `intersectVarSet` arg_tyvars
 
 
+mkDataConUnivTyBinders :: [TyBinder] -> [TyVar]   -- From the TyCon
+                       -> [TyBinder]              -- For the DataCon
+-- See Note [Building the TyBinders for a DataCon]
+mkDataConUnivTyBinders bndrs tvs
+ = zipWith mk_binder bndrs tvs
+ where
+   mk_binder bndr tv = mkNamedBinder vis tv
+      where
+        vis = case bndr of
+                Anon _          -> Specified
+                Named _ Visible -> Specified
+                Named _ vis     -> vis
+
+{- Note [Building the TyBinders for a DataCon]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+A DataCon needs to keep track of the visibility of its universals and
+existentials, so that visible type application can work properly. This
+is done by storing the universal and existential TyBinders, along with
+the TyVars.  See Note [TyBinders in DataCons] in DataCon.
+
+During construction of a DataCon, we often start from the TyBinders of
+the parent TyCon.  For example
+   data Maybe a = Nothing | Just a
+The DataCons start from the TyBinders of the parent TyCon.
+
+But the ultimate TyBinders for the DataCon are *different* than those
+of the DataCon. Here is an example:
+
+  data App a b = MkApp (a b) -- App :: forall {k}. (k->*) -> k -> *
+
+The TyCon has
+
+  tyConTyVars    = [ k:*,                      a:k->*,      b:k]
+  tyConTyBinders = [ Named (k :: *) Invisible, Anon (k->*), Anon k ]
+
+The TyBinders for App line up with App's kind, given above.
+
+But the DataCon MkApp has the type
+  MkApp :: forall {k} (a:k->*) (b:k). a b -> App k a b
+
+That is, its TyBinders should be
+
+  dataConUnivTyVars = [ Named (k:*)    Invisible
+                      , Named (a:k->*) Specified
+                      , Named (b:k)    Specified ]
+
+So we want to take the TyCon's TyBinders and the TyCon's TyVars and
+merge them, pulling
+  - variable names from the TyVars
+  - visibilities from the TyBinders
+  - but changing Anon/Visible to Specified
+
+The last part about Visible->Specified comes from this:
+  data T k (a:k) b = MkT (a b)
+Here k is Visible in T's kind, but we don't have Visible binders in
+the TyBinders for a term (see Note [No Visible TyBinder in terms]
+in TyCoRep), so we change it to Specified when making MkT's TyBinders
+
+This merging operation is done by mkDataConUnivTyBinders. In contrast,
+the TyBinders passed to mkDataCon are the final TyBinders stored in the
+DataCon (mkDataCon does no further work).
+-}
+
 ------------------------------------------------------
 buildPatSyn :: Name -> Bool
             -> (Id,Bool) -> Maybe (Id, Bool)
-            -> ([TyVar], ThetaType) -- ^ Univ and req
-            -> ([TyVar], ThetaType) -- ^ Ex and prov
+            -> ([TyVar], [TyBinder], ThetaType) -- ^ Univ and req
+            -> ([TyVar], [TyBinder], ThetaType) -- ^ Ex and prov
             -> [Type]               -- ^ Argument types
             -> Type                 -- ^ Result type
             -> [FieldLabel]         -- ^ Field labels for
                                     --   a record pattern synonym
             -> PatSyn
 buildPatSyn src_name declared_infix matcher@(matcher_id,_) builder
-            (univ_tvs, req_theta) (ex_tvs, prov_theta) arg_tys
+            (univ_tvs, univ_bndrs, req_theta) (ex_tvs, ex_bndrs, prov_theta) arg_tys
             pat_ty field_labels
   = -- The assertion checks that the matcher is
     -- compatible with the pattern synonym
@@ -196,7 +263,7 @@ buildPatSyn src_name declared_infix matcher@(matcher_id,_) builder
                     , ppr req_theta <+> twiddle <+> ppr req_theta1
                     , ppr arg_tys <+> twiddle <+> ppr arg_tys1]))
     mkPatSyn src_name declared_infix
-             (univ_tvs, req_theta) (ex_tvs, prov_theta)
+             (univ_tvs, univ_bndrs, req_theta) (ex_tvs, ex_bndrs, prov_theta)
              arg_tys pat_ty
              matcher builder field_labels
   where
@@ -215,7 +282,7 @@ type TcMethInfo = (Name, Type, Maybe (DefMethSpec Type))
 
 buildClass :: Name  -- Name of the class/tycon (they have the same Name)
            -> [TyVar] -> [Role] -> ThetaType
-           -> [TyBinder]
+           -> [TyBinder]                   -- of the tycon
            -> [FunDep TyVar]               -- Functional dependencies
            -> [ClassATItem]                -- Associated types
            -> [TcMethInfo]                 -- Method info
@@ -273,7 +340,9 @@ buildClass tycon_name tvs roles sc_theta binders
                                    (map (const no_bang) args)
                                    (Just (map (const HsLazy) args))
                                    [{- No fields -}]
-                                   tvs [{- no existentials -}]
+                                   tvs binders
+                                   [{- no existentials -}]
+                                   [{- no existentials -}]
                                    [{- No GADT equalities -}]
                                    [{- No theta -}]
                                    arg_tys

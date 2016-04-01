@@ -1203,13 +1203,13 @@ data TcIdSigBndr   -- See Note [Complete and partial type signatures]
 
 data TcPatSynInfo
   = TPSI {
-        patsig_name     :: Name,
-        patsig_univ_tvs :: [TcTyVar],
-        patsig_req      :: TcThetaType,
-        patsig_ex_tvs   :: [TcTyVar],
-        patsig_prov     :: TcThetaType,
-        patsig_arg_tys  :: [TcSigmaType],
-        patsig_body_ty  :: TcSigmaType
+        patsig_name       :: Name,
+        patsig_univ_bndrs :: [TcTyBinder],
+        patsig_req        :: TcThetaType,
+        patsig_ex_bndrs   :: [TcTyBinder],
+        patsig_prov       :: TcThetaType,
+        patsig_arg_tys    :: [TcSigmaType],
+        patsig_body_ty    :: TcSigmaType
     }
 
 findScopedTyVars  -- See Note [Binding scoped type variables]
@@ -2574,7 +2574,7 @@ pushErrCtxtSameOrigin err loc@(CtLoc { ctl_env = lcl })
 --   b) an implication constraint is generated
 data SkolemInfo
   = SigSkol UserTypeCtxt        -- A skolem that is created by instantiating
-            ExpType             -- a programmer-supplied type signature
+            TcType              -- a programmer-supplied type signature
                                 -- Location of the binding site is on the TyVar
 
   | ClsSkol Class       -- Bound at a class decl
@@ -2646,10 +2646,11 @@ pprSkolInfo (UnifyForAllSkol ty) = text "the type" <+> ppr ty
 -- For Insts, these cases should not happen
 pprSkolInfo UnkSkol = WARN( True, text "pprSkolInfo: UnkSkol" ) text "UnkSkol"
 
-pprSigSkolInfo :: UserTypeCtxt -> ExpType -> SDoc
+pprSigSkolInfo :: UserTypeCtxt -> TcType -> SDoc
 pprSigSkolInfo ctxt ty
   = case ctxt of
        FunSigCtxt f _ -> pp_sig f
+       PatSynCtxt {}  -> pprUserTypeCtxt ctxt  -- See Note [Skolem info for pattern synonyms]
        _              -> vcat [ pprUserTypeCtxt ctxt <> colon
                               , nest 2 (ppr ty) ]
   where
@@ -2670,7 +2671,17 @@ pprPatSkolInfo (PatSynCon ps)
         , nest 2 $ ppr ps <+> dcolon
                    <+> pprType (patSynType ps) <> comma ]
 
-{-
+{- Note [Skolem info for pattern synonyms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For pattern synonym SkolemInfo we have
+   SigSkol (PatSynCtxt p) ty
+but the type 'ty' is not very helpful.  The full pattern-synonym type
+is has the provided and required pieces, which it is inconvenient to
+record and display here. So we simply don't display the type at all,
+contenting outselves with just the name of the pattern synonym, which
+is fine.  We could do more, but it doesn't seem worth it.
+
+
 ************************************************************************
 *                                                                      *
             CtOrigin
@@ -2814,7 +2825,7 @@ exprCtOrigin (HsIPVar ip)       = IPOccOrigin ip
 exprCtOrigin (HsOverLit lit)    = LiteralOrigin lit
 exprCtOrigin (HsLit {})         = Shouldn'tHappenOrigin "concrete literal"
 exprCtOrigin (HsLam matches)    = matchesCtOrigin matches
-exprCtOrigin (HsLamCase _ ms)   = matchesCtOrigin ms
+exprCtOrigin (HsLamCase ms)     = matchesCtOrigin ms
 exprCtOrigin (HsApp (L _ e1) _) = exprCtOrigin e1
 exprCtOrigin (HsAppType (L _ e1) _) = exprCtOrigin e1
 exprCtOrigin (HsAppTypeOut {})      = panic "exprCtOrigin HsAppTypeOut"
