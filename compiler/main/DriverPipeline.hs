@@ -2065,9 +2065,8 @@ linkBinary' staticLink dflags o_files dep_packages = do
                     -- and ShMem. Flag(s) for threaded way should do
                     -- in POSIX case (code replicated for clarity)
                     let os = platformOS (targetPlatform dflags)
-                    in if os == OSOsf3 then ["-lpthread", "-lexc"]
-                       else if os `elem` [OSMinGW32, OSFreeBSD, OSOpenBSD,
-                                          OSNetBSD, OSHaiku, OSQNXNTO, OSiOS, OSDarwin]
+                    in if os `elem` [OSMinGW32, OSFreeBSD, OSOpenBSD,
+                                     OSNetBSD, OSHaiku, OSQNXNTO, OSiOS, OSDarwin]
                        then []
                        else ["-lpthread"]
                 | WayParMSlot `elem` ways dflags =
