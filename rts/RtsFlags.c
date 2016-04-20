@@ -1924,35 +1924,37 @@ static rtsBool read_heap_profiling_flag(const char *arg_in)
                 if (!right)
                     right = arg + strlen(arg);
 
-                *right = '\0';
+                char *selector = stgStrndup(left, right - left + 1);
 
                 switch (arg[2]) {
                 case 'c': // cost centre label select
-                    RtsFlags.ProfFlags.ccSelector = left;
+                    RtsFlags.ProfFlags.ccSelector = selector;
                     break;
                 case 'C':
-                    RtsFlags.ProfFlags.ccsSelector = left;
+                    RtsFlags.ProfFlags.ccsSelector = selector;
                     break;
                 case 'M':
                 case 'm': // cost centre module select
-                    RtsFlags.ProfFlags.modSelector = left;
+                    RtsFlags.ProfFlags.modSelector = selector;
                     break;
                 case 'D':
                 case 'd': // closure descr select
-                    RtsFlags.ProfFlags.descrSelector = left;
+                    RtsFlags.ProfFlags.descrSelector = selector;
                     break;
                 case 'Y':
                 case 'y': // closure type select
-                    RtsFlags.ProfFlags.typeSelector = left;
+                    RtsFlags.ProfFlags.typeSelector = selector;
                     break;
                 case 'R':
                 case 'r': // retainer select
-                    RtsFlags.ProfFlags.retainerSelector = left;
+                    RtsFlags.ProfFlags.retainerSelector = selector;
                     break;
                 case 'B':
                 case 'b': // biography select
-                    RtsFlags.ProfFlags.bioSelector = left;
+                    RtsFlags.ProfFlags.bioSelector = selector;
                     break;
+                default:
+                    free(selector);
                 }
             }
             break;

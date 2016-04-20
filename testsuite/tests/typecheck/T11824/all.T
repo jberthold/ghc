@@ -1,0 +1,1 @@
+test('T11824', normal, compile_and_run, [''])

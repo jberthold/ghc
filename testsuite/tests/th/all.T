@@ -26,6 +26,8 @@ test('TH_repGuard', normal, compile, ['-v0'])
 test('TH_repGuardOutput', normal, compile_and_run, [''])
 test('TH_repPatSig', normal, compile_fail, [''])
 
+test('TH_overlaps', normal, compile, ['-v0'])
+
 test('TH_spliceE5',
      extra_clean(['TH_spliceE5_Lib.hi', 'TH_spliceE5_Lib.o']),
      multimod_compile_and_run,
@@ -363,7 +365,7 @@ test('T10620', normal, compile_and_run, ['-v0'])
 test('T10638', normal, compile_fail, ['-v0'])
 test('T10697_decided_1', normal, compile_and_run, ['-v0'])
 test('T10697_decided_2', normal, compile_and_run, ['-XStrictData -v0'])
-test('T10697_decided_3', normal,
+test('T10697_decided_3', omit_ways(['ghci']),  # ghci doesn't support -O(2)
                          compile_and_run,
                          ['-XStrictData -funbox-strict-fields -O2 -v0'])
 test('T10697_source',
@@ -400,3 +402,7 @@ test('TH_finalizer', normal, compile, ['-v0'])
 test('T10603', normal, compile, ['-ddump-splices -dsuppress-uniques'])
 test('T11452', normal, compile_fail, ['-v0'])
 test('T11145', normal, compile_fail, ['-v0 -dsuppress-uniques'])
+test('T11463', normal, compile_and_run, ['-v0 -dsuppress-uniques'])
+test('T11680', normal, compile_fail, ['-v0'])
+test('T11809', normal, compile, ['-v0'])
+test('T11797', normal, compile, ['-v0 -dsuppress-uniques'])
