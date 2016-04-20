@@ -18,6 +18,14 @@ performance improvements over the 7.10 branch.
     package key (with GHC's :ghc-flag:`-this-package-key` argument), GHC 8.0 and
     later uses installed package IDs in place of package keys.
 
+.. note::
+
+    Users compiling GHC on Mac OS X with XCode 7.3 will need to tell the build
+    system to use the ``nm-classic`` command instead of Apple's new ``nm``
+    implementation as the latter breaks POSIX compliance (see
+    :ghc-ticket:`11744`). This can be done by passing something like
+    ``--with-nm=/Library/Developer/CommandLineTools/usr/bin/nm-classic`` to
+    ``configure``.
 
 Highlights
 ----------
@@ -72,6 +80,9 @@ The highlights, since the 7.10 branch, are:
 
 - Support for Windows XP and earlier has been dropped.
 
+- GHC RTS No longer re-exports POSIX functions under their deprecated
+  names on Windows.
+
 Full details
 ------------
 
@@ -85,7 +96,7 @@ Language
    kinds, along with kind families and type-level GADTs. Support is still
    experimental, and it is expected to improve over the next several
    releases. See :ref:`type-in-type` for the details.
-   
+
 -  The parser now supports Haddock comments on GADT data constructors.
    For example ::
 
@@ -200,6 +211,31 @@ Language
    In previous versions of GHC, this required a workaround via an
    explicit export list in ``Bar``.
 
+-  GHC has grown a :ghc-flag:`-XUndecidableSuperClasses` language extension,
+   which relaxes GHC's recursive superclass check (see :ghc-ticket:`11318`).
+   This allows class definitions which have mutually recursive superclass
+   constraints at the expense of potential non-termination in the solver.
+
+-  The compiler is now a bit more conservative in solving constraints previously
+   provided by superclasses (see :ghc-ticket:`11762`). For instance, consider
+   this program,::
+
+     {-# LANGUAGE FlexibleInstances #-}
+     {-# LANGUAGE UndecidableInstances #-}
+
+     class Super a
+     class (Super a) => Left a
+     class (Super a) => Right a
+     instance (Left a) => Right a    -- this is now an error
+
+   GHC now rejects this instance, claiming it cannot deduce the ``Super a``
+   superclass constraint of the ``Right`` typeclass. This stands in contrast to
+   previous releases, which would accept this declaration, using the ``Super a``
+   constraint implied by the ``Left a`` constraint. To fix this simply add the
+   needed superclass constraint explicitly, ::
+
+     instance (Left a, Super a) => Right a
+
 -  :ghc-flag:`-XDeriveFoldable` and :ghc-flag:`-XDeriveTraversable` now
    generate code without superfluous ``mempty`` or ``pure`` expressions. As a
    result, :ghc-flag:`-XDeriveTraversable` now works on datatypes that contain
@@ -215,6 +251,11 @@ Language
 
 Compiler
 ~~~~~~~~
+
+-  The LLVM code generator now supports only LLVM 3.7. This is in contrast to our
+   previous policy where GHC would try to support a range of LLVM versions
+   concurrently. We hope that by supporting a narrower range of versions we can
+   provide more reliable support for each.
 
 -  Warnings can now be controlled with ``-W(no-)...`` flags in addition to
    the old ``-f(no-)warn...`` ones. This was done as the first part of a
@@ -336,6 +377,13 @@ Compiler
 -  :ghc-flag:`-ddump-strsigs` has been renamed to
    :ghc-flag:`-ddump-str-signatures`.
 
+-  :ghc-flag:`-XDeriveGeneric` is now less picky about instantiating type
+   arguments when deriving (:ghc-ticket:`11732`). As a consequence, the
+   following code is now legal (whereas before it would have been rejected). ::
+
+     data T a b = T a b
+     deriving instance Generic (T Int b)
+
 GHCi
 ~~~~
 
@@ -435,6 +483,14 @@ Template Haskell
    whether flags such as :ghc-flag:`-XStrictData` or
    :ghc-flag:`-funbox-strict-fields` are enabled.
 
+-  Previously, quoting a type signature like ``a -> a`` would produce the
+   abstract syntax for ``forall a. a -> a``. This behavior remains, but it
+   is extended to kinds, too, meaning that ``Proxy a -> Proxy a`` becomes
+   ``forall k (a :: k). Proxy a -> Proxy a``. This change is not intentional,
+   but is forced by the fact that GHC has a hard time telling kinds apart
+   from types. The effect of this change is that round-tripping kind-
+   polymorphic types will now require :ghc-flag:`-XTypeInType`.
+
 Runtime system
 ~~~~~~~~~~~~~~
 
@@ -450,6 +506,12 @@ Runtime system
 - :rts-flag:`-maxN⟨x⟩ <-maxN>` flag added to complement :rts-flag:`-N`. It will
   choose to use at most ⟨x⟩ capabilities, limited by the number of processors
   as :rts-flag:`-N` is.
+
+- The runtime linker is no longer greedy and will load only the needed objects
+  from archives. This means particularly on Windows packages requiring e.g. C99
+  support will now function properly. As part of this the RTS on Windows
+  no longer re-exports deprecated posix functions under the undeprecated names
+  (see :ghc-ticket:`11223`).
 
 Build system
 ~~~~~~~~~~~~

@@ -52,6 +52,7 @@ import Digraph          ( SCC, flattenSCC, stronglyConnCompFromEdgedVertices )
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
+import Control.Arrow ( first )
 import Data.List ( sortBy )
 import Maybes( orElse, mapMaybe )
 import qualified Data.Set as Set ( difference, fromList, toList, null )
@@ -708,7 +709,10 @@ rnClsInstDecl (ClsInstDecl { cid_poly_ty = inst_ty, cid_binds = mbinds
              --     to remove the context).
 
 rnFamInstDecl :: HsDocContext
-              -> Maybe (Name, [Name])
+              -> Maybe (Name, [Name])   -- Nothing => not associated
+                                        -- Just (cls,tvs) => associated,
+                                        --   and gives class and tyvars of the
+                                        --   parent instance delc
               -> Located RdrName
               -> HsTyPats RdrName
               -> rhs
@@ -742,10 +746,17 @@ rnFamInstDecl doc mb_cls tycon (HsIB { hsib_body = pats }) payload rnPayload
                                    freeKiTyVarsAllVars pat_kity_vars_with_dups
                     ; tv_nms_dups <- mapM (lookupOccRn . unLoc) $
                                      [ tv | (tv:_:_) <- groups ]
-                          -- Add to the used variables any variables that
-                          -- appear *more than once* on the LHS
-                          -- e.g.   F a Int a = Bool
-                    ; let tv_nms_used = extendNameSetList rhs_fvs tv_nms_dups
+                          -- Add to the used variables
+                          --  a) any variables that appear *more than once* on the LHS
+                          --     e.g.   F a Int a = Bool
+                          --  b) for associated instances, the variables
+                          --     of the instance decl.  See
+                          --     Note [Unused type variables in family instances]
+                    ; let tv_nms_used = extendNameSetList rhs_fvs $
+                                        inst_tvs ++ tv_nms_dups
+                          inst_tvs = case mb_cls of
+                                       Nothing            -> []
+                                       Just (_, inst_tvs) -> inst_tvs
                     ; warnUnusedTypePatterns var_names tv_nms_used
 
                          -- See Note [Renaming associated types]
@@ -756,8 +767,8 @@ rnFamInstDecl doc mb_cls tycon (HsIB { hsib_body = pats }) payload rnPayload
 
                           is_bad cls_tkv = cls_tkv `elemNameSet` rhs_fvs
                                         && not (cls_tkv `elemNameSet` var_name_set)
-
                     ; unless (null bad_tvs) (badAssocRhs bad_tvs)
+
                     ; return ((pats', payload'), rhs_fvs `plusFV` pat_fvs) }
 
        ; let anon_wcs = concatMap collectAnonWildCards pats'
@@ -801,7 +812,7 @@ rnTyFamDefltEqn :: Name
 rnTyFamDefltEqn cls (TyFamEqn { tfe_tycon = tycon
                               , tfe_pats  = tyvars
                               , tfe_rhs   = rhs })
-  = bindHsQTyVars ctx Nothing (Just cls) [] tyvars $ \ tyvars' ->
+  = bindHsQTyVars ctx Nothing (Just cls) [] tyvars $ \ tyvars' _ ->
     do { tycon'      <- lookupFamInstName (Just cls) tycon
        ; (rhs', fvs) <- rnLHsType ctx rhs
        ; return (TyFamEqn { tfe_tycon = tycon'
@@ -871,14 +882,24 @@ fresh meta-variables whereas the former generate fresh skolems.
 
 Note [Unused type variables in family instances]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When the flag -fwarn-unused-type-patterns is on, the compiler reports warnings
-about unused type variables. (rnFamInstDecl) A type variable is considered
-used
- * when it is either occurs on the RHS of the family instance, or
+When the flag -fwarn-unused-type-patterns is on, the compiler reports
+warnings about unused type variables in type-family instances. A
+tpye variable is considered used (i.e. cannot be turned into a wildcard)
+when
+
+ * it occurs on the RHS of the family instance
    e.g.   type instance F a b = a    -- a is used on the RHS
 
  * it occurs multiple times in the patterns on the LHS
    e.g.   type instance F a a = Int  -- a appears more than once on LHS
+
+ * it is one of the instance-decl variables, for associated types
+   e.g.   instance C (a,b) where
+            type T (a,b) = a
+   Here the type pattern in the type instance must be the same as that
+   for the class instance, so
+            type T (a,_) = a
+   would be rejected.  So we should not complain about an unused variable b
 
 As usual, the warnings are not reported for for type variables with names
 beginning with an underscore.
@@ -1061,7 +1082,7 @@ badRuleLhsErr name lhs bad_e
     text "LHS must be of form (f e1 .. en) where f is not forall'd"
   where
     err = case bad_e of
-            HsUnboundVar occ -> text "Not in scope:" <+> ppr occ
+            HsUnboundVar uv -> text "Not in scope:" <+> ppr uv
             _ -> text "Illegal expression:" <+> ppr bad_e
 
 {-
@@ -1251,7 +1272,7 @@ rnTyClDecl (SynDecl { tcdLName = tycon, tcdTyVars = tyvars, tcdRhs = rhs })
        ; let doc = TySynCtx tycon
        ; traceRn (text "rntycl-ty" <+> ppr tycon <+> ppr kvs)
        ; ((tyvars', rhs'), fvs) <- bindHsQTyVars doc Nothing Nothing kvs tyvars $
-                                    \ tyvars' ->
+                                    \ tyvars' _ ->
                                     do { (rhs', fvs) <- rnTySyn doc rhs
                                        ; return ((tyvars', rhs'), fvs) }
        ; return (SynDecl { tcdLName = tycon', tcdTyVars = tyvars'
@@ -1265,9 +1286,11 @@ rnTyClDecl (DataDecl { tcdLName = tycon, tcdTyVars = tyvars, tcdDataDefn = defn 
        ; let doc = TyDataCtx tycon
        ; traceRn (text "rntycl-data" <+> ppr tycon <+> ppr kvs)
        ; ((tyvars', defn', no_kvs), fvs)
-           <- bindHsQTyVars doc Nothing Nothing kvs tyvars $ \ tyvars' ->
-              do { ((defn', no_kvs), fvs) <- rnDataDefn doc defn
-                 ; return ((tyvars', defn', no_kvs), fvs) }
+           <- bindHsQTyVars doc Nothing Nothing kvs tyvars $ \ tyvars' dep_vars ->
+              do { ((defn', kind_sig_fvs), fvs) <- rnDataDefn doc defn
+                 ; let sig_tvs         = filterNameSet isTyVarName kind_sig_fvs
+                       unbound_sig_tvs = sig_tvs `minusNameSet` dep_vars
+                 ; return ((tyvars', defn', isEmptyNameSet unbound_sig_tvs), fvs) }
           -- See Note [Complete user-supplied kind signatures] in HsDecls
        ; typeintype <- xoptM LangExt.TypeInType
        ; let cusk = hsTvbAllKinded tyvars' &&
@@ -1287,7 +1310,7 @@ rnTyClDecl (ClassDecl { tcdCtxt = context, tcdLName = lcls,
 
         -- Tyvars scope over superclass context and method signatures
         ; ((tyvars', context', fds', ats'), stuff_fvs)
-            <- bindHsQTyVars cls_doc Nothing Nothing kvs tyvars $ \ tyvars' -> do
+            <- bindHsQTyVars cls_doc Nothing Nothing kvs tyvars $ \ tyvars' _ -> do
                   -- Checks for distinct tyvars
              { (context', cxt_fvs) <- rnContext cls_doc context
              ; fds'  <- rnFds fds
@@ -1398,22 +1421,18 @@ orphanRoleAnnotErr (L loc decl)
             text "is declared.")
 
 rnDataDefn :: HsDocContext -> HsDataDefn RdrName
-           -> RnM ((HsDataDefn Name, Bool), FreeVars)
-                -- the Bool is True if the DataDefn is consistent with
-                -- having a CUSK. See Note [Complete user-supplied kind signatures]
-                -- in HsDecls
+           -> RnM ((HsDataDefn Name, NameSet), FreeVars)
+                -- the NameSet includes all Names free in the kind signature
+                -- See Note [Complete user-supplied kind signatures]
 rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
                            , dd_ctxt = context, dd_cons = condecls
                            , dd_kindSig = m_sig, dd_derivs = derivs })
   = do  { checkTc (h98_style || null (unLoc context))
                   (badGadtStupidTheta doc)
 
-        ; (m_sig', cusk, sig_fvs) <- case m_sig of
-             Just sig -> do { fkvs <- freeKiTyVarsAllVars <$>
-                                      extractHsTyRdrTyVars sig
-                            ; (sig', fvs) <- rnLHsKind doc sig
-                            ; return (Just sig', null fkvs, fvs) }
-             Nothing  -> return (Nothing, True, emptyFVs)
+        ; (m_sig', sig_fvs) <- case m_sig of
+             Just sig -> first Just <$> rnLHsKind doc sig
+             Nothing  -> return (Nothing, emptyFVs)
         ; (context', fvs1) <- rnContext doc context
         ; (derivs',  fvs3) <- rn_derivs derivs
 
@@ -1433,7 +1452,7 @@ rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
                                , dd_ctxt = context', dd_kindSig = m_sig'
                                , dd_cons = condecls'
                                , dd_derivs = derivs' }
-                  , cusk )
+                  , sig_fvs )
                  , all_fvs )
         }
   where
@@ -1464,7 +1483,7 @@ rnFamDecl mb_cls (FamilyDecl { fdLName = tycon, fdTyVars = tyvars
        ; kvs <- extractRdrKindSigVars res_sig
        ; ((tyvars', res_sig', injectivity'), fv1) <-
             bindHsQTyVars doc Nothing mb_cls kvs tyvars $
-            \ tyvars'@(HsQTvs { hsq_implicit = rn_kvs }) ->
+            \ tyvars'@(HsQTvs { hsq_implicit = rn_kvs }) _ ->
             do { let rn_sig = rnFamResultSig doc rn_kvs
                ; (res_sig', fv_kind) <- wrapLocFstM rn_sig res_sig
                ; injectivity' <- traverse (rnInjectivityAnn tyvars' res_sig')
@@ -1728,7 +1747,7 @@ rnConDecl decl@(ConDeclH98 { con_name = name, con_qvars = qtvs
         ; (kvs, qtvs') <- get_con_qtvs (hsConDeclArgTys details)
 
         ; bindHsQTyVars doc (Just $ inHsDocContext doc) Nothing kvs qtvs' $
-          \new_tyvars -> do
+          \new_tyvars _ -> do
         { (new_context, fvs1) <- case mcxt of
                              Nothing   -> return (Nothing,emptyFVs)
                              Just lcxt -> do { (lctx',fvs) <- rnContext doc lcxt

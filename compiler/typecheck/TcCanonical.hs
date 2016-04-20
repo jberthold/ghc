@@ -23,7 +23,6 @@ import FamInstEnv ( FamInstEnvs )
 import FamInst ( tcTopNormaliseNewTypeTF_maybe )
 import Var
 import Name( isSystemName )
-import OccName( OccName )
 import Outputable
 import DynFlags( DynFlags )
 import VarSet
@@ -164,8 +163,8 @@ canonicalize (CFunEqCan { cc_ev = ev
 
 canonicalize (CIrredEvCan { cc_ev = ev })
   = canIrred ev
-canonicalize (CHoleCan { cc_ev = ev, cc_occ = occ, cc_hole = hole })
-  = canHole ev occ hole
+canonicalize (CHoleCan { cc_ev = ev, cc_hole = hole })
+  = canHole ev hole
 
 canEvNC :: CtEvidence -> TcS (StopOrContinue Ct)
 -- Called only for non-canonical EvVars
@@ -487,14 +486,13 @@ canIrred old_ev
            _                     -> continueWith $
                                     CIrredEvCan { cc_ev = new_ev } } }
 
-canHole :: CtEvidence -> OccName -> HoleSort -> TcS (StopOrContinue Ct)
-canHole ev occ hole_sort
+canHole :: CtEvidence -> Hole -> TcS (StopOrContinue Ct)
+canHole ev hole
   = do { let ty = ctEvPred ev
        ; (xi,co) <- flatten FM_SubstOnly ev ty -- co :: xi ~ ty
        ; rewriteEvidence ev xi co `andWhenContinue` \ new_ev ->
     do { emitInsoluble (CHoleCan { cc_ev = new_ev
-                                 , cc_occ = occ
-                                 , cc_hole = hole_sort })
+                                 , cc_hole = hole })
        ; stopWith new_ev "Emit insoluble hole" } }
 
 {-
@@ -601,8 +599,11 @@ can_eq_nc' _flat _rdr_env _envs ev eq_rel
  = do { let (bndrs1,body1) = tcSplitNamedPiTys s1
             (bndrs2,body2) = tcSplitNamedPiTys s2
       ; if not (equalLength bndrs1 bndrs2)
-           || not (map binderVisibility bndrs1 == map binderVisibility bndrs2)
-        then canEqHardFailure ev s1 s2
+        then do { traceTcS "Forall failure" $
+                     vcat [ ppr s1, ppr s2, ppr bndrs1, ppr bndrs2
+                          , ppr (map binderVisibility bndrs1)
+                          , ppr (map binderVisibility bndrs2) ]
+                ; canEqHardFailure ev s1 s2 }
         else
           do { traceTcS "Creating implication for polytype equality" $ ppr ev
              ; kind_cos <- zipWithM (unifyWanted loc Nominal)

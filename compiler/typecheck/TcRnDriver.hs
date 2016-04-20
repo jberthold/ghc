@@ -33,6 +33,7 @@ import RnSplice ( rnTopSpliceDecls, traceSplice, SpliceInfo(..) )
 import IfaceEnv( externaliseName )
 import TcHsType
 import TcMatches
+import Inst( deeplyInstantiate )
 import RnTypes
 import RnExpr
 import MkId
@@ -609,9 +610,12 @@ tc_rn_src_decls ds
           }
 #else
             -- If there's a splice, we must carry on
-          ; Just (SpliceDecl (L _ splice) _, rest_ds) ->
-            do { -- Rename the splice expression, and get its supporting decls
-                 (spliced_decls, splice_fvs) <- checkNoErrs (rnTopSpliceDecls splice)
+          ; Just (SpliceDecl (L loc splice) _, rest_ds) ->
+            do { recordTopLevelSpliceLoc loc
+
+                 -- Rename the splice expression, and get its supporting decls
+               ; (spliced_decls, splice_fvs) <- checkNoErrs (rnTopSpliceDecls
+                                                             splice)
 
                  -- Glue them on the front of the remaining decls and loop
                ; setGblEnv (tcg_env `addTcgDUs` usesOnly splice_fvs) $
@@ -1628,7 +1632,7 @@ runTcInteractive hsc_env thing_inside
     -- See Note [Initialising the type environment for GHCi]
     is_closed thing
       | AnId id <- thing
-      , NotTopLevel <- isClosedLetBndr id
+      , NotTopLevel <- isTypeClosedLetBndr id
       = Left (idName id, ATcId { tct_id = id, tct_closed = NotTopLevel })
       | otherwise
       = Right thing
@@ -1977,9 +1981,16 @@ tcRnExpr hsc_env rdr_expr
         -- Now typecheck the expression, and generalise its type
         -- it might have a rank-2 type (e.g. :t runST)
     uniq <- newUnique ;
-    let { fresh_it  = itName uniq (getLoc rdr_expr) } ;
-    (tclvl, lie, (_tc_expr, res_ty)) <- pushLevelAndCaptureConstraints $
-                                        tcInferSigma rn_expr ;
+    let { fresh_it  = itName uniq (getLoc rdr_expr)
+        ; orig = exprCtOrigin (unLoc rn_expr) } ;
+    (tclvl, lie, res_ty)
+          <- pushLevelAndCaptureConstraints $
+             do { (_tc_expr, expr_ty) <- tcInferSigma rn_expr
+                ; (_wrap, res_ty)   <- deeplyInstantiate orig expr_ty
+                     -- See [Note Deeply instantiate in :type]
+                ; return res_ty } ;
+
+    -- Generalise
     ((qtvs, dicts, _), lie_top) <- captureConstraints $
                                    {-# SCC "simplifyInfer" #-}
                                    simplifyInfer tclvl
@@ -2055,7 +2066,22 @@ tcRnType hsc_env normalise rdr_type
 
        ; return (ty', mkInvForAllTys kvs (typeKind ty')) }
 
-{- Note [Kind-generalise in tcRnType]
+{- Note [Deeply instantiate in :type]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose (Trac #11376)
+  bar :: forall a b. Show a => a -> b -> a
+What should `:t bar @Int` show?
+
+ 1. forall b. Show Int => Int -> b -> Int
+ 2. forall b. Int -> b -> Int
+ 3. forall {b}. Int -> b -> Int
+ 4. Int -> b -> Int
+
+We choose (3), which is the effect of deeply instantiating and
+re-generalising.  All the others seem deeply confusing.  That is
+why we deeply instantiate here.
+
+Note [Kind-generalise in tcRnType]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We switch on PolyKinds when kind-checking a user type, so that we will
 kind-generalise the type, even when PolyKinds is not otherwise on.

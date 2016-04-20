@@ -95,7 +95,6 @@ module Type (
         funTyCon,
 
         -- ** Predicates on types
-        allDistinctTyVars,
         isTyVarTy, isFunTy, isDictTy, isPredTy, isVoidTy, isCoercionTy,
         isCoercionTy_maybe, isCoercionType, isForAllTy,
         isPiTy,
@@ -121,7 +120,6 @@ module Type (
         tyCoVarsOfTypeDSet,
         coVarsOfType,
         coVarsOfTypes, closeOverKinds,
-        splitDepVarsOfType, splitDepVarsOfTypes,
         splitVisVarsOfType, splitVisVarsOfTypes,
         expandTypeSynonyms,
         typeSize,
@@ -175,7 +173,7 @@ module Type (
         -- * Pretty-printing
         pprType, pprParendType, pprTypeApp, pprTyThingCategory, pprTyThing,
         pprTvBndr, pprTvBndrs, pprForAll, pprForAllImplicit, pprUserForAll,
-        pprSigmaType,
+        pprSigmaType, ppSuggestExplicitKinds,
         pprTheta, pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind, pprSourceTyCon,
         TyPrec(..), maybeParen,
@@ -584,16 +582,6 @@ getCastedTyVar_maybe _                            = Nothing
 repGetTyVar_maybe :: Type -> Maybe TyVar
 repGetTyVar_maybe (TyVarTy tv) = Just tv
 repGetTyVar_maybe _            = Nothing
-
-allDistinctTyVars :: [KindOrType] -> Bool
-allDistinctTyVars tkvs = go emptyVarSet tkvs
-  where
-    go _      [] = True
-    go so_far (ty : tys)
-       = case getTyVar_maybe ty of
-             Nothing -> False
-             Just tv | tv `elemVarSet` so_far -> False
-                     | otherwise -> go (so_far `extendVarSet` tv) tys
 
 {-
 ---------------------------------------------------------------------
@@ -1084,9 +1072,9 @@ mkCastTy ty co | isReflexiveCo co = ty
 
 mkCastTy (CastTy ty co1) co2 = mkCastTy ty (co1 `mkTransCo` co2)
 -- See Note [Weird typing rule for ForAllTy]
-mkCastTy (ForAllTy (Named tv vis) inner_ty) co
+mkCastTy outer_ty@(ForAllTy (Named tv vis) inner_ty) co
   = -- have to make sure that pushing the co in doesn't capture the bound var
-    let fvs = tyCoVarsOfCo co
+    let fvs = tyCoVarsOfCo co `unionVarSet` tyCoVarsOfType outer_ty
         empty_subst = mkEmptyTCvSubst (mkInScopeSet fvs)
         (subst, tv') = substTyVarBndr empty_subst tv
     in
@@ -1857,8 +1845,13 @@ typeSize (CoercionTy co)  = coercionSize co
 ************************************************************************
 -}
 
--- | Do a topological sort on a list of tyvars. This is a deterministic
--- sorting operation (that is, doesn't depend on Uniques).
+-- | Do a topological sort on a list of tyvars,
+--   so that binders occur before occurrences
+-- E.g. given  [ a::k, k::*, b::k ]
+-- it'll return a well-scoped list [ k::*, a::k, b::k ]
+--
+-- This is a deterministic sorting operation
+-- (that is, doesn't depend on Uniques).
 toposortTyVars :: [TyVar] -> [TyVar]
 toposortTyVars tvs = reverse $
                      [ tv | (tv, _, _) <- topologicalSortG $
@@ -2300,47 +2293,6 @@ tyConsOfType ty
 -- but they'd always return '*', so we never need to ask
 synTyConResKind :: TyCon -> Kind
 synTyConResKind tycon = piResultTys (tyConKind tycon) (mkTyVarTys (tyConTyVars tycon))
-
--- | Retrieve the free variables in this type, splitting them based
--- on whether the variable was used in a dependent context.
--- (This isn't the most precise analysis, because
--- it's used in the typechecking knot. It might list some dependent
--- variables as also non-dependent.)
-splitDepVarsOfType :: Type -> Pair TyCoVarSet
-splitDepVarsOfType ty = Pair dep_vars final_nondep_vars
-  where
-    Pair dep_vars nondep_vars = split_dep_vars ty
-    final_nondep_vars = nondep_vars `minusVarSet` dep_vars
-
--- | Like 'splitDepVarsOfType', but over a list of types
-splitDepVarsOfTypes :: [Type] -> Pair TyCoVarSet
-splitDepVarsOfTypes tys = Pair dep_vars final_nondep_vars
-  where
-    Pair dep_vars nondep_vars = foldMap split_dep_vars tys
-    final_nondep_vars = nondep_vars `minusVarSet` dep_vars
-
--- | Worker for 'splitDepVarsOfType'. This might output the same var
--- in both sets, if it's used in both a type and a kind.
-split_dep_vars :: Type -> Pair TyCoVarSet
-split_dep_vars = go
-  where
-    go (TyVarTy tv)              = Pair (tyCoVarsOfType $ tyVarKind tv)
-                                        (unitVarSet tv)
-    go (AppTy t1 t2)             = go t1 `mappend` go t2
-    go (TyConApp _ tys)          = foldMap go tys
-    go (ForAllTy (Anon arg) res) = go arg `mappend` go res
-    go (ForAllTy (Named tv _) ty)
-      = let Pair kvs tvs = go ty in
-        Pair (kvs `delVarSet` tv `unionVarSet` tyCoVarsOfType (tyVarKind tv))
-             (tvs `delVarSet` tv)
-    go (LitTy {})                = mempty
-    go (CastTy ty co)            = go ty `mappend` Pair (tyCoVarsOfCo co)
-                                                        emptyVarSet
-    go (CoercionTy co)           = go_co co
-
-    go_co co = let Pair ty1 ty2 = coercionKind co in
-               go ty1 `mappend` go ty2  -- NB: the Pairs separate along different
-                                        -- dimensions here. Be careful!
 
 -- | Retrieve the free variables in this type, splitting them based
 -- on whether they are used visibly or invisibly. Invisible ones come

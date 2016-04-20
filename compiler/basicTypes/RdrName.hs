@@ -357,8 +357,17 @@ extendLocalRdrEnvList lre@(LRE { lre_env = env, lre_in_scope = ns }) names
         , lre_in_scope = extendNameSetList ns names }
 
 lookupLocalRdrEnv :: LocalRdrEnv -> RdrName -> Maybe Name
-lookupLocalRdrEnv (LRE { lre_env = env }) (Unqual occ) = lookupOccEnv env occ
-lookupLocalRdrEnv _                       _            = Nothing
+lookupLocalRdrEnv (LRE { lre_env = env, lre_in_scope = ns }) rdr
+  | Unqual occ <- rdr
+  = lookupOccEnv env occ
+
+  -- See Note [Local bindings with Exact Names]
+  | Exact name <- rdr
+  , name `elemNameSet` ns
+  = Just name
+
+  | otherwise
+  = Nothing
 
 lookupLocalRdrOcc :: LocalRdrEnv -> OccName -> Maybe Name
 lookupLocalRdrOcc (LRE { lre_env = env }) occ = lookupOccEnv env occ
@@ -430,7 +439,8 @@ data GlobalRdrElt
         , gre_par  :: Parent
         , gre_lcl :: Bool          -- ^ True <=> the thing was defined locally
         , gre_imp :: [ImportSpec]  -- ^ In scope through these imports
-    }    -- INVARIANT: either gre_lcl = True or gre_imp is non-empty
+    } deriving (Data, Typeable)
+         -- INVARIANT: either gre_lcl = True or gre_imp is non-empty
          -- See Note [GlobalRdrElt provenance]
 
 -- | The children of a Name are the things that are abbreviated by the ".."
@@ -440,7 +450,7 @@ data Parent = NoParent
             | FldParent { par_is :: Name, par_lbl :: Maybe FieldLabelString }
               -- ^ See Note [Parents for record fields]
             | PatternSynonym
-            deriving (Eq)
+            deriving (Eq, Data, Typeable)
 
 instance Outputable Parent where
    ppr NoParent        = empty
@@ -1001,7 +1011,7 @@ shadowName env name
 -- It's quite elaborate so that we can give accurate unused-name warnings.
 data ImportSpec = ImpSpec { is_decl :: ImpDeclSpec,
                             is_item :: ImpItemSpec }
-                deriving( Eq, Ord )
+                deriving( Eq, Ord, Data, Typeable )
 
 -- | Describes a particular import declaration and is
 -- shared among all the 'Provenance's for that decl
@@ -1016,7 +1026,7 @@ data ImpDeclSpec
         is_as       :: ModuleName, -- ^ Import alias, e.g. from @as M@ (or @Muggle@ if there is no @as@ clause)
         is_qual     :: Bool,       -- ^ Was this import qualified?
         is_dloc     :: SrcSpan     -- ^ The location of the entire import declaration
-    }
+    } deriving (Data, Typeable)
 
 -- | Describes import info a particular Name
 data ImpItemSpec
@@ -1035,6 +1045,7 @@ data ImpItemSpec
         --
         -- Here the constructors of @T@ are not named explicitly;
         -- only @T@ is named explicitly.
+  deriving (Data, Typeable)
 
 instance Eq ImpDeclSpec where
   p1 == p2 = case p1 `compare` p2 of EQ -> True; _ -> False

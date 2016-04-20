@@ -5,7 +5,7 @@
 \section[Demand]{@Demand@: A decoupled implementation of a demand domain}
 -}
 
-{-# LANGUAGE CPP, FlexibleInstances, TypeSynonymInstances #-}
+{-# LANGUAGE CPP, FlexibleInstances, TypeSynonymInstances, RecordWildCards #-}
 
 module Demand (
         StrDmd, UseDmd(..), Count(..),
@@ -37,7 +37,7 @@ module Demand (
         appIsBottom, isBottomingSig, pprIfaceStrictSig,
         trimCPRInfo, returnsCPR_maybe,
         StrictSig(..), mkStrictSig, mkClosedStrictSig, nopSig, botSig, cprProdSig,
-        isTopSig, splitStrictSig, increaseStrictSigArity,
+        isTopSig, hasDemandEnvSig, splitStrictSig, increaseStrictSigArity,
 
         seqDemand, seqDemandList, seqDmdType, seqStrictSig,
 
@@ -46,13 +46,14 @@ module Demand (
         deferAfterIO,
         postProcessUnsat, postProcessDmdType,
 
-        splitProdDmd_maybe, peelCallDmd, mkCallDmd,
+        splitProdDmd_maybe, peelCallDmd, mkCallDmd, mkWorkerDemand,
         dmdTransformSig, dmdTransformDataConSig, dmdTransformDictSelSig,
-        argOneShots, argsOneShots,
+        argOneShots, argsOneShots, saturatedByOneShots,
         trimToType, TypeShape(..),
 
         useCount, isUsedOnce, reuseEnv,
-        killUsageDemand, killUsageSig, zapUsageDemand,
+        killUsageDemand, killUsageSig, zapUsageDemand, zapUsageEnvSig,
+        zapUsedOnceDemand, zapUsedOnceSig,
         strictifyDictDmd
 
      ) where
@@ -667,6 +668,12 @@ mkProdDmd dx
 mkCallDmd :: CleanDemand -> CleanDemand
 mkCallDmd (JD {sd = d, ud = u})
   = JD { sd = mkSCall d, ud = mkUCall One u }
+
+-- See Note [Demand on the worker] in WorkWrap
+mkWorkerDemand :: Int -> Demand
+mkWorkerDemand n = JD { sd = Lazy, ud = Use One (go n) }
+  where go 0 = Used
+        go n = mkUCall One $ go (n-1)
 
 cleanEvalDmd :: CleanDemand
 cleanEvalDmd = JD { sd = HeadStr, ud = Used }
@@ -1671,6 +1678,9 @@ increaseStrictSigArity arity_increase (StrictSig (DmdType env dmds res))
 isTopSig :: StrictSig -> Bool
 isTopSig (StrictSig ty) = isTopDmdType ty
 
+hasDemandEnvSig :: StrictSig -> Bool
+hasDemandEnvSig (StrictSig (DmdType env _ _)) = not (isEmptyVarEnv env)
+
 isBottomingSig :: StrictSig -> Bool
 -- True if the signature diverges or throws an exception
 isBottomingSig (StrictSig (DmdType _ _ res)) = isBotRes res
@@ -1776,6 +1786,20 @@ argsOneShots (StrictSig (DmdType _ arg_ds _)) n_val_args
     cons [] [] = []
     cons a  as = a:as
 
+-- saturatedByOneShots n C1(C1(...)) = True,
+--   <=>
+-- there are at least n nested C1(..) calls
+-- See Note [Demand on the worker] in WorkWrap
+saturatedByOneShots :: Int -> Demand -> Bool
+saturatedByOneShots n (JD { ud = usg })
+  = case usg of
+      Use _ arg_usg -> go n arg_usg
+      _             -> False
+  where
+    go 0 _             = True
+    go n (UCall One u) = go (n-1) u
+    go _ _             = False
+
 argOneShots :: OneShotInfo     -- OneShotLam or ProbOneShot,
             -> Demand          -- depending on saturation
             -> [OneShotInfo]
@@ -1841,9 +1865,31 @@ of absence or one-shot information altogether.  This is only used for performanc
 tests, to see how important they are.
 -}
 
+zapUsageEnvSig :: StrictSig -> StrictSig
+-- Remove the usage environment from the demand
+zapUsageEnvSig (StrictSig (DmdType _ ds r)) = mkClosedStrictSig ds r
+
 zapUsageDemand :: Demand -> Demand
 -- Remove the usage info, but not the strictness info, from the demand
-zapUsageDemand = kill_usage (True, True)
+zapUsageDemand = kill_usage $ KillFlags
+    { kf_abs         = True
+    , kf_used_once   = True
+    , kf_called_once = True
+    }
+
+-- | Remove all 1* information (but not C1 information) from the demand
+zapUsedOnceDemand :: Demand -> Demand
+zapUsedOnceDemand = kill_usage $ KillFlags
+    { kf_abs         = False
+    , kf_used_once   = True
+    , kf_called_once = False
+    }
+
+-- | Remove all 1* information (but not C1 information) from the strictness
+--   signature
+zapUsedOnceSig :: StrictSig -> StrictSig
+zapUsedOnceSig (StrictSig (DmdType env ds r))
+    = StrictSig (DmdType env (map zapUsedOnceDemand ds) r)
 
 killUsageDemand :: DynFlags -> Demand -> Demand
 -- See Note [Killing usage information]
@@ -1857,35 +1903,39 @@ killUsageSig dflags sig@(StrictSig (DmdType env ds r))
   | Just kfs <- killFlags dflags = StrictSig (DmdType env (map (kill_usage kfs) ds) r)
   | otherwise                    = sig
 
-type KillFlags = (Bool, Bool)
+data KillFlags = KillFlags
+    { kf_abs         :: Bool
+    , kf_used_once   :: Bool
+    , kf_called_once :: Bool
+    }
 
 killFlags :: DynFlags -> Maybe KillFlags
 -- See Note [Killing usage information]
 killFlags dflags
-  | not kill_abs && not kill_one_shot = Nothing
-  | otherwise                         = Just (kill_abs, kill_one_shot)
+  | not kf_abs && not kf_used_once = Nothing
+  | otherwise                      = Just (KillFlags {..})
   where
-    kill_abs      = gopt Opt_KillAbsence dflags
-    kill_one_shot = gopt Opt_KillOneShot dflags
+    kf_abs         = gopt Opt_KillAbsence dflags
+    kf_used_once   = gopt Opt_KillOneShot dflags
+    kf_called_once = kf_used_once
 
 kill_usage :: KillFlags -> Demand -> Demand
 kill_usage kfs (JD {sd = s, ud = u}) = JD {sd = s, ud = zap_musg kfs u}
 
 zap_musg :: KillFlags -> ArgUse -> ArgUse
-zap_musg (kill_abs, _) Abs
-  | kill_abs  = useTop
-  | otherwise = Abs
-zap_musg kfs (Use c u) = Use (zap_count kfs c) (zap_usg kfs u)
-
-zap_count :: KillFlags -> Count -> Count
-zap_count (_, kill_one_shot) c
-  | kill_one_shot = Many
-  | otherwise     = c
+zap_musg kfs Abs
+  | kf_abs kfs = useTop
+  | otherwise  = Abs
+zap_musg kfs (Use c u)
+  | kf_used_once kfs = Use Many (zap_usg kfs u)
+  | otherwise        = Use c    (zap_usg kfs u)
 
 zap_usg :: KillFlags -> UseDmd -> UseDmd
-zap_usg kfs (UCall c u) = UCall (zap_count kfs c) (zap_usg kfs u)
-zap_usg kfs (UProd us)  = UProd (map (zap_musg kfs) us)
-zap_usg _   u           = u
+zap_usg kfs (UCall c u)
+    | kf_called_once kfs = UCall Many (zap_usg kfs u)
+    | otherwise          = UCall c    (zap_usg kfs u)
+zap_usg kfs (UProd us)   = UProd (map (zap_musg kfs) us)
+zap_usg _   u            = u
 
 -- If the argument is a used non-newtype dictionary, give it strict
 -- demand. Also split the product type & demand and recur in order to

@@ -14,7 +14,7 @@ module TcPatSyn ( tcPatSynSig, tcInferPatSynDecl, tcCheckPatSynDecl
 import HsSyn
 import TcPat
 import TcHsType( tcImplicitTKBndrs, tcExplicitTKBndrs
-               , tcHsContext, tcHsLiftedType, tcHsOpenType )
+               , tcHsContext, tcHsLiftedType, tcHsOpenType, kindGeneralize )
 import TcRnMonad
 import TcEnv
 import TcMType
@@ -28,6 +28,7 @@ import Panic
 import Outputable
 import FastString
 import Var
+import VarEnv( emptyTidyEnv )
 import Id
 import IdInfo( RecSelParent(..))
 import TcBinds
@@ -48,7 +49,6 @@ import Util
 import ErrUtils
 import Control.Monad ( unless, zipWithM )
 import Data.List( partition )
-import Pair( Pair(..) )
 
 #include "HsVersions.h"
 
@@ -120,16 +120,14 @@ tcPatSynSig name sig_ty
                  ; return ( (univ_tvs, req, ex_tvs, prov, arg_tys, body_ty)
                           , bound_tvs) }
 
-       -- Kind generalisation; c.f. kindGeneralise
-       ; free_kvs <- zonkTcTypeAndFV $
-                     mkSpecForAllTys (implicit_tvs ++ univ_tvs) $
-                     mkFunTys req $
-                     mkSpecForAllTys ex_tvs $
-                     mkFunTys prov $
-                     mkFunTys arg_tys $
-                     body_ty
-
-       ; kvs <- quantifyZonkedTyVars emptyVarSet (Pair free_kvs emptyVarSet)
+       -- Kind generalisation
+       ; kvs <- kindGeneralize $
+                mkSpecForAllTys (implicit_tvs ++ univ_tvs) $
+                mkFunTys req $
+                mkSpecForAllTys ex_tvs $
+                mkFunTys prov $
+                mkFunTys arg_tys $
+                body_ty
 
        -- These are /signatures/ so we zonk to squeeze out any kind
        -- unification variables.  Do this after quantifyTyVars which may
@@ -411,12 +409,19 @@ tc_patsyn_finish lname dir is_infix lpat'
                  pat_ty field_labels
   = do { -- Zonk everything.  We are about to build a final PatSyn
          -- so there had better be no unification variables in there
-         univ_tvs     <- mapMaybeM zonkQuantifiedTyVar univ_tvs
-       ; ex_tvs       <- mapMaybeM zonkQuantifiedTyVar ex_tvs
-       ; prov_theta   <- zonkTcTypes prov_theta
-       ; req_theta    <- zonkTcTypes req_theta
-       ; pat_ty       <- zonkTcType pat_ty
-       ; arg_tys      <- zonkTcTypes arg_tys
+         univ_tvs'    <- mapMaybeM zonkQuantifiedTyVar univ_tvs
+       ; ex_tvs'      <- mapMaybeM zonkQuantifiedTyVar ex_tvs
+       ; prov_theta'  <- zonkTcTypes prov_theta
+       ; req_theta'   <- zonkTcTypes req_theta
+       ; pat_ty'      <- zonkTcType pat_ty
+       ; arg_tys'     <- zonkTcTypes arg_tys
+
+       ; let (env1, univ_tvs) = tidyTyCoVarBndrs emptyTidyEnv univ_tvs'
+             (env2, ex_tvs)   = tidyTyCoVarBndrs env1 ex_tvs'
+             req_theta  = tidyTypes env2 req_theta'
+             prov_theta = tidyTypes env2 prov_theta'
+             arg_tys    = tidyTypes env2 arg_tys'
+             pat_ty     = tidyType  env2 pat_ty'
 
           -- We need to update the univ and ex binders after zonking.
           -- But zonking may have defaulted some erstwhile binders,

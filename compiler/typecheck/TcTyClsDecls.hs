@@ -1070,26 +1070,29 @@ proper tcMatchTys here.)  -}
 
 -------------------------
 kcTyFamInstEqn :: FamTyConShape -> LTyFamInstEqn Name -> TcM ()
-kcTyFamInstEqn fam_tc_shape
-    (L loc (TyFamEqn { tfe_pats = pats, tfe_rhs = hs_ty }))
+kcTyFamInstEqn fam_tc_shape@(fam_tc_name,_,_,_)
+    (L loc (TyFamEqn { tfe_tycon = L _ eqn_tc_name
+                     , tfe_pats  = pats
+                     , tfe_rhs   = hs_ty }))
   = setSrcSpan loc $
-    discardResult $
-    tc_fam_ty_pats fam_tc_shape Nothing -- not an associated type
-                   pats (discardResult . (tcCheckLHsType hs_ty))
+    do { checkTc (fam_tc_name == eqn_tc_name)
+                 (wrongTyFamName fam_tc_name eqn_tc_name)
+       ; discardResult $
+         tc_fam_ty_pats fam_tc_shape Nothing -- not an associated type
+                        pats (discardResult . (tcCheckLHsType hs_ty)) }
 
-tcTyFamInstEqn :: FamTyConShape -> Maybe ClsInfo -> LTyFamInstEqn Name -> TcM CoAxBranch
+tcTyFamInstEqn :: FamTyConShape -> Maybe ClsInstInfo -> LTyFamInstEqn Name -> TcM CoAxBranch
 -- Needs to be here, not in TcInstDcls, because closed families
 -- (typechecked here) have TyFamInstEqns
 tcTyFamInstEqn fam_tc_shape@(fam_tc_name,_,_,_) mb_clsinfo
     (L loc (TyFamEqn { tfe_tycon = L _ eqn_tc_name
                      , tfe_pats  = pats
                      , tfe_rhs   = hs_ty }))
-  = setSrcSpan loc $
+  = ASSERT( fam_tc_name == eqn_tc_name )
+    setSrcSpan loc $
     tcFamTyPats fam_tc_shape mb_clsinfo pats (discardResult . (tcCheckLHsType hs_ty)) $
        \tvs' pats' res_kind ->
-    do { checkTc (fam_tc_name == eqn_tc_name)
-                 (wrongTyFamName fam_tc_name eqn_tc_name)
-       ; rhs_ty <- solveEqualities $ tcCheckLHsType hs_ty res_kind
+    do { rhs_ty <- solveEqualities $ tcCheckLHsType hs_ty res_kind
        ; rhs_ty <- zonkTcTypeToType emptyZonkEnv rhs_ty
        ; traceTc "tcTyFamInstEqn" (ppr fam_tc_name <+> pprTvBndrs tvs')
           -- don't print out the pats here, as they might be zonked inside the knot
@@ -1168,7 +1171,7 @@ famTyConShape fam_tc
     , tyConResKind fam_tc )
 
 tc_fam_ty_pats :: FamTyConShape
-               -> Maybe ClsInfo
+               -> Maybe ClsInstInfo
                -> HsTyPats Name       -- Patterns
                -> (TcKind -> TcM ())  -- Kind checker for RHS
                                       -- result is ignored
@@ -1191,7 +1194,7 @@ tc_fam_ty_pats (name, _, binders, res_kind) mb_clsinfo
          -- See Note [Quantifying over family patterns]
          (_, (insted_res_kind, typats)) <- tcImplicitTKBndrs tv_names $
          do { (insting_subst, _leftover_binders, args, leftovers, n)
-                <- tcInferArgs name binders (snd <$> mb_clsinfo) arg_pats
+                <- tcInferArgs name binders (thdOf3 <$> mb_clsinfo) arg_pats
             ; case leftovers of
                 hs_ty:_ -> addErrTc $ too_many_args hs_ty n
                 _       -> return ()
@@ -1206,12 +1209,12 @@ tc_fam_ty_pats (name, _, binders, res_kind) mb_clsinfo
     too_many_args hs_ty n
       = hang (text "Too many parameters to" <+> ppr name <> colon)
            2 (vcat [ ppr hs_ty <+> text "is unexpected;"
-                   , text "expected only" <+>
+                   , text (if n == 1 then "expected" else "expected only") <+>
                      speakNOf (n-1) (text "parameter") ])
 
 -- See Note [tc_fam_ty_pats vs tcFamTyPats]
 tcFamTyPats :: FamTyConShape
-            -> Maybe ClsInfo
+            -> Maybe ClsInstInfo
             -> HsTyPats Name          -- patterns
             -> (TcKind -> TcM ())    -- kind-checker for RHS
             -> (   [TyVar]           -- Kind and type variables
@@ -2349,6 +2352,8 @@ checkValidClass cls
     cls_arity = length $ filterOutInvisibleTyVars (classTyCon cls) tyvars
        -- Ignore invisible variables
     cls_tv_set = mkVarSet tyvars
+    mini_env   = zipVarEnv tyvars (mkTyVarTys tyvars)
+    mb_cls     = Just (cls, tyvars, mini_env)
 
     check_op constrained_class_methods (sel_id, dm)
       = setSrcSpan (getSrcSpan sel_id) $
@@ -2374,9 +2379,12 @@ checkValidClass cls
           (_,theta2,_)    = tcSplitSigmaTy tau1
 
           check_constraint :: TcPredType -> TcM ()
-          check_constraint pred
-            = when (tyCoVarsOfType pred `subVarSet` cls_tv_set)
+          check_constraint pred -- See Note [Class method constraints]
+            = when (not (isEmptyVarSet pred_tvs) &&
+                    pred_tvs `subVarSet` cls_tv_set)
                    (addErrTc (badMethPred sel_id pred))
+            where
+              pred_tvs = tyCoVarsOfType pred
 
     check_at (ATI fam_tc m_dflt_rhs)
       = do { checkTc (cls_arity == 0 || any (`elemVarSet` cls_tv_set) fam_tvs)
@@ -2388,11 +2396,10 @@ checkValidClass cls
 
              -- Check that any default declarations for associated types are valid
            ; whenIsJust m_dflt_rhs $ \ (rhs, loc) ->
-             checkValidTyFamEqn (Just (cls, mini_env)) fam_tc
+             checkValidTyFamEqn mb_cls fam_tc
                                 fam_tvs [] (mkTyVarTys fam_tvs) rhs loc }
         where
           fam_tvs = tyConTyVars fam_tc
-    mini_env = zipVarEnv tyvars (mkTyVarTys tyvars)
 
     check_dm :: UserTypeCtxt -> DefMethInfo -> TcM ()
     -- Check validity of the /top-level/ generic-default type
@@ -2417,7 +2424,21 @@ checkFamFlag tc_name
     err_msg = hang (text "Illegal family declaration for" <+> quotes (ppr tc_name))
                  2 (text "Use TypeFamilies to allow indexed type families")
 
-{-
+{- Note [Class method constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Haskell 2010 is supposed to reject
+  class C a where
+    op :: Eq a => a -> a
+where the method type costrains only the class variable(s).  (The extension
+-XConstrainedClassMethods switches off this check.)  But regardless
+we should not reject
+  class C a where
+    op :: (?x::Int) => a -> a
+as pointed out in Trac #11793. So the test here rejects the program if
+  * -XConstrainedClassMethods is off
+  * the tyvars of the constraint are non-empty
+  * all the tyvars are class tyvars, none are locally quantified
+
 Note [Abort when superclass cycle is detected]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We must avoid doing the ambiguity check for the methods (in

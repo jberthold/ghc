@@ -7,6 +7,7 @@ Handles @deriving@ clauses on @data@ declarations.
 -}
 
 {-# LANGUAGE CPP #-}
+{-# LANGUAGE ImplicitParams #-}
 
 module TcDeriv ( tcDeriving, DerivInfo(..), mkDerivInfos ) where
 
@@ -18,7 +19,7 @@ import DynFlags
 import TcRnMonad
 import FamInst
 import TcErrors( reportAllUnsolved )
-import TcValidity( validDerivPred )
+import TcValidity( validDerivPred, allDistinctTyVars )
 import TcClassDcl( tcATDefault, tcMkDeclCtxt )
 import TcEnv
 import TcGenDeriv                       -- Deriv stuff
@@ -66,6 +67,9 @@ import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
 import Data.List
+#if MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
+import GHC.Stack (CallStack)
+#endif
 
 {-
 ************************************************************************
@@ -133,6 +137,23 @@ mkPredOrigin origin t_or_k pred = PredOrigin pred origin t_or_k
 
 mkThetaOrigin :: CtOrigin -> TypeOrKind -> ThetaType -> ThetaOrigin
 mkThetaOrigin origin t_or_k = map (mkPredOrigin origin t_or_k)
+
+substPredOrigin ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
+    (?callStack :: CallStack) =>
+#endif
+    TCvSubst -> PredOrigin -> PredOrigin
+substPredOrigin subst (PredOrigin pred origin t_or_k)
+  = PredOrigin (substTy subst pred) origin t_or_k
+
+substThetaOrigin ::
+-- CallStack wasn't present in GHC 7.10.1, disable callstacks in stage 1
+#if MIN_VERSION_GLASGOW_HASKELL(7,10,2,0)
+    (?callStack :: CallStack) =>
+#endif
+    TCvSubst -> ThetaOrigin -> ThetaOrigin
+substThetaOrigin subst = map (substPredOrigin subst)
 
 data EarlyDerivSpec = InferTheta (DerivSpec ThetaOrigin)
                     | GivenTheta (DerivSpec ThetaType)
@@ -212,6 +233,28 @@ In both cases we produce a bunch of un-simplified constraints
 and them simplify them in simplifyInstanceContexts; see
 Note [Simplifying the instance context].
 
+In the functor-like case, we may need to unify some kind variables with * in
+order for the generated instance to be well-kinded. An example from
+Trac #10524:
+
+  newtype Compose (f :: k2 -> *) (g :: k1 -> k2) (a :: k1)
+    = Compose (f (g a)) deriving Functor
+
+Earlier in the deriving pipeline, GHC unifies the kind of Compose f g
+(k1 -> *) with the kind of Functor's argument (* -> *), so k1 := *. But this
+alone isn't enough, since k2 wasn't unified with *:
+
+  instance (Functor (f :: k2 -> *), Functor (g :: * -> k2)) =>
+    Functor (Compose f g) where ...
+
+The two Functor constraints are ill-kinded. To ensure this doesn't happen, we:
+
+  1. Collect all of a datatype's subtypes which require functor-like
+     constraints.
+  2. For each subtype, create a substitution by unifying the subtype's kind
+     with (* -> *).
+  3. Compose all the substitutions into one, then apply that substitution to
+     all of the in-scope type variables and the instance types.
 
 Note [Data decl contexts]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -596,11 +639,6 @@ deriveTyData tvs tc tc_args deriv_pred
               (tc_args_to_keep, args_to_drop)
                               = splitAt n_args_to_keep tc_args
               inst_ty_kind    = typeKind (mkTyConApp tc tc_args_to_keep)
-              -- Use exactTyCoVarsOfTypes, not tyCoVarsOfTypes, so that we
-              -- don't mistakenly grab a type variable mentioned in a type
-              -- synonym that drops it.
-              -- See Note [Eta-reducing type synonyms].
-              dropped_tvs     = exactTyCoVarsOfTypes args_to_drop
 
               -- Match up the kinds, and apply the resulting kind substitution
               -- to the types.  See Note [Unify kinds in deriving]
@@ -629,8 +667,7 @@ deriveTyData tvs tc tc_args deriv_pred
 
         ; traceTc "derivTyData2" (vcat [ ppr tkvs ])
 
-        ; checkTc (allDistinctTyVars args_to_drop &&              -- (a) and (b)
-                   not (any (`elemVarSet` dropped_tvs) tkvs))     -- (c)
+        ; checkTc (allDistinctTyVars (mkVarSet tkvs) args_to_drop)     -- (a, b, c)
                   (derivingEtaErr cls final_cls_tys (mkTyConApp tc final_tc_args))
                 -- Check that
                 --  (a) The args to drop are all type variables; eg reject:
@@ -705,6 +742,55 @@ an instance   $df :: forall (x:*->*). Functor x => Functor (P * (x:*->*))
 and similarly for C.  Notice the modified kind of x, both at binding
 and occurrence sites.
 
+This can lead to some surprising results when *visible* kind binder is
+unified (in contrast to the above examples, in which only non-visible kind
+binders were considered). Consider this example from Trac #11732:
+
+    data T k (a :: k) = MkT deriving Functor
+
+Since unification yields k:=*, this results in a generated instance of:
+
+    instance Functor (T *) where ...
+
+which looks odd at first glance, since one might expect the instance head
+to be of the form Functor (T k). Indeed, one could envision an alternative
+generated instance of:
+
+    instance (k ~ *) => Functor (T k) where
+
+But this does not typecheck as the result of a -XTypeInType design decision:
+kind equalities are not allowed to be bound in types, only terms. But in
+essence, the two instance declarations are entirely equivalent, since even
+though (T k) matches any kind k, the only possibly value for k is *, since
+anything else is ill-typed. As a result, we can just as comfortably use (T *).
+
+Another way of thinking about is: deriving clauses often infer constraints.
+For example:
+
+    data S a = S a deriving Eq
+
+infers an (Eq a) constraint in the derived instance. By analogy, when we
+are deriving Functor, we might infer an equality constraint (e.g., k ~ *).
+The only distinction is that GHC instantiates equality constraints directly
+during the deriving process.
+
+Another quirk of this design choice manifests when typeclasses have visible
+kind parameters. Consider this code (also from Trac #11732):
+
+    class Cat k (cat :: k -> k -> *) where
+      catId   :: cat a a
+      catComp :: cat b c -> cat a b -> cat a c
+
+    instance Cat * (->) where
+      catId   = id
+      catComp = (.)
+
+    newtype Fun a b = Fun (a -> b) deriving (Cat k)
+
+Even though we requested an derived instance of the form (Cat k Fun), the
+kind unification will actually generate (Cat * Fun) (i.e., the same thing as if
+the user wrote deriving (Cat *)).
+
 Note [Eta-reducing type synonyms]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 One can instantiate a type in a data family instance with a type synonym that
@@ -730,6 +816,12 @@ where this was first noticed).
 For this reason, we call exactTyCoVarsOfTypes on the eta-reduced types so that
 we only consider the type variables that remain after expanding through type
 synonyms.
+
+              -- Use exactTyCoVarsOfTypes, not tyCoVarsOfTypes, so that we
+              -- don't mistakenly grab a type variable mentioned in a type
+              -- synonym that drops it.
+              -- See Note [Eta-reducing type synonyms].
+              dropped_tvs     = exactTyCoVarsOfTypes args_to_drop
 -}
 
 mkEqnHelp :: Maybe OverlapMode
@@ -857,7 +949,7 @@ mkDataTypeEqn :: DynFlags
 
 mkDataTypeEqn dflags overlap_mode tvs cls cls_tys
               tycon tc_args rep_tc rep_tc_args mtheta
-  = case checkSideConditions dflags mtheta cls cls_tys rep_tc rep_tc_args of
+  = case checkSideConditions dflags mtheta cls cls_tys rep_tc of
         -- NB: pass the *representation* tycon to checkSideConditions
         NonDerivableClass   msg -> bale_out (nonStdErr cls $$ msg)
         DerivableClassError msg -> bale_out msg
@@ -874,12 +966,14 @@ mk_data_eqn overlap_mode tvs cls cls_tys tycon tc_args rep_tc rep_tc_args mtheta
   = do loc                  <- getSrcSpanM
        dfun_name            <- newDFunName' cls tycon
        case mtheta of
-        Nothing -> do --Infer context
-            inferred_constraints <- inferConstraints cls cls_tys inst_ty rep_tc rep_tc_args
+        Nothing -> -- Infer context
+          inferConstraints tvs cls cls_tys
+                           inst_ty rep_tc rep_tc_args
+            $ \inferred_constraints tvs' inst_tys' ->
             return $ InferTheta $ DS
                    { ds_loc = loc
-                   , ds_name = dfun_name, ds_tvs = tvs
-                   , ds_cls = cls, ds_tys = inst_tys
+                   , ds_name = dfun_name, ds_tvs = tvs'
+                   , ds_cls = cls, ds_tys = inst_tys'
                    , ds_tc = rep_tc
                    , ds_theta = inferred_constraints
                    , ds_overlap = overlap_mode
@@ -899,12 +993,15 @@ mk_data_eqn overlap_mode tvs cls cls_tys tycon tc_args rep_tc rep_tc_args mtheta
 
 ----------------------
 
-inferConstraints :: Class -> [TcType] -> TcType
+inferConstraints :: [TyVar] -> Class -> [TcType] -> TcType
                  -> TyCon -> [TcType]
-                 -> TcM ThetaOrigin
+                 -> (ThetaOrigin -> [TyVar] -> [TcType] -> TcM a)
+                 -> TcM a
 -- inferConstraints figures out the constraints needed for the
 -- instance declaration generated by a 'deriving' clause on a
--- data type declaration.
+-- data type declaration. It also returns the new in-scope type
+-- variables and instance types, in case they were changed due to
+-- the presence of functor-like constraints.
 -- See Note [Inferring the instance context]
 
 -- e.g. inferConstraints
@@ -915,24 +1012,29 @@ inferConstraints :: Class -> [TcType] -> TcType
 -- Generate a sufficiently large set of constraints that typechecking the
 -- generated method definitions should succeed.   This set will be simplified
 -- before being used in the instance declaration
-inferConstraints main_cls cls_tys inst_ty rep_tc rep_tc_args
+inferConstraints tvs main_cls cls_tys inst_ty rep_tc rep_tc_args mkTheta
   | main_cls `hasKey` genClassKey    -- Generic constraints are easy
-  = return []
+  = mkTheta [] tvs inst_tys
 
   | main_cls `hasKey` gen1ClassKey   -- Gen1 needs Functor
   = ASSERT( length rep_tc_tvs > 0 )   -- See Note [Getting base classes]
     ASSERT( null cls_tys )
     do { functorClass <- tcLookupClass functorClassName
-       ; return (con_arg_constraints (get_gen1_constraints functorClass)) }
+       ; con_arg_constraints (get_gen1_constraints functorClass) mkTheta }
 
   | otherwise  -- The others are a bit more complicated
   = ASSERT2( equalLength rep_tc_tvs all_rep_tc_args
            , ppr main_cls <+> ppr rep_tc
              $$ ppr rep_tc_tvs $$ ppr all_rep_tc_args )
-    do { traceTc "inferConstraints" (vcat [ppr main_cls <+> ppr inst_tys, ppr arg_constraints])
-       ; return (stupid_constraints ++ extra_constraints
-                 ++ sc_constraints
-                 ++ arg_constraints) }
+    con_arg_constraints get_std_constrained_tys
+      $ \arg_constraints tvs' inst_tys' ->
+      do { traceTc "inferConstraints" $ vcat
+                [ ppr main_cls <+> ppr inst_tys'
+                , ppr arg_constraints
+                ]
+         ; mkTheta (stupid_constraints ++ extra_constraints
+                     ++ sc_constraints ++ arg_constraints)
+                   tvs' inst_tys' }
   where
     tc_binders = tyConBinders rep_tc
     choose_level bndr
@@ -941,52 +1043,73 @@ inferConstraints main_cls cls_tys inst_ty rep_tc rep_tc_args
     t_or_ks = map choose_level tc_binders ++ repeat TypeLevel
        -- want to report *kind* errors when possible
 
-    arg_constraints = con_arg_constraints get_std_constrained_tys
-
        -- Constraints arising from the arguments of each constructor
-    con_arg_constraints :: (CtOrigin -> TypeOrKind -> Type -> [PredOrigin])
-                        -> [PredOrigin]
-    con_arg_constraints get_arg_constraints
-      = [ pred
-        | data_con <- tyConDataCons rep_tc
-        , (arg_n, arg_t_or_k, arg_ty)
-            <- zip3 [1..] t_or_ks $
-               dataConInstOrigArgTys data_con all_rep_tc_args
-        , not (isUnliftedType arg_ty)
-        , let orig = DerivOriginDC data_con arg_n
-        , pred <- get_arg_constraints orig arg_t_or_k arg_ty ]
-
+    con_arg_constraints :: (CtOrigin -> TypeOrKind
+                                     -> Type
+                                     -> [(ThetaOrigin, Maybe TCvSubst)])
+                        -> (ThetaOrigin -> [TyVar] -> [TcType] -> TcM a)
+                        -> TcM a
+    con_arg_constraints get_arg_constraints mkTheta
+      = let (predss, mbSubsts) = unzip
+              [ preds_and_mbSubst
+              | data_con <- tyConDataCons rep_tc
+              , (arg_n, arg_t_or_k, arg_ty)
+                  <- zip3 [1..] t_or_ks $
+                     dataConInstOrigArgTys data_con all_rep_tc_args
                 -- No constraints for unlifted types
                 -- See Note [Deriving and unboxed types]
+              , not (isUnliftedType arg_ty)
+              , let orig = DerivOriginDC data_con arg_n
+              , preds_and_mbSubst <- get_arg_constraints orig arg_t_or_k arg_ty
+              ]
+            preds = concat predss
+            -- If the constraints require a subtype to be of kind (* -> *)
+            -- (which is the case for functor-like constraints), then we
+            -- explicitly unify the subtype's kinds with (* -> *).
+            -- See Note [Inferring the instance context]
+            subst = foldl' composeTCvSubst emptyTCvSubst (catMaybes mbSubsts)
+            unmapped_tvs   = filter (`notElemTCvSubst` subst) tvs
+            (subst', tvs') = mapAccumL substTyVarBndr subst unmapped_tvs
+            preds'         = substThetaOrigin subst' preds
+            inst_tys'      = substTys subst' inst_tys
+        in mkTheta preds' tvs' inst_tys'
 
     -- is_functor_like: see Note [Inferring the instance context]
     is_functor_like = typeKind inst_ty `tcEqKind` typeToTypeKind
 
+    get_gen1_constraints :: Class -> CtOrigin -> TypeOrKind -> Type
+                         -> [(ThetaOrigin, Maybe TCvSubst)]
     get_gen1_constraints functor_cls orig t_or_k ty
        = mk_functor_like_constraints orig t_or_k functor_cls $
          get_gen1_constrained_tys last_tv ty
 
-    get_std_constrained_tys :: CtOrigin -> TypeOrKind -> Type -> [PredOrigin]
+    get_std_constrained_tys :: CtOrigin -> TypeOrKind -> Type
+                            -> [(ThetaOrigin, Maybe TCvSubst)]
     get_std_constrained_tys orig t_or_k ty
         | is_functor_like = mk_functor_like_constraints orig t_or_k main_cls $
                             deepSubtypesContaining last_tv ty
-        | otherwise       = [mk_cls_pred orig t_or_k main_cls ty]
+        | otherwise       = [( [mk_cls_pred orig t_or_k main_cls ty]
+                             , Nothing )]
 
     mk_functor_like_constraints :: CtOrigin -> TypeOrKind
-                                -> Class -> [Type] -> [PredOrigin]
+                                -> Class -> [Type]
+                                -> [(ThetaOrigin, Maybe TCvSubst)]
     -- 'cls' is usually main_cls (Functor or Traversable etc), but if
     -- main_cls = Generic1, then 'cls' can be Functor; see get_gen1_constraints
     --
-    -- For each type, generate two constraints: (cls ty, kind(ty) ~ (*->*))
-    -- The second constraint checks that the first is well-kinded.
-    -- Lacking that, as Trac #10561 showed, we can just generate an
-    -- ill-kinded instance.
-    mk_functor_like_constraints orig t_or_k cls tys
-       = [ pred_o
-         | ty <- tys
-         , pred_o <- [ mk_cls_pred orig t_or_k cls ty
-                     , mkPredOrigin orig KindLevel
-                         (mkPrimEqPred (typeKind ty) typeToTypeKind) ] ]
+    -- For each type, generate two constraints, [cls ty, kind(ty) ~ (*->*)],
+    -- and a kind substitution that results from unifying kind(ty) with * -> *.
+    -- If the unification is successful, it will ensure that the resulting
+    -- instance is well kinded. If not, the second constraint will result
+    -- in an error message which points out the kind mismatch.
+    -- See Note [Inferring the instance context]
+    mk_functor_like_constraints orig t_or_k cls
+       = map $ \ty -> let ki = typeKind ty in
+                      ( [ mk_cls_pred orig t_or_k cls ty
+                        , mkPredOrigin orig KindLevel
+                            (mkPrimEqPred ki typeToTypeKind) ]
+                      , tcUnifyTy ki typeToTypeKind
+                      )
 
     rep_tc_tvs      = tyConTyVars rep_tc
     last_tv         = last rep_tc_tvs
@@ -1098,11 +1221,11 @@ data DerivStatus = CanDerive                 -- Standard class, can derive
 -- to generate code for, such as Eq, Ord, Ix, etc.
 
 checkSideConditions :: DynFlags -> DerivContext -> Class -> [TcType]
-                    -> TyCon -> [Type] -- tycon and its parameters
+                    -> TyCon -- tycon
                     -> DerivStatus
-checkSideConditions dflags mtheta cls cls_tys rep_tc rep_tc_args
+checkSideConditions dflags mtheta cls cls_tys rep_tc
   | Just cond <- sideConditions mtheta cls
-  = case (cond (dflags, rep_tc, rep_tc_args)) of
+  = case (cond (dflags, rep_tc)) of
         NotValid err -> DerivableClassError err  -- Class-specific error
         IsValid  | null cls_tys -> CanDerive     -- All derivable classes are unary, so
                                                  -- cls_tys (the type args other than last)
@@ -1189,11 +1312,8 @@ canDeriveAnyClass dflags _tycon clas
 typeToTypeKind :: Kind
 typeToTypeKind = liftedTypeKind `mkFunTy` liftedTypeKind
 
-type Condition = (DynFlags, TyCon, [Type]) -> Validity
-        -- first Bool is whether or not we are allowed to derive Data and Typeable
-        -- second Bool is whether or not we are allowed to derive Functor
+type Condition = (DynFlags, TyCon) -> Validity
         -- TyCon is the *representation* tycon if the data type is an indexed one
-        -- [Type] are the type arguments to the (representation) TyCon
         -- Nothing => OK
 
 orCond :: Condition -> Condition -> Condition
@@ -1216,7 +1336,7 @@ cond_stdOK (Just _) _ _
   = IsValid     -- Don't check these conservative conditions for
                 -- standalone deriving; just generate the code
                 -- and let the typechecker handle the result
-cond_stdOK Nothing permissive (_, rep_tc, _)
+cond_stdOK Nothing permissive (_, rep_tc)
   | null data_cons
   , not permissive      = NotValid (no_cons_why rep_tc $$ suggestion)
   | not (null con_whys) = NotValid (vcat con_whys $$ suggestion)
@@ -1240,10 +1360,10 @@ no_cons_why rep_tc = quotes (pprSourceTyCon rep_tc) <+>
                      text "must have at least one data constructor"
 
 cond_RepresentableOk :: Condition
-cond_RepresentableOk (dflags, tc, tc_args) = canDoGenerics dflags tc tc_args
+cond_RepresentableOk (_, tc) = canDoGenerics tc
 
 cond_Representable1Ok :: Condition
-cond_Representable1Ok (dflags, tc, tc_args) = canDoGenerics1 dflags tc tc_args
+cond_Representable1Ok (_, tc) = canDoGenerics1 tc
 
 cond_enumOrProduct :: Class -> Condition
 cond_enumOrProduct cls = cond_isEnumeration `orCond`
@@ -1252,7 +1372,7 @@ cond_enumOrProduct cls = cond_isEnumeration `orCond`
 cond_args :: Class -> Condition
 -- For some classes (eg Eq, Ord) we allow unlifted arg types
 -- by generating specialised code.  For others (eg Data) we don't.
-cond_args cls (_, tc, _)
+cond_args cls (_, tc)
   = case bad_args of
       []     -> IsValid
       (ty:_) -> NotValid (hang (text "Don't know how to derive" <+> quotes (ppr cls))
@@ -1276,7 +1396,7 @@ cond_args cls (_, tc, _)
 
 
 cond_isEnumeration :: Condition
-cond_isEnumeration (_, rep_tc, _)
+cond_isEnumeration (_, rep_tc)
   | isEnumerationTyCon rep_tc = IsValid
   | otherwise                 = NotValid why
   where
@@ -1286,7 +1406,7 @@ cond_isEnumeration (_, rep_tc, _)
                   -- See Note [Enumeration types] in TyCon
 
 cond_isProduct :: Condition
-cond_isProduct (_, rep_tc, _)
+cond_isProduct (_, rep_tc)
   | isProductTyCon rep_tc = IsValid
   | otherwise             = NotValid why
   where
@@ -1300,7 +1420,7 @@ cond_functorOK :: Bool -> Bool -> Condition
 --            (c) don't use argument in the wrong place, e.g. data T a = T (X a a)
 --            (d) optionally: don't use function types
 --            (e) no "stupid context" on data type
-cond_functorOK allowFunctions allowExQuantifiedLastTyVar (_, rep_tc, _)
+cond_functorOK allowFunctions allowExQuantifiedLastTyVar (_, rep_tc)
   | null tc_tvs
   = NotValid (text "Data type" <+> quotes (ppr rep_tc)
               <+> text "must have some type parameters")
@@ -1348,7 +1468,7 @@ cond_functorOK allowFunctions allowExQuantifiedLastTyVar (_, rep_tc, _)
     wrong_arg   = text "must use the type variable only as the last argument of a data type"
 
 checkFlag :: LangExt.Extension -> Condition
-checkFlag flag (dflags, _, _)
+checkFlag flag (dflags, _)
   | xopt flag dflags = IsValid
   | otherwise        = NotValid why
   where
@@ -1443,7 +1563,6 @@ Here there *is* no argument field, but we must nevertheless generate
 a context for the Data instances:
         instance Typable a => Data (T a) where ...
 
-
 ************************************************************************
 *                                                                      *
                 Deriving newtypes
@@ -1467,7 +1586,7 @@ mkNewTypeEqn dflags overlap_mode tvs
        case mtheta of
         Just theta -> return $ GivenTheta $ DS
             { ds_loc = loc
-            , ds_name = dfun_name, ds_tvs = varSetElemsWellScoped dfun_tvs
+            , ds_name = dfun_name, ds_tvs = dfun_tvs
             , ds_cls = cls, ds_tys = inst_tys
             , ds_tc = rep_tycon
             , ds_theta = theta
@@ -1475,14 +1594,14 @@ mkNewTypeEqn dflags overlap_mode tvs
             , ds_newtype = Just rep_inst_ty }
         Nothing -> return $ InferTheta $ DS
             { ds_loc = loc
-            , ds_name = dfun_name, ds_tvs = varSetElemsWellScoped dfun_tvs
+            , ds_name = dfun_name, ds_tvs = dfun_tvs
             , ds_cls = cls, ds_tys = inst_tys
             , ds_tc = rep_tycon
             , ds_theta = all_preds
             , ds_overlap = overlap_mode
             , ds_newtype = Just rep_inst_ty }
   | otherwise
-  = case checkSideConditions dflags mtheta cls cls_tys rep_tycon rep_tc_args of
+  = case checkSideConditions dflags mtheta cls cls_tys rep_tycon of
       -- Error with standard class
       DerivableClassError msg
         | might_derive_via_coercible -> bale_out (msg $$ suggest_gnd)
@@ -1517,7 +1636,7 @@ mkNewTypeEqn dflags overlap_mode tvs
         -- Here is the plan for newtype derivings.  We see
         --        newtype T a1...an = MkT (t ak+1...an) deriving (.., C s1 .. sm, ...)
         -- where t is a type,
-        --       ak+1...an is a suffix of a1..an, and are all tyars
+        --       ak+1...an is a suffix of a1..an, and are all tyvars
         --       ak+1...an do not occur free in t, nor in the s1..sm
         --       (C s1 ... sm) is a  *partial applications* of class C
         --                      with the last parameter missing
@@ -1570,7 +1689,7 @@ mkNewTypeEqn dflags overlap_mode tvs
         -- Next we figure out what superclass dictionaries to use
         -- See Note [Newtype deriving superclasses] above
         cls_tyvars = classTyVars cls
-        dfun_tvs   = tyCoVarsOfTypes inst_tys
+        dfun_tvs   = tyCoVarsOfTypesWellScoped inst_tys
         inst_ty    = mkTyConApp tycon tc_args
         inst_tys   = cls_tys ++ [inst_ty]
         sc_theta   = mkThetaOrigin DerivOrigin TypeLevel $
@@ -1582,7 +1701,7 @@ mkNewTypeEqn dflags overlap_mode tvs
         -- newtype type; precisely the constraints required for the
         -- calls to coercible that we are going to generate.
         coercible_constraints =
-            [ let (Pair t1 t2) = mkCoerceClassMethEqn cls (varSetElemsWellScoped dfun_tvs) inst_tys rep_inst_ty meth
+            [ let (Pair t1 t2) = mkCoerceClassMethEqn cls dfun_tvs inst_tys rep_inst_ty meth
               in mkPredOrigin (DerivOriginCoerce meth t1 t2) TypeLevel
                               (mkReprPrimEqPred t1 t2)
             | meth <- classMethods cls ]
@@ -2088,7 +2207,10 @@ genDerivStuff loc clas dfun_name tycon inst_tys tyvars
   = let gk = if ck == genClassKey then Gen0 else Gen1
         -- TODO NSF: correctly identify when we're building Both instead of One
     in do
-      (binds, faminst) <- gen_Generic_binds gk tycon (nameModule dfun_name)
+      let inst_ty = ASSERT(not $ null inst_tys)
+                          head inst_tys
+      (binds, faminst) <- gen_Generic_binds gk tycon inst_ty
+                                            (nameModule dfun_name)
       return (binds, unitBag (DerivFamInst faminst))
 
   -- Not deriving Generic(1), so we first check if the compiler has built-in

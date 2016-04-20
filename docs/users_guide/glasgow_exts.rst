@@ -5545,7 +5545,7 @@ This means that the usual string syntax can be used, e.g., for
 ``ByteString``, ``Text``, and other variations of string like types.
 String literals behave very much like integer literals, i.e., they can
 be used in both expressions and patterns. If used in a pattern the
-literal with be replaced by an equality test, in the same way as an
+literal will be replaced by an equality test, in the same way as an
 integer literal is.
 
 The class ``IsString`` is defined as: ::
@@ -6466,23 +6466,46 @@ keyword in the family instance: ::
       type Elem [e] = e
       ...
 
-Note the following points:
+The data or type family instance for an assocated type must follow
+the following two rules:
 
 -  The type indexes corresponding to class parameters must have
-   precisely the same shape the type given in the instance head. To have
-   the same "shape" means that the two types are identical modulo
-   renaming of type variables. For example: ::
+   precisely the same as type given in the instance head.
+   For example: ::
+
+       class Collects ce where
+         type Elem ce :: *
 
        instance Eq (Elem [e]) => Collects [e] where
          -- Choose one of the following alternatives:
          type Elem [e] = e       -- OK
-         type Elem [x] = x       -- OK
-         type Elem x   = x       -- BAD; shape of 'x' is different to '[e]'
-         type Elem [Maybe x] = x -- BAD: shape of '[Maybe x]' is different to '[e]'
+         type Elem [x] = x       -- BAD; '[x]' is differnet to '[e]' from head
+         type Elem x   = x       -- BAD; 'x' is different to '[e]'
+         type Elem [Maybe x] = x -- BAD: '[Maybe x]' is different to '[e]'
 
--  An instances for an associated family can only appear as part of an
+-  The type indexes of the type family that do *not* correspond to
+   class parameters must be distinct type variables, not mentioned
+   in the instance head.  For example: ::
+
+       class C b x where
+          type F a b c :: *
+
+       instance C [v] [w] where
+         -- Choose one of the following alternatives:
+         type C a [v] c = a->c  -- OK; a,c are tyvars
+         type C x [v] y = y->x  -- OK; x,y are tyvars
+         type C x [v] x = x     -- BAD: x is repeated
+         type C x [v] w = x     -- BAD: w is mentioned in instance head
+
+The effect of these two rules is that the type-family instance
+completely covers the cases covered by the instance head.
+
+-  An instance for an associated family can only appear as part of an
    instance declarations of the class in which the family was declared,
    just as with the equations of the methods of a class.
+
+-  The variables on the right hand side of the type family equation
+   must, as usual, be bound on the left hand side.
 
 -  The instance for an associated type can be omitted in class
    instances. In that case, unless there is a default instance (see
@@ -6490,9 +6513,9 @@ Note the following points:
    inhabited; i.e., only diverging expressions, such as ``undefined``,
    can assume the type.
 
--  Although it is unusual, there (currently) can be *multiple* instances
-   for an associated family in a single instance declaration. For
-   example, this is legitimate: ::
+-  A historical note.  In the past (but no longer), GHC allowed you to
+   write *multiple* type or data family instances for a single
+   asssociated type.  For example: ::
 
        instance GMapKey Flob where
          data GMap Flob [v] = G1 v
@@ -6501,10 +6524,23 @@ Note the following points:
 
    Here we give two data instance declarations, one in which the last
    parameter is ``[v]``, and one for which it is ``Int``. Since you
-   cannot give any *subsequent* instances for ``(GMap Flob ...)``, this
-   facility is most useful when the free indexed parameter is of a kind
-   with a finite number of alternatives (unlike ``*``). WARNING: this
-   facility may be withdrawn in the future.
+   cannot give any *subsequent* instances for ``(GMap Flob ...)``,
+   this facility was not very useful, except perhaps when the free
+   indexed parameter has a fixed number of alternatives
+   (e.g. ``Bool`). But in that case it is better to define an auxiliary
+   closed type function like this: ::
+
+       class C a where
+         type F a (b :: Bool) :: *
+
+       instance C Int where
+         type F Int b = FInt b
+
+       type family FInt a b where
+         FInt True  = Char
+         FInt False = Bool
+
+    Here the auxiliary type function is ``FInt``.
 
 .. _assoc-decl-defs:
 
@@ -13367,8 +13403,10 @@ For example, we can define ::
 
    errorWithCallStack :: HasCallStack => String -> a
 
-as a variant of ``error`` that will get its call-site. We can access the
-call-stack inside ``errorWithCallStack`` with ``GHC.Stack.callStack``. ::
+as a variant of ``error`` that will get its call-site (as of GHC 8.0,
+``error`` already gets its call-site, but let's assume for the sake of
+demonstration that it does not). We can access the call-stack inside
+``errorWithCallStack`` with ``GHC.Stack.callStack``. ::
 
    errorWithCallStack :: HasCallStack => String -> a
    errorWithCallStack msg = error (msg ++ "\n" ++ prettyCallStack callStack)
@@ -13386,12 +13424,12 @@ alongside our error message.
 The ``CallStack`` will only extend as far as the types allow it, for
 example ::
 
-   head :: HasCallStack => [a] -> a
-   head []     = errorWithCallStack "empty"
-   head (x:xs) = x
+   myHead :: HasCallStack => [a] -> a
+   myHead []     = errorWithCallStack "empty"
+   myHead (x:xs) = x
 
    bad :: Int
-   bad = head []
+   bad = myHead []
 
 .. code-block:: none
 
@@ -13399,27 +13437,23 @@ example ::
    *** Exception: empty
    CallStack (from HasCallStack):
      errorWithCallStack, called at Bad.hs:8:15 in main:Bad
-     head, called at Bad.hs:12:7 in main:Bad
+     myHead, called at Bad.hs:12:7 in main:Bad
 
-includes the call-site of ``errorWithCallStack`` in ``head``,
-and of ``head`` in ``bad``,
-but not the call-site of ``bad`` at the GHCi prompt.
+includes the call-site of ``errorWithCallStack`` in ``myHead``, and of
+``myHead`` in ``bad``, but not the call-site of ``bad`` at the GHCi
+prompt.
 
-GHC solves ``HasCallStack`` constraints in three steps:
+GHC solves ``HasCallStack`` constraints in two steps:
 
-1. If there is a ``CallStack`` in scope -- i.e. the enclosing function
+1. If there is a ``CallStack`` in scope -- i.e. the enclosing definition
    has a ``HasCallStack`` constraint -- GHC will push the new call-site
    onto the existing ``CallStack``.
 
-2. If there is no ``CallStack`` in scope -- e.g. in the GHCi session
-   above -- and the enclosing definition does not have an explicit
-   type signature, GHC will infer a ``HasCallStack`` constraint for the
-   enclosing definition (subject to the monomorphism restriction).
+2. Otherwise GHC will solve the ``HasCallStack`` constraint for the
+   singleton ``CallStack`` containing just the current call-site.
 
-3. If there is no ``CallStack`` in scope and the enclosing definition
-   has an explicit type signature, GHC will solve the ``HasCallStack``
-   constraint for the singleton ``CallStack`` containing just the
-   current call-site.
+Importantly, GHC will **never** infer a ``HasCallStack`` constraint,
+you must request it explicitly.
 
 ``CallStack`` is kept abstract, but GHC provides a function ::
 
@@ -13433,20 +13467,20 @@ package, module, and file name, as well as the line and column numbers.
 allows users to freeze the current ``CallStack``, preventing any future push
 operations from having an effect. This can be used by library authors
 to prevent ``CallStack``\s from exposing unnecessary implementation
-details. Consider the ``head`` example above, the ``errorWithCallStack`` line in
+details. Consider the ``myHead`` example above, the ``errorWithCallStack`` line in
 the printed stack is not particularly enlightening, so we might choose
 to suppress it by freezing the ``CallStack`` that we pass to ``errorWithCallStack``. ::
 
-   head :: HasCallStack => [a] -> a
-   head []     = withFrozenCallStack (errorWithCallStack "empty")
-   head (x:xs) = x
+   myHead :: HasCallStack => [a] -> a
+   myHead []     = withFrozenCallStack (errorWithCallStack "empty")
+   myHead (x:xs) = x
 
 .. code-block:: none
 
-   ghci> head []
+   ghci> myHead []
    *** Exception: empty
    CallStack (from HasCallStack):
-     head, called at Bad.hs:12:7 in main:Bad
+     myHead, called at Bad.hs:12:7 in main:Bad
 
 **NOTE**: The intrepid user may notice that ``HasCallStack`` is just an
 alias for an implicit parameter ``?callStack :: CallStack``. This is an

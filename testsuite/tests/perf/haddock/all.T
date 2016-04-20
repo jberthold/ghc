@@ -37,13 +37,13 @@ test('haddock.base',
             # 2014-12-01:                     4202377432 (x86/Windows, 64bit machine)
             # 2015-01-20:                     4434804940 (x86/Windows, 64bit machine)
 
-          ,(wordsize(32), 3799130400, 1)])
+          ,(wordsize(32), 5509757068, 5)])
             # 2012-08-14: 3046487920 (x86/OSX)
             # 2012-10-30: 2955470952 (x86/Windows)
             # 2013-02-10: 3146596848 (x86/OSX)
             # 2014-02-22: 3554624600 (x86/Linux - new haddock)
             # 2014-06-29: 3799130400 (x86/Linux)
-            # 2014-08-05: XXX TODO UPDATE ME XXX
+            # 2016-04-06: 5509757068 (x86/Linux)
       ],
      stats,
      ['../../../../libraries/base/dist-install/haddock.t'])
@@ -51,7 +51,7 @@ test('haddock.base',
 test('haddock.Cabal',
      [unless(in_tree_compiler(), skip), req_haddock
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 10941742184, 5)
+          [(wordsize(64), 10963514352, 5)
             # 2012-08-14: 3255435248 (amd64/Linux)
             # 2012-08-29: 3324606664 (amd64/Linux, new codegen)
             # 2012-10-08: 3373401360 (amd64/Linux)
@@ -77,6 +77,8 @@ test('haddock.Cabal',
             # 2015-12-22: 10519532424 (amd64/Linux) - Lots of new Semigroup instances in Cabal
             # 2016-03-29: 11517963232 (amd64/Linux) - not yet investigated
             # 2016-03-30: 10941742184 (amd64/Linux) - defer inlining of Int* Ord methods
+            # 2016-04-06: 11542374816 (amd64/Linux) - CSE improvements and others
+            # 2016-04-07: 10963514352 (amd64/Linux) - Revert to what phabricator claims
 
           ,(platform('i386-unknown-mingw32'), 3293415576, 5)
             # 2012-10-30:                     1733638168 (x86/Windows)
@@ -86,11 +88,11 @@ test('haddock.Cabal',
             # 2014-12-01:                     3088635556 (x86/Windows)
             # 2015-01-20:                     3293415576 
 
-          ,(wordsize(32), 2127198484, 1)])
+          ,(wordsize(32), 6268156056, 5)])
             # 2012-08-14: 1648610180 (x86/OSX)
             # 2014-01-22: 1986290624 (x86/Linux)
             # 2014-06-29: 2127198484 (x86/Linux)
-            # 2014-08-05: XXX TODO UPDATE ME XXX
+            # 2016-04-06: 6268156056 (x86/Linux)
       ],
      stats,
      ['../../../../libraries/Cabal/Cabal/dist-install/haddock.t'])
@@ -120,10 +122,11 @@ test('haddock.compiler',
             # 2014-12-01:                       104140852 (x86/Windows, sudden shrinkage!)
             # 2014-12-10:                       217933548 increased again
 
-          ,(wordsize(32), 15110426000, 1)])
+          ,(wordsize(32), 16222702892, 5)])
             # 2012-08-14: 13471797488 (x86/OSX)
             # 2014-01-22: 14581475024 (x86/Linux - new haddock)
             # 2014-06-29: 15110426000 (x86/Linux)
+            # 2016-04-06: 16222702892 (x86/Linux)
       ],
      stats,
      ['../../../../compiler/stage2/haddock.t'])

@@ -395,7 +395,7 @@ runSolverPipeline pipeline workItem
            ContinueWith ct -> do { traceFireTcS (ctEvidence ct) (text "Kept as inert")
                                  ; traceTcS "End solver pipeline (kept as inert) }" $
                                        vcat [ text "final_item =" <+> ppr ct
-                                            , pprTvBndrs (varSetElems $ tyCoVarsOfCt ct)
+                                            , pprTvBndrs $ tyCoVarsOfCtList ct
                                             , text "inerts     =" <+> ppr final_is]
                                  ; addInertCan ct }
        }
@@ -683,7 +683,7 @@ interactIrred _ wi = pprPanic "interactIrred" (ppr wi)
 interactDict :: InertCans -> Ct -> TcS (StopOrContinue Ct)
 interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs = tys })
   | isWanted ev_w
-  , Just ip_name      <- isCallStackDict cls tys
+  , Just ip_name      <- isCallStackPred (ctPred workItem)
   , OccurrenceOf func <- ctLocOrigin (ctEvLoc ev_w)
   -- If we're given a CallStack constraint that arose from a function
   -- call, we need to push the current call-site onto the stack instead
