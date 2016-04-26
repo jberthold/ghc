@@ -54,4 +54,16 @@ typedef struct Port_ {
 } Port;
 typedef Port Proc;
 
+// Pack Buffer for constructing messages between PEs
+typedef struct rtsPackBuffer_ {
+    // Eden channel communication
+    Port                 sender;
+    Port                 receiver;
+    // for data messages only,
+    StgInt /* nat */     id;            // currently unused
+    StgInt /* nat */     size;          // payload size in units of StgWord
+    StgInt /* nat */     unpacked_size; // currently unused
+    StgWord              buffer[];      // payload
+} rtsPackBuffer;
+
 #endif /* RTS_TYPES_H */

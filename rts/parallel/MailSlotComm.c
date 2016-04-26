@@ -70,7 +70,7 @@ HANDLE mySlot;
 typedef struct SlotMsg_ {
   nat proc;  // sender
   char tag;  // message tag ("PEOpCode")
-  char data[FLEXIBLE_ARRAY];
+  char data[];
 } SlotMsg;
 
 /* this is data space to copy messages (proc, tag, DATASPACEWORDS words) */

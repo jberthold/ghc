@@ -39,21 +39,6 @@ extern nat nPEs, thisPE;
 
 
 // packing and sending:
-// Pack Buffer for constructing messages between PEs
-// defined here instead of in RtsTypes.h due to FLEXIBLE_ARRAY usage
-typedef struct rtsPackBuffer_ {
-    // Eden channel communication
-    Port                 sender;
-    Port                 receiver;
-    // for data messages only,
-    StgInt /* nat */     id;            // currently unused
-    StgInt /* nat */     size;          // payload size in units of StgWord
-    StgInt /* nat */     unpacked_size; // currently unused
-    StgWord              buffer[FLEXIBLE_ARRAY]; // payload
-} rtsPackBuffer;
-
-// minimum sizes for message buffers:
-
 /* (arbitrary) amount of additional StgWords to remain free */
 #define DEBUG_HEADROOM  2
 

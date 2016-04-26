@@ -24,7 +24,6 @@
 #define errorBelch(x, ...) fprintf(stderr, x "\n", __VA_ARGS__)
 #define stgMallocBytes(sz,msg) malloc(sz)
 #define stgFree(p) free(p)
-#define FLEXIBLE_ARRAY 0
 #define ASSERT(x) if (!(x)) fprintf(stderr,"Assertion failed: %s",#x)
 #else
 #include "RtsUtils.h"
@@ -54,8 +53,8 @@ typedef struct {
   StgWord32 usize; // ditto
   StgWord16 nlength; // name length
   StgWord16 elength; // extra field length (zero for us, for now)
-  char   name[FLEXIBLE_ARRAY];
-  // char   extra[FLEXIBLE_ARRAY]; // empty for us (for now)
+  char   name[];     // file name
+  // char   extra[];    // empty for us (for now)
 } FileHeader;
 
 typedef struct {
@@ -82,9 +81,9 @@ typedef struct {
   StgWord16 iattr;    // internal attributes (bit 0 set => ASCII data )
   StgWord32 eattr;    // external attributes (system dependent)
   StgWord32 offset;
-  char   name[FLEXIBLE_ARRAY];
-  // char   extra[FLEXIBLE_ARRAY]; // empty for us (for now)
-  // char   comm[FLEXIBLE_ARRAY]; // empty for us (for now)
+  char   name[];
+  // char   extra[]; // empty for us (for now)
+  // char   comm[]; // empty for us (for now)
 } CentralDirEntry;
 
 typedef struct {
@@ -96,7 +95,7 @@ typedef struct {
   StgWord32 dsize;   // central dir size in bytes (excludes end marker)
   StgWord32 cdOff;   // offset of central dir from its (first) disk
   StgWord16 clength; // comment length
-  char   comm[FLEXIBLE_ARRAY];
+  char   comm[];
 } CentralDirEnd;
 
 
