@@ -48,8 +48,8 @@ StgWord inportmax = 0;
 
 
 // Constant System ports:
-Port RtsPort = (Port) {0, 0, 0}; // machine field set by initRTT()
-Port NoPort  = (Port) {0, 0, 0}; // constant for error returns
+Port RtsPort = {0, 0, 0}; // machine field set by initRTT()
+Port NoPort  = {0, 0, 0}; // constant for error returns
 
 #define localPort(p, id) ((Port) {thisPE, (p), (id)})
 
