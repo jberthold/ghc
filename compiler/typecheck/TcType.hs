@@ -168,8 +168,7 @@ module TcType (
   coreView,
 
   tyCoVarsOfType, tyCoVarsOfTypes, closeOverKinds,
-  tyCoVarsOfTelescope,
-  tyCoVarsOfTypeAcc, tyCoVarsOfTypesAcc,
+  tyCoFVsOfType, tyCoFVsOfTypes,
   tyCoVarsOfTypeDSet, tyCoVarsOfTypesDSet, closeOverKindsDSet,
   tyCoVarsOfTypeList, tyCoVarsOfTypesList,
 
@@ -209,7 +208,8 @@ import Name -- hiding (varName)
 import NameSet
 import VarEnv
 import PrelNames
-import TysWiredIn
+import TysWiredIn( coercibleClass, unitTyCon, unitTyConKey
+                 , listTyCon, constraintKind )
 import BasicTypes
 import Util
 import Bag
@@ -526,7 +526,7 @@ data UserTypeCtxt
   | ClassSCCtxt Name    -- Superclasses of a class
   | SigmaCtxt           -- Theta part of a normal for-all type
                         --      f :: <S> => a -> a
-  | DataTyCtxt Name     -- Theta part of a data decl
+  | DataTyCtxt Name     -- The "stupid theta" part of a data decl
                         --      data <S> => T a = MkT a
 
 {-
@@ -827,18 +827,18 @@ exactTyCoVarsOfTypes tys = mapUnionVarSet exactTyCoVarsOfType tys
 -- | Find all variables bound anywhere in a type.
 -- See also Note [Scope-check inferred kinds] in TcHsType
 allBoundVariables :: Type -> TyVarSet
-allBoundVariables ty = runFVSet $ go ty
+allBoundVariables ty = fvVarSet $ go ty
   where
     go :: Type -> FV
     go (TyVarTy tv)     = go (tyVarKind tv)
     go (TyConApp _ tys) = mapUnionFV go tys
     go (AppTy t1 t2)    = go t1 `unionFV` go t2
     go (ForAllTy (Anon t1) t2) = go t1 `unionFV` go t2
-    go (ForAllTy (Named tv _) t2) = oneVar tv `unionFV`
+    go (ForAllTy (Named tv _) t2) = FV.unitFV tv `unionFV`
                                     go (tyVarKind tv) `unionFV` go t2
-    go (LitTy {})       = noVars
+    go (LitTy {})       = emptyFV
     go (CastTy ty _)    = go ty
-    go (CoercionTy {})  = noVars
+    go (CoercionTy {})  = emptyFV
       -- any types mentioned in a coercion should also be mentioned in
       -- a type.
 
@@ -870,7 +870,7 @@ instance Outputable TcDepVars where
 In Haskell type inference we quantify over type variables; but we only
 quantify over /kind/ variables when -XPolyKinds is on. So when
 collecting the free vars of a type, prior to quantifying, we must keep
-the type and kind veraibles separate.  But what does that mean in a
+the type and kind variables separate.  But what does that mean in a
 system where kind variables /are/ type variables? It's a fairly
 arbitrary distinction based on how the variables appear:
 
@@ -931,12 +931,7 @@ split_dep_vars = go
     go (LitTy {})                = mempty
     go (CastTy ty co)            = go ty `mappend` Pair (tyCoVarsOfCo co)
                                                         emptyVarSet
-    go (CoercionTy co)           = go_co co
-
-    go_co co = let Pair ty1 ty2 = coercionKind co in
-                   -- co :: ty1 ~ ty2
-               go ty1 `mappend` go ty2
-
+    go (CoercionTy co)           = Pair (tyCoVarsOfCo co) emptyVarSet
 
 {-
 ************************************************************************

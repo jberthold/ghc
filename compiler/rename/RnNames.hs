@@ -526,7 +526,7 @@ extendGlobalRdrEnvRn avails new_fixities
     getLocalDeclBindersd@ returns the names for an HsDecl
              It's used for source code.
 
-        *** See "THE NAMING STORY" in HsDecls ****
+        *** See Note [The Naming story] in HsDecls ****
 *                                                                      *
 ********************************************************************* -}
 
@@ -544,12 +544,13 @@ getLocalNonValBinders :: MiniFixityEnv -> HsGroup RdrName
 getLocalNonValBinders fixity_env
      (HsGroup { hs_valds  = binds,
                 hs_tyclds = tycl_decls,
-                hs_instds = inst_decls,
                 hs_fords  = foreign_decls })
   = do  { -- Process all type/class decls *except* family instances
+        ; let inst_decls = tycl_decls >>= group_instds
         ; overload_ok <- xoptM LangExt.DuplicateRecordFields
-        ; (tc_avails, tc_fldss) <- fmap unzip $ mapM (new_tc overload_ok)
-                                                     (tyClGroupConcat tycl_decls)
+        ; (tc_avails, tc_fldss)
+            <- fmap unzip $ mapM (new_tc overload_ok)
+                                 (tyClGroupTyClDecls tycl_decls)
         ; traceRn (text "getLocalNonValBinders 1" <+> ppr tc_avails)
         ; envs <- extendGlobalRdrEnvRn tc_avails fixity_env
         ; setEnvs envs $ do {
@@ -1271,14 +1272,12 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
         | let earlier_mods = [ mod
                              | (L _ (IEModuleContents (L _ mod))) <- ie_names ]
         , mod `elem` earlier_mods    -- Duplicate export of M
-        = do { warn_dup_exports <- woptM Opt_WarnDuplicateExports ;
-               warnIf (Reason Opt_WarnDuplicateExports) warn_dup_exports
+        = do { warnIf (Reason Opt_WarnDuplicateExports) True
                       (dupModuleExport mod) ;
                return acc }
 
         | otherwise
-        = do { warnDodgyExports <- woptM Opt_WarnDodgyExports
-             ; let { exportValid = (mod `elem` imported_modules)
+        = do { let { exportValid = (mod `elem` imported_modules)
                                 || (moduleName this_mod == mod)
                    ; gre_prs     = pickGREsModExp mod (globalRdrEnvElts rdr_env)
                    ; new_exports = map (availFromGRE . fst) gre_prs
@@ -1288,7 +1287,7 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
 
              ; checkErr exportValid (moduleNotImported mod)
              ; warnIf (Reason Opt_WarnDodgyExports)
-                      (warnDodgyExports && exportValid && null gre_prs)
+                      (exportValid && null gre_prs)
                       (nullModuleExport mod)
 
              ; traceRn (text "efa" <+> (ppr mod $$ ppr all_gres))
@@ -1428,11 +1427,10 @@ check_occs ie occs names  -- 'names' are the entities specifed by 'ie'
             | name == name'   -- Duplicate export
             -- But we don't want to warn if the same thing is exported
             -- by two different module exports. See ticket #4478.
-            -> do unless (dupExport_ok name ie ie') $ do
-                      warn_dup_exports <- woptM Opt_WarnDuplicateExports
-                      warnIf (Reason Opt_WarnDuplicateExports) warn_dup_exports
-                             (dupExportWarn name_occ ie ie')
-                  return occs
+            -> do { warnIf (Reason Opt_WarnDuplicateExports)
+                           (not (dupExport_ok name ie ie'))
+                           (dupExportWarn name_occ ie ie')
+                  ; return occs }
 
             | otherwise    -- Same occ name but different names: an error
             ->  do { global_env <- getGlobalRdrEnv ;

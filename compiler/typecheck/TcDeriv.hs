@@ -63,6 +63,7 @@ import Outputable
 import FastString
 import Bag
 import Pair
+import FV (fvVarList, unionFV, mkFVs)
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
@@ -340,11 +341,9 @@ data DerivInfo = DerivInfo { di_rep_tc :: TyCon
                            }
 
 -- | Extract `deriving` clauses of proper data type (skips data families)
-mkDerivInfos :: [TyClGroup Name] -> TcM [DerivInfo]
-mkDerivInfos tycls = concatMapM mk_derivs tycls
+mkDerivInfos :: [LTyClDecl Name] -> TcM [DerivInfo]
+mkDerivInfos decls = concatMapM (mk_deriv . unLoc) decls
   where
-    mk_derivs (TyClGroup { group_tyclds = decls })
-      = concatMapM (mk_deriv . unLoc) decls
 
     mk_deriv decl@(DataDecl { tcdLName = L _ data_name
                             , tcdDataDefn =
@@ -403,7 +402,7 @@ tcDeriving deriv_infos deriv_decls
 
         ; gbl_env <- tcExtendLocalFamInstEnv (bagToList famInsts) $
                      tcExtendLocalInstEnv (map iSpec (bagToList inst_info)) getGblEnv
-        ; let all_dus = rn_dus `plusDU` usesOnly (mkFVs $ catMaybes maybe_fvs)
+        ; let all_dus = rn_dus `plusDU` usesOnly (NameSet.mkFVs $ catMaybes maybe_fvs)
         ; return (addTcgDUs gbl_env all_dus, inst_info, rn_binds) }
   where
     ddump_deriving :: Bag (InstInfo Name) -> HsValBinds Name
@@ -646,9 +645,11 @@ deriveTyData tvs tc tc_args deriv_pred
               mb_match        = tcUnifyTy inst_ty_kind cls_arg_kind
               Just kind_subst = mb_match
 
-              all_tkvs        = varSetElemsWellScoped $
-                                mkVarSet deriv_tvs `unionVarSet`
-                                tyCoVarsOfTypes tc_args_to_keep
+              all_tkvs        = toposortTyVars $
+                                fvVarList $ unionFV
+                                  (tyCoFVsOfTypes tc_args_to_keep)
+                                  (FV.mkFVs deriv_tvs)
+
               unmapped_tkvs   = filter (`notElemTCvSubst` kind_subst) all_tkvs
               (subst, tkvs)   = mapAccumL substTyVarBndr
                                           kind_subst unmapped_tkvs
@@ -2167,7 +2168,6 @@ genInst spec@(DS { ds_tvs = tvs, ds_tc = rep_tycon
                  , ds_name = dfun_name, ds_cls = clas, ds_loc = loc })
   | Just rhs_ty <- is_newtype   -- See Note [Bindings for Generalised Newtype Deriving]
   = do { inst_spec <- newDerivClsInst theta spec
-       ; traceTc "genInst/is_newtype" (vcat [ppr loc, ppr clas, ppr tvs, ppr tys, ppr rhs_ty])
        ; return ( InstInfo
                     { iSpec   = inst_spec
                     , iBinds  = InstBindings

@@ -15,6 +15,8 @@ import HsSyn
 import TcPat
 import TcHsType( tcImplicitTKBndrs, tcExplicitTKBndrs
                , tcHsContext, tcHsLiftedType, tcHsOpenType, kindGeneralize )
+import Type( binderVar, mkNamedBinders, binderVisibility
+           , tidyTyCoVarBndrs, tidyTypes, tidyType )
 import TcRnMonad
 import TcEnv
 import TcMType
@@ -36,7 +38,6 @@ import BasicTypes
 import TcSimplify
 import TcUnify
 import TcType
-import Type
 import TcEvidence
 import BuildTyCl
 import VarSet
@@ -409,8 +410,8 @@ tc_patsyn_finish lname dir is_infix lpat'
                  pat_ty field_labels
   = do { -- Zonk everything.  We are about to build a final PatSyn
          -- so there had better be no unification variables in there
-         univ_tvs'    <- mapMaybeM zonkQuantifiedTyVar univ_tvs
-       ; ex_tvs'      <- mapMaybeM zonkQuantifiedTyVar ex_tvs
+         univ_tvs'    <- mapMaybeM (zonkQuantifiedTyVar False) univ_tvs
+       ; ex_tvs'      <- mapMaybeM (zonkQuantifiedTyVar False) ex_tvs
        ; prov_theta'  <- zonkTcTypes prov_theta
        ; req_theta'   <- zonkTcTypes req_theta
        ; pat_ty'      <- zonkTcType pat_ty
