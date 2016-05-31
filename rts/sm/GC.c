@@ -99,7 +99,7 @@
  * flag) is when we're collecting all generations.  We only attempt to
  * deal with static objects and GC CAFs when doing a major GC.
  */
-nat N;
+uint32_t N;
 rtsBool major_gc;
 
 /* Data used for allocation area sizing.
@@ -108,7 +108,7 @@ static W_ g0_pcnt_kept = 30; // percentage of g0 live at last minor GC
 
 /* Mut-list stats */
 #ifdef DEBUG
-nat mutlist_MUTVARS,
+uint32_t mutlist_MUTVARS,
     mutlist_MUTARRS,
     mutlist_MVARS,
     mutlist_TVAR,
@@ -130,15 +130,15 @@ StgWord8 the_gc_thread[sizeof(gc_thread) + 64 * sizeof(gen_workspace)];
 
 // Number of threads running in *this* GC.  Affects how many
 // step->todos[] lists we have to look in to find work.
-nat n_gc_threads;
+uint32_t n_gc_threads;
 
 // For stats:
 static long copied;        // *words* copied & scavenged during this GC
 
 rtsBool work_stealing;
 
-nat static_flag = STATIC_FLAG_B;
-nat prev_static_flag = STATIC_FLAG_A;
+uint32_t static_flag = STATIC_FLAG_B;
+uint32_t prev_static_flag = STATIC_FLAG_A;
 
 DECLARE_GCT
 
@@ -156,8 +156,8 @@ static void start_gc_threads        (void);
 static void scavenge_until_all_done (void);
 static StgWord inc_running          (void);
 static StgWord dec_running          (void);
-static void wakeup_gc_threads       (nat me);
-static void shutdown_gc_threads     (nat me);
+static void wakeup_gc_threads       (uint32_t me);
+static void shutdown_gc_threads     (uint32_t me);
 static void collect_gct_blocks      (void);
 static void collect_pinned_object_blocks (void);
 
@@ -182,9 +182,9 @@ StgPtr mark_sp;            // pointer to the next unallocated mark stack entry
    -------------------------------------------------------------------------- */
 
 void
-GarbageCollect (nat collect_gen,
+GarbageCollect (uint32_t collect_gen,
                 rtsBool do_heap_census,
-                nat gc_type USED_IF_THREADS,
+                uint32_t gc_type USED_IF_THREADS,
                 Capability *cap)
 {
   bdescr *bd;
@@ -193,7 +193,7 @@ GarbageCollect (nat collect_gen,
 #if defined(THREADED_RTS)
   gc_thread *saved_gct;
 #endif
-  nat g, n;
+  uint32_t g, n;
 
   // necessary if we stole a callee-saves register for gct:
 #if defined(THREADED_RTS)
@@ -485,7 +485,7 @@ GarbageCollect (nat collect_gen,
   par_max_copied = 0;
   par_tot_copied = 0;
   {
-      nat i;
+      uint32_t i;
       for (i=0; i < n_gc_threads; i++) {
           if (n_gc_threads > 1) {
               debugTrace(DEBUG_gc,"thread %d:", i);
@@ -645,10 +645,9 @@ GarbageCollect (nat collect_gen,
     live_words  += genLiveWords(gen);
     live_blocks += genLiveBlocks(gen);
 
-    // add in the partial blocks in the gen_workspaces, but ignore gen 0
-    // if this is a local GC (we can't count another capability's part_list)
+    // add in the partial blocks in the gen_workspaces
     {
-        nat i;
+        uint32_t i;
         for (i = 0; i < n_capabilities; i++) {
             live_words  += gcThreadLiveWords(i, gen->no);
             live_blocks += gcThreadLiveBlocks(i, gen->no);
@@ -793,9 +792,9 @@ GarbageCollect (nat collect_gen,
 #define GC_THREAD_WAITING_TO_CONTINUE  3
 
 static void
-new_gc_thread (nat n, gc_thread *t)
+new_gc_thread (uint32_t n, gc_thread *t)
 {
-    nat g;
+    uint32_t g;
     gen_workspace *ws;
 
     t->cap = capabilities[n];
@@ -856,10 +855,10 @@ new_gc_thread (nat n, gc_thread *t)
 
 
 void
-initGcThreads (nat from USED_IF_THREADS, nat to USED_IF_THREADS)
+initGcThreads (uint32_t from USED_IF_THREADS, uint32_t to USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
-    nat i;
+    uint32_t i;
 
     if (from > 0) {
         gc_threads = stgReallocBytes (gc_threads, to * sizeof(gc_thread*),
@@ -888,10 +887,10 @@ initGcThreads (nat from USED_IF_THREADS, nat to USED_IF_THREADS)
 void
 freeGcThreads (void)
 {
-    nat g;
+    uint32_t g;
     if (gc_threads != NULL) {
 #if defined(THREADED_RTS)
-        nat i;
+        uint32_t i;
         for (i = 0; i < n_capabilities; i++) {
             for (g = 0; g < RtsFlags.GcFlags.generations; g++)
             {
@@ -960,7 +959,7 @@ any_work (void)
 
 #if defined(THREADED_RTS)
     if (work_stealing) {
-        nat n;
+        uint32_t n;
         // look for work to steal
         for (n = 0; n < n_gc_threads; n++) {
             if (n == gct->thread_index) continue;
@@ -983,7 +982,7 @@ any_work (void)
 static void
 scavenge_until_all_done (void)
 {
-    DEBUG_ONLY( nat r );
+    DEBUG_ONLY( uint32_t r );
 
 
 loop:
@@ -1090,13 +1089,12 @@ gcWorkerThread (Capability *cap)
 void
 waitForGcThreads (Capability *cap USED_IF_THREADS)
 {
-    const nat n_threads = n_capabilities;
-    const nat me = cap->no;
-    nat i, j;
+    const uint32_t n_threads = n_capabilities;
+    const uint32_t me = cap->no;
+    uint32_t i, j;
     rtsBool retry = rtsTrue;
 
     stat_startGCSync(gc_threads[cap->no]);
-
 
     while(retry) {
         for (i=0; i < n_threads; i++) {
@@ -1132,10 +1130,10 @@ start_gc_threads (void)
 }
 
 static void
-wakeup_gc_threads (nat me USED_IF_THREADS)
+wakeup_gc_threads (uint32_t me USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
-    nat i;
+    uint32_t i;
 
     if (n_gc_threads == 1) return;
 
@@ -1156,10 +1154,10 @@ wakeup_gc_threads (nat me USED_IF_THREADS)
 // standby state, otherwise they may still be executing inside
 // any_work(), and may even remain awake until the next GC starts.
 static void
-shutdown_gc_threads (nat me USED_IF_THREADS)
+shutdown_gc_threads (uint32_t me USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
-    nat i;
+    uint32_t i;
 
     if (n_gc_threads == 1) return;
 
@@ -1177,9 +1175,9 @@ shutdown_gc_threads (nat me USED_IF_THREADS)
 void
 releaseGCThreads (Capability *cap USED_IF_THREADS)
 {
-    const nat n_threads = n_capabilities;
-    const nat me = cap->no;
-    nat i;
+    const uint32_t n_threads = n_capabilities;
+    const uint32_t me = cap->no;
+    uint32_t i;
     for (i=0; i < n_threads; i++) {
         if (i == me || gc_threads[i]->idle) continue;
         if (gc_threads[i]->wakeup != GC_THREAD_WAITING_TO_CONTINUE)
@@ -1199,7 +1197,7 @@ releaseGCThreads (Capability *cap USED_IF_THREADS)
 static void
 prepare_collected_gen (generation *gen)
 {
-    nat i, g, n;
+    uint32_t i, g, n;
     gen_workspace *ws;
     bdescr *bd, *next;
 
@@ -1321,7 +1319,7 @@ prepare_collected_gen (generation *gen)
    ------------------------------------------------------------------------- */
 
 static void
-stash_mut_list (Capability *cap, nat gen_no)
+stash_mut_list (Capability *cap, uint32_t gen_no)
 {
     cap->saved_mut_lists[gen_no] = cap->mut_lists[gen_no];
     cap->mut_lists[gen_no] = allocBlock_sync();
@@ -1334,7 +1332,7 @@ stash_mut_list (Capability *cap, nat gen_no)
 static void
 prepare_uncollected_gen (generation *gen)
 {
-    nat i;
+    uint32_t i;
 
 
     ASSERT(gen->no > 0);
@@ -1358,7 +1356,7 @@ prepare_uncollected_gen (generation *gen)
 static void
 collect_gct_blocks (void)
 {
-    nat g;
+    uint32_t g;
     gen_workspace *ws;
     bdescr *bd, *prev;
 
@@ -1408,7 +1406,7 @@ collect_gct_blocks (void)
 static void
 collect_pinned_object_blocks (void)
 {
-    nat n;
+    uint32_t n;
     bdescr *bd, *prev;
 
     for (n = 0; n < n_capabilities; n++) {
@@ -1484,7 +1482,7 @@ mark_root(void *user USED_IF_THREADS, StgClosure **root)
 static void
 resize_generations (void)
 {
-    nat g;
+    uint32_t g;
 
     if (major_gc && RtsFlags.GcFlags.generations > 1) {
         W_ live, size, min_alloc, words;
@@ -1711,7 +1709,7 @@ static void gcCAFs(void)
     StgIndStatic *p, *prev;
 
     const StgInfoTable *info;
-    nat i;
+    uint32_t i;
 
     i = 0;
     p = debug_caf_list;

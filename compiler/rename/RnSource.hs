@@ -50,6 +50,7 @@ import Util             ( debugIsOn, partitionWith )
 import HscTypes         ( HscEnv, hsc_dflags )
 import ListSetOps       ( findDupsEq, removeDups, equivClasses )
 import Digraph          ( SCC, flattenSCC, flattenSCCs, stronglyConnCompFromEdgedVertices )
+import UniqFM
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
@@ -1339,12 +1340,18 @@ depAnalTyClDecls :: GlobalRdrEnv
 depAnalTyClDecls rdr_env ds_w_fvs
   = stronglyConnCompFromEdgedVertices edges
   where
-    edges = [ (d, tcdName (unLoc d), map (getParent rdr_env) (nameSetElems fvs))
+    edges = [ (d, tcdName (unLoc d), map (getParent rdr_env) (nonDetEltsUFM fvs))
             | (d, fvs) <- ds_w_fvs ]
+            -- It's OK to use nonDetEltsUFM here as
+            -- stronglyConnCompFromEdgedVertices is still deterministic
+            -- even if the edges are in nondeterministic order as explained
+            -- in Note [Deterministic SCC] in Digraph.
 
 toParents :: GlobalRdrEnv -> NameSet -> NameSet
 toParents rdr_env ns
-  = foldNameSet add emptyNameSet ns
+  = nonDetFoldUFM add emptyNameSet ns
+  -- It's OK to use nonDetFoldUFM because we immediately forget the
+  -- ordering by creating a set
   where
     add n s = extendNameSet s (getParent rdr_env n)
 
@@ -1420,8 +1427,7 @@ addBootDeps ds_w_fvs
                 | otherwise             = pr
 
              has_local_imports fvs
-                 = foldNameSet ((||) . nameIsHomePackageImport this_mod)
-                               False fvs
+                 = nameSetAny (nameIsHomePackageImport this_mod) fvs
        ; return (add_boot_deps ds_w_fvs) }
 
 
@@ -1997,12 +2003,10 @@ extendPatSynEnv :: HsValBinds RdrName -> MiniFixityEnv
                 -> ([Name] -> TcRnIf TcGblEnv TcLclEnv a) -> TcM a
 extendPatSynEnv val_decls local_fix_env thing = do {
      names_with_fls <- new_ps val_decls
-   ; let pat_syn_bndrs =
-          concat [name: map flSelector fields | (name, fields) <- names_with_fls]
+   ; let pat_syn_bndrs = concat [ name: map flSelector fields
+                                | (name, fields) <- names_with_fls ]
    ; let avails = map patSynAvail pat_syn_bndrs
-   ; (gbl_env, lcl_env) <-
-        extendGlobalRdrEnvRn avails local_fix_env
-
+   ; (gbl_env, lcl_env) <- extendGlobalRdrEnvRn avails local_fix_env
 
    ; let field_env' = extendNameEnvList (tcg_field_env gbl_env) names_with_fls
          final_gbl_env = gbl_env { tcg_field_env = field_env' }

@@ -464,11 +464,11 @@ output it generates.
  DOCSECTION     { L _ (ITdocSection _ _) }
 
 -- Template Haskell
-'[|'            { L _ (ITopenExpQuote _) }
+'[|'            { L _ (ITopenExpQuote _ _) }
 '[p|'           { L _ ITopenPatQuote  }
 '[t|'           { L _ ITopenTypQuote  }
 '[d|'           { L _ ITopenDecQuote  }
-'|]'            { L _ ITcloseQuote    }
+'|]'            { L _ (ITcloseQuote _) }
 '[||'           { L _ (ITopenTExpQuote _) }
 '||]'           { L _ ITcloseTExpQuote  }
 TH_ID_SPLICE    { L _ (ITidEscape _)  }     -- $x
@@ -673,7 +673,9 @@ qcname_ext :: { Located RdrName }
                                             [mj AnnType $1,mj AnnVal $2] }
 
 qcname  :: { Located RdrName }  -- Variable or type constructor
-        :  qvar                 { $1 }
+        :  qvar                 { $1 } -- Things which look like functions
+                                       -- Note: This includes record selectors but
+                                       -- also (-.->), see #11432
         |  oqtycon_no_varcon    { $1 } -- see Note [Type constructors in export list]
 
 -----------------------------------------------------------------------------
@@ -1640,7 +1642,7 @@ btype :: { LHsType RdrName }
 -- Used for parsing Haskell98-style data constructors,
 -- in order to forbid the blasphemous
 -- > data Foo = Int :+ Char :* Bool
--- See also Note [Parsing data constructors is hard].
+-- See also Note [Parsing data constructors is hard] in RdrHsSyn
 btype_no_ops :: { LHsType RdrName }
         : btype_no_ops atype            { sLL $1 $> $ HsAppTy $1 $2 }
         | atype                         { $1 }
@@ -1725,9 +1727,9 @@ inst_type :: { LHsSigType RdrName }
         : sigtype                       { mkLHsSigType $1 }
 
 deriv_types :: { [LHsSigType RdrName] }
-        : type                          { [mkLHsSigType $1] }
+        : typedoc                       { [mkLHsSigType $1] }
 
-        | type ',' deriv_types          {% addAnnotation (gl $1) AnnComma (gl $2)
+        | typedoc ',' deriv_types       {% addAnnotation (gl $1) AnnComma (gl $2)
                                            >> return (mkLHsSigType $1 : $3) }
 
 comma_types0  :: { [LHsType RdrName] }  -- Zero or more:  ty,ty,ty
@@ -1896,22 +1898,11 @@ forall :: { Located ([AddAnn], Maybe [LHsTyVarBndr RdrName]) }
         | {- empty -}                 { noLoc ([], Nothing) }
 
 constr_stuff :: { Located (Located RdrName, HsConDeclDetails RdrName) }
-    -- see Note [Parsing data constructors is hard]
+    -- See Note [Parsing data constructors is hard] in RdrHsSyn
         : btype_no_ops                         {% do { c <- splitCon $1
                                                      ; return $ sLL $1 $> c } }
         | btype_no_ops conop btype_no_ops      {% do { ty <- splitTilde $1
                                                      ; return $ sLL $1 $> ($2, InfixCon ty $3) } }
-
-{- Note [Parsing data constructors is hard]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We parse the constructor declaration
-     C t1 t2
-as a btype_no_ops (treating C as a type constructor) and then convert C to be
-a data constructor.  Reason: it might continue like this:
-     C t1 t2 :% D Int
-in which case C really would be a type constructor.  We can't resolve this
-ambiguity till we come across the constructor oprerator :% (or not, more usually)
--}
 
 fielddecls :: { [LConDeclField RdrName] }
         : {- empty -}     { [] }
@@ -1934,10 +1925,9 @@ fielddecl :: { LConDeclField RdrName }
 -- know the rightmost extremity of the 'deriving' clause
 deriving :: { Located (HsDeriving RdrName) }
         : {- empty -}             { noLoc Nothing }
-        | 'deriving' qtycon       {% let { L tv_loc tv = $2
-                                         ; full_loc = comb2 $1 $> }
+        | 'deriving' qtycondoc    {% let { full_loc = comb2 $1 $> }
                                       in ams (L full_loc $ Just $ L full_loc $
-                                                 [mkLHsSigType (L tv_loc (HsTyVar $2))])
+                                                 [mkLHsSigType $2])
                                              [mj AnnDeriving $1] }
 
         | 'deriving' '(' ')'      {% let { full_loc = comb2 $1 $> }
@@ -2244,7 +2234,7 @@ fexp    :: { LHsExpr RdrName }
         : fexp aexp                  { sLL $1 $> $ HsApp $1 $2 }
         | fexp TYPEAPP atype         {% ams (sLL $1 $> $ HsAppType $1 (mkHsWildCardBndrs $3))
                                             [mj AnnAt $2] }
-        | 'static' aexp              {% ams (sLL $1 $> $ HsStatic $2)
+        | 'static' aexp              {% ams (sLL $1 $> $ HsStatic placeHolderNames $2)
                                             [mj AnnStatic $1] }
         | aexp                       { $1 }
 
@@ -2866,17 +2856,22 @@ oqtycon_no_varcon :: { Located RdrName }  -- Type constructor which cannot be mi
 
 {- Note [Type constructors in export list]
 ~~~~~~~~~~~~~~~~~~~~~
-Mixing type constructors and variable constructors in export lists introduces
+Mixing type constructors and data constructors in export lists introduces
 ambiguity in grammar: e.g. (*) may be both a type constructor and a function.
 
 -XExplicitNamespaces allows to disambiguate by explicitly prefixing type
 constructors with 'type' keyword.
 
 This ambiguity causes reduce/reduce conflicts in parser, which are always
-resolved in favour of variable constructors. To get rid of conflicts we demand
+resolved in favour of data constructors. To get rid of conflicts we demand
 that ambiguous type constructors (those, which are formed by the same
 productions as variable constructors) are always prefixed with 'type' keyword.
 Unambiguous type constructors may occur both with or without 'type' keyword.
+
+Note that in the parser we still parse data constructors as type
+constructors. As such, they still end up in the type constructor namespace
+until after renaming when we resolve the proper namespace for each exported
+child.
 -}
 
 qtyconop :: { Located RdrName } -- Qualified or unqualified
@@ -2888,6 +2883,10 @@ qtyconop :: { Located RdrName } -- Qualified or unqualified
 qtycon :: { Located RdrName }   -- Qualified or unqualified
         : QCONID            { sL1 $1 $! mkQual tcClsName (getQCONID $1) }
         | tycon             { $1 }
+
+qtycondoc :: { LHsType RdrName } -- Qualified or unqualified
+        : qtycon            { sL1 $1                     (HsTyVar $1)      }
+        | qtycon docprev    { sLL $1 $> (HsDocTy (sL1 $1 (HsTyVar $1)) $2) }
 
 tycon   :: { Located RdrName }  -- Unqualified
         : CONID                   { sL1 $1 $! mkUnqual tcClsName (getCONID $1) }
@@ -3207,20 +3206,24 @@ getCTYPEs             (L _ (ITctype             src)) = src
 getStringLiteral l = StringLiteral (getSTRINGs l) (getSTRING l)
 
 isUnicode :: Located Token -> Bool
-isUnicode (L _ (ITforall     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITdarrow     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITdcolon     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITlarrow     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITrarrow     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITrarrow     iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITlarrowtail iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITrarrowtail iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITLarrowtail iu)) = iu == UnicodeSyntax
-isUnicode (L _ (ITRarrowtail iu)) = iu == UnicodeSyntax
-isUnicode _                       = False
+isUnicode (L _ (ITforall         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITdarrow         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITdcolon         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITlarrow         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITrarrow         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITrarrow         iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITlarrowtail     iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITrarrowtail     iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITLarrowtail     iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITRarrowtail     iu)) = iu == UnicodeSyntax
+isUnicode (L _ (IToparenbar      iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITcparenbar      iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITopenExpQuote _ iu)) = iu == UnicodeSyntax
+isUnicode (L _ (ITcloseQuote     iu)) = iu == UnicodeSyntax
+isUnicode _                           = False
 
 hasE :: Located Token -> Bool
-hasE (L _ (ITopenExpQuote HasE))  = True
+hasE (L _ (ITopenExpQuote HasE _))  = True
 hasE (L _ (ITopenTExpQuote HasE)) = True
 hasE _                            = False
 
@@ -3313,14 +3316,14 @@ fileSrcSpan = do
 -- Hint about the MultiWayIf extension
 hintMultiWayIf :: SrcSpan -> P ()
 hintMultiWayIf span = do
-  mwiEnabled <- liftM ((LangExt.MultiWayIf `xopt`) . dflags) getPState
+  mwiEnabled <- liftM ((LangExt.MultiWayIf `extopt`) . options) getPState
   unless mwiEnabled $ parseErrorSDoc span $
     text "Multi-way if-expressions need MultiWayIf turned on"
 
 -- Hint about if usage for beginners
 hintIf :: SrcSpan -> String -> P (LHsExpr RdrName)
 hintIf span msg = do
-  mwiEnabled <- liftM ((LangExt.MultiWayIf `xopt`) . dflags) getPState
+  mwiEnabled <- liftM ((LangExt.MultiWayIf `extopt`) . options) getPState
   if mwiEnabled
     then parseErrorSDoc span $ text $ "parse error in if statement"
     else parseErrorSDoc span $ text $ "parse error in if statement: "++msg

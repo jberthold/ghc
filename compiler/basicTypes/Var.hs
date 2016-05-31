@@ -5,7 +5,7 @@
 \section{@Vars@: Variables}
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable, MultiWayIf #-}
+{-# LANGUAGE CPP, MultiWayIf #-}
 
 -- |
 -- #name_types#
@@ -64,7 +64,9 @@ module Var (
 
         -- ** Modifying 'TyVar's
         setTyVarName, setTyVarUnique, setTyVarKind, updateTyVarKind,
-        updateTyVarKindM
+        updateTyVarKindM,
+
+        nonDetCmpVar
 
     ) where
 
@@ -80,6 +82,7 @@ import Util
 import DynFlags
 import Outputable
 
+import Unique (nonDetCmpUnique)
 import Data.Data
 
 {-
@@ -183,7 +186,6 @@ data Var
         idScope    :: IdScope,
         id_details :: IdDetails,        -- Stable, doesn't change
         id_info    :: IdInfo }          -- Unstable, updated by simplifier
-    deriving Typeable
 
 data IdScope    -- See Note [GlobalId/LocalId]
   = GlobalId
@@ -269,7 +271,14 @@ instance Ord Var where
     a <  b = realUnique a <  realUnique b
     a >= b = realUnique a >= realUnique b
     a >  b = realUnique a >  realUnique b
-    a `compare` b = varUnique a `compare` varUnique b
+    a `compare` b = a `nonDetCmpVar` b
+
+-- | Compare Vars by their Uniques.
+-- This is what Ord Var does, provided here to make it explicit at the
+-- call-site that it can introduce non-determinism.
+-- See Note [Unique Determinism]
+nonDetCmpVar :: Var -> Var -> Ordering
+nonDetCmpVar a b = varUnique a `nonDetCmpUnique` varUnique b
 
 instance Data Var where
   -- don't traverse?

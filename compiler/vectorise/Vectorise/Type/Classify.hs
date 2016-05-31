@@ -75,7 +75,7 @@ classifyTyCons convStatus parTyCons tcs = classify [] [] [] [] convStatus parTyC
         can_convert  = (isNullUFM (filterUniqSet ((`elemNameSet` pts) . tyConName) (refs `minusUFM` cs))
                         && all convertable tcs)
                        || isShowClass tcs
-        must_convert = foldUFM (||) False (intersectUFM_C const cs refs)
+        must_convert = anyUFM id (intersectUFM_C const cs refs)
                        && (not . isShowClass $ tcs)
 
         -- We currently admit Haskell 2011-style data and newtype declarations as well as type
@@ -98,8 +98,12 @@ type TyConGroup = ([TyCon], UniqSet TyCon)
 tyConGroups :: [TyCon] -> [TyConGroup]
 tyConGroups tcs = map mk_grp (stronglyConnCompFromEdgedVertices edges)
   where
-    edges = [((tc, ds), tc, uniqSetToList ds) | tc <- tcs
+    edges = [((tc, ds), tc, nonDetEltsUFM ds) | tc <- tcs
                                 , let ds = tyConsOfTyCon tc]
+            -- It's OK to use nonDetEltsUFM here as
+            -- stronglyConnCompFromEdgedVertices is still deterministic even
+            -- if the edges are in nondeterministic order as explained in
+            -- Note [Deterministic SCC] in Digraph.
 
     mk_grp (AcyclicSCC (tc, ds)) = ([tc], ds)
     mk_grp (CyclicSCC els)       = (tcs, unionManyUniqSets dss)

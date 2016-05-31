@@ -9,7 +9,7 @@ module VarEnv (
 
         -- ** Manipulating these environments
         emptyVarEnv, unitVarEnv, mkVarEnv, mkVarEnv_Directly,
-        elemVarEnv, varEnvElts, varEnvKeys, varEnvToList,
+        elemVarEnv, varEnvElts,
         extendVarEnv, extendVarEnv_C, extendVarEnv_Acc, extendVarEnv_Directly,
         extendVarEnvList,
         plusVarEnv, plusVarEnv_C, plusVarEnv_CD, alterVarEnv,
@@ -18,19 +18,29 @@ module VarEnv (
         lookupVarEnv, lookupVarEnv_NF, lookupWithDefaultVarEnv,
         mapVarEnv, zipVarEnv,
         modifyVarEnv, modifyVarEnv_Directly,
-        isEmptyVarEnv, foldVarEnv, foldVarEnv_Directly,
+        isEmptyVarEnv,
         elemVarEnvByKey, lookupVarEnv_Directly,
         filterVarEnv, filterVarEnv_Directly, restrictVarEnv,
         partitionVarEnv,
 
         -- * Deterministic Var environments (maps)
-        DVarEnv,
+        DVarEnv, DIdEnv, DTyVarEnv,
 
         -- ** Manipulating these environments
         emptyDVarEnv,
-        extendDVarEnv,
+        dVarEnvElts,
+        extendDVarEnv, extendDVarEnv_C,
         lookupDVarEnv,
-        foldDVarEnv,
+        isEmptyDVarEnv, foldDVarEnv,
+        mapDVarEnv,
+        modifyDVarEnv,
+        alterDVarEnv,
+        plusDVarEnv_C,
+        unitDVarEnv,
+        delDVarEnv,
+        delDVarEnvList,
+        partitionDVarEnv,
+        anyDVarEnv,
 
         -- * The InScopeSet type
         InScopeSet,
@@ -425,8 +435,6 @@ plusVarEnv_CD     :: (a -> a -> a) -> VarEnv a -> a -> VarEnv a -> a -> VarEnv a
 mapVarEnv         :: (a -> b) -> VarEnv a -> VarEnv b
 modifyVarEnv      :: (a -> a) -> VarEnv a -> Var -> VarEnv a
 varEnvElts        :: VarEnv a -> [a]
-varEnvKeys        :: VarEnv a -> [Unique]
-varEnvToList      :: VarEnv a -> [(Unique, a)]
 
 isEmptyVarEnv     :: VarEnv a -> Bool
 lookupVarEnv      :: VarEnv a -> Var -> Maybe a
@@ -435,8 +443,6 @@ lookupVarEnv_NF   :: VarEnv a -> Var -> a
 lookupWithDefaultVarEnv :: VarEnv a -> a -> Var -> a
 elemVarEnv        :: Var -> VarEnv a -> Bool
 elemVarEnvByKey   :: Unique -> VarEnv a -> Bool
-foldVarEnv        :: (a -> b -> b) -> b -> VarEnv a -> b
-foldVarEnv_Directly :: (Unique -> a -> b -> b) -> b -> VarEnv a -> b
 
 elemVarEnv       = elemUFM
 elemVarEnvByKey  = elemUFM_Directly
@@ -461,12 +467,8 @@ mkVarEnv         = listToUFM
 mkVarEnv_Directly= listToUFM_Directly
 emptyVarEnv      = emptyUFM
 varEnvElts       = eltsUFM
-varEnvKeys       = keysUFM
-varEnvToList     = ufmToList
 unitVarEnv       = unitUFM
 isEmptyVarEnv    = isNullUFM
-foldVarEnv       = foldUFM
-foldVarEnv_Directly = foldUFM_Directly
 lookupVarEnv_Directly = lookupUFM_Directly
 filterVarEnv_Directly = filterUFM_Directly
 delVarEnv_Directly    = delFromUFM_Directly
@@ -501,10 +503,15 @@ modifyVarEnv_Directly mangle_fn env key
 -- See Note [Deterministic UniqFM] in UniqDFM for explanation why we need
 -- DVarEnv.
 
-type DVarEnv elt   = UniqDFM elt
+type DVarEnv elt = UniqDFM elt
+type DIdEnv elt = DVarEnv elt
+type DTyVarEnv elt = DVarEnv elt
 
 emptyDVarEnv :: DVarEnv a
 emptyDVarEnv = emptyUDFM
+
+dVarEnvElts :: DVarEnv a -> [a]
+dVarEnvElts = eltsUDFM
 
 extendDVarEnv :: DVarEnv a -> Var -> a -> DVarEnv a
 extendDVarEnv = addToUDFM
@@ -514,3 +521,39 @@ lookupDVarEnv = lookupUDFM
 
 foldDVarEnv :: (a -> b -> b) -> b -> DVarEnv a -> b
 foldDVarEnv = foldUDFM
+
+mapDVarEnv :: (a -> b) -> DVarEnv a -> DVarEnv b
+mapDVarEnv = mapUDFM
+
+alterDVarEnv :: (Maybe a -> Maybe a) -> DVarEnv a -> Var -> DVarEnv a
+alterDVarEnv = alterUDFM
+
+plusDVarEnv_C :: (a -> a -> a) -> DVarEnv a -> DVarEnv a -> DVarEnv a
+plusDVarEnv_C = plusUDFM_C
+
+unitDVarEnv :: Var -> a -> DVarEnv a
+unitDVarEnv = unitUDFM
+
+delDVarEnv :: DVarEnv a -> Var -> DVarEnv a
+delDVarEnv = delFromUDFM
+
+delDVarEnvList :: DVarEnv a -> [Var] -> DVarEnv a
+delDVarEnvList = delListFromUDFM
+
+isEmptyDVarEnv :: DVarEnv a -> Bool
+isEmptyDVarEnv = isNullUDFM
+
+extendDVarEnv_C :: (a -> a -> a) -> DVarEnv a -> Var -> a -> DVarEnv a
+extendDVarEnv_C = addToUDFM_C
+
+modifyDVarEnv :: (a -> a) -> DVarEnv a -> Var -> DVarEnv a
+modifyDVarEnv mangle_fn env key
+  = case (lookupDVarEnv env key) of
+      Nothing -> env
+      Just xx -> extendDVarEnv env key (mangle_fn xx)
+
+partitionDVarEnv :: (a -> Bool) -> DVarEnv a -> (DVarEnv a, DVarEnv a)
+partitionDVarEnv = partitionUDFM
+
+anyDVarEnv :: (a -> Bool) -> DVarEnv a -> Bool
+anyDVarEnv = anyUDFM

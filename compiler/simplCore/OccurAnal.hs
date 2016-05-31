@@ -691,7 +691,10 @@ instance Outputable Details where
 
 makeNode :: OccEnv -> ImpRuleEdges -> VarSet -> (Var, CoreExpr) -> Node Details
 makeNode env imp_rule_edges bndr_set (bndr, rhs)
-  = (details, varUnique bndr, keysUFM node_fvs)
+  = (details, varUnique bndr, nonDetKeysUFM node_fvs)
+    -- It's OK to use nonDetKeysUFM here as stronglyConnCompFromEdgedVerticesR
+    -- is still deterministic with edges in nondeterministic order as
+    -- explained in Note [Deterministic SCC] in Digraph.
   where
     details = ND { nd_bndr = bndr
                  , nd_rhs  = rhs'
@@ -800,7 +803,11 @@ occAnalRec (CyclicSCC nodes) (body_uds, binds)
         -- See Note [Choosing loop breakers] for loop_breaker_edges
     loop_breaker_edges = map mk_node tagged_nodes
     mk_node (details@(ND { nd_inl = inl_fvs }), k, _)
-      = (details, k, keysUFM (extendFvs_ rule_fv_env inl_fvs))
+      = (details, k, nonDetKeysUFM (extendFvs_ rule_fv_env inl_fvs))
+        -- It's OK to use nonDetKeysUFM here as
+        -- stronglyConnCompFromEdgedVerticesR is still deterministic with edges
+        -- in nondeterministic order as explained in
+        -- Note [Deterministic SCC] in Digraph.
 
     ------------------------------------
     rule_fv_env :: IdEnv IdSet
@@ -1122,7 +1129,8 @@ occAnalNonRecRhs env bndr rhs
     not_stable = not (isStableUnfolding (idUnfolding bndr))
 
 addIdOccs :: UsageDetails -> VarSet -> UsageDetails
-addIdOccs usage id_set = foldVarSet addIdOcc usage id_set
+addIdOccs usage id_set = nonDetFoldUFM addIdOcc usage id_set
+  -- It's OK to use nonDetFoldUFM here because addIdOcc commutes
 
 addIdOcc :: Id -> UsageDetails -> UsageDetails
 addIdOcc v u | isId v    = addOneOcc u v NoOccInfo
@@ -1587,7 +1595,9 @@ transClosureFV env
   | no_change = env
   | otherwise = transClosureFV (listToUFM new_fv_list)
   where
-    (no_change, new_fv_list) = mapAccumL bump True (ufmToList env)
+    (no_change, new_fv_list) = mapAccumL bump True (nonDetUFMToList env)
+      -- It's OK to use nonDetUFMToList here because we'll forget the
+      -- ordering by creating a new set with listToUFM
     bump no_change (b,fvs)
       | no_change_here = (no_change, (b,fvs))
       | otherwise      = (False,     (b,new_fvs))
@@ -1608,7 +1618,8 @@ extendFvs env s
   = (s `unionVarSet` extras, extras `subVarSet` s)
   where
     extras :: VarSet    -- env(s)
-    extras = foldUFM unionVarSet emptyVarSet $
+    extras = nonDetFoldUFM unionVarSet emptyVarSet $
+      -- It's OK to use nonDetFoldUFM here because unionVarSet commutes
              intersectUFM_C (\x _ -> x) env s
 
 {-

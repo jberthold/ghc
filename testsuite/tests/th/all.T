@@ -287,7 +287,8 @@ test('T8028',
      ['T8028', '-v0 ' + config.ghc_th_way_flags])
 
 test('TH_Roles1', normal, compile_fail, ['-v0'])
-test('TH_Roles2', normalise_version('array', 'base', 'deepseq', 'ghc-prim', 'ghc-boot',
+test('TH_Roles2', normalise_version('array', 'base', 'deepseq', 'ghc-prim',
+                                    'ghc-boot', 'ghc-boot-th',
                                     'integer-gmp', 'pretty', 'template-haskell',
                                     'binary', 'bytestring', 'containers'
                                     ), compile, ['-v0 -ddump-tc'])
@@ -322,7 +323,7 @@ test('T8625', normal, ghci_script, ['T8625.script'])
 test('TH_StaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, [''])
 test('TH_StaticPointers02', [], compile_fail, [''])
-test('T8759', normal, compile_fail, ['-v0'])
+test('T8759', normal, compile, ['-v0'])
 test('T7021',
      extra_clean(['T7021a.hi', 'T7021a.o']), multimod_compile,
      ['T7021','-v0 ' + config.ghc_th_way_flags])
@@ -393,7 +394,6 @@ test('T10819',
 test('T10820', normal, compile_and_run, ['-v0'])
 test('T11341', normal, compile, ['-v0 -dsuppress-uniques'])
 test('T11345', normal, compile_and_run, ['-v0 -dsuppress-uniques'])
-
 test('TH_finalizer', normal, compile, ['-v0'])
 test('T10603', normal, compile, ['-ddump-splices -dsuppress-uniques'])
 test('T11452', normal, compile_fail, ['-v0'])
@@ -404,3 +404,6 @@ test('T11680', normal, compile_fail, ['-v0'])
 test('T11809', normal, compile, ['-v0'])
 test('T11797', normal, compile, ['-v0 -dsuppress-uniques'])
 test('T11941', normal, compile_fail, ['-v0'])
+test('T11484', normal, compile, ['-v0'])
+test('T8761', unless(ghc_dynamic(), expect_broken(12077)), compile,
+     ['-v0 -ddump-splices -dsuppress-uniques'])

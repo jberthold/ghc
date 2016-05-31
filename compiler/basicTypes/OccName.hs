@@ -92,7 +92,7 @@ module OccName (
         OccSet, emptyOccSet, unitOccSet, mkOccSet, extendOccSet,
         extendOccSetList,
         unionOccSets, unionManyOccSets, minusOccSet, elemOccSet, occSetElts,
-        foldOccSet, isEmptyOccSet, intersectOccSet, intersectsOccSet,
+        isEmptyOccSet, intersectOccSet, intersectsOccSet,
         filterOccSet,
 
         -- * Tidying up
@@ -227,7 +227,6 @@ data OccName = OccName
     { occNameSpace  :: !NameSpace
     , occNameFS     :: !FastString
     }
-    deriving Typeable
 
 instance Eq OccName where
     (OccName sp1 s1) == (OccName sp2 s2) = s1 == s2 && sp1 == sp2
@@ -386,7 +385,7 @@ instance Uniquable OccName where
   getUnique (OccName TcClsName fs) = mkTcOccUnique   fs
 
 newtype OccEnv a = A (UniqFM a)
-  deriving (Data, Typeable)
+  deriving Data
 
 emptyOccEnv :: OccEnv a
 unitOccEnv  :: OccName -> a -> OccEnv a
@@ -446,7 +445,6 @@ unionManyOccSets  :: [OccSet] -> OccSet
 minusOccSet       :: OccSet -> OccSet -> OccSet
 elemOccSet        :: OccName -> OccSet -> Bool
 occSetElts        :: OccSet -> [OccName]
-foldOccSet        :: (OccName -> b -> b) -> b -> OccSet -> b
 isEmptyOccSet     :: OccSet -> Bool
 intersectOccSet   :: OccSet -> OccSet -> OccSet
 intersectsOccSet  :: OccSet -> OccSet -> Bool
@@ -462,7 +460,6 @@ unionManyOccSets  = unionManyUniqSets
 minusOccSet       = minusUniqSet
 elemOccSet        = elementOfUniqSet
 occSetElts        = uniqSetToList
-foldOccSet        = foldUniqSet
 isEmptyOccSet     = isEmptyUniqSet
 intersectOccSet   = intersectUniqSets
 intersectsOccSet s1 s2 = not (isEmptyOccSet (s1 `intersectOccSet` s2))

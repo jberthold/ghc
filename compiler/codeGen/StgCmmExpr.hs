@@ -11,7 +11,6 @@
 
 module StgCmmExpr ( cgExpr ) where
 
-#define FAST_STRING_NOT_NEEDED
 #include "HsVersions.h"
 
 import {-# SOURCE #-} StgCmmBind ( cgBind )
@@ -404,7 +403,7 @@ cgCase (StgApp v []) bndr alt_type@(PrimAlt _) alts
        ; v_info <- getCgIdInfo v
        ; emitAssign (CmmLocal (idToReg dflags (NonVoid bndr)))
                     (idInfoToAmode v_info)
-       ; bindArgsToRegs [NonVoid bndr]
+       ; bindArgToReg (NonVoid bndr)
        ; cgAlts (NoGcInAlts,AssignedDirectly) (NonVoid bndr) alt_type alts }
   where
     reps_compatible = idPrimRep v == idPrimRep bndr
@@ -582,7 +581,6 @@ cgAlts gc_plan bndr (AlgAlt tycon) alts
                    tag_expr = cmmConstrTag1 dflags (CmmReg bndr_reg)
                    branches' = [(tag+1,branch) | (tag,branch) <- branches]
                 emitSwitch tag_expr branches' mb_deflt 1 fam_sz
-                return AssignedDirectly
 
            else         -- No, get tag from info table
                 do dflags <- getDynFlags
@@ -591,7 +589,8 @@ cgAlts gc_plan bndr (AlgAlt tycon) alts
                        untagged_ptr = cmmRegOffB bndr_reg (-1)
                        tag_expr = getConstrTag dflags (untagged_ptr)
                    emitSwitch tag_expr branches mb_deflt 0 (fam_sz - 1)
-                   return AssignedDirectly }
+
+        ; return AssignedDirectly }
 
 cgAlts _ _ _ _ = panic "cgAlts"
         -- UbxTupAlt and PolyAlt have only one alternative
@@ -680,6 +679,7 @@ cgConApp con stg_args
                 -- it only affects profiling (hence the False)
 
         ; emit =<< fcode_init
+        ; tickyReturnNewCon (length stg_args)
         ; emitReturn [idInfoToAmode idinfo] }
 
 cgIdApp :: Id -> [StgArg] -> FCode ReturnKind

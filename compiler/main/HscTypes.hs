@@ -4,7 +4,7 @@
 \section[HscTypes]{Types for the per-module compiler}
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, ScopedTypeVariables #-}
 
 -- | Types for the per-module compiler
 module HscTypes (
@@ -194,7 +194,6 @@ import Foreign
 import Control.Monad    ( guard, liftM, when, ap )
 import Data.IORef
 import Data.Time
-import Data.Typeable    ( Typeable )
 import Exception
 import System.FilePath
 #ifdef GHCI
@@ -286,7 +285,6 @@ throwOneError err = liftIO $ throwIO $ mkSrcErr $ unitBag err
 -- See 'printExceptionAndWarnings' for more information on what to take care
 -- of when writing a custom error handler.
 newtype SourceError = SourceError ErrorMessages
-  deriving Typeable
 
 instance Show SourceError where
   show (SourceError msgs) = unlines . map show . bagToList $ msgs
@@ -304,7 +302,6 @@ handleSourceError handler act =
 
 -- | An error thrown if the GHC API is used in an incorrect fashion.
 newtype GhcApiError = GhcApiError String
-  deriving Typeable
 
 instance Show GhcApiError where
   show (GhcApiError msg) = msg
@@ -486,10 +483,10 @@ emptyPackageIfaceTable = emptyModuleEnv
 
 pprHPT :: HomePackageTable -> SDoc
 -- A bit aribitrary for now
-pprHPT hpt
-  = vcat [ hang (ppr (mi_module (hm_iface hm)))
+pprHPT hpt = pprUFM hpt $ \hms ->
+    vcat [ hang (ppr (mi_module (hm_iface hm)))
               2 (ppr (md_types (hm_details hm)))
-         | hm <- eltsUFM hpt ]
+         | hm <- hms ]
 
 lookupHptByModule :: HomePackageTable -> Module -> Maybe HomeModInfo
 -- The HPT is indexed by ModuleName, not Module,
@@ -1504,9 +1501,9 @@ icExtendGblRdrEnv env tythings
        | is_sub_bndr thing
        = env
        | otherwise
-       = foldl extendGlobalRdrEnv env1 (localGREsFromAvail avail)
+       = foldl extendGlobalRdrEnv env1 (concatMap localGREsFromAvail avail)
        where
-          env1  = shadowNames env (availNames avail)
+          env1  = shadowNames env (concatMap availNames avail)
           avail = tyThingAvailInfo thing
 
     -- Ugh! The new_tythings may include record selectors, since they
@@ -1829,19 +1826,21 @@ tyThingsTyCoVars tts =
 
 -- | The Names that a TyThing should bring into scope.  Used to build
 -- the GlobalRdrEnv for the InteractiveContext.
-tyThingAvailInfo :: TyThing -> AvailInfo
+tyThingAvailInfo :: TyThing -> [AvailInfo]
 tyThingAvailInfo (ATyCon t)
    = case tyConClass_maybe t of
-        Just c  -> AvailTC n (n : map getName (classMethods c)
+        Just c  -> [AvailTC n (n : map getName (classMethods c)
                                  ++ map getName (classATs c))
-                             []
+                             [] ]
              where n = getName c
-        Nothing -> AvailTC n (n : map getName dcs) flds
+        Nothing -> [AvailTC n (n : map getName dcs) flds]
              where n    = getName t
                    dcs  = tyConDataCons t
                    flds = tyConFieldLabels t
+tyThingAvailInfo (AConLike (PatSynCon p))
+  = map patSynAvail ((getName p) : map flSelector (patSynFieldLabels p))
 tyThingAvailInfo t
-   = avail (getName t)
+   = [avail (getName t)]
 
 {-
 ************************************************************************

@@ -494,9 +494,10 @@ pprInstr (STU fmt reg addr) = hcat [
         char '\t',
         text "st",
         pprFormat fmt,
-        text "u\t",
+        char 'u',
         case addr of AddrRegImm _ _ -> empty
                      AddrRegReg _ _ -> char 'x',
+        char '\t',
         pprReg reg,
         text ", ",
         pprAddr addr
@@ -789,6 +790,17 @@ pprInstr (RLWINM reg1 reg2 sh mb me) = hcat [
         int mb,
         text ", ",
         int me
+    ]
+
+pprInstr (CLRRI fmt reg1 reg2 n) = hcat [
+        text "\tclrr",
+        pprFormat fmt,
+        text "i ",
+        pprReg reg1,
+        text ", ",
+        pprReg reg2,
+        text ", ",
+        int n
     ]
 
 pprInstr (FADD fmt reg1 reg2 reg3) = pprBinaryF (sLit "fadd") fmt reg1 reg2 reg3

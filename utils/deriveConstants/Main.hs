@@ -315,6 +315,9 @@ wanteds os = concat
           ,constantWord Both "BLOCKS_PER_MBLOCK" "BLOCKS_PER_MBLOCK"
            -- could be derived, but better to save doing the calculation twice
 
+          ,constantWord Both "TICKY_BIN_COUNT" "TICKY_BIN_COUNT"
+           -- number of bins for histograms used in ticky code
+
           ,fieldOffset Both "StgRegTable" "rR1"
           ,fieldOffset Both "StgRegTable" "rR2"
           ,fieldOffset Both "StgRegTable" "rR3"
@@ -388,6 +391,7 @@ wanteds os = concat
           ,structField Both "bdescr" "blocks"
           ,structField C    "bdescr" "gen_no"
           ,structField C    "bdescr" "link"
+          ,structField C    "bdescr" "flags"
 
           ,structSize C  "generation"
           ,structField C "generation" "n_new_large_words"
@@ -693,7 +697,7 @@ getWanted verbose os tmpdir gccProgram gccFlags nmProgram mobjdumpProgram
              Just 0x292 -> die $ "broken 'nm' detected, see https://ghc.haskell.org/ticket/11744.\n"
                               ++ "\n"
                               ++ "Workaround: You may want to pass\n"
-                              ++ "    --with-nm=$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/bin/nm-classic\n"
+                              ++ "    --with-nm=$(xcrun --find nm-classic)\n"
                               ++ "to 'configure'.\n"
              Just x     -> die ("unexpected value round-tripped for CONTROL_GROUP_CONST_291: " ++ show x)
 

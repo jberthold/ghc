@@ -36,6 +36,8 @@ endif
 # in nested Makefiles
 TEST_HC_OPTS = -fforce-recomp -dcore-lint -dcmm-lint -dno-debug-output -no-user-$(GhcPackageDbFlag) -rtsopts $(EXTRA_HC_OPTS)
 
+TEST_HC_OPTS_INTERACTIVE = $(TEST_HC_OPTS) --interactive -v0 -ignore-dot-ghci
+
 # The warning suppression flag below is a temporary kludge. While working with
 # tests that contain tabs, please de-tab them so this flag can be eventually
 # removed. See
@@ -189,14 +191,12 @@ ifeq "$(SKIP_PERF_TESTS)" "YES"
 RUNTEST_OPTS += --skip-perf-tests
 endif
 
-ifneq "$(CLEAN_ONLY)" ""
-RUNTEST_OPTS += -e clean_only=True
+ifeq "$(CLEANUP)" "0"
+RUNTEST_OPTS += -e cleanup=False
+else ifeq "$(CLEANUP)" "NO"
+RUNTEST_OPTS += -e cleanup=False
 else
-RUNTEST_OPTS += -e clean_only=False
-endif
-
-ifneq "$(CHECK_FILES_WRITTEN)" ""
-RUNTEST_OPTS += --check-files-written
+RUNTEST_OPTS += -e cleanup=True
 endif
 
 RUNTEST_OPTS +=  \
@@ -207,7 +207,6 @@ RUNTEST_OPTS +=  \
 	-e 'config.os="$(TargetOS_CPP)"' \
 	-e 'config.arch="$(TargetARCH_CPP)"' \
 	-e 'config.wordsize="$(WORDSIZE)"' \
-	-e 'default_testopts.cleanup="$(CLEANUP)"' \
 	-e 'config.timeout=int($(TIMEOUT)) or config.timeout' \
 	-e 'config.exeext="$(exeext)"' \
 	-e 'config.top="$(TOP_ABS)"'
@@ -282,7 +281,7 @@ $(TIMEOUT_PROGRAM) :
 # communicate with the topmake.
 # See Note [Communicating options and variables to a submake]
 test: $(TIMEOUT_PROGRAM)
-	+$(PYTHON) $(RUNTESTS) $(RUNTEST_OPTS) \
+	+PYTHON="$(PYTHON)" "$(PYTHON)" $(RUNTESTS) $(RUNTEST_OPTS) \
 		$(patsubst %, --only=%, $(TEST)) \
 		$(patsubst %, --only=%, $(TESTS)) \
 		$(patsubst %, --way=%, $(WAY)) \
@@ -326,15 +325,15 @@ list_broken:
 # From
 # https://www.gnu.org/software/make/manual/html_node/Variables_002fRecursion.html:
 #
-#     "The ‘-j’ option is a special case (see Parallel Execution). If you set
-#     it to some numeric value ‘N’ and your operating system supports it (most
-#     any UNIX system will; others typically won’t), the parent make and all the
-#     sub-makes will communicate to ensure that there are only ‘N’ jobs running
+#     "The '-j' option is a special case (see Parallel Execution). If you set
+#     it to some numeric value 'N' and your operating system supports it (most
+#     any UNIX system will; others typically won't), the parent make and all the
+#     sub-makes will communicate to ensure that there are only 'N' jobs running
 #     at the same time between them all."
 #
 # In our scenario, the user will actually see the following warning [2]:
 #
-#     ‘warning: jobserver unavailable: using -j1. Add `+' to parent make rule.’
+#     'warning: jobserver unavailable: using -j1. Add '+' to parent make rule.'
 #
 # The problem is that topmake and submake don't know about eachother, since
 # python is in between. To let them communicate, we have to use the '+'

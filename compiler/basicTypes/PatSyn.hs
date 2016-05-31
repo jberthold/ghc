@@ -5,7 +5,7 @@
 \section[PatSyn]{@PatSyn@: Pattern synonyms}
 -}
 
-{-# LANGUAGE CPP, DeriveDataTypeable #-}
+{-# LANGUAGE CPP #-}
 
 module PatSyn (
         -- * Main data types
@@ -34,7 +34,6 @@ import Var
 import FieldLabel
 
 import qualified Data.Data as Data
-import qualified Data.Typeable
 import Data.Function
 import Data.List
 
@@ -108,7 +107,6 @@ data PatSyn
              --                       =>  arg_tys -> res_ty
              -- See Note [Builder for pattern synonyms with unboxed type]
   }
-  deriving Data.Typeable.Typeable
 
 {- Note [Pattern synonym signatures]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -245,7 +243,7 @@ This means that when typechecking an occurrence of P in an expression,
 we must remember that the builder has this void argument. This is
 done by TcPatSyn.patSynBuilderOcc.
 
-Note [Patterns synonyms and the data type Type]
+Note [Pattern synonyms and the data type Type]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The type of a pattern synonym is of the form (See Note
 [Pattern synonym signatures]):

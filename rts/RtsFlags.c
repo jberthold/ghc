@@ -115,7 +115,7 @@ static int  openStatsFile (
     char *filename, const char *FILENAME_FMT, FILE **file_ret);
 
 static StgWord64 decodeSize (
-    const char *flag, nat offset, StgWord64 min, StgWord64 max);
+    const char *flag, uint32_t offset, StgWord64 min, StgWord64 max);
 
 static void bad_option (const char *s);
 
@@ -160,6 +160,7 @@ void initRtsFlagsDefaults(void)
     RtsFlags.GcFlags.stkChunkBufferSize = (1 * 1024) / sizeof(W_);
 
     RtsFlags.GcFlags.minAllocAreaSize   = (512 * 1024)        / BLOCK_SIZE;
+    RtsFlags.GcFlags.largeAllocLim      = 0; /* defaults to minAllocAreasize */
     RtsFlags.GcFlags.nurseryChunkSize   = 0;
     RtsFlags.GcFlags.minOldGenSize      = (1024 * 1024)       / BLOCK_SIZE;
     RtsFlags.GcFlags.maxHeapSize        = 0;    /* off by default */
@@ -250,6 +251,7 @@ void initRtsFlagsDefaults(void)
     RtsFlags.ParFlags.parGcLoadBalancingEnabled = rtsTrue;
     RtsFlags.ParFlags.parGcLoadBalancingGen = 1;
     RtsFlags.ParFlags.parGcNoSyncWithIdle   = 0;
+    RtsFlags.ParFlags.parGcThreads      = 0; /* defaults to -N */
     RtsFlags.ParFlags.setAffinity       = 0;
 #endif
 
@@ -293,14 +295,16 @@ usage_text[] = {
 "  -kc<size> Sets the stack chunk size (default 32k)",
 "  -kb<size> Sets the stack chunk buffer size (default 1k)",
 "",
-"  -A<size> Sets the minimum allocation area size (default 512k) Egs: -A1m -A10k",
-"  -n<size> Allocation area chunk size (0 = disabled, default: 0)",
-"  -O<size> Sets the minimum size of the old generation (default 1M)",
-"  -M<size> Sets the maximum heap size (default unlimited)  Egs: -M256k -M1G",
-"  -H<size> Sets the minimum heap size (default 0M)   Egs: -H24m  -H1G",
-"  -m<n>    Minimum % of heap which must be available (default 3%)",
-"  -G<n>    Number of generations (default: 2)",
-"  -c<n>    Use in-place compaction instead of copying in the oldest generation",
+"  -A<size>  Sets the minimum allocation area size (default 512k) Egs: -A1m -A10k",
+"  -AL<size> Sets the amount of large-object memory that can be allocated",
+"            before a GC is triggered (default: the value of -A)",
+"  -n<size>  Allocation area chunk size (0 = disabled, default: 0)",
+"  -O<size>  Sets the minimum size of the old generation (default 1M)",
+"  -M<size>  Sets the maximum heap size (default unlimited)  Egs: -M256k -M1G",
+"  -H<size>  Sets the minimum heap size (default 0M)   Egs: -H24m  -H1G",
+"  -m<n>     Minimum % of heap which must be available (default 3%)",
+"  -G<n>     Number of generations (default: 2)",
+"  -c<n>     Use in-place compaction instead of copying in the oldest generation",
 "           when live data is at least <n>% of the maximum heap size set with",
 "           -M (default: 30%)",
 "  -c       Use in-place compaction for all oldest generation collections",
@@ -439,6 +443,7 @@ usage_text[] = {
 "            (default: 0, -qg alone turns off parallel GC)",
 "  -qb[<n>]  Use load-balancing in the parallel GC only for generations >= <n>",
 "            (default: 1, -qb alone turns off load-balancing)",
+"  -qn<n>    Use <n> threads for parallel GC (defaults to value of -N)",
 "  -qa       Use the OS to set thread affinity (experimental)",
 "  -qm       Don't automatically migrate threads between CPUs",
 "  -qi<n>    If a processor has been idle for the last <n> GCs, do not",
@@ -548,9 +553,9 @@ static void errorRtsOptsDisabled(const char *s)
 
 void setupRtsFlags (int *argc, char *argv[], RtsConfig rts_config)
 {
-    nat mode;
-    nat total_arg;
-    nat arg, rts_argc0;
+    uint32_t mode;
+    uint32_t total_arg;
+    uint32_t arg, rts_argc0;
 
     rtsConfig = rts_config;
 
@@ -820,11 +825,17 @@ error = rtsTrue;
                   break;
               case 'A':
                   OPTION_UNSAFE;
-                  // minimum two blocks in the nursery, so that we have one to
-                  // grab for allocate().
-                  RtsFlags.GcFlags.minAllocAreaSize
-                      = decodeSize(rts_argv[arg], 2, 2*BLOCK_SIZE, HS_INT_MAX)
-                           / BLOCK_SIZE;
+                  if (rts_argv[arg][2] == 'L') {
+                      RtsFlags.GcFlags.largeAllocLim
+                          = decodeSize(rts_argv[arg], 3, 2*BLOCK_SIZE,
+                                       HS_INT_MAX) / BLOCK_SIZE;
+                  } else {
+                      // minimum two blocks in the nursery, so that we have one
+                      // to grab for allocate().
+                      RtsFlags.GcFlags.minAllocAreaSize
+                          = decodeSize(rts_argv[arg], 2, 2*BLOCK_SIZE,
+                                       HS_INT_MAX) / BLOCK_SIZE;
+                  }
                   break;
               case 'n':
                   OPTION_UNSAFE;
@@ -930,7 +941,7 @@ error = rtsTrue;
 #if defined(PROFILING)
                     RtsFlags.ParFlags.nNodes = 1;
 #else
-                    RtsFlags.ParFlags.nNodes = (nat)nNodes;
+                    RtsFlags.ParFlags.nNodes = (uint32_t)nNodes;
 #endif
                   ) break;
                 } else {
@@ -961,15 +972,16 @@ error = rtsTrue;
                   if (rts_argv[arg][2] == '\0') {
                       RtsFlags.GcFlags.heapSizeSuggestionAuto = rtsTrue;
                   } else {
-                      RtsFlags.GcFlags.heapSizeSuggestion =
-                          (nat)(decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX) / BLOCK_SIZE);
+                      RtsFlags.GcFlags.heapSizeSuggestion = (uint32_t)
+                          (decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX)
+                          / BLOCK_SIZE);
                   }
                   break;
 
               case 'O':
                   OPTION_UNSAFE;
                   RtsFlags.GcFlags.minOldGenSize =
-                      (nat)(decodeSize(rts_argv[arg], 2, BLOCK_SIZE,
+                      (uint32_t)(decodeSize(rts_argv[arg], 2, BLOCK_SIZE,
                                        HS_WORD_MAX)
                             / BLOCK_SIZE);
                   break;
@@ -1152,7 +1164,7 @@ error = rtsTrue;
                       errorRtsOptsDisabled("Using large values for -N is not allowed by default. %s");
                       stg_exit(EXIT_FAILURE);
                     }
-                    RtsFlags.ParFlags.nNodes = (nat)nNodes;
+                    RtsFlags.ParFlags.nNodes = (uint32_t)nNodes;
                 }
                 ) break;
 
@@ -1237,6 +1249,17 @@ error = rtsTrue;
                         RtsFlags.ParFlags.parGcNoSyncWithIdle
                             = strtol(rts_argv[arg]+3, (char **) NULL, 10);
                         break;
+                    case 'n': {
+                        int threads;
+                        threads = strtol(rts_argv[arg]+3, (char **) NULL, 10);
+                        if (threads <= 0) {
+                            errorBelch("-qn must be 1 or greater");
+                            error = rtsTrue;
+                        } else {
+                            RtsFlags.ParFlags.parGcThreads = threads;
+                        }
+                        break;
+                    }
                     case 'a':
                         RtsFlags.ParFlags.setAffinity = rtsTrue;
                         break;
@@ -1477,6 +1500,13 @@ static void normaliseRtsOpts (void)
                    "of the stack chunk size (-kc)");
         errorUsage();
     }
+
+#ifdef THREADED_RTS
+    if (RtsFlags.ParFlags.parGcThreads > RtsFlags.ParFlags.nNodes) {
+        errorBelch("GC threads (-qn) must be between 1 and the value of -N");
+        errorUsage();
+    }
+#endif
 }
 
 static void errorUsage (void)
@@ -1771,7 +1801,7 @@ static void initStatsFile (FILE *f)
 -------------------------------------------------------------------------- */
 
 static StgWord64
-decodeSize(const char *flag, nat offset, StgWord64 min, StgWord64 max)
+decodeSize(const char *flag, uint32_t offset, StgWord64 min, StgWord64 max)
 {
     char c;
     const char *s;
@@ -1875,15 +1905,10 @@ static void read_debug_flags(const char* arg)
 
 #ifdef PROFILING
 // Parse a "-h" flag, returning whether the parse resulted in an error.
-static rtsBool read_heap_profiling_flag(const char *arg_in)
+static rtsBool read_heap_profiling_flag(const char *arg)
 {
     // Already parsed "-h"
 
-    // For historical reasons the parser here mutates the arguments.
-    // However, for sanity we want to guarantee const-correctness and parsing
-    // really ought to be an immutable operation. To avoid rewriting the parser
-    // we just operate on a temporary copy of the argument.
-    char *arg = strdup(arg_in);
     rtsBool error = rtsFalse;
     switch (arg[2]) {
     case '\0':
@@ -1901,8 +1926,8 @@ static rtsBool read_heap_profiling_flag(const char *arg_in)
     case 'b':
         if (arg[2] != '\0' && arg[3] != '\0') {
             {
-                char *left  = strchr(arg, '{');
-                char *right = strrchr(arg, '}');
+                const char *left  = strchr(arg, '{');
+                const char *right = strrchr(arg, '}');
 
                 // curly braces are optional, for
                 // backwards compat.
@@ -1990,7 +2015,6 @@ static rtsBool read_heap_profiling_flag(const char *arg_in)
         error = rtsTrue;
     }
 
-    free(arg);
     return error;
 }
 #endif

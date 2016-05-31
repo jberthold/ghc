@@ -85,6 +85,7 @@ module TcRnTypes(
         andWC, unionsWC, mkSimpleWC, mkImplicWC,
         addInsols, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
+        tyCoVarsOfWCList,
         isDroppableDerivedLoc, insolubleImplic,
         arisesFromGivens,
 
@@ -169,7 +170,6 @@ import DynFlags
 import Outputable
 import ListSetOps
 import FastString
-import GHC.Fingerprint
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad (ap, liftM, msum)
@@ -279,8 +279,8 @@ data IfLclEnv
                 --      .hi file, or GHCi state, or ext core
                 -- plus which bit is currently being examined
 
-        if_tv_env  :: UniqFM TyVar,     -- Nested tyvar bindings
-        if_id_env  :: UniqFM Id         -- Nested id binding
+        if_tv_env  :: FastStringEnv TyVar,     -- Nested tyvar bindings
+        if_id_env  :: FastStringEnv Id         -- Nested id binding
     }
 
 {-
@@ -327,8 +327,6 @@ data DsGblEnv
                                                 -- exported entities of 'Data.Array.Parallel' iff
                                                 -- '-XParallelArrays' was given; otherwise, empty
         , ds_parr_bi :: PArrBuiltin             -- desugarar names for '-XParallelArrays'
-        , ds_static_binds :: IORef [(Fingerprint, (Id,CoreExpr))]
-          -- ^ Bindings resulted from floating static forms
         }
 
 instance ContainsModule DsGblEnv where
@@ -756,6 +754,8 @@ type TcIdSet     = IdSet
 type TcIdBinderStack = [TcIdBinder]
    -- This is a stack of locally-bound ids, innermost on top
    -- Used ony in error reporting (relevantBindings in TcError)
+   -- We can't use the tcl_env type environment, because it doesn't
+   --   keep track of the nesting order
 
 data TcIdBinder
   = TcIdBndr
@@ -1211,13 +1211,15 @@ data TcIdSigBndr   -- See Note [Complete and partial type signatures]
 
 data TcPatSynInfo
   = TPSI {
-        patsig_name       :: Name,
-        patsig_univ_bndrs :: [TcTyBinder],
-        patsig_req        :: TcThetaType,
-        patsig_ex_bndrs   :: [TcTyBinder],
-        patsig_prov       :: TcThetaType,
-        patsig_arg_tys    :: [TcSigmaType],
-        patsig_body_ty    :: TcSigmaType
+        patsig_name           :: Name,
+        patsig_implicit_bndrs :: [TyBinder],    -- Implicitly-bound kind vars (Invisible) and
+                                                -- implicitly-bound type vars (Specified)
+          -- See Note [The pattern-synonym signature splitting rule] in TcPatSyn
+        patsig_univ_bndrs     :: [TyVar],       -- Bound by explicit user forall
+        patsig_req            :: TcThetaType,
+        patsig_ex_bndrs       :: [TyVar],       -- Bound by explicit user forall
+        patsig_prov           :: TcThetaType,
+        patsig_body_ty        :: TcSigmaType
     }
 
 findScopedTyVars  -- See Note [Binding scoped type variables]
@@ -1612,22 +1614,38 @@ tyCoVarsOfCtsList = fvVarList . tyCoFVsOfCts
 tyCoFVsOfCts :: Cts -> FV
 tyCoFVsOfCts = foldrBag (unionFV . tyCoFVsOfCt) emptyFV
 
+-- | Returns free variables of WantedConstraints as a non-deterministic
+-- set. See Note [Deterministic FV] in FV.
 tyCoVarsOfWC :: WantedConstraints -> TyCoVarSet
 -- Only called on *zonked* things, hence no need to worry about flatten-skolems
-tyCoVarsOfWC (WC { wc_simple = simple, wc_impl = implic, wc_insol = insol })
-  = tyCoVarsOfCts simple `unionVarSet`
-    tyCoVarsOfBag tyCoVarsOfImplic implic `unionVarSet`
-    tyCoVarsOfCts insol
+tyCoVarsOfWC = fvVarSet . tyCoFVsOfWC
 
-tyCoVarsOfImplic :: Implication -> TyCoVarSet
+-- | Returns free variables of WantedConstraints as a deterministically
+-- ordered list. See Note [Deterministic FV] in FV.
+tyCoVarsOfWCList :: WantedConstraints -> [TyCoVar]
 -- Only called on *zonked* things, hence no need to worry about flatten-skolems
-tyCoVarsOfImplic (Implic { ic_skols = skols
-                         , ic_given = givens, ic_wanted = wanted })
-  = (tyCoVarsOfWC wanted `unionVarSet` tyCoVarsOfTypes (map evVarPred givens))
-    `delVarSetList` skols
+tyCoVarsOfWCList = fvVarList . tyCoFVsOfWC
 
-tyCoVarsOfBag :: (a -> TyCoVarSet) -> Bag a -> TyCoVarSet
-tyCoVarsOfBag tvs_of = foldrBag (unionVarSet . tvs_of) emptyVarSet
+-- | Returns free variables of WantedConstraints as a composable FV
+-- computation. See Note [Deterministic FV] in FV.
+tyCoFVsOfWC :: WantedConstraints -> FV
+-- Only called on *zonked* things, hence no need to worry about flatten-skolems
+tyCoFVsOfWC (WC { wc_simple = simple, wc_impl = implic, wc_insol = insol })
+  = tyCoFVsOfCts simple `unionFV`
+    tyCoFVsOfBag tyCoFVsOfImplic implic `unionFV`
+    tyCoFVsOfCts insol
+
+-- | Returns free variables of Implication as a composable FV computation.
+-- See Note [Deterministic FV] in FV.
+tyCoFVsOfImplic :: Implication -> FV
+-- Only called on *zonked* things, hence no need to worry about flatten-skolems
+tyCoFVsOfImplic (Implic { ic_skols = skols
+                         , ic_given = givens, ic_wanted = wanted })
+  = FV.delFVs (mkVarSet skols)
+      (tyCoFVsOfWC wanted `unionFV` tyCoFVsOfTypes (map evVarPred givens))
+
+tyCoFVsOfBag :: (a -> FV) -> Bag a -> FV
+tyCoFVsOfBag tvs_of = foldrBag (unionFV . tvs_of) emptyFV
 
 --------------------------
 dropDerivedSimples :: Cts -> Cts
@@ -1768,18 +1786,53 @@ isTypeHoleCt :: Ct -> Bool
 isTypeHoleCt (CHoleCan { cc_hole = TypeHole {} }) = True
 isTypeHoleCt _ = False
 
--- | The following constraints are considered to be a custom type error:
---    1. TypeError msg a b c
---    2. TypeError msg a b c ~ Something (and the other way around)
---    4. C (TypeError msg a b c)         (for any parameter of class constraint)
+
+{- Note [Custom type errors in constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When GHC reports a type-error about an unsolved-constraint, we check
+to see if the constraint contains any custom-type errors, and if so
+we report them.  Here are some examples of constraints containing type
+errors:
+
+TypeError msg           -- The actual constraint is a type error
+
+TypError msg ~ Int      -- Some type was supposed to be Int, but ended up
+                        -- being a type error instead
+
+Eq (TypeError msg)      -- A class constraint is stuck due to a type error
+
+F (TypeError msg) ~ a   -- A type function failed to evaluate due to a type err
+
+It is also possible to have constraints where the type error is nested deeper,
+for example see #11990, and also:
+
+Eq (F (TypeError msg))  -- Here the type error is nested under a type-function
+                        -- call, which failed to evaluate because of it,
+                        -- and so the `Eq` constraint was unsolved.
+                        -- This may happen when one function calls another
+                        -- and the called function produced a custom type error.
+-}
+
+-- | A constraint is considered to be a custom type error, if it contains
+-- custom type errors anywhere in it.
+-- See Note [Custom type errors in constraints]
 getUserTypeErrorMsg :: Ct -> Maybe Type
-getUserTypeErrorMsg ct
-  | Just (_,t1,t2) <- getEqPredTys_maybe ctT    = oneOf [t1,t2]
-  | Just (_,ts)    <- getClassPredTys_maybe ctT = oneOf ts
-  | otherwise                                   = userTypeError_maybe ctT
+getUserTypeErrorMsg ct = findUserTypeError (ctPred ct)
   where
-  ctT       = ctPred ct
-  oneOf xs  = msum (map userTypeError_maybe xs)
+  findUserTypeError t = msum ( userTypeError_maybe t
+                             : map findUserTypeError (subTys t)
+                             )
+
+  subTys t            = case splitAppTys t of
+                          (t,[]) ->
+                            case splitTyConApp_maybe t of
+                              Nothing     -> []
+                              Just (_,ts) -> ts
+                          (t,ts) -> t : ts
+
+
+
 
 isUserTypeErrorCt :: Ct -> Bool
 isUserTypeErrorCt ct = case getUserTypeErrorMsg ct of
@@ -1795,7 +1848,7 @@ isPendingScDict _ = Nothing
 superClassesMightHelp :: Ct -> Bool
 -- ^ True if taking superclasses of givens, or of wanteds (to perhaps
 -- expose more equalities or functional dependencies) might help to
--- solve this constraint.  See Note [When superclases help]
+-- solve this constraint.  See Note [When superclasses help]
 superClassesMightHelp ct
   = isWantedCt ct && not (is_ip ct)
   where

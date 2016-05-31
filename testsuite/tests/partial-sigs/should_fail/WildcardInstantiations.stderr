@@ -5,22 +5,19 @@ WildcardInstantiations.hs:5:14: error:
                the inferred type of foo :: (Show a, Enum a) => a -> String
                at WildcardInstantiations.hs:6:1
       To use the inferred type, enable PartialTypeSignatures
-    • In the type signature:
-        foo :: (Show _a, _) => _a -> _
+    • In the type signature: foo :: (Show _a, _) => _a -> _
     • Relevant bindings include
         foo :: a -> String (bound at WildcardInstantiations.hs:6:1)
 
 WildcardInstantiations.hs:5:18: error:
     Found constraint wildcard ‘_’ standing for ‘Enum a’
     To use the inferred type, enable PartialTypeSignatures
-    In the type signature:
-      foo :: (Show _a, _) => _a -> _
+    In the type signature: foo :: (Show _a, _) => _a -> _
 
 WildcardInstantiations.hs:5:30: error:
     • Found type wildcard ‘_’ standing for ‘String’
       To use the inferred type, enable PartialTypeSignatures
-    • In the type signature:
-        foo :: (Show _a, _) => _a -> _
+    • In the type signature: foo :: (Show _a, _) => _a -> _
     • Relevant bindings include
         foo :: a -> String (bound at WildcardInstantiations.hs:6:1)
 
@@ -30,8 +27,7 @@ WildcardInstantiations.hs:8:8: error:
                the inferred type of bar :: t1 -> (t1 -> t) -> t
                at WildcardInstantiations.hs:9:1
       To use the inferred type, enable PartialTypeSignatures
-    • In the type signature:
-        bar :: _ -> _ -> _
+    • In the type signature: bar :: _ -> _ -> _
     • Relevant bindings include
         bar :: t1 -> (t1 -> t) -> t
           (bound at WildcardInstantiations.hs:9:1)
@@ -45,8 +41,7 @@ WildcardInstantiations.hs:8:13: error:
                the inferred type of bar :: t1 -> (t1 -> t) -> t
                at WildcardInstantiations.hs:9:1
       To use the inferred type, enable PartialTypeSignatures
-    • In the type signature:
-        bar :: _ -> _ -> _
+    • In the type signature: bar :: _ -> _ -> _
     • Relevant bindings include
         bar :: t1 -> (t1 -> t) -> t
           (bound at WildcardInstantiations.hs:9:1)
@@ -57,8 +52,7 @@ WildcardInstantiations.hs:8:18: error:
                the inferred type of bar :: t1 -> (t1 -> t) -> t
                at WildcardInstantiations.hs:9:1
       To use the inferred type, enable PartialTypeSignatures
-    • In the type signature:
-        bar :: _ -> _ -> _
+    • In the type signature: bar :: _ -> _ -> _
     • Relevant bindings include
         bar :: t1 -> (t1 -> t) -> t
           (bound at WildcardInstantiations.hs:9:1)

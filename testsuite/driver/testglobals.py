@@ -68,7 +68,6 @@ class TestConfig:
         # Compiler version info
         self.compiler_version = ''
         self.compiler_maj_version = ''
-        self.compiler_tags = []
 
         # Flags we always give to this compiler
         self.compiler_always_flags = []
@@ -115,9 +114,6 @@ class TestConfig:
         # threads
         self.threads = 1
         self.use_threads = 0
-
-        # Should we check for files being written more than once?
-        self.check_files_written = False
 
         # Should we skip performance tests
         self.skip_perf_tests = False
@@ -208,11 +204,11 @@ class TestOptions:
        # expected exit code
        self.exit_code = 0
 
-       # should we clean up after ourselves?
-       self.cleanup = ''
-
        # extra files to clean afterward
        self.clean_files = []
+
+       # extra files to copy to the testdir
+       self.extra_files = []
 
        # which -t numeric fields do we want to look at, and what bounds must
        # they fall within?

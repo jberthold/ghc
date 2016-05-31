@@ -29,7 +29,7 @@ import TcRnMonad
 import TcEnv
 import TcBinds( tcRecSelBinds )
 import RnEnv( RoleAnnotEnv, lookupRoleAnnot )
-import TyCoRep( Type(..), TyBinder(..), delBinderVar )
+import TyCoRep( Type(..), TyBinder(..), delBinderVarFV )
 import TcType
 import TysWiredIn( unitTy )
 import MkCore( rEC_SEL_ERROR_ID )
@@ -59,6 +59,8 @@ import Maybes
 import Data.List
 import Bag
 import FastString
+import FV
+import UniqFM
 
 import Control.Monad
 
@@ -129,9 +131,13 @@ synonymTyConsOfType ty
 -}
 
 mkSynEdges :: [LTyClDecl Name] -> [(LTyClDecl Name, Name, [Name])]
-mkSynEdges syn_decls = [ (ldecl, name, nameSetElems fvs)
+mkSynEdges syn_decls = [ (ldecl, name, nonDetEltsUFM fvs)
                        | ldecl@(L _ (SynDecl { tcdLName = L _ name
                                              , tcdFVs = fvs })) <- syn_decls ]
+            -- It's OK to use nonDetEltsUFM here as
+            -- stronglyConnCompFromEdgedVertices is still deterministic even
+            -- if the edges are in nondeterministic order as explained in
+            -- Note [Deterministic SCC] in Digraph.
 
 calcSynCycles :: [LTyClDecl Name] -> [SCC (LTyClDecl Name)]
 calcSynCycles = stronglyConnCompFromEdgedVertices . mkSynEdges
@@ -418,8 +424,10 @@ calcRecFlags boot_details is_boot mrole_env all_tycons
     nt_edges = [(t, mk_nt_edges t) | t <- new_tycons]
 
     mk_nt_edges nt      -- Invariant: nt is a newtype
-        = [ tc | tc <- nameEnvElts (tyConsOfType (new_tc_rhs nt))
+        = [ tc | tc <- nonDetEltsUFM (tyConsOfType (new_tc_rhs nt))
                         -- tyConsOfType looks through synonyms
+                        -- It's OK to use nonDetEltsUFM here, see
+                        -- Note [findLoopBreakers determinism].
                , tc `elem` new_tycons ]
            -- If not (tc `elem` new_tycons) we know that either it's a local *data* type,
            -- or it's imported.  Either way, it can't form part of a newtype cycle
@@ -432,7 +440,9 @@ calcRecFlags boot_details is_boot mrole_env all_tycons
     mk_prod_edges tc    -- Invariant: tc is a product tycon
         = concatMap (mk_prod_edges1 tc) (dataConOrigArgTys (head (tyConDataCons tc)))
 
-    mk_prod_edges1 ptc ty = concatMap (mk_prod_edges2 ptc) (nameEnvElts (tyConsOfType ty))
+    mk_prod_edges1 ptc ty = concatMap (mk_prod_edges2 ptc) (nonDetEltsUFM (tyConsOfType ty))
+                                      -- It's OK to use nonDetEltsUFM here, see
+                                      -- Note [findLoopBreakers determinism].
 
     mk_prod_edges2 ptc tc
         | tc `elem` prod_tycons   = [tc]                -- Local product
@@ -445,6 +455,14 @@ calcRecFlags boot_details is_boot mrole_env all_tycons
 
 new_tc_rhs :: TyCon -> Type
 new_tc_rhs tc = snd (newTyConRhs tc)    -- Ignore the type variables
+
+{-
+Note [findLoopBreakers determinism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The order of edges doesn't matter for determinism here as explained in
+Note [Deterministic SCC] in Digraph. It's enough for the order of nodes
+to be deterministic.
+-}
 
 findLoopBreakers :: [(TyCon, [TyCon])] -> [Name]
 -- Finds a set of tycons that cut all loops
@@ -703,21 +721,21 @@ irExTyVars orig_tvs thing = go emptyVarSet orig_tvs
 
 markNominal :: TyVarSet   -- local variables
             -> Type -> RoleM ()
-markNominal lcls ty = let nvars = get_ty_vars ty `minusVarSet` lcls in
-                      mapM_ (updateRole Nominal) (varSetElems nvars)
+markNominal lcls ty = let nvars = fvVarList (FV.delFVs lcls $ get_ty_vars ty) in
+                      mapM_ (updateRole Nominal) nvars
   where
      -- get_ty_vars gets all the tyvars (no covars!) from a type *without*
      -- recurring into coercions. Recall: coercions are totally ignored during
      -- role inference. See [Coercions in role inference]
-    get_ty_vars (TyVarTy tv)     = unitVarSet tv
-    get_ty_vars (AppTy t1 t2)    = get_ty_vars t1 `unionVarSet` get_ty_vars t2
-    get_ty_vars (TyConApp _ tys) = foldr (unionVarSet . get_ty_vars) emptyVarSet tys
+    get_ty_vars (TyVarTy tv)     = FV.unitFV tv
+    get_ty_vars (AppTy t1 t2)    = get_ty_vars t1 `unionFV` get_ty_vars t2
+    get_ty_vars (TyConApp _ tys) = mapUnionFV get_ty_vars tys
     get_ty_vars (ForAllTy bndr ty)
-      = get_ty_vars ty `delBinderVar` bndr
-        `unionVarSet` (tyCoVarsOfType $ binderType bndr)
-    get_ty_vars (LitTy {})       = emptyVarSet
+      = delBinderVarFV bndr (get_ty_vars ty)
+        `unionFV` (tyCoFVsOfType $ binderType bndr)
+    get_ty_vars (LitTy {})       = emptyFV
     get_ty_vars (CastTy ty _)    = get_ty_vars ty
-    get_ty_vars (CoercionTy _)   = emptyVarSet
+    get_ty_vars (CoercionTy _)   = emptyFV
 
 -- like lookupRoles, but with Nominal tags at the end for oversaturated TyConApps
 lookupRolesX :: TyCon -> RoleM [Role]
@@ -912,7 +930,7 @@ mkRecSelBind :: (TyCon, FieldLabel) -> (LSig Name, (RecFlag, LHsBinds Name))
 mkRecSelBind (tycon, fl)
   = mkOneRecordSelector all_cons (RecSelData tycon) fl
   where
-    all_cons     = map RealDataCon (tyConDataCons tycon)
+    all_cons = map RealDataCon (tyConDataCons tycon)
 
 mkOneRecordSelector :: [ConLike] -> RecSelParent -> FieldLabel
                     -> (LSig Name, (RecFlag, LHsBinds Name))
@@ -923,7 +941,12 @@ mkOneRecordSelector all_cons idDetails fl
     lbl      = flLabel fl
     sel_name = flSelector fl
 
-    sel_id = mkExportedLocalId rec_details sel_name sel_ty
+    sel_id =
+      -- Do not mark record selectors as exported to avoid keeping these Ids
+      -- alive unnecessarily. See #12125. Selectors are now marked as exported
+      -- when necessary by desugarer ('Desugar.addExportFlagsAndRules', also see
+      -- uses of 'availsToNameSetWithSelectors' in 'Desugar.hs').
+      mkNonExportedLocalId rec_details sel_name sel_ty
     rec_details = RecSelId { sel_tycon = idDetails, sel_naughty = is_naughty }
 
     -- Find a representative constructor, con1

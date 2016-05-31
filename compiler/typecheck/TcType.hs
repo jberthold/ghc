@@ -91,7 +91,7 @@ module TcType (
   ---------------------------------
   -- Predicate types
   mkMinimalBySCs, transSuperClasses,
-  pickQuantifiablePreds,
+  pickQuantifiablePreds, pickCapturedPreds,
   immSuperClasses,
   isImprovementPred,
 
@@ -100,7 +100,7 @@ module TcType (
 
   -- * Finding "exact" (non-dead) type variables
   exactTyCoVarsOfType, exactTyCoVarsOfTypes,
-  splitDepVarsOfType, splitDepVarsOfTypes, TcDepVars(..), depVarsTyVars,
+  splitDepVarsOfType, splitDepVarsOfTypes, TcDepVars(..), tcDepVarSet,
 
   -- * Extracting bound variables
   allBoundVariables, allBoundVariabless,
@@ -214,7 +214,7 @@ import BasicTypes
 import Util
 import Bag
 import Maybes
-import Pair
+import Pair( pFst )
 import Outputable
 import FastString
 import ErrUtils( Validity(..), MsgDoc, isValid )
@@ -564,18 +564,18 @@ pprUserTypeCtxt SigmaCtxt         = text "the context of a polymorphic type"
 pprUserTypeCtxt (DataTyCtxt tc)   = text "the context of the data type declaration for" <+> quotes (ppr tc)
 pprUserTypeCtxt (PatSynCtxt n)    = text "the signature for pattern synonym" <+> quotes (ppr n)
 
-pprSigCtxt :: UserTypeCtxt -> SDoc -> SDoc -> SDoc
+pprSigCtxt :: UserTypeCtxt -> SDoc -> SDoc
 -- (pprSigCtxt ctxt <extra> <type>)
--- prints    In <extra> the type signature for 'f':
+-- prints    In the type signature for 'f':
 --              f :: <type>
 -- The <extra> is either empty or "the ambiguity check for"
-pprSigCtxt ctxt extra pp_ty
+pprSigCtxt ctxt pp_ty
   | Just n <- isSigMaybe ctxt
-  = vcat [ text "In" <+> extra <+> ptext (sLit "the type signature:")
-         , nest 2 (pprPrefixOcc n <+> dcolon <+> pp_ty) ]
+  = hang (text "In the type signature:")
+       2 (pprPrefixOcc n <+> dcolon <+> pp_ty)
 
   | otherwise
-  = hang (text "In" <+> extra <+> pprUserTypeCtxt ctxt <> colon)
+  = hang (text "In" <+> pprUserTypeCtxt ctxt <> colon)
        2 pp_ty
 
 isSigMaybe :: UserTypeCtxt -> Maybe Name
@@ -851,14 +851,27 @@ allBoundVariabless = mapUnionVarSet allBoundVariables
 *                                                                      *
 ********************************************************************* -}
 
-data TcDepVars  -- See note [Dependent type variables]
-  = DV { dv_kvs :: TyCoVarSet  -- "kind" variables (dependent)
-       , dv_tvs :: TyVarSet    -- "type" variables (non-dependent)
-                               -- The two are disjoint sets
+data TcDepVars  -- See Note [Dependent type variables]
+                -- See Note [TcDepVars determinism]
+  = DV { dv_kvs :: DTyCoVarSet  -- "kind" variables (dependent)
+       , dv_tvs :: DTyVarSet    -- "type" variables (non-dependent)
+         -- A variable may appear in both sets
+         -- E.g.   T k (x::k)    The first occurence of k makes it
+         --                      show up in dv_tvs, the second in dv_kvs
+         -- See Note [Dependent type variables]
     }
 
-depVarsTyVars :: TcDepVars -> TyVarSet
-depVarsTyVars = dv_tvs
+tcDepVarSet :: TcDepVars -> TyVarSet
+-- Actually can contain CoVars, but never mind
+tcDepVarSet (DV { dv_kvs = kvs, dv_tvs = tvs })
+  = dVarSetToVarSet kvs `unionVarSet` dVarSetToVarSet tvs
+
+instance Monoid TcDepVars where
+   mempty = DV { dv_kvs = emptyDVarSet, dv_tvs = emptyDVarSet }
+   mappend (DV { dv_kvs = kv1, dv_tvs = tv1 })
+           (DV { dv_kvs = kv2, dv_tvs = tv2 })
+          = DV { dv_kvs = kv1 `unionDVarSet` kv2
+               , dv_tvs = tv1 `unionDVarSet` tv2}
 
 instance Outputable TcDepVars where
   ppr (DV {dv_kvs = kvs, dv_tvs = tvs })
@@ -882,9 +895,21 @@ arbitrary distinction based on how the variables appear:
 E.g.  In the type    T k (a::k)
       'k' is a kind variable, because it occurs in the kind of 'a',
           even though it also appears at "top level" of the type
-      'a' is a type variable, becuase it doesn't
+      'a' is a type variable, because it doesn't
+
+We gather these variables using a TcDepVars record:
+  DV { dv_kvs: Variables free in the kind of a free type variable
+               or of a forall-bound type variable
+     , dv_tvs: Variables sytactically free in the type }
+
+So:  dv_kvs            are the kind variables of the type
+     (dv_tvs - dv_kvs) are the type variable of the type
 
 Note that
+
+* A variable can occur in both.
+      T k (x::k)    The first occurence of k makes it
+                    show up in dv_tvs, the second in dv_kvs
 
 * We include any coercion variables in the "dependent",
   "kind-variable" set because we never quantify over them.
@@ -895,43 +920,48 @@ Note that
      (k1 :: k2), (k2 :: *)
   The "type variables" do not depend on each other; if
   one did, it'd be classified as a kind variable!
--}
 
-splitDepVarsOfType :: Type -> TcDepVars
--- See Note [Dependent type variables]
-splitDepVarsOfType ty
-  = DV { dv_kvs = dep_vars
-       , dv_tvs = nondep_vars `minusVarSet` dep_vars }
-  where
-    Pair dep_vars nondep_vars = split_dep_vars ty
+Note [TcDepVars determinism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we quantify over type variables we decide the order in which they
+appear in the final type. Because the order of type variables in the type
+can end up in the interface file and affects some optimizations like
+worker-wrapper we want this order to be deterministic.
+
+To achieve that we use deterministic sets of variables that can be converted to
+lists in a deterministic order.
+
+For more information about deterministic sets see
+Note [Deterministic UniqFM] in UniqDFM.
+-}
 
 -- | Like 'splitDepVarsOfType', but over a list of types
 splitDepVarsOfTypes :: [Type] -> TcDepVars
--- See Note [Dependent type variables]
-splitDepVarsOfTypes tys
-  = DV { dv_kvs = dep_vars
-       , dv_tvs = nondep_vars `minusVarSet` dep_vars }
-  where
-    Pair dep_vars nondep_vars = foldMap split_dep_vars tys
+splitDepVarsOfTypes = foldMap splitDepVarsOfType
 
 -- | Worker for 'splitDepVarsOfType'. This might output the same var
 -- in both sets, if it's used in both a type and a kind.
-split_dep_vars :: Type -> Pair TyCoVarSet   -- Pair kvs tvs
-split_dep_vars = go
+-- See Note [TcDepVars determinism]
+-- See Note [Dependent type variables]
+splitDepVarsOfType :: Type -> TcDepVars
+splitDepVarsOfType = go
   where
-    go (TyVarTy tv)              = Pair (tyCoVarsOfType $ tyVarKind tv)
-                                        (unitVarSet tv)
+    go (TyVarTy tv)              = DV { dv_kvs =tyCoVarsOfTypeDSet $ tyVarKind tv
+                                      , dv_tvs = unitDVarSet tv }
     go (AppTy t1 t2)             = go t1 `mappend` go t2
     go (TyConApp _ tys)          = foldMap go tys
     go (ForAllTy (Anon arg) res) = go arg `mappend` go res
-    go (ForAllTy (Named tv _) ty)
-      = let Pair kvs tvs = go ty in
-        Pair (kvs `delVarSet` tv `unionVarSet` tyCoVarsOfType (tyVarKind tv))
-             (tvs `delVarSet` tv)
     go (LitTy {})                = mempty
-    go (CastTy ty co)            = go ty `mappend` Pair (tyCoVarsOfCo co)
-                                                        emptyVarSet
-    go (CoercionTy co)           = Pair (tyCoVarsOfCo co) emptyVarSet
+    go (CastTy ty co)            = go ty `mappend` go_co co
+    go (CoercionTy co)           = go_co co
+    go (ForAllTy (Named tv _) ty)
+      = let DV { dv_kvs = kvs, dv_tvs = tvs } = go ty in
+        DV { dv_kvs = (kvs `delDVarSet` tv)
+                      `extendDVarSetList` tyCoVarsOfTypeList (tyVarKind tv)
+           , dv_tvs = tvs `delDVarSet` tv }
+
+    go_co co = DV { dv_kvs = tyCoVarsOfCoDSet co
+                  , dv_tvs = emptyDVarSet }
 
 {-
 ************************************************************************
@@ -1299,20 +1329,24 @@ tcSplitFunTy_maybe _                                    = Nothing
         --
         --      g = f () ()
 
-tcSplitFunTysN
-        :: TcRhoType
-        -> Arity                -- N: Number of desired args
-        -> ([TcSigmaType],      -- Arg types (N or fewer)
-            TcSigmaType)        -- The rest of the type
-
-tcSplitFunTysN ty n_args
-  | n_args == 0
-  = ([], ty)
-  | Just (arg,res) <- tcSplitFunTy_maybe ty
-  = case tcSplitFunTysN res (n_args - 1) of
-        (args, res) -> (arg:args, res)
-  | otherwise
-  = ([], ty)
+tcSplitFunTysN :: Arity                      -- N: Number of desired args
+               -> TcRhoType
+               -> Either Arity               -- Number of missing arrows
+                        ([TcSigmaType],      -- Arg types (N or fewer)
+                         TcSigmaType)        -- The rest of the type
+-- ^ Split off exactly the specified number argument types
+-- Returns
+--  (Left m) if there are 'm' missing arrows in the type
+--  (Right (tys,res)) if the type looks like t1 -> ... -> tn -> res
+tcSplitFunTysN n ty
+ | n == 0
+ = Right ([], ty)
+ | Just (arg,res) <- tcSplitFunTy_maybe ty
+ = case tcSplitFunTysN (n-1) res of
+     Left m            -> Left m
+     Right (args,body) -> Right (arg:args, body)
+ | otherwise
+ = Left n
 
 tcSplitFunTy :: Type -> (Type, Type)
 tcSplitFunTy  ty = expectJust "tcSplitFunTy" (tcSplitFunTy_maybe ty)
@@ -1804,12 +1838,11 @@ evVarPred var
 -- [Inheriting implicit parameters] and [Quantifying over equality constraints]
 pickQuantifiablePreds
   :: TyVarSet           -- Quantifying over these
-  -> TcThetaType        -- Context from PartialTypeSignatures
   -> TcThetaType        -- Proposed constraints to quantify
   -> TcThetaType        -- A subset that we can actually quantify
--- This function decides whether a particular constraint shoudl be
+-- This function decides whether a particular constraint should be
 -- quantified over, given the type variables that are being quantified
-pickQuantifiablePreds qtvs annotated_theta theta
+pickQuantifiablePreds qtvs theta
   = let flex_ctxt = True in  -- Quantify over non-tyvar constraints, even without
                              -- -XFlexibleContexts: see Trac #10608, #10351
          -- flex_ctxt <- xoptM Opt_FlexibleContexts
@@ -1819,14 +1852,13 @@ pickQuantifiablePreds qtvs annotated_theta theta
       = case classifyPredType pred of
 
           ClassPred cls tys
-            | Just str <- isCallStackPred pred
-              -- NEVER infer a CallStack constraint, unless we were
-              -- given one in a partial type signatures.
+            | Just {} <- isCallStackPred pred
+              -- NEVER infer a CallStack constraint
               -- Otherwise, we let the constraints bubble up to be
               -- solved from the outer context, or be defaulted when we
               -- reach the top-level.
               -- see Note [Overview of implicit CallStacks]
-              -> str `elem` givenStks
+              -> False
 
             | isIPClass cls    -> True -- See note [Inheriting implicit parameters]
 
@@ -1838,9 +1870,6 @@ pickQuantifiablePreds qtvs annotated_theta theta
 
           EqPred NomEq ty1 ty2  -> quant_fun ty1 || quant_fun ty2
           IrredPred ty          -> tyCoVarsOfType ty `intersectsVarSet` qtvs
-
-    givenStks = [ str | (str, ty) <- mapMaybe isIPPred_maybe annotated_theta
-                      , isCallStackTy ty ]
 
     pick_cls_pred flex_ctxt cls tys
       = tyCoVarsOfTypes tys `intersectsVarSet` qtvs
@@ -1854,6 +1883,19 @@ pickQuantifiablePreds qtvs annotated_theta theta
           Just (tc, tys) | isTypeFamilyTyCon tc
                          -> tyCoVarsOfTypes tys `intersectsVarSet` qtvs
           _ -> False
+
+pickCapturedPreds
+  :: TyVarSet           -- Quantifying over these
+  -> TcThetaType        -- Proposed constraints to quantify
+  -> TcThetaType        -- A subset that we can actually quantify
+-- A simpler version of pickQuantifiablePreds, used to winnow down
+-- the inferred constrains of a group of bindings, into those for
+-- one particular identifier
+pickCapturedPreds qtvs theta
+  = filter captured theta
+  where
+    captured pred = isIPPred pred || (tyCoVarsOfType pred `intersectsVarSet` qtvs)
+
 
 -- Superclasses
 

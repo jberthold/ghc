@@ -733,8 +733,8 @@ Note [Dealing with imports]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For import M( ies ), we take the mi_exports of M, and make
    imp_occ_env :: OccEnv (Name, AvailInfo, Maybe Name)
-One entry for each Name that M exports; the AvailInfo describes just
-that Name.
+One entry for each Name that M exports; the AvailInfo is the
+AvailInfo exported from M that exports that Name.
 
 The situation is made more complicated by associated types. E.g.
    module M where
@@ -747,7 +747,7 @@ Notice that T appears *twice*, once as a child and once as a parent.
 From this we construct the imp_occ_env
    C  -> (C,  C(C,T),        Nothing)
    T  -> (T,  T(T,T1,T2,T3), Just C)
-   T1 -> (T1, T(T1,T2,T3),   Nothing)   -- similarly T2,T3
+   T1 -> (T1, T(T,T1,T2,T3), Nothing)   -- similarly T2,T3
 
 If we say
    import M( T(T1,T2) )
@@ -1357,7 +1357,7 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
     lookup_ie_with :: IE RdrName -> Located RdrName -> [Located RdrName]
                    -> RnM (Located Name, [Located Name], [Name], [FieldLabel])
     lookup_ie_with ie (L l rdr) sub_rdrs
-        = do name <- lookupGlobalOccRnExport rdr
+        = do name <- lookupGlobalOccRn rdr
              let gres = findChildren kids_env name
                  mchildren =
                   lookupChildren (map classifyGRE (gres ++ pat_syns)) sub_rdrs
@@ -1377,7 +1377,7 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
     lookup_ie_all :: IE RdrName -> Located RdrName
                   -> RnM (Located Name, [Name], [FieldLabel])
     lookup_ie_all ie (L l rdr) =
-          do name <- lookupGlobalOccRnExport rdr
+          do name <- lookupGlobalOccRn rdr
              let gres = findChildren kids_env name
                  (non_flds, flds) = classifyGREs gres
              addUsedKids rdr gres

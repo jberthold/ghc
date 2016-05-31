@@ -50,6 +50,7 @@ import VarSet
 import Name             ( Name, NamedThing(..), nameIsLocalOrFrom )
 import NameSet
 import NameEnv
+import UniqFM
 import Unify            ( ruleMatchTyX )
 import BasicTypes       ( Activation, CompilerPhase, isActive, pprRuleName )
 import StaticFlags      ( opt_PprStyle_Debug )
@@ -357,8 +358,9 @@ extendRuleBase rule_base rule
   = extendNameEnv_Acc (:) singleton rule_base (ruleIdName rule) rule
 
 pprRuleBase :: RuleBase -> SDoc
-pprRuleBase rules = vcat [ pprRules (tidyRules emptyTidyEnv rs)
-                         | rs <- nameEnvElts rules ]
+pprRuleBase rules = pprUFM rules $ \rss ->
+  vcat [ pprRules (tidyRules emptyTidyEnv rs)
+       | rs <- rss ]
 
 {-
 ************************************************************************
@@ -566,7 +568,9 @@ matchN (in_scope, id_unf) rule_name tmpl_vars tmpl_es target_es
           kind = Type.substTy (mkTCvSubst in_scope (tv_subst, cv_subst))
                               (tyVarKind tmpl_var)
 
-          to_co_env env = foldVarEnv_Directly to_co emptyVarEnv env
+          to_co_env env = nonDetFoldUFM_Directly to_co emptyVarEnv env
+            -- It's OK to use nonDetFoldUFM_Directly because we forget the
+            -- order immediately by creating a new env
           to_co uniq expr env
             | Just co <- exprToCoercion_maybe expr
             = extendVarEnv_Directly env uniq co
@@ -855,7 +859,7 @@ match_alts _ _ _ _
 ------------------------------------------
 okToFloat :: RnEnv2 -> VarSet -> Bool
 okToFloat rn_env bind_fvs
-  = foldVarSet ((&&) . not_captured) True bind_fvs
+  = varSetAll not_captured bind_fvs
   where
     not_captured fv = not (inRnEnvR rn_env fv)
 

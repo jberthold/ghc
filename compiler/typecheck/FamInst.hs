@@ -93,6 +93,8 @@ newFamInst flavor axiom@(CoAxiom { co_ax_tc = fam_tc })
 *                                                                      *
 ************************************************************************
 
+Note [Checking family instance consistency]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For any two family instance modules that we import directly or indirectly, we
 check whether the instances in the two modules are consistent, *unless* we can
 be certain that the instances of the two modules have already been checked for
@@ -143,6 +145,7 @@ listToSet :: [ModulePair] -> ModulePairSet
 listToSet l = Map.fromList (zip l (repeat ()))
 
 checkFamInstConsistency :: [Module] -> [Module] -> TcM ()
+-- See Note [Checking family instance consistency]
 checkFamInstConsistency famInstMods directlyImpMods
   = do { dflags     <- getDynFlags
        ; (eps, hpt) <- getEpsAndHpt
@@ -272,7 +275,7 @@ tcTopNormaliseNewTypeTF_maybe faminsts rdr_env ty
     stepper = unwrap_newtype `composeSteppers` unwrap_newtype_instance
 
     -- For newtype instances we take a double step or nothing, so that
-    -- we don't return the reprsentation type of the newtype instance,
+    -- we don't return the representation type of the newtype instance,
     -- which would lead to terrible error messages
     unwrap_newtype_instance rec_nts tc tys
       | Just (tc', tys', co) <- tcLookupDataFamInst_maybe faminsts tc tys
@@ -562,7 +565,7 @@ unusedInjectiveVarsErr (Pair invis_vars vis_vars) errorBuilder tyfamEqn
       has_kinds = not $ isEmptyVarSet invis_vars
 
       doc = sep [ what <+> text "variable" <>
-                  pluralVarSet tvs <+> pprVarSet (pprQuotedList . toposortTyVars) tvs
+                  pluralVarSet tvs <+> pprVarSet tvs (pprQuotedList . toposortTyVars)
                 , text "cannot be inferred from the right-hand side." ]
       what = case (has_types, has_kinds) of
                (True, True)   -> text "Type and kind"

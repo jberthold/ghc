@@ -58,6 +58,7 @@ import Outputable
 import Type(mkStrLitTy, tidyOpenType)
 import PrelNames( mkUnboundName, gHC_PRIM, ipClassName )
 import TcValidity (checkValidType)
+import UniqFM
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
@@ -498,10 +499,13 @@ type BKey = Int -- Just number off the bindings
 mkEdges :: TcSigFun -> LHsBinds Name -> [Node BKey (LHsBind Name)]
 -- See Note [Polymorphic recursion] in HsBinds.
 mkEdges sig_fn binds
-  = [ (bind, key, [key | n <- nameSetElems (bind_fvs (unLoc bind)),
+  = [ (bind, key, [key | n <- nonDetEltsUFM (bind_fvs (unLoc bind)),
                          Just key <- [lookupNameEnv key_map n], no_sig n ])
     | (bind, key) <- keyd_binds
     ]
+    -- It's OK to use nonDetEltsUFM here as stronglyConnCompFromEdgedVertices
+    -- is still deterministic even if the edges are in nondeterministic order
+    -- as explained in Note [Deterministic SCC] in Digraph.
   where
     no_sig :: Name -> Bool
     no_sig n = noCompleteSig (sig_fn n)
@@ -777,10 +781,10 @@ chooseInferredQuantifiers :: TcThetaType   -- inferred
                           -> Maybe TcIdSigInfo
                           -> TcM ([TcTyBinder], TcThetaType)
 chooseInferredQuantifiers inferred_theta tau_tvs qtvs Nothing
-  = -- No type signature for this binder
+  = -- No type signature (partial or complete) for this binder,
     do { let free_tvs = closeOverKinds (growThetaTyVars inferred_theta tau_tvs)
                         -- Include kind variables!  Trac #7916
-             my_theta = pickQuantifiablePreds free_tvs [] inferred_theta
+             my_theta = pickCapturedPreds free_tvs inferred_theta
              binders  = [ mkNamedBinder Invisible tv
                         | tv <- qtvs
                         , tv `elemVarSet` free_tvs ]
@@ -799,24 +803,23 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
        ; traceTc "ciq" (vcat [ ppr bndr_info, ppr annotated_theta, ppr free_tvs])
        ; return (mk_binders free_tvs, annotated_theta) }
 
-  | PartialSig { sig_cts = extra } <- bndr_info
+  | PartialSig { sig_cts = extra, sig_hs_ty = hs_ty } <- bndr_info
   , Just loc <- extra
   = do { annotated_theta <- zonkTcTypes annotated_theta
        ; let free_tvs = closeOverKinds (tyCoVarsOfTypes annotated_theta
                                         `unionVarSet` tau_tvs)
-             my_theta = pickQuantifiablePreds free_tvs annotated_theta inferred_theta
+             my_theta = pickCapturedPreds free_tvs inferred_theta
 
        -- Report the inferred constraints for an extra-constraints wildcard/hole as
        -- an error message, unless the PartialTypeSignatures flag is enabled. In this
        -- case, the extra inferred constraints are accepted without complaining.
-       -- Returns the annotated constraints combined with the inferred constraints.
+       -- NB: inferred_theta already includes all the annotated constraints
              inferred_diff = [ pred
                              | pred <- my_theta
                              , all (not . (`eqType` pred)) annotated_theta ]
-             final_theta   = annotated_theta ++ inferred_diff
        ; partial_sigs      <- xoptM LangExt.PartialTypeSignatures
        ; warn_partial_sigs <- woptM Opt_WarnPartialTypeSignatures
-       ; msg <- mkLongErrAt loc (mk_msg inferred_diff partial_sigs) empty
+       ; msg <- mkLongErrAt loc (mk_msg inferred_diff partial_sigs hs_ty) empty
        ; traceTc "completeTheta" $
             vcat [ ppr bndr_info
                  , ppr annotated_theta, ppr inferred_theta
@@ -827,18 +830,18 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
                 | otherwise         -> return ()
            False                    -> reportError msg
 
-       ; return (mk_binders free_tvs, final_theta) }
+       ; return (mk_binders free_tvs, my_theta) }
 
   | otherwise  -- A complete type signature is dealt with in mkInferredPolyId
   = pprPanic "chooseInferredQuantifiers" (ppr bndr_info)
 
   where
     pts_hint = text "To use the inferred type, enable PartialTypeSignatures"
-    mk_msg inferred_diff suppress_hint
+    mk_msg inferred_diff suppress_hint hs_ty
        = vcat [ hang ((text "Found constraint wildcard") <+> quotes (char '_'))
                    2 (text "standing for") <+> quotes (pprTheta inferred_diff)
               , if suppress_hint then empty else pts_hint
-              , typeSigCtxt ctxt bndr_info ]
+              , pprSigCtxt ctxt (ppr hs_ty) ]
 
     spec_tv_set = mkVarSet $ map snd annotated_tvs
     mk_binders free_tvs
@@ -1483,21 +1486,32 @@ tcMonoBinds _ sig_fn no_gen binds
 
         -- Bring the monomorphic Ids, into scope for the RHSs
         ; let mono_infos = getMonoBindInfo tc_binds
-              rhs_id_env = [(name, mono_id) | MBI { mbi_poly_name = name
-                                                  , mbi_sig       = mb_sig
-                                                  , mbi_mono_id   = mono_id }
-                                                    <- mono_infos
-                                            , case mb_sig of
-                                                Just sig -> isPartialSig sig
-                                                Nothing  -> True ]
-                    -- A monomorphic binding for each term variable that lacks
-                    -- a type sig.  (Ones with a sig are already in scope.)
+              rhs_id_env = [ (name, mono_id)
+                           | MBI { mbi_poly_name = name
+                                 , mbi_sig       = mb_sig
+                                 , mbi_mono_id   = mono_id } <- mono_infos
+                           , case mb_sig of
+                               Just sig -> isPartialSig sig
+                               Nothing  -> True ]
+                -- A monomorphic binding for each term variable that lacks
+                -- a complete type sig.  (Ones with a sig are already in scope.)
 
         ; traceTc "tcMonoBinds" $ vcat [ ppr n <+> ppr id <+> ppr (idType id)
                                        | (n,id) <- rhs_id_env]
         ; binds' <- tcExtendLetEnvIds NotTopLevel rhs_id_env $
                     mapM (wrapLocM tcRhs) tc_binds
+
         ; return (listToBag binds', mono_infos) }
+
+
+emitWildCardHoles :: MonoBindInfo -> TcM ()
+emitWildCardHoles (MBI { mbi_sig = Just sig })
+  | TISI { sig_bndr = bndr, sig_ctxt = ctxt } <- sig
+  , PartialSig { sig_wcs = wc_prs, sig_hs_ty = hs_ty } <- bndr
+  = addErrCtxt (pprSigCtxt ctxt (ppr hs_ty)) $
+    emitWildCardHoleConstraints wc_prs
+emitWildCardHoles _
+  = return ()
 
 ------------------------
 -- tcLhs typechecks the LHS of the bindings, to construct the environment in which
@@ -1581,6 +1595,7 @@ tcRhs (TcFunBind info@(MBI { mbi_sig = mb_sig, mbi_mono_id = mono_id })
     do  { traceTc "tcRhs: fun bind" (ppr mono_id $$ ppr (idType mono_id))
         ; (co_fn, matches') <- tcMatchesFun (idName mono_id)
                                  matches (mkCheckExpType $ idType mono_id)
+        ; emitWildCardHoles info
         ; return ( FunBind { fun_id = L loc mono_id
                            , fun_matches = matches'
                            , fun_co_fn = co_fn
@@ -1597,6 +1612,7 @@ tcRhs (TcPatBind infos pat' grhss pat_ty)
     do  { traceTc "tcRhs: pat bind" (ppr pat' $$ ppr pat_ty)
         ; grhss' <- addErrCtxt (patMonoBindsCtxt pat' grhss) $
                     tcGRHSsPat grhss pat_ty
+        ; mapM_ emitWildCardHoles infos
         ; return ( PatBind { pat_lhs = pat', pat_rhs = grhss'
                            , pat_rhs_ty = pat_ty
                            , bind_fvs = placeHolderNamesTc
@@ -1610,15 +1626,12 @@ tcExtendTyVarEnvForRhs (Just sig) thing_inside
 
 tcExtendTyVarEnvFromSig :: TcIdSigInfo -> TcM a -> TcM a
 tcExtendTyVarEnvFromSig sig thing_inside
-  | TISI { sig_bndr = s_bndr, sig_skols = skol_prs, sig_ctxt = ctxt } <- sig
+  | TISI { sig_bndr = s_bndr, sig_skols = skol_prs } <- sig
   = tcExtendTyVarEnv2 skol_prs $
     case s_bndr of
       CompleteSig {}  -> thing_inside
       PartialSig { sig_wcs = wc_prs }  -- Extend the env ad emit the holes
-                      -> tcExtendTyVarEnv2 wc_prs $
-                         do { addErrCtxt (typeSigCtxt ctxt s_bndr) $
-                              emitWildCardHoleConstraints wc_prs
-                            ; thing_inside }
+                      -> tcExtendTyVarEnv2 wc_prs thing_inside
 
 tcExtendIdBinderStackForRhs :: [MonoBindInfo] -> TcM a -> TcM a
 -- Extend the TcIdBinderStack for the RHS of the binding, with
@@ -1797,8 +1810,9 @@ tcUserTypeSig hs_sig_ty mb_name
            <- pushTcLevelM_  $
                   -- When instantiating the signature, do so "one level in"
                   -- so that they can be unified under the forall
-              tcImplicitTKBndrs vars $
-              tcWildCardBinders wcs  $ \ wcs ->
+              solveEqualities           $
+              tcImplicitTKBndrs vars    $
+              tcWildCardBinders wcs     $ \ wcs ->
               tcExplicitTKBndrs hs_tvs  $ \ tvs2 ->
          do { -- Instantiate the type-class context; but if there
               -- is an extra-constraints wildcard, just discard it here
@@ -1815,20 +1829,14 @@ tcUserTypeSig hs_sig_ty mb_name
             ; theta <- zonkTcTypes theta
             ; tau   <- zonkTcType tau
 
-              -- Check for validity (eg rankN etc)
-              -- The ambiguity check will happen (from checkValidType),
-              -- but unnecessarily; it will always succeed because there
-              -- is no quantification
-            ; checkValidType ctxt_F (mkPhiTy theta tau)
-                -- NB: Do this in the context of the pushTcLevel so that
-                -- the TcLevel invariant is respected
-
             ; let bound_tvs
                     = unionVarSets [ allBoundVariabless theta
                                    , allBoundVariables tau
                                    , mkVarSet (map snd wcs) ]
             ; return ((wcs, tvs2, theta, tau), bound_tvs) }
 
+       -- NB: checkValidType on the final inferred type will
+       --     be done later by checkInferredPolyId
        ; loc <- getSrcSpanM
        ; return $
          TISI { sig_bndr  = PartialSig { sig_name = name, sig_hs_ty = hs_ty
@@ -1978,7 +1986,7 @@ isClosedBndrGroup binds = do
     fvs _                           = emptyNameSet
 
     is_closed_ns :: TcTypeEnv -> NameSet -> Bool -> Bool
-    is_closed_ns type_env ns b = foldNameSet ((&&) . is_closed_id type_env) b ns
+    is_closed_ns type_env ns b = b && nameSetAll (is_closed_id type_env) ns
         -- ns are the Names referred to from the RHS of this bind
 
     is_closed_id :: TcTypeEnv -> Name -> Bool
@@ -2109,12 +2117,6 @@ the common case.) -}
 patMonoBindsCtxt :: (OutputableBndr id, Outputable body) => LPat id -> GRHSs Name body -> SDoc
 patMonoBindsCtxt pat grhss
   = hang (text "In a pattern binding:") 2 (pprPatBind pat grhss)
-
-typeSigCtxt :: UserTypeCtxt -> TcIdSigBndr -> SDoc
-typeSigCtxt ctxt (PartialSig { sig_hs_ty = hs_ty })
-  = pprSigCtxt ctxt empty (ppr hs_ty)
-typeSigCtxt ctxt (CompleteSig id)
-  = pprSigCtxt ctxt empty (ppr (idType id))
 
 instErrCtxt :: Name -> TcType -> TidyEnv -> TcM (TidyEnv, SDoc)
 instErrCtxt name ty env

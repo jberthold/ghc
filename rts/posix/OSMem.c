@@ -39,11 +39,11 @@
 #include <sys/sysctl.h>
 #endif
 
-static caddr_t next_request = 0;
+static void *next_request = 0;
 
 void osMemInit(void)
 {
-    next_request = (caddr_t)RtsFlags.GcFlags.heapBase;
+    next_request = (void *)RtsFlags.GcFlags.heapBase;
 }
 
 /* -----------------------------------------------------------------------------
@@ -260,9 +260,9 @@ gen_map_mblocks (W_ size)
 }
 
 void *
-osGetMBlocks(nat n)
+osGetMBlocks(uint32_t n)
 {
-  caddr_t ret;
+  void *ret;
   W_ size = MBLOCK_SIZE * (W_)n;
 
   if (next_request == 0) {
@@ -289,12 +289,12 @@ osGetMBlocks(nat n)
   }
   // Next time, we'll try to allocate right after the block we just got.
   // ToDo: check that we haven't already grabbed the memory at next_request
-  next_request = ret + size;
+  next_request = (char *)ret + size;
 
   return ret;
 }
 
-void osFreeMBlocks(char *addr, nat n)
+void osFreeMBlocks(void *addr, uint32_t n)
 {
     munmap(addr, n * MBLOCK_SIZE);
 }
@@ -315,20 +315,20 @@ void osFreeAllMBlocks(void)
     }
 }
 
-W_ getPageSize (void)
+size_t getPageSize (void)
 {
-    static W_ pageSize = 0;
-    if (pageSize) {
-        return pageSize;
-    } else {
+    static size_t pageSize = 0;
+
+    if (pageSize == 0) {
         long ret;
         ret = sysconf(_SC_PAGESIZE);
         if (ret == -1) {
            barf("getPageSize: cannot get page size");
         }
         pageSize = ret;
-        return ret;
     }
+
+    return pageSize;
 }
 
 /* Returns 0 if physical memory size cannot be identified */

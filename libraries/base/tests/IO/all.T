@@ -107,8 +107,8 @@ test('countReaders001',
       extra_clean(['countReaders001.txt']),
       compile_and_run, [''])
 
-test('concio001', skip, run_command, ['$MAKE -s --no-print-directory test.concio001'])
-test('concio001.thr', skip, run_command, ['$MAKE -s --no-print-directory test.concio001.thr'])
+test('concio001', normal, run_command, ['$MAKE -s --no-print-directory test.concio001'])
+test('concio001.thr', normal, run_command, ['$MAKE -s --no-print-directory test.concio001.thr'])
 
 test('concio002', reqlib('process'), compile_and_run, [''])
 
@@ -138,8 +138,7 @@ test('encoding001',
 test('encoding002', normal, compile_and_run, [''])
 test('encoding003', normal, compile_and_run, [''])
 test('encoding004', normal, compile_and_run, [''])
-test('encoding005', when(opsys('mingw32'), expect_broken(10623)),
-     compile_and_run, [''])
+test('encoding005', normal, compile_and_run, [''])
 
 test('environment001',
      [extra_clean(['environment001'])],

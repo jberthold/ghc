@@ -46,6 +46,7 @@ import Bag
 import Util
 import Outputable
 import FastString
+import UniqFM
 import Maybes           ( orElse )
 import qualified GHC.LanguageExtensions as LangExt
 
@@ -516,7 +517,9 @@ depAnalBinds binds_w_dus
   = (map get_binds sccs, map get_du sccs)
   where
     sccs = depAnal (\(_, defs, _) -> defs)
-                   (\(_, _, uses) -> nameSetElems uses)
+                   (\(_, _, uses) -> nonDetEltsUFM uses)
+                   -- It's OK to use nonDetEltsUFM here as explained in
+                   -- Note [depAnal determinism] in NameEnv.
                    (bagToList binds_w_dus)
 
     get_binds (AcyclicSCC (bind, _, _)) = (NonRecursive, unitBag bind)
@@ -639,10 +642,12 @@ rnPatSynBind sig_fn bind@(PSB { psb_id = L _ name
                RecordPatSyn vars ->
                    do { checkDupRdrNames (map recordPatSynSelectorId vars)
                       ; let rnRecordPatSynField
-                              (RecordPatSynField visible hidden) = do {
-                              ; visible' <- lookupLocatedTopBndrRn visible
-                              ; hidden'  <- lookupVar hidden
-                              ; return $ RecordPatSynField visible' hidden' }
+                              (RecordPatSynField { recordPatSynSelectorId = visible
+                                                 , recordPatSynPatVar = hidden })
+                              = do { visible' <- lookupLocatedTopBndrRn visible
+                                   ; hidden'  <- lookupVar hidden
+                                   ; return $ RecordPatSynField { recordPatSynSelectorId = visible'
+                                                                , recordPatSynPatVar = hidden' } }
                       ; names <- mapM rnRecordPatSynField  vars
                       ; return ( (pat', RecordPatSyn names)
                                , mkFVs (map (unLoc . recordPatSynPatVar) names)) }

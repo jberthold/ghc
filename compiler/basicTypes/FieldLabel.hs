@@ -95,7 +95,7 @@ data FieldLbl a = FieldLabel {
                                           --   in the defining module for this datatype?
       flSelector     :: a                 -- ^ Record selector function
     }
-  deriving (Eq, Functor, Foldable, Traversable, Typeable)
+  deriving (Eq, Functor, Foldable, Traversable)
 deriving instance Data a => Data (FieldLbl a)
 
 instance Outputable a => Outputable (FieldLbl a) where
@@ -119,7 +119,8 @@ instance Binary a => Binary (FieldLbl a) where
 -- See Note [Why selector names include data constructors].
 mkFieldLabelOccs :: FieldLabelString -> OccName -> Bool -> FieldLbl OccName
 mkFieldLabelOccs lbl dc is_overloaded
-  = FieldLabel lbl is_overloaded sel_occ
+  = FieldLabel { flLabel = lbl, flIsOverloaded = is_overloaded
+               , flSelector = sel_occ }
   where
     str     = ":" ++ unpackFS lbl ++ ":" ++ occNameString dc
     sel_occ | is_overloaded = mkRecFldSelOcc str

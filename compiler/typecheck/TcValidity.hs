@@ -349,7 +349,7 @@ checkValidType ctxt ty
                  _              -> panic "checkValidType"
                                           -- Can't happen; not used for *user* sigs
 
-       ; env <- tcInitOpenTidyEnv (tyCoVarsOfType ty)
+       ; env <- tcInitOpenTidyEnv (tyCoVarsOfTypeList ty)
 
         -- Check the internal validity of the type itself
        ; check_type env ctxt rank ty
@@ -371,7 +371,7 @@ checkValidType ctxt ty
 checkValidMonoType :: Type -> TcM ()
 -- Assumes arguemt is fully zonked
 checkValidMonoType ty
-  = do { env <- tcInitOpenTidyEnv (tyCoVarsOfType ty)
+  = do { env <- tcInitOpenTidyEnv (tyCoVarsOfTypeList ty)
        ; check_type env SigmaCtxt MustBeMonoType ty }
 
 check_kind :: TidyEnv -> UserTypeCtxt -> TcType -> TcM ()
@@ -471,7 +471,7 @@ kind system should check for uses of unlifted types.  So I've
 removed the check.  See Trac #11120 comment:19.
 
 check_lifted ty
-  = do { env <- tcInitOpenTidyEnv (tyCoVarsOfType ty)
+  = do { env <- tcInitOpenTidyEnv (tyCoVarsOfTypeList ty)
        ; checkTcM (not (isUnliftedType ty)) (unliftedArgErr env ty) }
 
 unliftedArgErr :: TidyEnv -> Type -> (TidyEnv, SDoc)
@@ -707,7 +707,7 @@ applying the instance decl would show up two uses of ?x.  Trac #8912.
 checkValidTheta :: UserTypeCtxt -> ThetaType -> TcM ()
 -- Assumes arguemt is fully zonked
 checkValidTheta ctxt theta
-  = do { env <- tcInitOpenTidyEnv (tyCoVarsOfTypes theta)
+  = do { env <- tcInitOpenTidyEnv (tyCoVarsOfTypesList theta)
        ; addErrCtxtM (checkThetaCtxt ctxt theta) $
          check_valid_theta env ctxt theta }
 
@@ -1178,6 +1178,15 @@ It checks for three things
     So if they are the same, there must be no constructors.  But there
     might be applications thus (f (g x)).
 
+    Note that tys only includes the visible arguments of the class type
+    constructor. Including the non-vivisble arguments can cause the following,
+    perfectly valid instance to be rejected:
+       class Category (cat :: k -> k -> *) where ...
+       newtype T (c :: * -> * -> *) a b = MkT (c a b)
+       instance Category c => Category (T c) where ...
+    since the first argument to Category is a non-visible *, which sizeTypes
+    would count as a constructor! See Trac #11833.
+
   * Also check for a bizarre corner case, when the derived instance decl
     would look like
        instance C a b => D (T a) where ...
@@ -1198,19 +1207,20 @@ validDerivPred :: TyVarSet -> PredType -> Bool
 -- See Note [Valid 'deriving' predicate]
 validDerivPred tv_set pred
   = case classifyPredType pred of
-       ClassPred cls _ -> cls `hasKey` typeableClassKey
+       ClassPred cls tys -> cls `hasKey` typeableClassKey
                 -- Typeable constraints are bigger than they appear due
                 -- to kind polymorphism, but that's OK
-                       || check_tys
+                       || check_tys cls tys
        EqPred {}       -> False  -- reject equality constraints
        _               -> True   -- Non-class predicates are ok
   where
-    check_tys = hasNoDups fvs
+    check_tys cls tys
+              = hasNoDups fvs
                    -- use sizePred to ignore implicit args
                 && sizePred pred == fromIntegral (length fvs)
                 && all (`elemVarSet` tv_set) fvs
-
-    fvs = fvType pred
+      where tys' = filterOutInvisibleTypes (classTyCon cls) tys
+            fvs  = fvTypes tys'
 
 {-
 ************************************************************************
@@ -1937,7 +1947,7 @@ sizePred ty = goClass ty
 
     go (ClassPred cls tys')
       | isTerminatingClass cls = 0
-      | otherwise              = sizeTypes tys'
+      | otherwise = sizeTypes (filterOutInvisibleTypes (classTyCon cls) tys')
     go (EqPred {})        = 0
     go (IrredPred ty)     = sizeType ty
 
@@ -1966,4 +1976,3 @@ allDistinctTyVars tkvs (ty : tys)
       Nothing -> False
       Just tv | tv `elemVarSet` tkvs -> False
               | otherwise -> allDistinctTyVars (tkvs `extendVarSet` tv) tys
-

@@ -104,8 +104,9 @@ test('allocLimit4', [ extra_run_opts('+RTS -xq300k -RTS'),
                       omit_ways(['ghci']) ],
                     compile_and_run, [''])
 
-test('performGC', [ only_ways(['threaded1','threaded2']), req_smp
-                  , extra_run_opts('400 +RTS -qg -RTS') ],
+test('performGC', [ only_ways(['threaded1','threaded2']), req_smp,
+                    reqlib('random'),
+                    extra_run_opts('400 +RTS -qg -RTS') ],
                     compile_and_run, [''])
 
 # -----------------------------------------------------------------------------
@@ -244,14 +245,11 @@ test('conc067', ignore_output, compile_and_run, [''])
 # than one CPU.
 test('conc068', [ omit_ways('threaded2'), exit_code(1) ], compile_and_run, [''])
 
-# Commented out, instead of marked expect_broken, because it fails only
-# sometimes. See #10860.
-#test('setnumcapabilities001',
-#     [ only_ways(['threaded1','threaded2']),
-#       extra_run_opts('4 12 2000'),
-#       reqlib('parallel'),
-#       req_smp ],
-#     compile_and_run, [''])
+test('setnumcapabilities001',
+     [ only_ways(['threaded1','threaded2']),
+       extra_run_opts('4 12 2000'),
+       req_smp ],
+     compile_and_run, [''])
 
 # omit ghci, which can't handle unboxed tuples:
 test('compareAndSwap', [omit_ways(['ghci','hpc']), reqlib('primitive')], compile_and_run, [''])

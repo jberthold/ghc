@@ -60,7 +60,6 @@ import Coverage
 import Util
 import MonadUtils
 import OrdList
-import StaticPtrTable
 import UniqFM
 import ListSetOps
 import Fingerprint
@@ -149,7 +148,9 @@ mk_mod_usage_info pit hsc_env this_mod direct_imports used_names
     -- ent_map groups together all the things imported and used
     -- from a particular module
     ent_map :: ModuleEnv [OccName]
-    ent_map  = foldNameSet add_mv emptyModuleEnv used_names
+    ent_map  = nonDetFoldUFM add_mv emptyModuleEnv used_names
+     -- nonDetFoldUFM is OK here. If you follow the logic, we sort by OccName
+     -- in ent_hashs
      where
       add_mv name mv_map
         | isWiredInName name = mv_map  -- ignore wired-in names
@@ -295,7 +296,10 @@ deSugar hsc_env
                      (text "Desugar"<+>brackets (ppr mod))
                      (const ()) $
      do { -- Desugar the program
-        ; let export_set = availsToNameSet exports
+        ; let export_set =
+                -- Used to be 'availsToNameSet', but we now export selectors
+                -- only when necessary. See #12125.
+                availsToNameSetWithSelectors exports
               target     = hscTarget dflags
               hpcInfo    = emptyHpcInfo other_hpc_info
 
@@ -312,20 +316,13 @@ deSugar hsc_env
                           ; (ds_fords, foreign_prs) <- dsForeigns fords
                           ; ds_rules <- mapMaybeM dsRule rules
                           ; ds_vects <- mapM dsVect vects
-                          ; stBinds <- dsGetStaticBindsVar >>=
-                                           liftIO . readIORef
                           ; let hpc_init
                                   | gopt Opt_Hpc dflags = hpcInitCode mod ds_hpc_info
                                   | otherwise = empty
-                                -- Stub to insert the static entries of the
-                                -- module into the static pointer table
-                                spt_init = sptInitCode mod stBinds
                           ; return ( ds_ev_binds
                                    , foreign_prs `appOL` core_prs `appOL` spec_prs
-                                                 `appOL` toOL (map snd stBinds)
                                    , spec_rules ++ ds_rules, ds_vects
-                                   , ds_fords `appendStubC` hpc_init
-                                              `appendStubC` spt_init) }
+                                   , ds_fords `appendStubC` hpc_init) }
 
         ; case mb_res of {
            Nothing -> return (msgs, Nothing) ;

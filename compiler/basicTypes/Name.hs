@@ -5,7 +5,6 @@
 \section[Name]{@Name@: to transmit name info from renamer to typechecker}
 -}
 
-{-# LANGUAGE DeriveDataTypeable #-}
 {-# LANGUAGE RecordWildCards #-}
 
 -- |
@@ -101,7 +100,7 @@ import Data.Data
 ************************************************************************
 -}
 
--- | A unique, unambigious name for something, containing information about where
+-- | A unique, unambiguous name for something, containing information about where
 -- that thing originated.
 data Name = Name {
                 n_sort :: NameSort,     -- What sort of name it is
@@ -109,7 +108,6 @@ data Name = Name {
                 n_uniq :: {-# UNPACK #-} !Int,
                 n_loc  :: !SrcSpan      -- Definition site
             }
-    deriving Typeable
 
 -- NOTE: we make the n_loc field strict to eliminate some potential
 -- (and real!) space leaks, due to the fact that we don't look at

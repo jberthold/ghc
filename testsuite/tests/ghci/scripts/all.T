@@ -92,6 +92,9 @@ test('ghci056',
 
 test('ghci057', extra_hc_opts('-fwarn-tabs'), ghci_script, ['ghci057.script'])
 
+test('ghci060', normal, ghci_script, ['ghci060.script'])
+test('ghci061', normal, ghci_script, ['ghci061.script'])
+
 test('T2452', normal, ghci_script, ['T2452.script'])
 test('T2766', normal, ghci_script, ['T2766.script'])
 
@@ -249,3 +252,4 @@ test('T11456', normal, ghci_script, ['T11456.script'])
 test('TypeAppData', normal, ghci_script, ['TypeAppData.script'])
 test('T11728', normal, ghci_script, ['T11728.script'])
 test('T11376', normal, ghci_script, ['T11376.script'])
+test('T12007', normal, ghci_script, ['T12007.script'])

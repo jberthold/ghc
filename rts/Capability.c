@@ -37,8 +37,8 @@
 // builds, and for +RTS -N1
 Capability MainCapability;
 
-nat n_capabilities = 0;
-nat enabled_capabilities = 0;
+uint32_t n_capabilities = 0;
+uint32_t enabled_capabilities = 0;
 
 // The array of Capabilities.  It's important that when we need
 // to allocate more Capabilities we don't have to move the existing
@@ -55,10 +55,9 @@ static Capability *last_free_capability = NULL;
 
 /*
  * Indicates that the RTS wants to synchronise all the Capabilities
- * for some reason.  All Capabilities should stop and return to the
- * scheduler.
+ * for some reason.  All Capabilities should yieldCapability().
  */
-volatile StgWord pending_sync = 0;
+PendingSync * volatile pending_sync = 0;
 
 /* Let foreign code get the current Capability -- assuming there is one!
  * This is useful for unsafe foreign calls because they are called with
@@ -91,7 +90,7 @@ findSpark (Capability *cap)
   Capability *robbed;
   StgClosurePtr spark;
   rtsBool retry;
-  nat i = 0;
+  uint32_t i = 0;
 
   if (!emptyRunQueue(cap) || cap->returning_tasks_hd != NULL) {
       // If there are other threads, don't try to run any new
@@ -176,7 +175,7 @@ findSpark (Capability *cap)
 rtsBool
 anySparks (void)
 {
-    nat i;
+    uint32_t i;
 
     for (i=0; i < n_capabilities; i++) {
         if (!emptySparkPoolCap(capabilities[i])) {
@@ -231,9 +230,9 @@ popReturningTask (Capability *cap)
  * ------------------------------------------------------------------------- */
 
 static void
-initCapability( Capability *cap, nat i )
+initCapability( Capability *cap, uint32_t i )
 {
-    nat g;
+    uint32_t g;
 
     cap->no = i;
     cap->in_haskell        = rtsFalse;
@@ -357,10 +356,10 @@ initCapabilities( void )
 }
 
 void
-moreCapabilities (nat from USED_IF_THREADS, nat to USED_IF_THREADS)
+moreCapabilities (uint32_t from USED_IF_THREADS, uint32_t to USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
-    nat i;
+    uint32_t i;
     Capability **old_capabilities = capabilities;
 
     capabilities = stgMallocBytes(to * sizeof(Capability*), "moreCapabilities");
@@ -400,7 +399,7 @@ moreCapabilities (nat from USED_IF_THREADS, nat to USED_IF_THREADS)
 
 void contextSwitchAllCapabilities(void)
 {
-    nat i;
+    uint32_t i;
     for (i=0; i < n_capabilities; i++) {
         contextSwitchCapability(capabilities[i]);
     }
@@ -408,7 +407,7 @@ void contextSwitchAllCapabilities(void)
 
 void interruptAllCapabilities(void)
 {
-    nat i;
+    uint32_t i;
     for (i=0; i < n_capabilities; i++) {
         interruptCapability(capabilities[i]);
     }
@@ -429,7 +428,7 @@ void interruptAllCapabilities(void)
  * ------------------------------------------------------------------------- */
 
 #if defined(THREADED_RTS)
-STATIC_INLINE void
+static void
 giveCapabilityToTask (Capability *cap USED_IF_DEBUG, Task *task)
 {
     ASSERT_LOCK_HELD(&cap->lock);
@@ -477,13 +476,19 @@ releaseCapability_ (Capability* cap,
         return;
     }
 
-    // If there is a pending sync, then we should just leave the
-    // Capability free.  The thread trying to sync will be about to
-    // call waitForCapability().
-    if (pending_sync != 0 && pending_sync != SYNC_GC_PAR) {
-      last_free_capability = cap; // needed?
-      debugTrace(DEBUG_sched, "sync pending, set capability %d free", cap->no);
-      return;
+    // If there is a pending sync, then we should just leave the Capability
+    // free.  The thread trying to sync will be about to call
+    // waitForCapability().
+    //
+    // Note: this is *after* we check for a returning task above,
+    // because the task attempting to acquire all the capabilities may
+    // be currently in waitForCapability() waiting for this
+    // capability, in which case simply setting it as free would not
+    // wake up the waiting task.
+    PendingSync *sync = pending_sync;
+    if (sync && (sync->type != SYNC_GC_PAR || sync->idle[cap->no])) {
+        debugTrace(DEBUG_sched, "sync pending, freeing capability %d", cap->no);
+        return;
     }
 
     // If the next thread on the run queue is a bound thread,
@@ -709,21 +714,26 @@ void waitForCapability (Capability **pCap, Task *task)
     Capability *cap = *pCap;
 
     if (cap == NULL) {
-        // Try last_free_capability first
-        cap = last_free_capability;
-        if (cap->running_task) {
-            nat i;
-            // otherwise, search for a free capability
-            cap = NULL;
-            for (i = 0; i < n_capabilities; i++) {
-                if (!capabilities[i]->running_task) {
-                    cap = capabilities[i];
-                    break;
+        if (task->preferred_capability != -1) {
+            cap = capabilities[task->preferred_capability %
+                               enabled_capabilities];
+        } else {
+            // Try last_free_capability first
+            cap = last_free_capability;
+            if (cap->running_task) {
+                uint32_t i;
+                // otherwise, search for a free capability
+                cap = NULL;
+                for (i = 0; i < n_capabilities; i++) {
+                    if (!capabilities[i]->running_task) {
+                        cap = capabilities[i];
+                        break;
+                    }
                 }
-            }
-            if (cap == NULL) {
-                // Can't find a free one, use last_free_capability.
-                cap = last_free_capability;
+                if (cap == NULL) {
+                    // Can't find a free one, use last_free_capability.
+                    cap = last_free_capability;
+                }
             }
         }
 
@@ -790,14 +800,21 @@ yieldCapability (Capability** pCap, Task *task, rtsBool gcAllowed)
 {
     Capability *cap = *pCap;
 
-    if ((pending_sync == SYNC_GC_PAR) && gcAllowed) {
-        traceEventGcStart(cap);
-        gcWorkerThread(cap);
-        traceEventGcEnd(cap);
-        traceSparkCounters(cap);
-        // See Note [migrated bound threads 2]
-        if (task->cap == cap) {
-            return rtsTrue;
+    if (gcAllowed)
+    {
+        PendingSync *sync = pending_sync;
+
+        if (sync && sync->type == SYNC_GC_PAR) {
+            if (! sync->idle[cap->no]) {
+                traceEventGcStart(cap);
+                gcWorkerThread(cap);
+                traceEventGcEnd(cap);
+                traceSparkCounters(cap);
+                // See Note [migrated bound threads 2]
+                if (task->cap == cap) {
+                    return rtsTrue;
+                }
+            }
         }
     }
 
@@ -943,7 +960,7 @@ shutdownCapability (Capability *cap USED_IF_THREADS,
                     rtsBool safe USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
-    nat i;
+    uint32_t i;
 
     task->cap = cap;
 
@@ -1040,7 +1057,7 @@ shutdownCapability (Capability *cap USED_IF_THREADS,
 void
 shutdownCapabilities(Task *task, rtsBool safe)
 {
-    nat i;
+    uint32_t i;
     for (i=0; i < n_capabilities; i++) {
         ASSERT(task->incall->tso == NULL);
         shutdownCapability(capabilities[i], task, safe);
@@ -1067,7 +1084,7 @@ void
 freeCapabilities (void)
 {
 #if defined(THREADED_RTS)
-    nat i;
+    uint32_t i;
     for (i=0; i < n_capabilities; i++) {
         freeCapability(capabilities[i]);
         if (capabilities[i] != &MainCapability)
@@ -1121,7 +1138,7 @@ markCapability (evac_fn evac, void *user, Capability *cap,
 void
 markCapabilities (evac_fn evac, void *user)
 {
-    nat n;
+    uint32_t n;
     for (n = 0; n < n_capabilities; n++) {
         markCapability(evac, user, capabilities[n], rtsFalse);
     }
@@ -1132,7 +1149,7 @@ rtsBool checkSparkCountInvariant (void)
 {
     SparkCounters sparks = { 0, 0, 0, 0, 0, 0 };
     StgWord64 remaining = 0;
-    nat i;
+    uint32_t i;
 
     for (i = 0; i < n_capabilities; i++) {
         sparks.created   += capabilities[i]->spark_stats.created;
@@ -1159,7 +1176,8 @@ rtsBool checkSparkCountInvariant (void)
 #endif
 
 #if !defined(mingw32_HOST_OS)
-void setIOManagerControlFd(nat cap_no USED_IF_THREADS, int fd USED_IF_THREADS) {
+void
+setIOManagerControlFd(uint32_t cap_no USED_IF_THREADS, int fd USED_IF_THREADS) {
 #if defined(THREADED_RTS)
     if (cap_no < n_capabilities) {
         capabilities[cap_no]->io_manager_control_wr_fd = fd;

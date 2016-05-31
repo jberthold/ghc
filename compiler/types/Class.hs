@@ -3,7 +3,7 @@
 --
 -- The @Class@ datatype
 
-{-# LANGUAGE CPP, DeriveDataTypeable #-}
+{-# LANGUAGE CPP #-}
 
 module Class (
         Class,
@@ -36,7 +36,6 @@ import PrelNames    ( eqTyConKey, coercibleTyConKey, typeableClassKey,
 import Outputable
 import BooleanFormula (BooleanFormula)
 
-import Data.Typeable (Typeable)
 import qualified Data.Data as Data
 
 {-
@@ -79,7 +78,6 @@ data Class
         -- Minimal complete definition
         classMinimalDef :: ClassMinimalDef
      }
-  deriving Typeable
 
 --  | e.g.
 --
@@ -308,7 +306,7 @@ pprFundeps []  = empty
 pprFundeps fds = hsep (vbar : punctuate comma (map pprFunDep fds))
 
 pprFunDep :: Outputable a => FunDep a -> SDoc
-pprFunDep (us, vs) = hsep [interppSP us, text "->", interppSP vs]
+pprFunDep (us, vs) = hsep [interppSP us, arrow, interppSP vs]
 
 instance Data.Data Class where
     -- don't traverse?

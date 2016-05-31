@@ -51,8 +51,10 @@ import Module
 
 import Maybes
 import UniqSupply       ( UniqSupply, mkSplitUniqSupply, splitUniqSupply )
+import UniqFM
 import Outputable
 import Control.Monad
+import qualified GHC.LanguageExtensions as LangExt
 
 #ifdef GHCI
 import DynamicLoading   ( loadPlugins )
@@ -128,6 +130,7 @@ getCoreToDo dflags
     rules_on      = gopt Opt_EnableRewriteRules           dflags
     eta_expand_on = gopt Opt_DoLambdaEtaExpansion         dflags
     ww_on         = gopt Opt_WorkerWrapper                dflags
+    static_ptrs   = xopt LangExt.StaticPointers           dflags
 
     maybe_rule_check phase = runMaybe rule_check (CoreDoRuleCheck phase)
 
@@ -201,8 +204,15 @@ getCoreToDo dflags
 
     core_todo =
      if opt_level == 0 then
-       [ vectorisation
-       , CoreDoSimplify max_iter
+       [ vectorisation,
+         -- Static forms are moved to the top level with the FloatOut pass.
+         -- See Note [Grand plan for static forms].
+         runWhen static_ptrs $ CoreDoFloatOutwards FloatOutSwitches {
+                                 floatOutLambdas   = Just 0,
+                                 floatOutConstants = True,
+                                 floatOutOverSatApps = False,
+                                 floatToTopLevelOnly = True },
+         CoreDoSimplify max_iter
              (base_mode { sm_phase = Phase 0
                         , sm_names = ["Non-opt simplification"] })
        ]
@@ -230,7 +240,8 @@ getCoreToDo dflags
            CoreDoFloatOutwards FloatOutSwitches {
                                  floatOutLambdas   = Just 0,
                                  floatOutConstants = True,
-                                 floatOutOverSatApps = False },
+                                 floatOutOverSatApps = False,
+                                 floatToTopLevelOnly = False },
                 -- Was: gentleFloatOutSwitches
                 --
                 -- I have no idea why, but not floating constants to
@@ -281,7 +292,8 @@ getCoreToDo dflags
            CoreDoFloatOutwards FloatOutSwitches {
                                  floatOutLambdas     = floatLamArgs dflags,
                                  floatOutConstants   = True,
-                                 floatOutOverSatApps = True },
+                                 floatOutOverSatApps = True,
+                                 floatToTopLevelOnly = False },
                 -- nofib/spectral/hartel/wang doubles in speed if you
                 -- do full laziness late in the day.  It only happens
                 -- after fusion and other stuff, so the early pass doesn't
@@ -890,7 +902,10 @@ shortOutIndirections binds
   where
     ind_env            = makeIndEnv binds
     -- These exported Ids are the subjects  of the indirection-elimination
-    exp_ids            = map fst $ varEnvElts ind_env
+    exp_ids            = map fst $ nonDetEltsUFM ind_env
+      -- It's OK to use nonDetEltsUFM here because we forget the ordering
+      -- by immediately converting to a set or check if all the elements
+      -- satisfy a predicate.
     exp_id_set         = mkVarSet exp_ids
     no_need_to_flatten = all (null . ruleInfoRules . idSpecialisation) exp_ids
     binds'             = concatMap zap binds
@@ -977,3 +992,43 @@ transferIdInfo exported_id local_id
                                (ruleInfo local_info)
         -- Remember to set the function-name field of the
         -- rules as we transfer them from one function to another
+
+
+{- Note [Grand plan for static forms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Static forms go through the compilation phases as follows.
+Here is a running example:
+
+   f x = let k = map toUpper
+         in ...(static k)...
+
+* The renamer looks for out-of-scope names in the body of the static
+  form, as always If all names are in scope, the free variables of the
+  body are stored in AST at the location of the static form.
+
+* The typechecker verifies that all free variables occurring in the
+  static form are closed (see Note [Bindings with closed types] in
+  TcRnTypes).  In our example, 'k' is closed, even though it is bound
+  in a nested let, we are fine.
+
+* The desugarer replaces the static form with an application of the
+  data constructor 'StaticPtr' (defined in module GHC.StaticPtr of
+  base).  So we get
+
+   f x = let k = map toUpper
+         in ...(StaticPtr <fingerprint> k)...
+
+* The simplifier runs the FloatOut pass which moves the applications
+  of 'StaticPtr' to the top level. Thus the FloatOut pass is always
+  executed, even when optimizations are disabled.  So we get
+
+   k = map toUpper
+   lvl = StaticPtr <fingerprint> k
+   f x = ...lvl...
+
+* The CoreTidy pass produces a C function which inserts all the
+  floated 'StaticPtr' in the static pointer table (see the call to
+  StaticPtrTable.sptModuleInitCode in TidyPgm). CoreTidy pass also
+  exports the Ids of floated 'StaticPtr's so they can be linked with
+  the C function.
+-}

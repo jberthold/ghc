@@ -69,6 +69,7 @@ import Outputable
 import FastString
 import Control.Monad
 import Class(classTyCon)
+import UniqFM ( nonDetEltsUFM )
 import qualified GHC.LanguageExtensions as LangExt
 
 import Data.Function
@@ -566,7 +567,7 @@ tcExpr (HsProc pat cmd) res_ty
         ; return $ mkHsWrapCo coi (HsProc pat' cmd') }
 
 -- Typechecks the static form and wraps it with a call to 'fromStaticPtr'.
-tcExpr (HsStatic expr) res_ty
+tcExpr (HsStatic fvs expr) res_ty
   = do  { res_ty          <- expTypeToType res_ty
         ; (co, (p_ty, expr_ty)) <- matchExpectedAppTy res_ty
         ; (expr', lie)    <- captureConstraints $
@@ -574,6 +575,11 @@ tcExpr (HsStatic expr) res_ty
                              2 (ppr expr)
                        ) $
             tcPolyExprNC expr expr_ty
+        -- Check that the free variables of the static form are closed.
+        -- It's OK to use nonDetEltsUFM here as the only side effects of
+        -- checkClosedInStaticForm are error messages.
+        ; mapM_ checkClosedInStaticForm $ nonDetEltsUFM fvs
+
         -- Require the type of the argument to be Typeable.
         -- The evidence is not used, but asking the constraint ensures that
         -- the current implementation is as restrictive as future versions
@@ -591,7 +597,7 @@ tcExpr (HsStatic expr) res_ty
         ; let wrap = mkWpTyApps [expr_ty]
         ; loc <- getSrcSpanM
         ; return $ mkHsWrapCo co $ HsApp (L loc $ mkHsWrap wrap fromStaticPtr)
-                                         (L loc (HsStatic expr'))
+                                         (L loc (HsStatic fvs expr'))
         }
 
 {-
@@ -615,7 +621,7 @@ tcExpr expr@(RecordCon { rcon_con_name = L loc con_name
               -- a shallow instantiation should really be enough for
               -- a data constructor.
         ; let arity = conLikeArity con_like
-              (arg_tys, actual_res_ty) = tcSplitFunTysN con_tau arity
+              Right (arg_tys, actual_res_ty) = tcSplitFunTysN arity con_tau
         ; case conLikeWrapId_maybe con_like of
                Nothing -> nonBidirectionalErr (conLikeName con_like)
                Just con_id -> do {
@@ -1057,6 +1063,8 @@ arithSeqEltType (Just fl) res_ty
 
 type LHsExprArgIn  = Either (LHsExpr Name) (LHsWcType Name)
 type LHsExprArgOut = Either (LHsExpr TcId) (LHsWcType Name)
+   -- Left e   => argument expression
+   -- Right ty => visible type application
 
 tcApp1 :: HsExpr Name  -- either HsApp or HsAppType
        -> ExpRhoType -> TcM (HsExpr TcId)
@@ -1451,10 +1459,13 @@ tcExprSig expr sig@(TISI { sig_bndr  = s_bndr
                          <.> mkWpLet  ev_binds
        ; return (mkLHsWrap poly_wrap expr', idType poly_id) }
 
-  | PartialSig { sig_name = name } <- s_bndr
-  = do { (tclvl, wanted, expr') <- pushLevelAndCaptureConstraints  $
-                                   tcExtendTyVarEnvFromSig sig $
-                                   tcPolyExprNC expr tau
+  | PartialSig { sig_name = name, sig_wcs = wc_prs, sig_hs_ty = hs_ty } <- s_bndr
+  = do { (tclvl, wanted, expr')
+             <- pushLevelAndCaptureConstraints  $
+                tcExtendTyVarEnvFromSig sig $
+                do { addErrCtxt (pprSigCtxt ExprSigCtxt (ppr hs_ty)) $
+                     emitWildCardHoleConstraints wc_prs
+                   ; tcPolyExprNC expr tau }
        ; (qtvs, givens, ev_binds)
                  <- simplifyInfer tclvl False [sig] [(name, tau)] wanted
        ; tau <- zonkTcType tau
@@ -2478,3 +2489,20 @@ badOverloadedUpdate = text "Record update is ambiguous, and requires a type sign
 fieldNotInType :: RecSelParent -> RdrName -> SDoc
 fieldNotInType p rdr
   = unknownSubordinateErr (text "field of type" <+> quotes (ppr p)) rdr
+
+{-
+************************************************************************
+*                                                                      *
+\subsection{Static Pointers}
+*                                                                      *
+************************************************************************
+-}
+
+checkClosedInStaticForm :: Name -> TcM ()
+checkClosedInStaticForm name = do
+    thing <- tcLookup name
+    case thing of
+      ATcId { tct_closed = NotTopLevel } ->
+         addErrTc $ quotes (ppr name) <+>
+                    text "is used in a static form but it is not closed."
+      _ -> return ()

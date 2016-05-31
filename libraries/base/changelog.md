@@ -1,5 +1,14 @@
 # Changelog for [`base` package](http://hackage.haskell.org/package/base)
 
+## next *TBA*
+  * Bundled with GHC *TBA*
+
+  * `Foreign.Ptr` now exports the constructors for `IntPtr` and `WordPtr`
+    (#11983)
+
+  * `Generic1`, as well as the associated datatypes and typeclasses in
+    `GHC.Generics`, are now poly-kinded (#10604)
+
 ## 4.9.0.0  *TBA*
 
   * Bundled with GHC 8.0
@@ -150,6 +159,9 @@
     (previously orphans in `transformers`) (#10755)
 
   * `CallStack` now has an `IsList` instance
+
+  * The field `spInfoName` of `GHC.StaticPtr.StaticPtrInfo` has been removed.
+    The value is no longer available when constructing the `StaticPtr`.
 
 ### Generalizations
 

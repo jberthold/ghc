@@ -278,34 +278,38 @@ The language extension :ghc-flag:`-XUnicodeSyntax` enables
 Unicode characters to be used to stand for certain ASCII character
 sequences. The following alternatives are provided:
 
-+--------------+---------------+-------------+--------------------------------+
-| ASCII        | Unicode       | Code point  | Name                           |
-|              | alternative   |             |                                |
-+==============+===============+=============+================================+
-| ``::``       | ∷             | 0x2237      | PROPORTION                     |
-+--------------+---------------+-------------+--------------------------------+
-| ``=>``       | ⇒             | 0x21D2      | RIGHTWARDS DOUBLE ARROW        |
-+--------------+---------------+-------------+--------------------------------+
-| ``->``       | →             | 0x2192      | RIGHTWARDS ARROW               |
-+--------------+---------------+-------------+--------------------------------+
-| ``<-``       | ←             | 0x2190      | LEFTWARDS ARROW                |
-+--------------+---------------+-------------+--------------------------------+
-| ``>-``       | ⤚             | 0x291a      | RIGHTWARDS ARROW-TAIL          |
-+--------------+---------------+-------------+--------------------------------+
-| ``-<``       | ⤙             | 0x2919      | LEFTWARDS ARROW-TAIL           |
-+--------------+---------------+-------------+--------------------------------+
-| ``>>-``      | ⤜             | 0x291C      | RIGHTWARDS DOUBLE ARROW-TAIL   |
-+--------------+---------------+-------------+--------------------------------+
-| ``-<<``      | ⤛             | 0x291B      | LEFTWARDS DOUBLE ARROW-TAIL    |
-+--------------+---------------+-------------+--------------------------------+
-| ``*``        | ★             | 0x2605      | BLACK STAR                     |
-+--------------+---------------+-------------+--------------------------------+
-| ``forall``   | ∀             | 0x2200      | FOR ALL                        |
-+--------------+---------------+-------------+--------------------------------+
-| ``(|``       | ⦇             | 0x2987      | Z NOTATION LEFT IMAGE BRACKET  |
-+--------------+---------------+-------------+--------------------------------+
-| ``|)``       | ⦈             | 0x2988      | Z NOTATION RIGHT IMAGE BRACKET |
-+--------------+---------------+-------------+--------------------------------+
++--------------+---------------+-------------+-----------------------------------------+
+| ASCII        | Unicode       | Code point  | Name                                    |
+|              | alternative   |             |                                         |
++==============+===============+=============+=========================================+
+| ``::``       | ∷             | 0x2237      | PROPORTION                              |
++--------------+---------------+-------------+-----------------------------------------+
+| ``=>``       | ⇒             | 0x21D2      | RIGHTWARDS DOUBLE ARROW                 |
++--------------+---------------+-------------+-----------------------------------------+
+| ``->``       | →             | 0x2192      | RIGHTWARDS ARROW                        |
++--------------+---------------+-------------+-----------------------------------------+
+| ``<-``       | ←             | 0x2190      | LEFTWARDS ARROW                         |
++--------------+---------------+-------------+-----------------------------------------+
+| ``>-``       | ⤚             | 0x291a      | RIGHTWARDS ARROW-TAIL                   |
++--------------+---------------+-------------+-----------------------------------------+
+| ``-<``       | ⤙             | 0x2919      | LEFTWARDS ARROW-TAIL                    |
++--------------+---------------+-------------+-----------------------------------------+
+| ``>>-``      | ⤜             | 0x291C      | RIGHTWARDS DOUBLE ARROW-TAIL            |
++--------------+---------------+-------------+-----------------------------------------+
+| ``-<<``      | ⤛             | 0x291B      | LEFTWARDS DOUBLE ARROW-TAIL             |
++--------------+---------------+-------------+-----------------------------------------+
+| ``*``        | ★             | 0x2605      | BLACK STAR                              |
++--------------+---------------+-------------+-----------------------------------------+
+| ``forall``   | ∀             | 0x2200      | FOR ALL                                 |
++--------------+---------------+-------------+-----------------------------------------+
+| ``(|``       | ⦇             | 0x2987      | Z NOTATION LEFT IMAGE BRACKET           |
++--------------+---------------+-------------+-----------------------------------------+
+| ``|)``       | ⦈             | 0x2988      | Z NOTATION RIGHT IMAGE BRACKET          |
++--------------+---------------+-------------+-----------------------------------------+
+| ``[|``       | ⟦             | 0x27E6      | MATHEMATICAL LEFT WHITE SQUARE BRACKET  |
++--------------+---------------+-------------+-----------------------------------------+
+| ``|]``       | ⟧             | 0x27E7      | MATHEMATICAL RIGHT WHITE SQUARE BRACKET |
++--------------+---------------+-------------+-----------------------------------------+
 
 .. _magic-hash:
 
@@ -717,9 +721,9 @@ As you can guess ``justOnes`` will evaluate to ``Just [-1,-1,-1,...``.
 
 GHC's implementation the mdo-notation closely follows the original
 translation as described in the paper `A recursive do for
-Haskell <https://sites.google.com/site/leventerkok/recdo.pdf>`__, which
+Haskell <http://leventerkok.github.io/papers/recdo.pdf>`__, which
 in turn is based on the work `Value Recursion in Monadic
-Computations <http://sites.google.com/site/leventerkok/erkok-thesis.pdf>`__.
+Computations <http://leventerkok.github.io/papers/erkok-thesis.pdf>`__.
 Furthermore, GHC extends the syntax described in the former paper with a
 lower level syntax flagged by the ``rec`` keyword, as we describe next.
 
@@ -780,7 +784,7 @@ can be rather delicate: in particular, we would like the knots to be
 wrapped around as minimal groups as possible. This process is known as
 *segmentation*, and is described in detail in Section 3.2 of `A
 recursive do for
-Haskell <https://sites.google.com/site/leventerkok/recdo.pdf>`__.
+Haskell <http://leventerkok.github.io/papers/recdo.pdf>`__.
 Segmentation improves polymorphism and reduces the size of the recursive
 knot. Most importantly, it avoids unnecessary interference caused by a
 fundamental issue with the so-called *right-shrinking* axiom for monadic
@@ -789,7 +793,7 @@ recursion. In brief, most monads of interest (IO, strict state, etc.) do
 performing segmentation can cause unnecessary interference, changing the
 termination behavior of the resulting translation. (Details can be found
 in Sections 3.1 and 7.2.2 of `Value Recursion in Monadic
-Computations <http://sites.google.com/site/leventerkok/erkok-thesis.pdf>`__.)
+Computations <http://leventerkok.github.io/papers/erkok-thesis.pdf>`__.)
 
 The ``mdo`` notation removes the burden of placing explicit ``rec``
 blocks in the code. Unlike an ordinary ``do`` expression, in which
@@ -942,6 +946,11 @@ where none of the variables defined by ``p1...pn`` are mentioned in ``E1...En``,
 then the expression will only require ``Applicative``. Otherwise, the expression
 will require ``Monad``. The block may return a pure expression ``E`` depending
 upon the results ``p1...pn`` with either ``return`` or ``pure``.
+
+Note: the final statement really must be of the form ``return E`` or
+``pure E``, otherwise you get a ``Monad`` constraint.  In particular,
+``return $ E`` is not of the form ``return E``, and will therefore
+incur a ``Monad`` constraint.
 
 When the statements of a ``do`` expression have dependencies between
 them, and ``ApplicativeDo`` cannot infer an ``Applicative`` type, it
@@ -3805,16 +3814,26 @@ Generalising the deriving clause
 GHC now permits such instances to be derived instead, using the flag
 :ghc-flag:`-XGeneralizedNewtypeDeriving`, so one can write ::
 
-      newtype Dollars = Dollars Int deriving (Eq,Show,Num)
+      newtype Dollars = Dollars { getDollars :: Int } deriving (Eq,Show,Num)
 
 and the implementation uses the *same* ``Num`` dictionary for
-``Dollars`` as for ``Int``. Notionally, the compiler derives an instance
-declaration of the form ::
+``Dollars`` as for ``Int``. In other words, GHC will generate something that
+resembles the following code ::
 
       instance Num Int => Num Dollars
 
-which just adds or removes the ``newtype`` constructor according to the
-type.
+and then attempt to simplify the ``Num Int`` context as much as possible.
+GHC knows that there is a ``Num Int`` instance in scope, so it is able to
+discharge the ``Num Int`` constraint, leaving the code that GHC actually
+generates ::
+
+      instance Num Dollars
+
+One can think of this instance being implementated with the same code as the
+``Num Int`` instance, but with ``Dollars`` and ``getDollars`` added wherever
+necessary in order to make it typecheck. (In practice, GHC uses a somewhat
+different approach to code generation. See the :ref:`precise-gnd-specification`
+section below for more details.)
 
 We can also derive instances of constructor classes in a similar way.
 For example, suppose we have implemented state and failure monad
@@ -3866,6 +3885,8 @@ As a result of this extension, all derived instances in newtype
 declarations are treated uniformly (and implemented just by reusing the
 dictionary for the representation type), *except* ``Show`` and ``Read``,
 which really behave differently for the newtype and its representation.
+
+.. _precise-gnd-specification:
 
 A more precise specification
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -4301,7 +4322,7 @@ all currently bundled constructors. For example, we could write: ::
 in which case, ``Example`` would export the type constructor ``MyNum`` with
 the data constructor ``MkNum`` and also the pattern synonym ``Zero``.
 
-Bundled patterns synonyms are type checked to ensure that they are of the same
+Bundled pattern synonyms are type checked to ensure that they are of the same
 type as the type constructor which they are bundled with. A pattern synonym
 ``P`` can not be bundled with a type constructor ``T`` if ``P``\'s type is visibly
 incompatible with ``T``.
@@ -4546,8 +4567,8 @@ context.
 
 .. _class-method-types:
 
-Class method types
-~~~~~~~~~~~~~~~~~~
+Constrained class method types
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. ghc-flag:: -XConstrainedClassMethods
 
@@ -4563,6 +4584,21 @@ class type variable, thus: ::
 The type of ``elem`` is illegal in Haskell 98, because it contains the
 constraint ``Eq a``, which constrains only the class type variable (in
 this case ``a``).
+this case ``a``).  More precisely, a constraint in a class method signature is rejected if
+
+- The constraint mentions at least one type variable.  So this is allowed: ::
+
+     class C a where
+       op1 :: HasCallStack => a -> a
+       op2 :: (?x::Int) => Int -> a
+
+- All of the type variables mentioned are bound by the class declaration, and none is locally quantified.  Examples: ::
+
+     class C a where
+       op3 :: Eq a => a -> a    -- Rejected: constrains class variable only
+       op4 :: D b => a -> b     -- Accepted: constrains a locally-quantified varible `b`
+       op5 :: D (a,b) => a -> b -- Accepted: constrains a locally-quantified varible `b`
+
 
 GHC lifts this restriction with language extension
 :ghc-flag:`-XConstrainedClassMethods`. The restriction is a pretty stupid one in
@@ -6045,15 +6081,6 @@ instance for ``GMap`` is ::
 In this example, the declaration has only one variant. In general, it
 can be any number.
 
-When the name of a type argument of a data or newtype instance
-declaration doesn't matter, it can be replaced with an underscore
-(``_``). This is the same as writing a type variable with a unique name. ::
-
-    data family F a b :: *
-    data instance F Int _ = Int
-    -- Equivalent to
-    data instance F Int b = Int
-
 When the flag :ghc-flag:`-Wunused-type-patterns` is enabled, type
 variables that are mentioned in the patterns on the left hand side, but not
 used on the right hand side are reported. Variables that occur multiple times
@@ -6419,6 +6446,37 @@ If the option :ghc-flag:`-XUndecidableInstances` is passed to the compiler, the
 above restrictions are not enforced and it is on the programmer to ensure
 termination of the normalisation of type families during type inference.
 
+.. _type-wildcards-lhs:
+
+Wildcards on the LHS of data and type family instances
+------------------------------------------------------
+
+When the name of a type argument of a data or type instance
+declaration doesn't matter, it can be replaced with an underscore
+(``_``). This is the same as writing a type variable with a unique name. ::
+
+    data family F a b :: *
+    data instance F Int _ = Int
+    -- Equivalent to  data instance F Int b = Int
+
+    type family T a :: *
+    type instance T (a,_) = a
+    -- Equivalent to  type instance T (a,b) = a
+
+This use of underscore for wildcard in a type pattern is exactly like
+pattern matching in the term language, but is rather different to the
+use of a underscore in a partial type signature (see :ref:`type-wildcards`).
+
+A type variable beginning with an underscore is not treated specially in a
+type or data instance declaration.  For example: ::
+
+   data instance F Bool _a = _a -> Int
+   -- Equivalent to  data instance F Bool a = a -> Int
+
+Contrast this with the special treatment of named wildcards in
+type signatures (:ref:`named-wildcards`).
+
+
 .. _assoc-decl:
 
 Associated data and type families
@@ -6527,7 +6585,7 @@ completely covers the cases covered by the instance head.
    cannot give any *subsequent* instances for ``(GMap Flob ...)``,
    this facility was not very useful, except perhaps when the free
    indexed parameter has a fixed number of alternatives
-   (e.g. ``Bool`). But in that case it is better to define an auxiliary
+   (e.g. ``Bool``). But in that case it is better to define an auxiliary
    closed type function like this: ::
 
        class C a where
@@ -7409,7 +7467,7 @@ signature" for a type constructor? These are the forms:
 
 -  An associated type or data family declaration has a CUSK precisely if
    its enclosing class has a CUSK. ::
-       
+
        class C a where                -- no CUSK
          type AT a b                  -- no CUSK, b is defaulted
 
@@ -7525,7 +7583,7 @@ Explicit kind quantification
 
 Enabled by :ghc-flag:`-XTypeInType`, GHC now supports explicit kind quantification,
 as in these examples: ::
-  
+
   data Proxy :: forall k. k -> *
   f :: (forall k (a :: k). Proxy a -> ()) -> Int
 
@@ -7685,7 +7743,7 @@ Here is an example of this in action: ::
 
 In the last line, we use the promoted constructor ``'MkCompose``, which has
 kind ::
-  
+
   forall (a :: *) (b :: *) (f :: b -> *) (g :: a -> b) (x :: a).
     f (g x) -> Compose f g x
 
@@ -7708,7 +7766,7 @@ these flags, especially :ghc-flag:`-fprint-explicit-kinds`.
 .. index::
    single: TYPE
    single: representation polymorphism
-   
+
 .. _runtime-rep:
 
 Runtime representation polymorphism
@@ -7735,7 +7793,7 @@ Here are the key definitions, all available from ``GHC.Exts``: ::
                   | PtrRepUnlifted   -- for things like `Array#`
                   | IntRep           -- for things like `Int#`
                   | ...
-  
+
   type * = TYPE PtrRepLifted    -- * is just an ordinary type synonym
 
 The idea is that we have a new fundamental type constant ``TYPE``, which
@@ -9698,11 +9756,9 @@ Where can they occur?
 ---------------------
 
 Partial type signatures are allowed for bindings, pattern and expression
-signatures. In all other contexts, e.g. type class or type family
-declarations, they are disallowed. In the following example a wildcard
-is used in each of the three possible contexts. Extra-constraints
+signatures, except that extra-constraints
 wildcards are not supported in pattern or expression signatures.
-
+In the following example a wildcard is used in each of the three possible contexts.
 ::
 
     {-# LANGUAGE ScopedTypeVariables #-}
@@ -9710,10 +9766,16 @@ wildcards are not supported in pattern or expression signatures.
     foo (x :: _) = (x :: _)
     -- Inferred: forall w_. w_ -> w_
 
-Anonymous and named wildcards *can* occur in type or data instance
-declarations. However, these declarations are not partial type signatures
-and different rules apply. See :ref:`data-instance-declarations` for more
-details.
+Anonymous and named wildcards *can* occur on the left hand side of a
+type or data instance declaration;
+see :ref:`type-wildcards-lhs`.
+
+In all other contexts, type wildcards are disallowed, and a named wildcard is treated
+as an ordinary type variable.  For example: ::
+
+   class C _ where ...          -- Illegal
+   instance Eq (T _)            -- Illegal (currently; would actually make sense)
+   instance Eq _a => Eq (T _a)  -- Perfectly fine, same as  Eq a => Eq (T a)
 
 Partial type signatures can also be used in :ref:`template-haskell`
 splices.
@@ -11093,7 +11155,7 @@ bang it would be lazy. Bang patterns can be nested of course: ::
 
     f2 (!x, y) = [x,y]
 
-Here, ``f2`` is strict in ``x`` but not in ``y``. 
+Here, ``f2`` is strict in ``x`` but not in ``y``.
 
 Note the following points:
 
@@ -11600,9 +11662,11 @@ The compiler includes entries in this table for all static forms found
 in the linked modules. The value can be obtained from the reference via
 :base-ref:`deRefStaticPtr <GHC-StaticPtr.html#v%3AdeRefStaticPtr>`.
 
-The body ``e`` of a ``static e`` expression must be a closed expression.
-That is, there can be no free variables occurring in ``e``, i.e. lambda-
-or let-bound variables bound locally in the context of the expression.
+The body ``e`` of a ``static e`` expression must be a closed expression. Where
+we say an expression is *closed* when all of its free (type) variables are
+closed. And a variable is *closed* if it is let-bound to a *closed* expression
+and its type is *closed* as well. And a type is *closed* if it has no free
+variables.
 
 All of the following are permissible: ::
 
@@ -11614,11 +11678,14 @@ All of the following are permissible: ::
     ref3 = static (inc 1)
     ref4 = static ((\x -> x + 1) (1 :: Int))
     ref5 y = static (let x = 1 in x)
+    ref6 y = let x = 1 in static x
 
 While the following definitions are rejected: ::
 
-    ref6 = let x = 1 in static x
-    ref7 y = static (let x = 1 in y)
+    ref7 y = let x = y in static x    -- x is not closed
+    ref8 y = static (let x = 1 in y)  -- y is not let-bound
+    ref8 (y :: a) = let x = undefined :: a
+                     in static x      -- x has a non-closed type
 
 .. _typechecking-static-pointers:
 
@@ -12994,16 +13061,20 @@ datatypes and their internal representation as a sum-of-products: ::
       -- Convert from the representation to the datatype
       to    :: (Rep a) x -> a
 
-    class Generic1 f where
-      type Rep1 f :: * -> *
+    class Generic1 (f :: k -> *) where
+      type Rep1 f :: k -> *
 
       from1  :: f a -> Rep1 f a
       to1    :: Rep1 f a -> f a
 
 ``Generic1`` is used for functions that can only be defined over type
-containers, such as ``map``. Instances of these classes can be derived
-by GHC with the :ghc-flag:`-XDeriveGeneric`, and are
-necessary to be able to define generic instances automatically.
+containers, such as ``map``. Note that ``Generic1`` ranges over types of kind
+``* -> *`` by default, but if the :ghc-flag:`-XPolyKinds` extension is enabled,
+then it can range of types of kind ``k -> *``, for any kind ``k``.
+
+Instances of these classes can be derived by GHC with the
+:ghc-flag:`-XDeriveGeneric` extension, and are necessary to be able to define
+generic instances automatically.
 
 For example, a user-defined datatype of trees ::
 

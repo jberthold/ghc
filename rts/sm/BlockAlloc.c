@@ -7,7 +7,7 @@
  * This is the architecture independent part of the block allocator.
  * It requires only the following support from the operating system:
  *
- *    void *getMBlock(nat n);
+ *    void *getMBlock(uint32_t n);
  *
  * returns the address of an n*MBLOCK_SIZE region of memory, aligned on
  * an MBLOCK_SIZE boundary.  There are no other restrictions on the
@@ -140,23 +140,26 @@ static void  initMBlock(void *mblock);
 
    Be very careful with integer overflow here.  If you have an
    expression like (n_blocks * BLOCK_SIZE), and n_blocks is an int or
-   a nat, then it will very likely overflow on a 64-bit platform.
+   a uint32_t, then it will very likely overflow on a 64-bit platform.
    Always cast to StgWord (or W_ for short) first: ((W_)n_blocks * BLOCK_SIZE).
 
   --------------------------------------------------------------------------- */
-
-#define MAX_FREE_LIST 9
-
-// In THREADED_RTS mode, the free list is protected by sm_mutex.
-
-static bdescr *free_list[MAX_FREE_LIST];
-static bdescr *free_mblock_list;
 
 // free_list[i] contains blocks that are at least size 2^i, and at
 // most size 2^(i+1) - 1.
 //
 // To find the free list in which to place a block, use log_2(size).
 // To find a free block of the right size, use log_2_ceil(size).
+//
+// The largest free list (free_list[NUM_FREE_LISTS-1]) needs to contain sizes
+// from half a megablock up to (but not including) a full megablock.
+
+#define NUM_FREE_LISTS (MBLOCK_SHIFT-BLOCK_SHIFT)
+
+// In THREADED_RTS mode, the free list is protected by sm_mutex.
+
+static bdescr *free_list[NUM_FREE_LISTS];
+static bdescr *free_mblock_list;
 
 W_ n_alloc_blocks;   // currently allocated blocks
 W_ hw_alloc_blocks;  // high-water allocated blocks
@@ -167,8 +170,8 @@ W_ hw_alloc_blocks;  // high-water allocated blocks
 
 void initBlockAllocator(void)
 {
-    nat i;
-    for (i=0; i < MAX_FREE_LIST; i++) {
+    uint32_t i;
+    for (i=0; i < NUM_FREE_LISTS; i++) {
         free_list[i] = NULL;
     }
     free_mblock_list = NULL;
@@ -199,12 +202,41 @@ initGroup(bdescr *head)
   }
 }
 
-// There are quicker non-loopy ways to do log_2, but we expect n to be
-// usually small, and MAX_FREE_LIST is also small, so the loop version
-// might well be the best choice here.
-STATIC_INLINE nat
+#if SIZEOF_VOID_P == SIZEOF_LONG
+#define CLZW(n) (__builtin_clzl(n))
+#else
+#define CLZW(n) (__builtin_clzll(n))
+#endif
+
+// log base 2 (floor), needs to support up to (2^NUM_FREE_LISTS)-1
+STATIC_INLINE uint32_t
+log_2(W_ n)
+{
+    ASSERT(n > 0 && n < (1<<NUM_FREE_LISTS));
+#if defined(__GNUC__)
+    return CLZW(n) ^ (sizeof(StgWord)*8 - 1);
+    // generates good code on x86.  __builtin_clz() compiles to bsr+xor, but
+    // we want just bsr, so the xor here cancels out gcc's xor.
+#else
+    W_ i, x;
+    x = n;
+    for (i=0; i < NUM_FREE_LISTS; i++) {
+        x = x >> 1;
+        if (x == 0) return i;
+    }
+    return NUM_FREE_LISTS;
+#endif
+}
+
+// log base 2 (ceiling), needs to support up to (2^NUM_FREE_LISTS)-1
+STATIC_INLINE uint32_t
 log_2_ceil(W_ n)
 {
+    ASSERT(n > 0 && n < (1<<NUM_FREE_LISTS));
+#if defined(__GNUC__)
+    uint32_t r = log_2(n);
+    return (n & (n-1)) ? r+1 : r;
+#else
     W_ i, x;
     x = 1;
     for (i=0; i < MAX_FREE_LIST; i++) {
@@ -212,24 +244,13 @@ log_2_ceil(W_ n)
         x = x << 1;
     }
     return MAX_FREE_LIST;
-}
-
-STATIC_INLINE nat
-log_2(W_ n)
-{
-    W_ i, x;
-    x = n;
-    for (i=0; i < MAX_FREE_LIST; i++) {
-        x = x >> 1;
-        if (x == 0) return i;
-    }
-    return MAX_FREE_LIST;
+#endif
 }
 
 STATIC_INLINE void
 free_list_insert (bdescr *bd)
 {
-    nat ln;
+    uint32_t ln;
 
     ASSERT(bd->blocks < BLOCKS_PER_MBLOCK);
     ln = log_2(bd->blocks);
@@ -263,7 +284,7 @@ setup_tail (bdescr *bd)
 // Take a free block group bd, and split off a group of size n from
 // it.  Adjust the free list as necessary, and return the new group.
 static bdescr *
-split_free_block (bdescr *bd, W_ n, nat ln)
+split_free_block (bdescr *bd, W_ n, uint32_t ln)
 {
     bdescr *fg; // free group
 
@@ -362,11 +383,11 @@ allocGroup (W_ n)
 
     ln = log_2_ceil(n);
 
-    while (ln < MAX_FREE_LIST && free_list[ln] == NULL) {
+    while (ln < NUM_FREE_LISTS && free_list[ln] == NULL) {
         ln++;
     }
 
-    if (ln == MAX_FREE_LIST) {
+    if (ln == NUM_FREE_LISTS) {
 #if 0  /* useful for debugging fragmentation */
         if ((W_)mblocks_allocated * BLOCKS_PER_MBLOCK * BLOCK_SIZE_W
              - (W_)((n_alloc_blocks - n) * BLOCK_SIZE_W) > (2*1024*1024)/sizeof(W_)) {
@@ -438,12 +459,12 @@ allocLargeChunk (W_ min, W_ max)
     }
 
     ln = log_2_ceil(min);
-    lnmax = log_2_ceil(max); // tops out at MAX_FREE_LIST
+    lnmax = log_2_ceil(max);
 
-    while (ln < lnmax && free_list[ln] == NULL) {
+    while (ln < NUM_FREE_LISTS && ln < lnmax && free_list[ln] == NULL) {
         ln++;
     }
-    if (ln == lnmax) {
+    if (ln == NUM_FREE_LISTS || ln == lnmax) {
         return allocGroup(max);
     }
     bd = free_list[ln];
@@ -711,7 +732,7 @@ countAllocdBlocks(bdescr *bd)
     return n;
 }
 
-void returnMemoryToOS(nat n /* megablocks */)
+void returnMemoryToOS(uint32_t n /* megablocks */)
 {
     static bdescr *bd;
     StgWord size;
@@ -779,7 +800,7 @@ checkFreeListSanity(void)
 
 
     min = 1;
-    for (ln = 0; ln < MAX_FREE_LIST; ln++) {
+    for (ln = 0; ln < NUM_FREE_LISTS; ln++) {
         IF_DEBUG(block_alloc,
                  debugBelch("free block list [%" FMT_Word "]:\n", ln));
 
@@ -849,7 +870,7 @@ countFreeList(void)
   W_ total_blocks = 0;
   StgWord ln;
 
-  for (ln=0; ln < MAX_FREE_LIST; ln++) {
+  for (ln=0; ln < NUM_FREE_LISTS; ln++) {
       for (bd = free_list[ln]; bd != NULL; bd = bd->link) {
           total_blocks += bd->blocks;
       }

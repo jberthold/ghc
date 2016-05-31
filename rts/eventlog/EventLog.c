@@ -130,7 +130,7 @@ char *EventDesc[] = {
 
 typedef struct _EventType {
   EventTypeNum etNum;  // Event Type number.
-  nat   size;     // size of the payload in bytes
+  uint32_t   size;     // size of the payload in bytes
   char *desc;     // Description
 } EventType;
 
@@ -149,7 +149,7 @@ static void postBlockMarker(EventsBuf *eb);
 static void closeBlockMarker(EventsBuf *ebuf);
 
 static StgBool hasRoomForEvent(EventsBuf *eb, EventTypeNum eNum);
-static StgBool hasRoomForVariableEvent(EventsBuf *eb, nat payload_bytes);
+static StgBool hasRoomForVariableEvent(EventsBuf *eb, uint32_t payload_bytes);
 
 static void ensureRoomForEvent(EventsBuf *eb, EventTypeNum tag);
 static int ensureRoomForVariableEvent(EventsBuf *eb, StgWord16 size);
@@ -177,7 +177,7 @@ static inline void postWord64(EventsBuf *eb, StgWord64 i)
     postWord32(eb, (StgWord32)i);
 }
 
-static inline void postBuf(EventsBuf *eb, StgWord8 *buf, nat size)
+static inline void postBuf(EventsBuf *eb, StgWord8 *buf, uint32_t size)
 {
     memcpy(eb->pos, buf, size);
     eb->pos += size;
@@ -248,7 +248,7 @@ void
 initEventLogging(void)
 {
     StgWord8 t, c;
-    nat n_caps;
+    uint32_t n_caps;
     char *prog;
 
     prog = stgMallocBytes(strlen(prog_name) + 1, "initEventLogging");
@@ -562,7 +562,7 @@ initEventLogging(void)
 void
 endEventLogging(void)
 {
-    nat c;
+    uint32_t c;
 
     // Flush all events remaining in the buffers.
     for (c = 0; c < n_capabilities; ++c) {
@@ -583,9 +583,9 @@ endEventLogging(void)
 }
 
 void
-moreCapEventBufs (nat from, nat to)
+moreCapEventBufs (uint32_t from, uint32_t to)
 {
-    nat c;
+    uint32_t c;
 
     if (from > 0) {
         capEventBuf = stgReallocBytes(capEventBuf, to * sizeof(EventsBuf),
@@ -964,7 +964,7 @@ void postHeapEvent (Capability    *cap,
 }
 
 void postEventHeapInfo (EventCapsetID heap_capset,
-                        nat           gens,
+                        uint32_t    gens,
                         W_          maxHeapSize,
                         W_          allocAreaSize,
                         W_          mblockSize,
@@ -989,11 +989,11 @@ void postEventHeapInfo (EventCapsetID heap_capset,
 
 void postEventGcStats  (Capability    *cap,
                         EventCapsetID  heap_capset,
-                        nat            gen,
+                        uint32_t     gen,
                         W_           copied,
                         W_           slop,
                         W_           fragmentation,
-                        nat            par_n_threads,
+                        uint32_t     par_n_threads,
                         W_           par_max_copied,
                         W_           par_tot_copied)
 {
@@ -1098,7 +1098,8 @@ void postLogMsgF(EventsBuf *eb, EventTypeNum type, char *msg, ...)
 void postLogMsg(EventsBuf *eb, EventTypeNum type, char *msg, va_list ap)
 {
     char buf[BUF];
-    nat size;
+    uint32_t size;
+
     size = vsnprintf(buf,BUF,msg,ap);
     if (size > BUF) {
         buf[BUF-1] = '\0';
@@ -1391,7 +1392,7 @@ void resetEventsBuf(EventsBuf* eb)
 
 StgBool hasRoomForEvent(EventsBuf *eb, EventTypeNum eNum)
 {
-  nat size;
+  uint32_t size;
 
   size = sizeof(EventTypeNum) + sizeof(EventTimestamp) + eventTypes[eNum].size;
 
@@ -1402,9 +1403,9 @@ StgBool hasRoomForEvent(EventsBuf *eb, EventTypeNum eNum)
   }
 }
 
-StgBool hasRoomForVariableEvent(EventsBuf *eb, nat payload_bytes)
+StgBool hasRoomForVariableEvent(EventsBuf *eb, uint32_t payload_bytes)
 {
-  nat size;
+  uint32_t size;
 
   size = sizeof(EventTypeNum) + sizeof(EventTimestamp) +
       sizeof(EventPayloadSize) + payload_bytes;
@@ -1439,7 +1440,7 @@ int ensureRoomForVariableEvent(EventsBuf *eb, StgWord16 size)
 void postEventType(EventsBuf *eb, EventType *et)
 {
     StgWord8 d;
-    nat desclen;
+    uint32_t desclen;
 
     postInt32(eb, EVENT_ET_BEGIN);
     postEventTypeNum(eb, et->etNum);

@@ -74,6 +74,7 @@ import Name
 import BasicTypes
 import TcEvidence       ( idHsWrapper )
 import Lexer
+import Lexeme           ( isLexCon )
 import Type             ( TyThing(..) )
 import TysWiredIn       ( cTupleTyConName, tupleTyCon, tupleDataCon,
                           nilDataConName, nilDataConKey,
@@ -81,7 +82,6 @@ import TysWiredIn       ( cTupleTyConName, tupleTyCon, tupleDataCon,
                           starKindTyConName, unicodeStarKindTyConName )
 import ForeignCall
 import PrelNames        ( forall_tv_RDR, eqTyCon_RDR, allNameStrings )
-import DynFlags
 import SrcLoc
 import Unique           ( hasKey )
 import OrdList          ( OrdList, fromOL )
@@ -426,16 +426,34 @@ has_args ((L _ (Match _ args _ _)) : _) = not (null args)
 
   ********************************************************************* -}
 
------------------------------------------------------------------------------
--- splitCon
+{- Note [Parsing data constructors is hard]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We parse the RHS of the constructor declaration
+     data T = C t1 t2
+as a btype_no_ops (treating C as a type constructor) and then convert C to be
+a data constructor.  Reason: it might continue like this:
+     data T = C t1 t2 :% D Int
+in which case C really /would/ be a type constructor.  We can't resolve this
+ambiguity till we come across the constructor oprerator :% (or not, more usually)
 
--- When parsing data declarations, we sometimes inadvertently parse
--- a constructor application as a type (eg. in data T a b = C a b `D` E a b)
--- This function splits up the type application, adds any pending
--- arguments, and converts the type constructor back into a data constructor.
+So the plan is:
+
+* Parse the data constructor declration as a type (actually btype_no_ops)
+
+* Use 'splitCon' to rejig it into the data constructor and the args
+
+* In doing so, we use 'tyConToDataCon' to convert the RdrName for
+  the data con, which has been parsed as a tycon, back to a datacon.
+  This is more than just adjusting the name space; for operators we
+  need to check that it begins with a colon.  E.g.
+     data T = (+++)
+  will parse ok (since tycons can be operators), but we should reject
+  it (Trac #12051).
+-}
 
 splitCon :: LHsType RdrName
       -> P (Located RdrName, HsConDeclDetails RdrName)
+-- See Note [Parsing data constructors is hard]
 -- This gets given a "type" that should look like
 --      C Int Bool
 -- or   C { x::Int, y::Bool }
@@ -454,11 +472,23 @@ splitCon ty
    mk_rest [L l (HsRecTy flds)] = RecCon (L l flds)
    mk_rest ts                   = PrefixCon ts
 
-recordPatSynErr :: SrcSpan -> LPat RdrName -> P a
-recordPatSynErr loc pat =
-    parseErrorSDoc loc $
-    text "record syntax not supported for pattern synonym declarations:" $$
-    ppr pat
+tyConToDataCon :: SrcSpan -> RdrName -> P (Located RdrName)
+-- See Note [Parsing data constructors is hard]
+-- Data constructor RHSs are parsed as types
+tyConToDataCon loc tc
+  | isTcOcc occ
+  , isLexCon (occNameFS occ)
+  = return (L loc (setRdrNameSpace tc srcDataName))
+
+  | otherwise
+  = parseErrorSDoc loc (msg $$ extra)
+  where
+    occ = rdrNameOcc tc
+
+    msg = text "Not a data constructor:" <+> quotes (ppr tc)
+    extra | tc == forall_tv_RDR
+          = text "Perhaps you intended to use ExistentialQuantification"
+          | otherwise = empty
 
 mkPatSynMatchGroup :: Located RdrName
                    -> Located (OrdList (LHsDecl RdrName))
@@ -494,6 +524,12 @@ mkPatSynMatchGroup (L loc patsyn_name) (L _ decls) =
       text "pattern synonym 'where' clause cannot be empty" $$
       text "In the pattern synonym declaration for: " <+> ppr (patsyn_name)
 
+recordPatSynErr :: SrcSpan -> LPat RdrName -> P a
+recordPatSynErr loc pat =
+    parseErrorSDoc loc $
+    text "record syntax not supported for pattern synonym declarations:" $$
+    ppr pat
+
 mkConDeclH98 :: Located RdrName -> Maybe [LHsTyVarBndr RdrName]
                 -> LHsContext RdrName -> HsConDeclDetails RdrName
                 -> ConDecl RdrName
@@ -513,18 +549,6 @@ mkGadtDecl :: [Located RdrName]
 mkGadtDecl names ty = ConDeclGADT { con_names = names
                                   , con_type  = ty
                                   , con_doc   = Nothing }
-
-tyConToDataCon :: SrcSpan -> RdrName -> P (Located RdrName)
-tyConToDataCon loc tc
-  | isTcOcc (rdrNameOcc tc)
-  = return (L loc (setRdrNameSpace tc srcDataName))
-  | otherwise
-  = parseErrorSDoc loc (msg $$ extra)
-  where
-    msg = text "Not a data constructor:" <+> quotes (ppr tc)
-    extra | tc == forall_tv_RDR
-          = text "Perhaps you intended to use ExistentialQuantification"
-          | otherwise = empty
 
 setRdrNameSpace :: RdrName -> NameSpace -> RdrName
 -- ^ This rather gruesome function is used mainly by the parser.
@@ -787,7 +811,7 @@ checkPat msg loc e _
 checkAPat :: SDoc -> SrcSpan -> HsExpr RdrName -> P (Pat RdrName)
 checkAPat msg loc e0 = do
  pState <- getPState
- let dynflags = dflags pState
+ let opts = options pState
  case e0 of
    EWildPat -> return (WildPat placeHolderType)
    HsVar x  -> return (VarPat x)
@@ -819,7 +843,7 @@ checkAPat msg loc e0 = do
    -- n+k patterns
    OpApp (L nloc (HsVar (L _ n))) (L _ (HsVar (L _ plus))) _
          (L lloc (HsOverLit lit@(OverLit {ol_val = HsIntegral {}})))
-                      | xopt LangExt.NPlusKPatterns dynflags && (plus == plus_RDR)
+                      | extopt LangExt.NPlusKPatterns opts && (plus == plus_RDR)
                       -> return (mkNPlusKPat (L nloc n) (L lloc lit))
 
    OpApp l op _fix r  -> do l <- checkLPat msg l
@@ -973,7 +997,7 @@ checkDoAndIfThenElse :: LHsExpr RdrName
 checkDoAndIfThenElse guardExpr semiThen thenExpr semiElse elseExpr
  | semiThen || semiElse
     = do pState <- getPState
-         unless (xopt LangExt.DoAndIfThenElse (dflags pState)) $ do
+         unless (extopt LangExt.DoAndIfThenElse (options pState)) $ do
              parseErrorSDoc (combineLocs guardExpr elseExpr)
                             (text "Unexpected semi-colons in conditional:"
                           $$ nest 4 expr
@@ -1109,7 +1133,7 @@ splitTildeApps (t : rest) = do
 checkMonadComp :: P (HsStmtContext Name)
 checkMonadComp = do
     pState <- getPState
-    return $ if xopt LangExt.MonadComprehensions (dflags pState)
+    return $ if extopt LangExt.MonadComprehensions (options pState)
                 then MonadComp
                 else ListComp
 
@@ -1387,10 +1411,10 @@ mkModuleImpExp n@(L l name) subs =
   case subs of
     ImpExpAbs
       | isVarNameSpace (rdrNameSpace name) -> return $ IEVar  n
-      | otherwise                          -> return $ IEThingAbs  (L l name)
-    ImpExpAll                              -> return $ IEThingAll  (L l name)
+      | otherwise                          -> IEThingAbs . L l <$> nameT
+    ImpExpAll                              -> IEThingAll . L l <$> nameT
     ImpExpList xs                          ->
-      return $ IEThingWith (L l name) NoIEWildcard xs []
+      (\newName -> IEThingWith (L l newName) NoIEWildcard xs []) <$> nameT
     ImpExpAllWith xs                       ->
       do allowed <- extension patternSynonymsEnabled
          if allowed
@@ -1399,9 +1423,20 @@ mkModuleImpExp n@(L l name) subs =
                 pos   = maybe NoIEWildcard IEWildcard
                           (findIndex isNothing withs)
                 ies   = [L l n | L l (Just n) <- xs]
-            in return (IEThingWith (L l name) pos ies [])
+            in (\newName -> IEThingWith (L l newName) pos ies []) <$> nameT
           else parseErrorSDoc l
             (text "Illegal export form (use PatternSynonyms to enable)")
+  where
+    nameT =
+      if isVarNameSpace (rdrNameSpace name)
+        then parseErrorSDoc l
+              (text "Expecting a type constructor but found a variable,"
+               <+> quotes (ppr name) <> text "."
+              $$ if isSymOcc $ rdrNameOcc name
+                   then text "If" <+> quotes (ppr name) <+> text "is a type constructor"
+                    <+> text "then enable ExplicitNamespaces and use the 'type' keyword."
+                   else empty)
+        else return $ name
 
 mkTypeImpExp :: Located RdrName   -- TcCls or Var name space
              -> P (Located RdrName)

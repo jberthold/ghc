@@ -22,6 +22,7 @@ import subprocess
 
 from testglobals import *
 from testutil import *
+from extra_files import extra_src_files
 
 try:
     basestring
@@ -269,11 +270,14 @@ def _extra_hc_opts( name, opts, v ):
 # -----
 
 def extra_clean( files ):
-    assert not isinstance(files, str), files
-    return lambda name, opts, v=files: _extra_clean(name, opts, v);
+    # TODO. Remove all calls to extra_clean.
+    return lambda _name, _opts: None
 
-def _extra_clean( name, opts, v ):
-    opts.clean_files = v
+def extra_files(files):
+    return lambda name, opts: _extra_files(name, opts, files)
+
+def _extra_files(name, opts, files):
+    opts.extra_files.extend(files)
 
 # -----
 
@@ -375,9 +379,6 @@ def compiler_profiled( ):
 def compiler_debugged( ):
     return config.compiler_debugged
 
-def tag( t ):
-    return t in config.compiler_tags
-
 # ---
 
 def high_memory_usage(name, opts):
@@ -421,10 +422,8 @@ def _pre_cmd( name, opts, cmd ):
 # ----
 
 def clean_cmd( cmd ):
-    return lambda name, opts, c=cmd: _clean_cmd(name, opts, cmd)
-
-def _clean_cmd( name, opts, cmd ):
-    opts.clean_cmd = cmd
+    # TODO. Remove all calls to clean_cmd.
+    return lambda _name, _opts: None
 
 # ----
 
@@ -546,13 +545,27 @@ def executeSetups(fs, name, opts):
 # -----------------------------------------------------------------------------
 # The current directory of tests
 
-def newTestDir( dir ):
+def newTestDir(tempdir, dir):
+    # Hack. A few tests depend on files in ancestor directories
+    # (e.g. extra_files(['../../../../libraries/base/dist-install/haddock.t']))
+    # Make sure tempdir is sufficiently "deep", such that copying/linking those
+    # files won't cause any problems.
+    #
+    # If you received a framework failure about adding an extra level:
+    #  * add one extra '../' to the startswith('../../../../../') in do_test
+    #  * add one more number here:
+    tempdir = os.path.join(tempdir, '1', '2', '3')
+
     global thisdir_settings
     # reset the options for this test directory
-    thisdir_settings = lambda name, opts, dir=dir: _newTestDir( name, opts, dir )
+    def settings(name, opts, tempdir=tempdir, dir=dir):
+        return _newTestDir(name, opts, tempdir, dir)
+    thisdir_settings = settings
 
-def _newTestDir( name, opts, dir ):
-    opts.testdir = dir
+
+def _newTestDir(name, opts, tempdir, dir):
+    opts.srcdir = os.path.join(os.getcwd(), dir)
+    opts.testdir = os.path.join(tempdir, dir, name)
     opts.compiler_always_flags = config.compiler_always_flags
 
 # -----------------------------------------------------------------------------
@@ -686,58 +699,46 @@ def test_common_work (name, opts, func, args):
             other_ways = list(filter(lambda way: way not in opts.extra_ways, do_ways))
             do_ways = other_ways[:1] + explicit_ways
 
-        if not config.clean_only:
-            # Run the required tests...
-            for way in do_ways:
-                if stopping():
-                    break
-                do_test (name, way, func, args)
+        # Find all files in the source directory that this test
+        # depends on. Do this only once for all ways.
+        # Generously add all filenames that start with the name of
+        # the test to this set, as a convenience to test authors.
+        # They will have to use the `extra_files` setup function to
+        # specify all other files that their test depends on (but
+        # this seems to be necessary for only about 10% of all
+        # tests).
+        files = set((f for f in os.listdir(opts.srcdir)
+                        if f.startswith(name)))
+        for filename in (opts.extra_files + extra_src_files.get(name, [])):
+            if filename.startswith('../../../../../'):
+                framework_fail(name, 'whole-test',
+                    'add extra level to testlib.py:newTestDir for: ' + filename)
 
-            for way in all_ways:
-                if way not in do_ways:
-                    skiptest (name,way)
+            elif filename.startswith('/'):
+                framework_fail(name, 'whole-test',
+                    'no absolute paths in extra_files please: ' + filename)
 
-        if getTestOpts().cleanup != '' and (config.clean_only or do_ways != []):
-            pretest_cleanup(name)
-            clean([name + suff for suff in [
-                       '', '.exe', '.exe.manifest', '.genscript',
-                       '.stderr.normalised',        '.stdout.normalised',
-                       '.run.stderr.normalised',    '.run.stdout.normalised',
-                       '.comp.stderr.normalised',   '.comp.stdout.normalised',
-                       '.interp.stderr.normalised', '.interp.stdout.normalised',
-                       '.stats', '.comp.stats',
-                       '.hi', '.o', '.prof', '.exe.prof', '.hc',
-                       '_stub.h', '_stub.c', '_stub.o',
-                       '.hp', '.exe.hp', '.ps', '.aux', '.hcr', '.eventlog']])
+            elif '*' in filename:
+                # Don't use wildcards in extra_files too much, as
+                # globbing is slow.
+                files.update((os.path.relpath(f, opts.srcdir)
+                            for f in glob.iglob(in_srcdir(filename))))
 
-            if func == multi_compile or func == multi_compile_fail:
-                    extra_mods = args[1]
-                    clean([replace_suffix(fx[0],'o') for fx in extra_mods])
-                    clean([replace_suffix(fx[0], 'hi') for fx in extra_mods])
+            else:
+                files.add(filename)
 
+        # Run the required tests...
+        for way in do_ways:
+            if stopping():
+                break
+            do_test(name, way, func, args, files)
 
-            clean(getTestOpts().clean_files)
+        for way in all_ways:
+            if way not in do_ways:
+                skiptest (name,way)
 
-            if getTestOpts().outputdir != None:
-                odir = in_testdir(getTestOpts().outputdir)
-                try:
-                    shutil.rmtree(odir)
-                except:
-                    pass
-
-            try:
-                shutil.rmtree(in_testdir('.hpc.' + name))
-            except:
-                pass
-
-            try:
-                cleanCmd = getTestOpts().clean_cmd
-                if cleanCmd != None:
-                    result = runCmdFor(name, 'cd ' + getTestOpts().testdir + ' && ' + cleanCmd)
-                    if result != 0:
-                        framework_fail(name, 'cleaning', 'clean-command failed: ' + str(result))
-            except:
-                framework_fail(name, 'cleaning', 'clean-command exception')
+        if config.cleanup and do_ways:
+            cleanup()
 
         package_conf_cache_file_end_timestamp = get_package_cache_timestamp();
 
@@ -757,35 +758,9 @@ def test_common_work (name, opts, func, args):
     except Exception as e:
         framework_fail(name, 'runTest', 'Unhandled exception: ' + str(e))
 
-def clean(strs):
-    for str in strs:
-        if (str.endswith('.package.conf') or
-            str.startswith('package.conf.') and not str.endswith('/*')):
-            # Package confs are directories now.
-            str += '/*'
+def do_test(name, way, func, args, files):
+    opts = getTestOpts()
 
-        for name in glob.glob(in_testdir(str)):
-            clean_full_path(name)
-
-def clean_full_path(name):
-        try:
-            # Remove files...
-            os.remove(name)
-        except OSError as e1:
-            try:
-                # ... and empty directories
-                os.rmdir(name)
-            except OSError as e2:
-                # We don't want to fail here, but we do want to know
-                # what went wrong, so print out the exceptions.
-                # ENOENT isn't a problem, though, as we clean files
-                # that don't necessarily exist.
-                if e1.errno != errno.ENOENT:
-                    print(e1)
-                if e2.errno != errno.ENOENT:
-                    print(e2)
-
-def do_test(name, way, func, args):
     full_name = name + '(' + way + ')'
 
     try:
@@ -794,6 +769,66 @@ def do_test(name, way, func, args):
                     [t.n_unexpected_passes, \
                      t.n_unexpected_failures, \
                      t.n_framework_failures]))
+
+        # Clean up prior to the test, so that we can't spuriously conclude
+        # that it passed on the basis of old run outputs.
+        cleanup()
+
+        # Link all source files for this test into a new directory in
+        # /tmp, and run the test in that directory. This makes it
+        # possible to run tests in parallel, without modification, that
+        # would otherwise (accidentally) write to the same output file.
+        # It also makes it easier to keep the testsuite clean.
+
+        for filename in files:
+            src = in_srcdir(filename)
+            dst = in_testdir(filename)
+
+            if os.path.isfile(src):
+                dirname = os.path.dirname(dst)
+                if dirname:
+                    mkdirp(dirname)
+                try:
+                    link_or_copy_file(src, dst)
+                except OSError as e:
+                    if e.errno == errno.EEXIST and os.path.isfile(dst):
+                        # Some tests depend on files from ancestor
+                        # directories (e.g. '../shell.hs'). It is
+                        # possible such a file was already copied over
+                        # for another test, since cleanup() doesn't
+                        # delete them.
+                        pass
+                    else:
+                        raise
+            elif os.path.isdir(src):
+                os.makedirs(dst)
+                lndir(src, dst)
+            else:
+                if not config.haddock and os.path.splitext(filename)[1] == '.t':
+                    # When using a ghc built without haddock support, .t
+                    # files are rightfully missing. Don't
+                    # framework_fail. Test will be skipped later.
+                    pass
+                else:
+                    framework_fail(name, way,
+                        'extra_file does not exist: ' + filename)
+
+        if not files:
+            # Always create the testdir, even when no files were copied
+            # (because user forgot to specify extra_files setup function), to
+            # prevent the confusing error: can't cd to <testdir>.
+            os.makedirs(opts.testdir)
+
+        if func.__name__ == 'run_command' or opts.pre_cmd:
+            # When running 'MAKE' make sure 'TOP' still points to the
+            # root of the testsuite.
+            src_makefile = in_srcdir('Makefile')
+            dst_makefile = in_testdir('Makefile')
+            if os.path.exists(src_makefile):
+                with open(src_makefile, 'r') as src:
+                    makefile = re.sub('TOP=.*', 'TOP=' + config.top, src.read(), 1)
+                    with open(dst_makefile, 'w') as dst:
+                        dst.write(makefile)
 
         if config.use_threads:
             t.lock.release()
@@ -1004,7 +1039,6 @@ def multi_compile_fail( name, way, top_mod, extra_mods, extra_hc_opts ):
 
 def do_compile( name, way, should_fail, top_mod, extra_mods, extra_hc_opts, override_flags = None ):
     # print 'Compile only, extra args = ', extra_hc_opts
-    pretest_cleanup(name)
 
     result = extras_build( way, extra_mods, extra_hc_opts )
     if badResult(result):
@@ -1023,7 +1057,7 @@ def do_compile( name, way, should_fail, top_mod, extra_mods, extra_hc_opts, over
     # of whether we expected the compilation to fail or not (successful
     # compilations may generate warnings).
 
-    (_, expected_stderr_file) = find_expected_file(name, 'stderr')
+    expected_stderr_file = find_expected_file(name, 'stderr')
     actual_stderr_file = add_suffix(name, 'comp.stderr')
 
     if not compare_outputs(way, 'stderr',
@@ -1038,7 +1072,6 @@ def do_compile( name, way, should_fail, top_mod, extra_mods, extra_hc_opts, over
 
 def compile_cmp_asm( name, way, extra_hc_opts ):
     print('Compile only, extra args = ', extra_hc_opts)
-    pretest_cleanup(name)
     result = simple_build( name + '.cmm', way, '-keep-s-files -O ' + extra_hc_opts, 0, '', 0, 0, 0)
 
     if badResult(result):
@@ -1048,7 +1081,7 @@ def compile_cmp_asm( name, way, extra_hc_opts ):
     # of whether we expected the compilation to fail or not (successful
     # compilations may generate warnings).
 
-    (_, expected_asm_file) = find_expected_file(name, 'asm')
+    expected_asm_file = find_expected_file(name, 'asm')
     actual_asm_file = add_suffix(name, 's')
 
     if not compare_outputs(way, 'asm',
@@ -1064,7 +1097,6 @@ def compile_cmp_asm( name, way, extra_hc_opts ):
 
 def compile_and_run__( name, way, top_mod, extra_mods, extra_hc_opts ):
     # print 'Compile and run, extra args = ', extra_hc_opts
-    pretest_cleanup(name)
 
     result = extras_build( way, extra_mods, extra_hc_opts )
     if badResult(result):
@@ -1173,22 +1205,14 @@ def extras_build( way, extra_mods, extra_hc_opts ):
 def simple_build( name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, noforce, override_flags = None ):
     opts = getTestOpts()
     errname = add_suffix(name, 'comp.stderr')
-    rm_no_fail( qualify(errname, '') )
 
     if top_mod != '':
         srcname = top_mod
-        rm_no_fail( qualify(name, '') )
         base, suf = os.path.splitext(top_mod)
-        rm_no_fail( qualify(base, '') )
-        rm_no_fail( qualify(base, 'exe') )
     elif addsuf:
         srcname = add_hs_lhs_suffix(name)
-        rm_no_fail( qualify(name, '') )
     else:
         srcname = name
-        rm_no_fail( qualify(name, 'o') )
-
-    rm_no_fail( qualify(replace_suffix(srcname, "o"), '') )
 
     to_do = ''
     if top_mod != '':
@@ -1265,19 +1289,13 @@ def simple_run(name, way, prog, extra_run_opts):
         use_stdin = opts.stdin
     else:
         stdin_file = add_suffix(name, 'stdin')
-        if os.path.exists(in_testdir(stdin_file)):
+        if os.path.exists(in_srcdir(stdin_file)):
             use_stdin = stdin_file
         else:
             use_stdin = '/dev/null'
 
     run_stdout = add_suffix(name,'run.stdout')
     run_stderr = add_suffix(name,'run.stderr')
-
-    rm_no_fail(qualify(name,'run.stdout'))
-    rm_no_fail(qualify(name,'run.stderr'))
-    rm_no_fail(qualify(name, 'hp'))
-    rm_no_fail(qualify(name,'ps'))
-    rm_no_fail(qualify(name, 'prof'))
 
     my_rts_flags = rts_flags(way)
 
@@ -1362,9 +1380,6 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
 
     outname = add_suffix(name, 'interp.stdout')
     errname = add_suffix(name, 'interp.stderr')
-    rm_no_fail(outname)
-    rm_no_fail(errname)
-    rm_no_fail(name)
 
     if (top_mod == ''):
         srcname = add_hs_lhs_suffix(name)
@@ -1373,7 +1388,6 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
 
     scriptname = add_suffix(name, 'genscript')
     qscriptname = in_testdir(scriptname)
-    rm_no_fail(qscriptname)
 
     delimiter = '===== program output begins here\n'
 
@@ -1396,9 +1410,9 @@ def interpreter_run( name, way, extra_hc_opts, compile_only, top_mod ):
 
     # figure out what to use for stdin
     if getTestOpts().stdin != '':
-        stdin_file = in_testdir(getTestOpts().stdin)
+        stdin_file = in_srcdir(opts.stdin)
     else:
-        stdin_file = qualify(name, 'stdin')
+        stdin_file = in_srcdir(name, 'stdin')
 
     if os.path.exists(stdin_file):
         os.system('cat ' + stdin_file + ' >>' + qscriptname)
@@ -1492,15 +1506,9 @@ def get_compiler_flags(override_flags, noforce):
 
 def check_stdout_ok(name, way):
    actual_stdout_file = add_suffix(name, 'run.stdout')
-   (platform_specific, expected_stdout_file) = find_expected_file(name, 'stdout')
+   expected_stdout_file = find_expected_file(name, 'stdout')
 
-   def norm(str):
-      if platform_specific:
-         return str
-      else:
-         return normalise_output(str)
-
-   extra_norm = join_normalisers(norm, getTestOpts().extra_normaliser)
+   extra_norm = join_normalisers(normalise_output, getTestOpts().extra_normaliser)
 
    check_stdout = getTestOpts().check_stdout
    if check_stdout:
@@ -1516,16 +1524,10 @@ def dump_stdout( name ):
 
 def check_stderr_ok(name, way):
    actual_stderr_file = add_suffix(name, 'run.stderr')
-   (platform_specific, expected_stderr_file) = find_expected_file(name, 'stderr')
-
-   def norm(str):
-      if platform_specific:
-         return str
-      else:
-         return normalise_errmsg(str)
+   expected_stderr_file = find_expected_file(name, 'stderr')
 
    return compare_outputs(way, 'stderr',
-                          join_normalisers(norm, getTestOpts().extra_errmsg_normaliser), \
+                          join_normalisers(normalise_errmsg, getTestOpts().extra_errmsg_normaliser), \
                           expected_stderr_file, actual_stderr_file,
                           whitespace_normaliser=normalise_whitespace)
 
@@ -1576,7 +1578,7 @@ def check_hp_ok(name):
         return(False)
 
 def check_prof_ok(name, way):
-    (_, expected_prof_file) = find_expected_file(name, 'prof.sample')
+    expected_prof_file = find_expected_file(name, 'prof.sample')
     expected_prof_path = in_testdir(expected_prof_file)
 
     # Check actual prof file only if we have an expected prof file to
@@ -1606,11 +1608,12 @@ def check_prof_ok(name, way):
 def compare_outputs(way, kind, normaliser, expected_file, actual_file,
                     whitespace_normaliser=lambda x:x):
 
-    expected_path = in_testdir(expected_file)
+    expected_path = in_srcdir(expected_file)
     actual_path = in_testdir(actual_file)
 
     if os.path.exists(expected_path):
         expected_str = normaliser(read_no_crs(expected_path))
+        # Create the .normalised file in the testdir, not in the srcdir.
         expected_normalised_file = add_suffix(expected_file, 'normalised')
         expected_normalised_path = in_testdir(expected_normalised_file)
     else:
@@ -1654,7 +1657,7 @@ def compare_outputs(way, kind, normaliser, expected_file, actual_file,
             return 1
         elif config.accept:
             if_verbose(1, 'No output. Deleting {0}.'.format(expected_path))
-            rm_no_fail(expected_path)
+            os.remove(expected_path)
             return 1
         else:
             return 0
@@ -1879,16 +1882,7 @@ def runCmdFor( name, cmd, timeout_multiplier=1.0 ):
     timeout = int(ceil(config.timeout * timeout_multiplier))
 
     if config.timeout_prog != '':
-        if config.check_files_written:
-            fn = name + ".strace"
-            r = rawSystemWithTimeout(
-                    ["strace", "-o", fn, "-fF",
-                               "-e", "creat,open,chdir,clone,vfork",
-                     strip_quotes(config.timeout_prog), str(timeout), cmd])
-            addTestFilesWritten(name, fn)
-            rm_no_fail(fn)
-        else:
-            r = rawSystemWithTimeout([config.timeout_prog, str(timeout), cmd])
+        r = rawSystemWithTimeout([config.timeout_prog, str(timeout), cmd])
     else:
         r = os.system(cmd)
     return r << 8
@@ -1898,42 +1892,10 @@ def runCmdExitCode( cmd ):
 
 
 # -----------------------------------------------------------------------------
-# checking for files being written to by multiple tests
-
-re_strace_call_end = '(\) += ([0-9]+|-1 E.*)| <unfinished ...>)$'
-re_strace_unavailable_end ='\) += \? <unavailable>$'
-
-re_strace_unavailable_line  = re.compile('^' + re_strace_unavailable_end)
-re_strace_unavailable_cntnt = re.compile('^<\.\.\. .* resumed> ' + re_strace_unavailable_end)
-re_strace_pid               = re.compile('^([0-9]+) +(.*)')
-re_strace_clone             = re.compile('^(clone\(|<... clone resumed> ).*\) = ([0-9]+)$')
-re_strace_clone_unfinished  = re.compile('^clone\( <unfinished \.\.\.>$')
-re_strace_vfork             = re.compile('^(vfork\(\)|<\.\.\. vfork resumed> \)) += ([0-9]+)$')
-re_strace_vfork_unfinished  = re.compile('^vfork\( <unfinished \.\.\.>$')
-re_strace_chdir             = re.compile('^chdir\("([^"]*)"(\) += 0| <unfinished ...>)$')
-re_strace_chdir_resumed     = re.compile('^<\.\.\. chdir resumed> \) += 0$')
-re_strace_open              = re.compile('^open\("([^"]*)", ([A-Z_|]*)(, [0-9]+)?' + re_strace_call_end)
-re_strace_open_resumed      = re.compile('^<... open resumed> '                    + re_strace_call_end)
-re_strace_ignore_sigchild   = re.compile('^--- SIGCHLD \(Child exited\) @ 0 \(0\) ---$')
-re_strace_ignore_sigchild2  = re.compile('^--- SIGCHLD {si_signo=SIGCHLD, si_code=CLD_EXITED, .*} ---$')
-re_strace_ignore_exited     = re.compile('^\+\+\+ exited with [0-9]* \+\+\+$')
-re_strace_ignore_sigvtalarm = re.compile('^--- SIGVTALRM \(Virtual timer expired\) @ 0 \(0\) ---$')
-re_strace_ignore_sigvtalarm2= re.compile('^--- SIGVTALRM {si_signo=SIGVTALRM, si_code=SI_TIMER, .*} ---$')
-re_strace_ignore_sigint     = re.compile('^--- SIGINT \(Interrupt\) @ 0 \(0\) ---$')
-re_strace_ignore_sigfpe     = re.compile('^--- SIGFPE \(Floating point exception\) @ 0 \(0\) ---$')
-re_strace_ignore_sigsegv    = re.compile('^--- SIGSEGV \(Segmentation fault\) @ 0 \(0\) ---$')
-re_strace_ignore_sigpipe    = re.compile('^--- SIGPIPE \(Broken pipe\) @ 0 \(0\) ---$')
-
 # Files that are read or written but shouldn't be:
 # * ghci_history shouldn't be read or written by tests
 # * things under package.conf.d shouldn't be written by tests
 bad_file_usages = {}
-
-# Mapping from tests to the list of files that they write
-files_written = {}
-
-# Mapping from tests to the list of files that they write but don't clean
-files_written_not_removed = {}
 
 def add_bad_file_usage(name, file):
     try:
@@ -1946,141 +1908,6 @@ def mkPath(curdir, path):
     # Given the current full directory is 'curdir', what is the full
     # path to 'path'?
     return os.path.realpath(os.path.join(curdir, path))
-
-def addTestFilesWritten(name, fn):
-    if config.use_threads:
-        with t.lockFilesWritten:
-            addTestFilesWrittenHelper(name, fn)
-    else:
-        addTestFilesWrittenHelper(name, fn)
-
-def addTestFilesWrittenHelper(name, fn):
-    started = False
-    working_directories = {}
-
-    with open(fn, 'r') as f:
-        for line in f:
-            m_pid = re_strace_pid.match(line)
-            if m_pid:
-                pid = m_pid.group(1)
-                content = m_pid.group(2)
-            elif re_strace_unavailable_line.match(line):
-                next
-            else:
-                framework_fail(name, 'strace', "Can't find pid in strace line: " + line)
-
-            m_open = re_strace_open.match(content)
-            m_chdir = re_strace_chdir.match(content)
-            m_clone = re_strace_clone.match(content)
-            m_vfork = re_strace_vfork.match(content)
-
-            if not started:
-                working_directories[pid] = os.getcwd()
-                started = True
-
-            if m_open:
-                file = m_open.group(1)
-                file = mkPath(working_directories[pid], file)
-                if file.endswith("ghci_history"):
-                    add_bad_file_usage(name, file)
-                elif not file in ['/dev/tty', '/dev/null'] and not file.startswith("/tmp/ghc"):
-                    flags = m_open.group(2).split('|')
-                    if 'O_WRONLY' in flags or 'O_RDWR' in flags:
-                        if re.match('package\.conf\.d', file):
-                            add_bad_file_usage(name, file)
-                        else:
-                            try:
-                                if not file in files_written[name]:
-                                    files_written[name].append(file)
-                            except:
-                                files_written[name] = [file]
-                    elif 'O_RDONLY' in flags:
-                        pass
-                    else:
-                        framework_fail(name, 'strace', "Can't understand flags in open strace line: " + line)
-            elif m_chdir:
-                # We optimistically assume that unfinished chdir's are going to succeed
-                dir = m_chdir.group(1)
-                working_directories[pid] = mkPath(working_directories[pid], dir)
-            elif m_clone:
-                working_directories[m_clone.group(2)] = working_directories[pid]
-            elif m_vfork:
-                working_directories[m_vfork.group(2)] = working_directories[pid]
-            elif re_strace_open_resumed.match(content):
-                pass
-            elif re_strace_chdir_resumed.match(content):
-                pass
-            elif re_strace_vfork_unfinished.match(content):
-                pass
-            elif re_strace_clone_unfinished.match(content):
-                pass
-            elif re_strace_ignore_sigchild.match(content):
-                pass
-            elif re_strace_ignore_sigchild2.match(content):
-                pass
-            elif re_strace_ignore_exited.match(content):
-                pass
-            elif re_strace_ignore_sigvtalarm.match(content):
-                pass
-            elif re_strace_ignore_sigvtalarm2.match(content):
-                pass
-            elif re_strace_ignore_sigint.match(content):
-                pass
-            elif re_strace_ignore_sigfpe.match(content):
-                pass
-            elif re_strace_ignore_sigsegv.match(content):
-                pass
-            elif re_strace_ignore_sigpipe.match(content):
-                pass
-            elif re_strace_unavailable_cntnt.match(content):
-                pass
-            else:
-                framework_fail(name, 'strace', "Can't understand strace line: " + line)
-
-def checkForFilesWrittenProblems(file):
-    foundProblem = False
-
-    files_written_inverted = {}
-    for t in files_written.keys():
-        for f in files_written[t]:
-            try:
-                files_written_inverted[f].append(t)
-            except:
-                files_written_inverted[f] = [t]
-
-    for f in files_written_inverted.keys():
-        if len(files_written_inverted[f]) > 1:
-            if not foundProblem:
-                foundProblem = True
-                file.write("\n")
-                file.write("\nSome files are written by multiple tests:\n")
-            file.write("    " + f + " (" + str(files_written_inverted[f]) + ")\n")
-    if foundProblem:
-        file.write("\n")
-
-    # -----
-
-    if len(files_written_not_removed) > 0:
-        file.write("\n")
-        file.write("\nSome files written but not removed:\n")
-        tests = list(files_written_not_removed.keys())
-        tests.sort()
-        for t in tests:
-            for f in files_written_not_removed[t]:
-                file.write("    " + t + ": " + f + "\n")
-        file.write("\n")
-
-    # -----
-
-    if len(bad_file_usages) > 0:
-        file.write("\n")
-        file.write("\nSome bad file usages:\n")
-        tests = list(bad_file_usages.keys())
-        tests.sort()
-        for t in tests:
-            for f in bad_file_usages[t]:
-                file.write("    " + t + ": " + f + "\n")
-        file.write("\n")
 
 # -----------------------------------------------------------------------------
 # checking if ghostscript is available for checking the output of hp2ps
@@ -2110,12 +1937,6 @@ if config.have_profiling:
   else:
     gsNotWorking();
 
-def rm_no_fail( file ):
-   try:
-       os.remove( file )
-   finally:
-       return
-
 def add_suffix( name, suffix ):
     if suffix == '':
         return name
@@ -2141,11 +1962,10 @@ def replace_suffix( name, suffix ):
     return base + '.' + suffix
 
 def in_testdir(name, suffix=''):
-    return getTestOpts().testdir + '/' + add_suffix(name, suffix)
+    return os.path.join(getTestOpts().testdir, add_suffix(name, suffix))
 
-def qualify( name, suff ):
-    return in_testdir(add_suffix(name, suff))
-
+def in_srcdir(name, suffix=''):
+    return os.path.join(getTestOpts().srcdir, add_suffix(name, suffix))
 
 # Finding the sample output.  The filename is of the form
 #
@@ -2153,46 +1973,24 @@ def qualify( name, suff ):
 #
 def find_expected_file(name, suff):
     basename = add_suffix(name, suff)
-    basepath = in_testdir(basename)
+    basepath = in_srcdir(basename)
 
-    files = [(platformSpecific, basename + ws + plat)
-             for (platformSpecific, plat) in [(1, '-' + config.platform),
-                                              (1, '-' + config.os),
-                                              (0, '')]
+    files = [basename + ws + plat
+             for plat in ['-' + config.platform, '-' + config.os, '']
              for ws in ['-ws-' + config.wordsize, '']]
 
     dir = glob.glob(basepath + '*')
     dir = [normalise_slashes_(d) for d in dir]
 
-    for (platformSpecific, f) in files:
-       if in_testdir(f) in dir:
-            return (platformSpecific,f)
+    for f in files:
+       if in_srcdir(f) in dir:
+            return f
 
-    return (0, basename)
+    return basename
 
-# Clean up prior to the test, so that we can't spuriously conclude
-# that it passed on the basis of old run outputs.
-def pretest_cleanup(name):
-   if getTestOpts().outputdir != None:
-       odir = in_testdir(getTestOpts().outputdir)
-       try:
-           shutil.rmtree(odir)
-       except:
-           pass
-       os.mkdir(odir)
+def cleanup():
+    shutil.rmtree(getTestOpts().testdir, ignore_errors=True)
 
-   rm_no_fail(qualify(name,'interp.stderr'))
-   rm_no_fail(qualify(name,'interp.stdout'))
-   rm_no_fail(qualify(name,'comp.stderr'))
-   rm_no_fail(qualify(name,'comp.stdout'))
-   rm_no_fail(qualify(name,'run.stderr'))
-   rm_no_fail(qualify(name,'run.stdout'))
-   rm_no_fail(qualify(name,'tix'))
-   rm_no_fail(qualify(name,'exe.tix'))
-   # simple_build zaps the following:
-   # rm_nofail(qualify("o"))
-   # rm_nofail(qualify(""))
-   # not interested in the return code
 
 # -----------------------------------------------------------------------------
 # Return a list of all the files ending in '.T' below directories roots.
@@ -2268,9 +2066,6 @@ def summary(t, file, short=False):
     if t.n_framework_failures > 0:
         file.write('Test framework failures:\n')
         printFrameworkFailureSummary(file, t.framework_failures)
-
-    if config.check_files_written:
-        checkForFilesWrittenProblems(file)
 
     if stopping():
         file.write('WARNING: Testsuite run was terminated early\n')
