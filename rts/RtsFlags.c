@@ -95,8 +95,8 @@ static char par_debug_opts_flags[] = {
   'v', 'c', 'p', 'q', 'P', 'o'
 };
 
-static void set_par_debug_options(nat n);
-static void help_par_debug_options(nat n);
+static void set_par_debug_options(uint16_t n);
+static void help_par_debug_options(uint16_t n);
 
 #endif
 #endif
@@ -1662,10 +1662,10 @@ process_par_option(int arg, rtsBool *error)
     }
     if (isdigit(rts_argv[arg][3])) {/* Set all debugging options in one */
       /* hack warning: interpret the flags as a binary number */
-      nat n = (nat) strtol(rts_argv[arg]+3, (char **) NULL, 10);
+      uint16_t n = (uint16_t) strtoul(rts_argv[arg]+3, (char **) NULL, 10);
       set_par_debug_options(n);
     } else {
-      nat i;
+      uint16_t i;
       for (i=0; i<=MAX_PAR_DEBUG_OPTION; i++) 
         if (rts_argv[arg][3] == par_debug_opts_flags[i])
           break;
@@ -1694,8 +1694,8 @@ process_par_option(int arg, rtsBool *error)
   correxponding option. See par_debug_opts_strs for explanations of the flags.
 */
 static void
-set_par_debug_options(nat n) {
-  nat i;
+set_par_debug_options(uint16_t n) {
+  uint16_t i;
 
   for (i=0; i<=MAX_PAR_DEBUG_OPTION; i++) 
     if ((n>>i)&1) {
@@ -1718,8 +1718,8 @@ set_par_debug_options(nat n) {
   in the bitmask n.
 */
 static void
-help_par_debug_options(nat n) {
-  nat i;
+help_par_debug_options(uint16_t n) {
+  uint16_t i;
 
   for (i=0; i<=MAX_PAR_DEBUG_OPTION; i++) 
     if ((n>>i)&1) 

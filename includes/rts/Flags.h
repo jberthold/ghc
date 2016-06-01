@@ -193,10 +193,10 @@ typedef struct _PAR_DEBUG_FLAGS {
 } PAR_DEBUG_FLAGS;
 
 /* starting at 0, number of flags defined above... */
-#define MAX_PAR_DEBUG_OPTION     5
+#define MAX_PAR_DEBUG_OPTION  5
 
-#define PAR_DEBUG_MASK(n)          ((nat) (1<<(n)))
-#define MAX_PAR_DEBUG_MASK         ((nat) ((1<<(MAX_PAR_DEBUG_OPTION+1))-1))
+#define PAR_DEBUG_MASK(n)     ((uint16_t) (1<<(n)))
+#define MAX_PAR_DEBUG_MASK    ((uint16_t) ((1<<(MAX_PAR_DEBUG_OPTION+1))-1))
 
 #endif /* PARALLEL_RTS */
 

@@ -97,7 +97,7 @@ static int cpw_sem_close(cpw_sem_t *sem);
  *==========*/
 
 struct cpw_msg_tag {
-  nat      sender;
+  PEId     sender;
   OpCode   tag;
   int      length;
   StgWord *data;
@@ -136,9 +136,9 @@ static int cpw_shm_create(void);
 
 static void cpw_shm_check_errors(void);
 
-static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, StgWord8 *data);
-static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag,
-                            int *length, StgWord8 *data);
+static int cpw_shm_send_msg(PEId toPE, OpCode tag, uint32_t length, StgWord8 *data);
+static int cpw_shm_recv_msg(PEId *fromPE, OpCode *tag,
+                            uint32_t *length, StgWord8 *data);
 static cpw_shm_slot_t* cpw_shm_acquire_slot(void);
 
 
@@ -151,8 +151,8 @@ static int cpw_shm_close(cpw_shm_t *shm);
 #ifdef DEBUG
 static void cpw_shm_debug_info(cpw_shm_t *shm);
 #endif
-static int cpw_self_recv_msg(nat *fromPE, OpCode *tag,
-                             int *length, StgWord8 *data);
+static int cpw_self_recv_msg(PEId *fromPE, OpCode *tag,
+                             uint32_t *length, StgWord8 *data);
 static int cpw_self_probe(void);
 static int cpw_self_probe_sys(void);
 
@@ -178,7 +178,7 @@ static int cpw_sync_close(cpw_sync_t *syn);
  * Utiliy Functions *
  *==================*/
 static int cpw_mk_name(char *res);
-nat setnPEsArg(int *argc, char **argv);
+PEId setnPEsArg(int *argc, char **argv);
 // these are shared between POSIX and Windows versions
 
 /*=================*
@@ -187,12 +187,12 @@ nat setnPEsArg(int *argc, char **argv);
 
 /* global constants, declared in Parallel.h:
  *
- * nPEs   - nat: number of PEs in the parallel system
- * thisPE - nat: logical address of this PE btw. 1 and nPEs
+ * nPEs   - PEId: number of PEs in the parallel system
+ * thisPE - PEId: logical address of this PE btw. 1 and nPEs
  * IAmMainThread - rtsBool: indicating main PE (thisPE == 1)
  */
-nat nPEs = 0;
-nat thisPE = 0;
+PEId nPEs = 0;
+PEId thisPE = 0;
 rtsBool IAmMainThread = rtsFalse;
 
 int cpw_state = CPW_NOT_STARTED; /* keep track of state, to avoid
@@ -396,8 +396,8 @@ rtsBool MP_quit(int isError){
     }
     /* child must stay alive until answer arrives if error shutdown */
     if (retryCount != 0 && isError != 0) {
-      nat sender;
-      int length;
+      PEId sender;
+      uint32_t length;
       OpCode code = PP_READY; // something != FINISH
       while (code != PP_FINISH)
         cpw_shm_recv_msg(&sender, &code, &length, NULL);
@@ -473,7 +473,7 @@ Needed functionality: */
  * Returns:
  *   rtsBool: success or failure inside comm. subsystem
  */
-rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
+rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length){
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_send(%s)\n", getOpName(tag)));
 
@@ -481,7 +481,7 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
   cpw_shm_check_errors();
 
   /* check length */
-  ASSERT(((uint)length) <= DATASPACEWORDS * sizeof(StgWord));
+  ASSERT(length <= DATASPACEWORDS * sizeof(StgWord));
 
   /* send */
   switch (cpw_shm_send_msg(node, tag, length, data)) {
@@ -511,8 +511,8 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
  * Returns:
  *   int: length of data received with message
  */
-int MP_recv(STG_UNUSED int maxlength, StgWord8 *destination, // IN
-            OpCode *code, nat *sender){                      // OUT
+uint32_t MP_recv(STG_UNUSED uint32_t maxlength, StgWord8 *destination, // IN
+                 OpCode *code, PEId *sender){                          // OUT
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_recv()\n"));
 
@@ -520,7 +520,7 @@ int MP_recv(STG_UNUSED int maxlength, StgWord8 *destination, // IN
   cpw_shm_check_errors();
 
   /* receive message */
-  int length;
+  uint32_t length;
   if (cpw_self_probe()) {
     /* might be a sys_msg in shm queue */
     if(!cpw_self_probe_sys() && cpw_shm_probe_sys()) {
@@ -991,7 +991,7 @@ static int cpw_shm_create()
 }
 
 /* try to send a message */
-static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, StgWord8 *data) {
+static int cpw_shm_send_msg(PEId toPE, OpCode tag, uint32_t length, StgWord8 *data) {
   cpw_shm_slot_t *free_slot = NULL;
 
   /* can we get a free slot? */
@@ -1048,8 +1048,8 @@ static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, StgWord8 *data) {
 
 /* try to receive a message */
 /* if data == NULL, data are not copied (for error shutdown) */
-static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag,
-                            int *length, StgWord8 *data) {
+static int cpw_shm_recv_msg(PEId *fromPE, OpCode *tag,
+                            uint32_t *length, StgWord8 *data) {
   int me = thisPE - 1;
 
   /* wait until msgs there */
@@ -1123,8 +1123,8 @@ static cpw_shm_slot_t* cpw_shm_acquire_slot() {
   return used_slot;
 }
 
-static int cpw_self_recv_msg(nat *fromPE, OpCode *tag,
-                             int *length, StgWord8 *data) {
+static int cpw_self_recv_msg(PEId *fromPE, OpCode *tag,
+                             uint32_t *length, StgWord8 *data) {
   cpw_shm_slot_t *used_slot = stored_msgs;
   stored_msgs = used_slot->next;
 
@@ -1399,17 +1399,17 @@ static int cpw_sem_close(cpw_sem_t *sem);
  *==========*/
 
 struct cpw_msg_off_tag {
-  nat      sender;
+  PEId     sender;
   OpCode   tag;
-  int      length;
+  uint32_t length;
   size_t   data;
 };
 typedef struct cpw_msg_off_tag cpw_msg_off_t;
 
 struct cpw_msg_tag {
-  nat      sender;
+  PEId     sender;
   OpCode   tag;
-  int      length;
+  uint32_t length;
   StgWord *data;
 };
 typedef struct cpw_msg_tag cpw_msg_t;
@@ -1478,9 +1478,9 @@ static int cpw_shm_init(void);
 
 static void cpw_shm_check_errors(void);
 
-static int cpw_shm_send_msg(nat toPE, OpCode tag, int length, StgWord8 *data);
-static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag,
-                            int *length, StgWord8 *data);
+static int cpw_shm_send_msg(PEId toPE, OpCode tag, uint32_t length, StgWord8 *data);
+static int cpw_shm_recv_msg(PEId *fromPE, OpCode *tag,
+                            uint32_t *length, StgWord8 *data);
 static size_t cpw_shm_acquire_slot(void);
 
 
@@ -1492,8 +1492,8 @@ static int cpw_shm_close(cpw_shm_t *shm);
 
 static void cpw_shm_debug_info(cpw_shm_t *shm);
 
-static int cpw_self_recv_msg(nat *fromPE, OpCode *tag,
-                             int *length, StgWord8 *data);
+static int cpw_self_recv_msg(PEId *fromPE, OpCode *tag,
+                             uint32_t *length, StgWord8 *data);
 static int cpw_self_probe(void);
 static int cpw_self_probe_sys(void);
 
@@ -1504,7 +1504,7 @@ static int cpw_self_probe_sys(void);
  * Utiliy Functions *
  *==================*/
 static int cpw_mk_name(char *res);
-nat setnPEsArg(int *argc, char **argv);
+PEId setnPEsArg(int *argc, char **argv);
 static char* cpw_mk_argv_string(int argc, char ** argv);
 // first two shared between POSIX and Windows versions
 
@@ -1515,18 +1515,18 @@ static char* cpw_mk_argv_string(int argc, char ** argv);
 
 /* global constants, declared in Parallel.h:
  *
- * nPEs   - nat: number of PEs in the parallel system
- * thisPE - nat: logical address of this PE btw. 1 and nPEs
+ * nPEs   - PEId: number of PEs in the parallel system
+ * thisPE - PEId: logical address of this PE btw. 1 and nPEs
  * IAmMainThread - rtsBool: indicating main PE (thisPE == 1)
  */
-nat nPEs = 0;
-nat thisPE = 0;
+PEId nPEs = 0;
+PEId thisPE = 0;
 rtsBool IAmMainThread = rtsFalse;
 
 int cpw_state = CPW_NOT_STARTED; /* keep track of state, to avoid
                                     double-faults on error shutdown */
 
-int finishRecvd = 0; /* master counts finish messages from children */
+PEId finishRecvd = 0; /* master counts finish messages from children */
 
 int num_msgs = 0; /* How many messages can be stored in buffer */
 
@@ -1675,8 +1675,8 @@ rtsBool MP_sync(void){
 rtsBool MP_quit(int isError){
 
     StgWord data[1] = {isError};
-    nat sender;
-    int length;
+    PEId sender;
+    uint32_t length;
     OpCode code;
     int retryCount;
 
@@ -1708,9 +1708,9 @@ rtsBool MP_quit(int isError){
     }
 
     IF_PAR_DEBUG(mpcomm,
-                 debugBelch("awaiting FINISH replies from children (have %d)",
+                 debugBelch("awaiting FINISH replies from children (have %u)",
                             finishRecvd));
-    while ((nat) finishRecvd != nPEs-1) {
+    while ( finishRecvd != nPEs-1) {
         cpw_shm_recv_msg(&sender, &code, &length, NULL);
         /* not actually receiving data, since destination is NULL */
         if (code == PP_FINISH) {
@@ -1846,8 +1846,8 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
  * Returns:
  *   int: length of data received with message
  */
-int MP_recv(STG_UNUSED int maxlength, StgWord8 *destination, // IN
-            OpCode *code, nat *sender){       // OUT
+uint32_t MP_recv(STG_UNUSED uint32_t maxlength, StgWord8 *destination, // IN
+                 OpCode *code, PEId *sender){                          // OUT
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_recv()"));
 
@@ -1855,7 +1855,7 @@ int MP_recv(STG_UNUSED int maxlength, StgWord8 *destination, // IN
   cpw_shm_check_errors();
 
   /* receive message */
-  int length;
+  uint32_t length;
   if (cpw_self_probe()) {
     /* might be a sys_msg in shm queue */
     if(!cpw_self_probe_sys() && cpw_shm_probe_sys()) {
@@ -2429,8 +2429,8 @@ static int cpw_shm_init()
 }
 
 /* try to send a message */
-static int cpw_shm_send_msg(nat toPE, OpCode tag,
-                            int length, StgWord8 *data) {
+static int cpw_shm_send_msg(PEId toPE, OpCode tag,
+                            uint32_t length, StgWord8 *data) {
   size_t free_slot_off = 0;
   //printf("sending msg\n");
   /* can we get a free slot? */
@@ -2504,8 +2504,8 @@ static int cpw_shm_send_msg(nat toPE, OpCode tag,
 
 /* try to receive a message */
 /* if data ptr is NULL, no data is copied (necessary for shutdown) */
-static int cpw_shm_recv_msg(nat *fromPE, OpCode *tag,
-                            int *length, StgWord8 *data) {
+static int cpw_shm_recv_msg(PEId *fromPE, OpCode *tag,
+                            uint32_t *length, StgWord8 *data) {
   int me = thisPE - 1;
 
   /* wait until msgs there */
@@ -2593,8 +2593,8 @@ static size_t cpw_shm_acquire_slot() {
   return used_slot_off;
 }
 
-static int cpw_self_recv_msg(nat *fromPE, OpCode *tag,
-                             int *length, StgWord8 *data) {
+static int cpw_self_recv_msg(PEId *fromPE, OpCode *tag,
+                             uint32_t *length, StgWord8 *data) {
   cpw_shm_slot_t *used_slot = stored_msgs;
   stored_msgs = used_slot->next;
 
@@ -2870,11 +2870,11 @@ static int cpw_mk_name(char *res) {
  * argv, and argc reduced.
  * Returns the nPEs value found, 0 if nothing found.
  */
-nat setnPEsArg(int *argc, char **argv) {
+PEId setnPEsArg(int *argc, char **argv) {
   char **currArg, **lastArg;
   rtsBool inRTS, finishedRTS;
   int i;
-  nat pes;
+  PEId pes;
 
   /* useless, as this routine is the place where we first set the debug flag..
   IF_PAR_DEBUG(mpcomm,
@@ -2891,9 +2891,9 @@ nat setnPEsArg(int *argc, char **argv) {
       // the PE flag we want. Parse it and only advance currArg, decrease argc
       if ((*currArg)[2]=='-') { // negative number, debug mode
         RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
-        pes = (nat)atoi((*currArg)+3);
+        pes = (PEId)atoi((*currArg)+3);
       } else {
-        pes = (nat)atoi((*currArg)+2);
+        pes = (PEId)atoi((*currArg)+2);
       }
       IF_PAR_DEBUG(mpcomm,
                    debugBelch("parsing flag %s, setting nPE=%u\n",

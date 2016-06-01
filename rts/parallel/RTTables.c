@@ -364,7 +364,7 @@ void connectInport(StgWord processId, StgWord id, Port sender) {
 // set a receiver for a TSO. Called by primop "connectToPort#"
 // directly.  Reconnecting allowed (but problems might arise when
 // reconnection intended: thread maybe terminated on previous inport).
-void setReceiver(StgTSO* tso, nat pe, StgWord proc, StgWord id) {
+void setReceiver(StgTSO* tso, PEId pe, StgWord proc, StgWord id) {
   Port* portInHashTable, *oldPort;
 
   ASSERT(get_itbl((StgClosure*)tso)->type == TSO);
@@ -432,7 +432,7 @@ void removeInport(StgWord processId, StgWord inportId) {
     ASSERT(last != NULL && *last == NULL);
     IF_PAR_DEBUG(ports,
          debugBelch("Inport %d: not found in process %d.\n",
-                    (nat) inportId, (nat) processId));
+                    (uint32_t) inportId, (uint32_t) processId));
   } else {
     // found, remove and free it.
     // last points to the field where remv was referenced in the list
@@ -484,9 +484,7 @@ void addTSO(StgWord processId, StgTSO* tso) {
 // threads per GC "step", for all steps. See Threads.c::printAllThreads.
 
 StgTSO* findTSO(StgWord processId, StgWord id) {
-  // Capability* cap;
-  // nat i;
-  nat g;
+  uint32_t g;
   StgTSO *t;
   StgWord proc;
   ProcessData *p = findProcess(processId);
@@ -655,7 +653,7 @@ void updateInports(ProcessData *p) {
     inp = inp->next;
 
     IF_PAR_DEBUG(ports,
-                 debugBelch("updating inport %d\n", (nat)temp->id));
+                 debugBelch("updating inport %d\n", (uint32_t)temp->id));
 
     temp->closure = isAlive(temp->closure); // updated to new BH
     if (temp->closure == NULL) { // a garbage inport, remove it

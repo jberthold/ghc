@@ -700,7 +700,7 @@ void freeRecvBuffer(void) {
 
 static void processMessages(Capability *cap) {
   OpCode opcode;
-  nat pe;
+  PEId pe;
   Port sender, receiver;
   StgTSO* tso; // for terminate messages
   rtsBool eventEmitted = rtsFalse;

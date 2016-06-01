@@ -28,8 +28,8 @@
 
 #ifndef PARALLEL_RTS
 /* provide constants nPE and thisPe for foreign import */
-nat nPEs   = 1;
-nat thisPE = 1;
+PEId nPEs   = 1;
+PEId thisPE = 1;
 #endif
 
 #ifdef PARALLEL_RTS /* whole rest of the file */
@@ -39,7 +39,7 @@ char *argvsave;
 char *pareventsName;
 struct timeval startupTime;
 struct timezone startupTimeZone;
-nat pes; // remember nPEs after shutdown
+PEId pes; // remember nPEs after shutdown
 #endif //TRACING
 /* For flag handling see RtsFlags.h */
 

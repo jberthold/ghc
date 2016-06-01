@@ -82,7 +82,7 @@
 
 DEFINED IN RTSTYPES_H
 typedef struct Port_ {
-  nat machine;
+  PEId    machine;
   StgWord process;
   StgWord id;
 } Port;
@@ -108,9 +108,9 @@ typedef struct Inport_ {
 
 typedef struct ProcessData_ {
   struct ProcessData_ *next;
-  StgWord id;
-  Inport* inports;
-  nat     tsos; // counter only
+  StgWord  id;
+  uint16_t tsos; // counter only
+  Inport*  inports;
 } ProcessData;
 
 // the runtime table, globally in scope (though not needed by now...): 
@@ -167,7 +167,7 @@ StgWord addInport(StgWord processId, StgClosure* blackhole);
 void connectInport(StgWord processId, StgWord id, Port sender);
 
 // set a receiver for a TSO. Called by primop "connectToPort#".
-void setReceiver(StgTSO* tso, nat pe, StgWord proc, StgWord id);
+void setReceiver(StgTSO* tso, PEId pe, StgWord proc, StgWord id);
 
 // close/remove an inport from a process 
 // (gets deallocated, TERM message to send by caller before!)

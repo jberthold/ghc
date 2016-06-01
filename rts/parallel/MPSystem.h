@@ -100,7 +100,7 @@ Needed functionality: */
  *   rtsBool: success or failure inside comm. subsystem
  */
 
-rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length);
+rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length);
 
 /* - a blocking receive operation
  *   where system messages from main node have priority!
@@ -121,8 +121,8 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length);
  * Returns:
  *   int: amount of data (in bytes) received with message
  */
-int MP_recv(int maxlength, StgWord8 *destination, // IN
-            OpCode *code, nat *sender);          // OUT
+uint32_t MP_recv(uint32_t maxlength, StgWord8 *destination, // IN
+                 OpCode *code, PEId *sender);               // OUT
 
 /* - a non-blocking probe operation
  * (unspecified sender, no receive buffers any more)

@@ -847,7 +847,7 @@ void traceCreateProcess_(StgWord pid)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
-        trace_stderr_("creating process %u \n", (nat)pid );
+        trace_stderr_("creating process %u \n", (uint32_t)pid );
     } else
 #endif
       {
@@ -860,7 +860,7 @@ void traceKillProcess_(StgWord pid)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
-        trace_stderr_("killing process %u \n", (nat)pid);
+        trace_stderr_("killing process %u \n", (uint32_t)pid);
     } else
 #endif
       {
@@ -869,11 +869,12 @@ void traceKillProcess_(StgWord pid)
 }
 
 
-void traceAssignThreadToProcessEvent_(Capability *cap, nat tid, StgWord pid)
+void traceAssignThreadToProcessEvent_(Capability *cap, StgThreadID tid, StgWord pid)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
-        trace_stderr_("cap %d: assigning thread %u to process %u \n",cap->no , tid, (nat)pid);
+        trace_stderr_("cap %d: assigning thread %u to process %u \n",
+                      cap->no , tid, (uint32_t)pid);
     } else
 #endif
       {
@@ -882,7 +883,7 @@ void traceAssignThreadToProcessEvent_(Capability *cap, nat tid, StgWord pid)
 }
 
 
-void traceCreateMachine_ (nat pe, StgWord64 time,StgWord64 ticks)
+void traceCreateMachine_ (PEId pe, StgWord64 time,StgWord64 ticks)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
@@ -895,7 +896,7 @@ void traceCreateMachine_ (nat pe, StgWord64 time,StgWord64 ticks)
 }
 
 
-void traceKillMachine_ (nat pe)
+void traceKillMachine_ (PEId pe)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
@@ -926,8 +927,12 @@ void traceReceiveMessageEvent_ (Capability *cap, OpCode msgtag, rtsPackBuffer *b
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
-        trace_stderr_("cap %d: receive message with Tag %d of size %u, \n \t receiver: process %lu, portID %lu  \n \t sender: machine %d, process %lu, thread %lu \n", 
-                 cap->no, msgtag, (nat)buf->size, (long)buf->receiver.process, (long)buf->receiver.id, buf->sender.machine, (long)buf->sender.process, (long)buf->sender.id);
+        trace_stderr_("cap %d: receive message with Tag %d of size %d, \n"
+                      "\treceiver: process %u, portID %u  \n"
+                      "\tsender: machine %u, process %u, thread %u \n", 
+                      cap->no, msgtag, buf->size,
+                      buf->receiver.process, buf->receiver.id,
+                      buf->sender.machine, buf->sender.process, buf->sender.id);
     } else
 #endif
       {

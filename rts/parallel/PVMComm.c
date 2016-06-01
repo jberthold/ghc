@@ -83,8 +83,8 @@ char* pvmError[] = {
 rtsBool IAmMainThread = rtsFalse;       // Set this for the main PE
 rtsBool Failure = rtsFalse; // Set this in case of error shutdown
 // nPEs, thisPE
-nat nPEs = 0; // number of PEs in system
-nat thisPE=0;
+PEId nPEs = 0; // number of PEs in system
+PEId thisPE=0;
 
 // counter to check finish messages. Invariant on shutdown: each non-main
 // machine should send and receive PP_FINISH to the main machine; i.e. this
@@ -126,7 +126,7 @@ static void MPMsgHandle(OpCode code, int buffer) {
   int bytes;  // size of message
 
   // for PE failure notification
-  nat whofailed = 1;
+  PEId whofailed = 1;
   int t;
 
   ASSERT(ISMPCODE(code)); // we only want to see internal messages...
@@ -136,7 +136,7 @@ static void MPMsgHandle(OpCode code, int buffer) {
 
   if (buffer == 0)  // recv. message, if not previously received
     buffer = pvm_recv(ANY_TASK, code);
-  pvm_bufinfo(buffer, &bytes, &code, &task);
+  pvm_bufinfo(buffer, &bytes, (int*) &code, &task);
 
   switch(code) {
   case PP_NEWPE:
@@ -155,7 +155,7 @@ static void MPMsgHandle(OpCode code, int buffer) {
     while (whofailed < nPEs && allPEs[whofailed] != t) {
       whofailed++;
     }
-    debugBelch("System failure on node %d (%x).\n", whofailed+1, (nat)t);
+    debugBelch("System failure on node %d (%x).\n", whofailed+1, (uint32_t)t);
     // delete from PE address table (avoid errors in shutdown).
     if (whofailed < nPEs) { // found the terminated PE
       allPEs[whofailed] = 0;
@@ -285,7 +285,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
            assuming it is in scope in $PVM_ROOT/bin/$PVM_ARCH.
            This variable has been set by the generated startup script. */
       int i, myHost;
-      nat tasks;
+      PEId tasks;
 
       // determine program name. This dance with tmp is necessary
       // since basename likes to modify its argument.
@@ -489,7 +489,7 @@ rtsBool MP_quit(int isError) {
                  "shutdown: Failed to broadcast PP_FINISH");
     else {
       // correct PEs array (for clean shutdown on remote PE failure)
-      nat j,k;
+      uint32_t j,k;
       int mcastArr[MAX_PES];
 
       k = 0;
@@ -542,20 +542,20 @@ rtsBool MP_quit(int isError) {
 // note that any buffering of messages happens one level above!
 
 /* send operation directly using PVM */
-rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length) {
+rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length) {
 
-  ASSERT(node); // node > 0
-  ASSERT(node <= (int) nPEs); // node is valid PE number
+  ASSERT(node > 0); // node is valid PE number
+  ASSERT(node <= nPEs);
   ASSERT(ISOPCODE(tag));
 
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_send for PVM: sending buffer@%p "
-                          "(length %d) to %d with tag %x (%s)\n",
+                          "(length %u) to %u with tag %x (%s)\n",
                           data, length, node, tag, getOpName(tag)));
   pvm_initsend(PvmDataRaw);
 
   if (length > 0) {
-    pvm_pkbyte((char*) data, length, 1);
+      pvm_pkbyte((char*) data, (int)length, 1);
   }
   checkComms(pvm_send(allPEs[node-1],tag),
              "PVM:send failed");
@@ -564,8 +564,8 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length) {
 
 /* - a blocking receive operation
    where system messages have priority! */
-int MP_recv(int maxlength, StgWord8 *destination,
-            OpCode *retcode, nat *sender) {
+uint32_t MP_recv(uint32_t maxlength, StgWord8 *destination,
+                 OpCode *retcode, PEId *sender) {
   int bytes; // return value
   OpCode code; // internal use...
   int buffer=0;
@@ -591,7 +591,7 @@ int MP_recv(int maxlength, StgWord8 *destination,
          pvm_probe(ANY_TASK, code)) {
       buffer = pvm_recv(ANY_TASK, code); // receive
       IF_PAR_DEBUG(mpcomm, debugBelch("Syscode received.\n"));
-      pvm_bufinfo(buffer, &bytes, retcode, &sendPE); // inspect message
+      pvm_bufinfo(buffer, &bytes, (int*) retcode, &sendPE); // inspect message
       ASSERT( *retcode==code );
       break; // got one message, no further check
     }
@@ -601,7 +601,7 @@ int MP_recv(int maxlength, StgWord8 *destination,
     IF_PAR_DEBUG(mpcomm, debugBelch("MP_recv: data.\n"));
     buffer = pvm_recv(ANY_TASK,ANY_CODE);
     IF_PAR_DEBUG(mpcomm, debugBelch("received.\n"));
-    pvm_bufinfo(buffer, &bytes, retcode, &sendPE); // inspect message
+    pvm_bufinfo(buffer, &bytes, (int*) retcode, &sendPE); // inspect message
   }
 
   IF_PAR_DEBUG(mpcomm,
@@ -641,15 +641,15 @@ int MP_recv(int maxlength, StgWord8 *destination,
   }
 
   // unpack data, if enough space, abort if not
-  if (bytes > maxlength)
+  if ((uint32_t)bytes > maxlength)
     // should never happen, higher levels use at most maxlength bytes!
-    barf("MPSystem(PVM): not enough space for packet (needed %d, have %d)!",
+    barf("MPSystem(PVM): not enough space for packet (needed %d, have %u)!",
          bytes, maxlength);
   pvm_upkbyte((char*) destination, bytes, 1);
 
   if (*retcode == PP_FINISH) finishRecvd++;
 
-  return bytes; // data and all variables set, ready
+  return (uint32_t) bytes; // data and all variables set, ready
 }
 
 /* - a non-blocking probe operation (unspecified sender)

@@ -33,16 +33,16 @@
 
 #include <unistd.h> // getpid, in choosePE
 
-nat targetPE = 0;
+PEId targetPE = 0;
 
 /*
  * ChoosePE selects a PE number between 1 and nPEs, either 'at
  * random' or round-robin, starting with thisPE+1
  */
-static nat
+static PEId
 choosePE(void)
 {
-  nat temp;
+  PEId temp;
 
   // initialisation
   if (targetPE == 0) {
@@ -51,7 +51,7 @@ choosePE(void)
   }
 
   if (RtsFlags.ParFlags.placement & 1) // random
-    temp = 1 + (nat) (lrand48() % nPEs);
+    temp = 1 + (PEId) (lrand48() % nPEs);
   else {// round-robin
     temp = targetPE;
     targetPE = (targetPE >= nPEs) ? 1 : (targetPE + 1);
@@ -113,8 +113,8 @@ void freePackBuffer(void) {
  * otherwise just using the sender/receiver fields
  */
 rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
-  int size;
-  int destinationPE = 0;
+  uint32_t size;
+  PEId     destinationPE = 0;
 
   ASSERT(!(isNoPort(dataBuffer->sender)));
   ASSERT(!(isNoPort(dataBuffer->receiver)));
@@ -125,7 +125,7 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
   ASSERT(destinationPE != 0); // PEs are (1..nPEs), 0 impossible
 
   IF_PAR_DEBUG(ports,
-               debugBelch("sending message %s (%#0x) to machine %d\n",
+               debugBelch("sending message %s (%#0x) to machine %dx\n",
                           getOpName(tag), tag, destinationPE);
                debugBelch("Sender: (%d,%" FMT_Word ",%" FMT_Word
                           "), Receiver (%d,%" FMT_Word ",%" FMT_Word ")\n",
@@ -188,14 +188,14 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data);
 int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
 
   rtsPackBuffer *packedData = globalPackBuffer;
-  nat size; // packed size (returned by packToBuffer with error code bias)
+  uint32_t size; // packed size (returned by packToBuffer with error code bias)
 
   OpCode sendTag = 0;
   int success=MSG_OK; // indicates successful packing, becomes return value
                       // codes defined in includes/rts/Constants.h
 
   int m; // mode 0..7
-  nat d; // data payload inside mode
+  uint32_t d; // data payload inside mode
 
   Port* receiver;
   Port sender;

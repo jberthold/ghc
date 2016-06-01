@@ -35,7 +35,7 @@ StgInt newSpark (StgRegTable *reg, StgClosure *p);
    implementing noPe and selfPe as foreign imports.
    Reside in MPSystem files, or in ParInit.c when not parallel.
 */
-extern nat nPEs, thisPE;
+extern PEId nPEs, thisPE;
 
 
 // packing and sending:
@@ -57,7 +57,7 @@ rtsBool isBlackhole(StgClosure* closure);
 
 // packs to buffer, returns size-in-bytes + P_ERRCODEMAX, or an error code
 int packToBuffer(StgClosure* closure,
-                 StgWord *buffer, nat bufsize, StgTSO *caller);
+                 StgWord *buffer, uint32_t bufsize, StgTSO *caller);
 
 // packing can fail for different reasons, encoded in small ints which are
 // returned by packToBuffer:

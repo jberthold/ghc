@@ -336,21 +336,21 @@ void traceKillProcess_(StgWord pid);
     if (RTS_UNLIKELY(TRACE_sched)) {                    \
       traceAssignThreadToProcessEvent_(cap, tid, pid);  \
     }
-void traceAssignThreadToProcessEvent_(Capability *cap, nat tid, StgWord pid);
+void traceAssignThreadToProcessEvent_(Capability *cap, StgThreadID tid, StgWord pid);
 
 
 #define traceCreateMachine(pe, time, ticks)       \
     if (RTS_UNLIKELY(TRACE_sched)) {        \
       traceCreateMachine_(pe, time, ticks);       \
     }
-void traceCreateMachine_ (nat pe, StgWord64 time, StgWord64 ticks);
+void traceCreateMachine_ (PEId pe, StgWord64 time, StgWord64 ticks);
 
 
 #define traceKillMachine(pe)        \
     if (RTS_UNLIKELY(TRACE_sched)) {   \
       traceKillMachine_(pe);        \
     }
-void traceKillMachine_(nat pe);
+void traceKillMachine_(PEId pe);
 
 
 #define traceSendMessageEvent(mstag, buf)      \

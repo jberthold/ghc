@@ -41,12 +41,13 @@ typedef struct StgTSO_       StgTSO;
 */
 
 // aliases
-typedef int           OpCode;
+typedef uint32_t OpCode;
+typedef uint32_t PEId;
 
 // a port type, stands for an inport (pe, proc,inport->id), an outport
 // (pe,proc,tso->id) and processes (pe, proc, NULL)
 typedef struct Port_ {
-  nat machine;
+  PEId    machine;
   StgWord process;
   StgWord id;
 } Port;
@@ -58,9 +59,9 @@ typedef struct rtsPackBuffer_ {
     Port                 sender;
     Port                 receiver;
     // for data messages only,
-    StgInt /* nat */     id;            // currently unused
-    StgInt /* nat */     size;          // payload size in units of StgWord
-    StgInt /* nat */     unpacked_size; // currently unused
+    StgInt               id;            // currently unused
+    StgInt               size;          // payload size in units of StgWord
+    StgInt               unpacked_size; // currently unused
     StgWord              buffer[];      // payload
 } rtsPackBuffer;
 
