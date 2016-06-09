@@ -33,15 +33,15 @@
  * thisPE - nat: logical address of this PE btw. 1 and nPEs
  * IAmMainThread - rtsBool: indicating main PE (thisPE == 1)
  */
-nat nPEs = 0;
-nat thisPE = 0;
+PEId nPEs = 0;
+PEId thisPE = 0;
 rtsBool IAmMainThread = rtsFalse;
 
 /* shutdown counter */
-nat finishRecvd = 0;
+PEId finishRecvd = 0;
 
 /* system state, to avoid shutdown problems in case of errors */
-nat mp_state = MP_NOT_STARTED;
+uint8_t mp_state = MP_NOT_STARTED;
 
 /* All processes create their input mail slots when going through
  * here. All slots use the following name pattern:
@@ -56,7 +56,7 @@ char slotPrefix[252] = "";
 
 /* this function uses slotPrefix to create a slot name following the
    given pattern, in the (256 char pre-allocated) slotName */
-rtsBool mkSlotName(char slotName[], nat proc);
+rtsBool mkSlotName(char slotName[], PEId proc);
 
 /* this will be the array of handles (write end for sending) */
 HANDLE *mailslot;
@@ -68,9 +68,9 @@ HANDLE mySlot;
    received in one piece. Therefore, make an internal type and copy
    all data from messages */
 typedef struct SlotMsg_ {
-  nat proc;  // sender
-  char tag;  // message tag ("PEOpCode")
-  char data[];
+  PEId proc;  // sender
+  uint8_t tag;  // message tag ("PEOpCode")
+  uint8_t data[];
 } SlotMsg;
 
 /* this is data space to copy messages (proc, tag, DATASPACEWORDS words) */
@@ -80,7 +80,7 @@ SlotMsg* msg;
 static char* mkCmdLineString(int argc, char ** argv);
 
 /* process argv to detect and remove the -N<num> argument */
-nat setnPEsArg(int *argc, char **argv);
+PEId setnPEsArg(int *argc, char **argv);
 
 /**************************************************************
  * Startup and Shutdown routines (used inside ParInit.c only) */
@@ -202,7 +202,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
       char *argsTmp = stgMallocBytes(strlen(cmdLine)+1, "cmdLine");
       strcpy(argsTmp, cmdLine);
 
-      CreateProcess(NULL, cmdLine, NULL, NULL,
+      CreateProcess(NULL, argsTmp, NULL, NULL,
                     TRUE, 0, NULL, NULL, &si, &pi[i-2]);
 
       free(argsTmp);
@@ -240,7 +240,7 @@ rtsBool MP_sync(void) {
 
   BOOL fRes;
   DWORD rwCount;
-  nat i;
+  PEId i;
 
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_sync\n"));
@@ -254,7 +254,7 @@ rtsBool MP_sync(void) {
                                   + DATASPACEWORDS*sizeof(StgWord), "Slot");
 
   if (IAmMainThread) {
-    nat proc;
+    PEId proc;
 
     /* We could rule out that we send messages to ourselves.
      * DataComms does that for DATA and HEAD messages at the moment,
@@ -387,7 +387,7 @@ rtsBool MP_quit(int isError) {
   StgWord *data;
   DWORD rwCount;
   BOOL fRes;
-  nat i;
+  PEId i;
 
   IF_PAR_DEBUG(mpcomm, debugBelch("MP_quit (%i%s)\n",
                                   isError, isError?": ERROR!":"" ));
@@ -512,7 +512,7 @@ rtsBool MP_quit(int isError) {
  *   rtsBool: success or failure inside comm. subsystem
  */
 
-rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length) {
+rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length) {
   /*
    * use the respective slot to send out the data (as a byte string)
    *
@@ -532,7 +532,7 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length) {
   IF_PAR_DEBUG(mpcomm, debugBelch("MP_send(%s) to %i\n",
                                   getOpName(tag), node));
 
-  ASSERT(node >= 1 && node <= (int) nPEs);
+  ASSERT(node >= 1 && node <= nPEs);
 
   msg->proc = thisPE;
   msg->tag  = tag;
@@ -574,8 +574,8 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length) {
  * Returns:
  *   int: amount of data (in bytes) received with message
  */
-int MP_recv(int maxlength, StgWord8 *destination, // IN
-            OpCode *code, nat *sender) {          // OUT
+int MP_recv(uint32_t maxlength, StgWord8 *destination, // IN
+            OpCode *code, PEId *sender) {              // OUT
   /* use GetMailslotInfo to determine whether messages are waiting,
    * receive the first one (unless size is too big, in which case
    * the entire system fails).
@@ -585,7 +585,7 @@ int MP_recv(int maxlength, StgWord8 *destination, // IN
   BOOL fResult;
 
   IF_PAR_DEBUG(mpcomm, debugBelch("MP_recv\n"));
-  ASSERT((nat) maxlength <= DATASPACEWORDS*sizeof(StgWord));
+  ASSERT(maxlength <= DATASPACEWORDS*sizeof(StgWord));
 
   fResult = ReadFile(mySlot, msg, sizeof(SlotMsg) + maxlength,
                      &msgBytes, NULL);
@@ -670,7 +670,7 @@ static char* mkCmdLineString(int argc, char ** argv) {
  *    IN  proc     (proc number)
  * Returns rtsFalse on failures (to be caught by caller)
  */
-rtsBool mkSlotName(char slotName[], nat proc) {
+rtsBool mkSlotName(char slotName[], PEId proc) {
   char procStr[4];
 
   if (proc > 999) return rtsFalse;
@@ -690,11 +690,11 @@ rtsBool mkSlotName(char slotName[], nat proc) {
  * argv, and argc reduced.
  * Returns the nPEs value found, 0 if nothing found.
  */
-nat setnPEsArg(int *argc, char **argv) {
+PEId setnPEsArg(int *argc, char **argv) {
   char **currArg, **lastArg;
   rtsBool inRTS, finishedRTS;
   int i;
-  nat pes;
+  PEId pes;
 
   /* useless, as this routine is the place where we first set the debug flag..
   IF_PAR_DEBUG(mpcomm,
@@ -711,9 +711,9 @@ nat setnPEsArg(int *argc, char **argv) {
       // the PE flag we want. Parse it and only advance currArg, decrease argc
       if ((*currArg)[2]=='-') { // negative number, debug mode
         RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
-        pes = (nat)atoi((*currArg)+3);
+        pes = (PEId)atoi((*currArg)+3);
       } else {
-        pes = (nat)atoi((*currArg)+2);
+        pes = (PEId)atoi((*currArg)+2);
       }
       IF_PAR_DEBUG(mpcomm,
                    debugBelch("parsing flag %s, setting nPE=%u\n",
