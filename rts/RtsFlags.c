@@ -15,6 +15,7 @@
 #include "RtsFlags.h"
 #include "sm/OSMem.h"
 #include "hooks/Hooks.h"
+#include "Capability.h"
 
 #ifdef HAVE_CTYPE_H
 #include <ctype.h>
@@ -181,8 +182,9 @@ void initRtsFlagsDefaults(void)
 #endif
     RtsFlags.GcFlags.heapBase           = 0;   /* means don't care */
     RtsFlags.GcFlags.allocLimitGrace    = (100*1024) / BLOCK_SIZE;
+    RtsFlags.GcFlags.numa               = rtsFalse;
+    RtsFlags.GcFlags.numaMask           = 1;
 
-#ifdef DEBUG
     RtsFlags.DebugFlags.scheduler       = rtsFalse;
     RtsFlags.DebugFlags.interpreter     = rtsFalse;
     RtsFlags.DebugFlags.weak            = rtsFalse;
@@ -198,7 +200,7 @@ void initRtsFlagsDefaults(void)
     RtsFlags.DebugFlags.squeeze         = rtsFalse;
     RtsFlags.DebugFlags.hpc             = rtsFalse;
     RtsFlags.DebugFlags.sparks          = rtsFalse;
-#endif
+    RtsFlags.DebugFlags.numa            = rtsFalse;
 
 #if defined(PROFILING)
     RtsFlags.CcFlags.doCostCentres      = 0;
@@ -244,7 +246,7 @@ void initRtsFlagsDefaults(void)
     RtsFlags.MiscFlags.linkerMemBase    = 0;
 
 #ifdef THREADED_RTS
-    RtsFlags.ParFlags.nNodes            = 1;
+    RtsFlags.ParFlags.nCapabilities     = 1;
     RtsFlags.ParFlags.migrate           = rtsTrue;
     RtsFlags.ParFlags.parGcEnabled      = 1;
     RtsFlags.ParFlags.parGcGen          = 0;
@@ -449,6 +451,14 @@ usage_text[] = {
 "  -qi<n>    If a processor has been idle for the last <n> GCs, do not",
 "            wake it up for a non-load-balancing parallel GC.",
 "            (0 disables,  default: 0)",
+"  --numa[=<node_mask>]",
+"            Use NUMA, nodes given by <node_mask> (default: off)",
+#if defined(DEBUG)
+"  --debug-numa[=<num_nodes>]",
+"            Pretend NUMA: like --numa, but without the system calls.",
+"            Can be used on non-NUMA systems for debugging.",
+"",
+#endif
 #endif
 "  --install-signal-handlers=<yes|no>",
 "            Install signal handlers (default: yes)",
@@ -817,6 +827,52 @@ error = rtsTrue;
                       printRtsInfo();
                       stg_exit(0);
                   }
+#if defined(THREADED_RTS)
+                  else if (!strncmp("numa", &rts_argv[arg][2], 4)) {
+                      OPTION_SAFE;
+                      StgWord mask;
+                      if (rts_argv[arg][6] == '=') {
+                          mask = (StgWord)strtol(rts_argv[arg]+7,
+                                                 (char **) NULL, 10);
+                      } else {
+                          mask = (StgWord)~0;
+                      }
+                      if (!osNumaAvailable()) {
+                          errorBelch("%s: OS reports NUMA is not available",
+                                     rts_argv[arg]);
+                          error = rtsTrue;
+                          break;
+                      }
+
+                      RtsFlags.GcFlags.numa = rtsTrue;
+                      RtsFlags.GcFlags.numaMask = mask;
+                  }
+#endif
+#if defined(DEBUG) && defined(THREADED_RTS)
+                  else if (!strncmp("debug-numa", &rts_argv[arg][2], 10)) {
+                      OPTION_SAFE;
+                      size_t nNodes;
+                      if (rts_argv[arg][12] == '=' &&
+                          isdigit(rts_argv[arg][13])) {
+                          nNodes = (StgWord)strtol(rts_argv[arg]+13,
+                                                 (char **) NULL, 10);
+                      } else {
+                          errorBelch("%s: missing number of nodes",
+                                     rts_argv[arg]);
+                          error = rtsTrue;
+                          break;
+                      }
+                      if (nNodes > MAX_NUMA_NODES) {
+                          errorBelch("%s: Too many NUMA nodes (max %d)",
+                                     rts_argv[arg], MAX_NUMA_NODES);
+                          error = rtsTrue;
+                      } else {
+                          RtsFlags.GcFlags.numa = rtsTrue;
+                          RtsFlags.DebugFlags.numa = rtsTrue;
+                          RtsFlags.GcFlags.numaMask = (1<<nNodes) - 1;
+                      }
+                  }
+#endif
                   else {
                       OPTION_SAFE;
                       errorBelch("unknown RTS option: %s",rts_argv[arg]);
@@ -928,20 +984,20 @@ error = rtsTrue;
                 if (strncmp("maxN", &rts_argv[arg][1], 4) == 0) {
                   OPTION_SAFE;
                   THREADED_BUILD_ONLY(
-                    int nNodes;
+                    int nCapabilities;
                     int proc = (int)getNumberOfProcessors();
 
-                    nNodes = strtol(rts_argv[arg]+5, (char **) NULL, 10);
-                    if (nNodes > proc) { nNodes = proc; }
+                    nCapabilities = strtol(rts_argv[arg]+5, (char **) NULL, 10);
+                    if (nCapabilities > proc) { nCapabilities = proc; }
 
-                    if (nNodes <= 0) {
+                    if (nCapabilities <= 0) {
                       errorBelch("bad value for -maxN");
                       error = rtsTrue;
                     }
 #if defined(PROFILING)
-                    RtsFlags.ParFlags.nNodes = 1;
+                    RtsFlags.ParFlags.nCapabilities = 1;
 #else
-                    RtsFlags.ParFlags.nNodes = (uint32_t)nNodes;
+                    RtsFlags.ParFlags.nCapabilities = (uint32_t)nCapabilities;
 #endif
                   ) break;
                 } else {
@@ -1145,26 +1201,26 @@ error = rtsTrue;
                 // PARALLEL_RTS uses this flag in a different way (for now)
                 if (rts_argv[arg][2] == '\0') {
 #if defined(PROFILING)
-                    RtsFlags.ParFlags.nNodes = 1;
+                    RtsFlags.ParFlags.nCapabilities = 1;
 #else
-                    RtsFlags.ParFlags.nNodes = getNumberOfProcessors();
+                    RtsFlags.ParFlags.nCapabilities = getNumberOfProcessors();
 #endif
                 } else {
-                    int nNodes;
+                    int nCapabilities;
                     OPTION_SAFE; /* but see extra checks below... */
 
-                    nNodes = strtol(rts_argv[arg]+2, (char **) NULL, 10);
+                    nCapabilities = strtol(rts_argv[arg]+2, (char **) NULL, 10);
 
-                    if (nNodes <= 0) {
+                    if (nCapabilities <= 0) {
                       errorBelch("bad value for -N");
                       error = rtsTrue;
                     }
                     if (rtsOptsEnabled == RtsOptsSafeOnly &&
-                      nNodes > (int)getNumberOfProcessors()) {
+                      nCapabilities > (int)getNumberOfProcessors()) {
                       errorRtsOptsDisabled("Using large values for -N is not allowed by default. %s");
                       stg_exit(EXIT_FAILURE);
                     }
-                    RtsFlags.ParFlags.nNodes = (uint32_t)nNodes;
+                    RtsFlags.ParFlags.nCapabilities = (uint32_t)nCapabilities;
                 }
                 ) break;
 
@@ -1502,7 +1558,7 @@ static void normaliseRtsOpts (void)
     }
 
 #ifdef THREADED_RTS
-    if (RtsFlags.ParFlags.parGcThreads > RtsFlags.ParFlags.nNodes) {
+    if (RtsFlags.ParFlags.parGcThreads > RtsFlags.ParFlags.nCapabilities) {
         errorBelch("GC threads (-qn) must be between 1 and the value of -N");
         errorUsage();
     }

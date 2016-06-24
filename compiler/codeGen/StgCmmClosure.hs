@@ -292,7 +292,7 @@ mkLFImported id
 --                Dynamic pointer tagging
 -----------------------------------------------------
 
-type ConTagZ = Int      -- A *zero-indexed* contructor tag
+type ConTagZ = Int      -- A *zero-indexed* constructor tag
 
 type DynTag = Int       -- The tag on a *pointer*
                         -- (from the dynamic-tagging paper)
@@ -970,15 +970,15 @@ getTyDescription ty
       TyVarTy _              -> "*"
       AppTy fun _            -> getTyDescription fun
       TyConApp tycon _       -> getOccString tycon
-      ForAllTy (Anon _) res  -> '-' : '>' : fun_result res
-      ForAllTy (Named {}) ty -> getTyDescription ty
+      FunTy _ res            -> '-' : '>' : fun_result res
+      ForAllTy _  ty         -> getTyDescription ty
       LitTy n                -> getTyLitDescription n
       CastTy ty _            -> getTyDescription ty
       CoercionTy co          -> pprPanic "getTyDescription" (ppr co)
     }
   where
-    fun_result (ForAllTy (Anon _) res) = '>' : fun_result res
-    fun_result other                   = getTyDescription other
+    fun_result (FunTy _ res) = '>' : fun_result res
+    fun_result other         = getTyDescription other
 
 getTyLitDescription :: TyLit -> String
 getTyLitDescription l =

@@ -46,13 +46,14 @@ import CoreSyn     ( isOrphan )
 import FunDeps
 import TcMType
 import Type
+import TyCoRep     ( TyBinder(..) )
 import TcType
 import HscTypes
 import Class( Class )
 import MkId( mkDictFunId )
 import Id
 import Name
-import Var      ( EvVar, mkTyVar )
+import Var      ( EvVar, mkTyVar, TyVarBndr(..) )
 import DataCon
 import TyCon
 import VarEnv
@@ -172,7 +173,8 @@ topInstantiateInferred :: CtOrigin -> TcSigmaType
 -- then  wrap e :: rho
 topInstantiateInferred = top_instantiate False
 
-top_instantiate :: Bool   -- True <=> instantiate *all* variables
+top_instantiate :: Bool   -- True  <=> instantiate *all* variables
+                          -- False <=> instantiate only the invisible ones
                 -> CtOrigin -> TcSigmaType -> TcM (HsWrapper, TcRhoType)
 top_instantiate inst_all orig ty
   | not (null binders && null theta)
@@ -180,16 +182,21 @@ top_instantiate inst_all orig ty
              (inst_theta, leave_theta)
                | null leave_bndrs = (theta, [])
                | otherwise        = ([], theta)
-       ; (subst, inst_tvs') <- newMetaTyVars (map (binderVar "top_inst") inst_bndrs)
-       ; let inst_theta' = substThetaUnchecked subst inst_theta
-             sigma'      = substTyAddInScope subst (mkForAllTys leave_bndrs $
-                                                    mkFunTys leave_theta rho)
+             in_scope    = mkInScopeSet (tyCoVarsOfType ty)
+             empty_subst = mkEmptyTCvSubst in_scope
+             inst_tvs    = binderVars inst_bndrs
+       ; (subst, inst_tvs') <- mapAccumLM newMetaTyVarX empty_subst inst_tvs
+       ; let inst_theta' = substTheta subst inst_theta
+             sigma'      = substTy subst (mkForAllTys leave_bndrs $
+                                          mkFunTys leave_theta rho)
 
        ; wrap1 <- instCall orig (mkTyVarTys inst_tvs') inst_theta'
        ; traceTc "Instantiating"
                  (vcat [ text "all tyvars?" <+> ppr inst_all
                        , text "origin" <+> pprCtOrigin orig
                        , text "type" <+> ppr ty
+                       , text "theta" <+> ppr theta
+                       , text "leave_bndrs" <+> ppr leave_bndrs
                        , text "with" <+> ppr inst_tvs'
                        , text "theta:" <+>  ppr inst_theta' ])
 
@@ -206,7 +213,7 @@ top_instantiate inst_all orig ty
 
   | otherwise = return (idHsWrapper, ty)
   where
-    (binders, phi) = tcSplitNamedPiTys ty
+    (binders, phi) = tcSplitForAllTyVarBndrs ty
     (theta, rho)   = tcSplitPhiTy phi
 
     should_inst bndr
@@ -361,13 +368,17 @@ tcInstBindersX subst mb_kind_info bndrs
 -- | Used only in *types*
 tcInstBinderX :: Maybe (VarEnv Kind)
               -> TCvSubst -> TyBinder -> TcM (TCvSubst, TcType)
-tcInstBinderX mb_kind_info subst binder
-  | Just tv <- binderVar_maybe binder
+tcInstBinderX mb_kind_info subst (Named (TvBndr tv _))
   = case lookup_tv tv of
       Just ki -> return (extendTvSubstAndInScope subst tv ki, ki)
       Nothing -> do { (subst', tv') <- newMetaTyVarX subst tv
                     ; return (subst', mkTyVarTy tv') }
+  where
+    lookup_tv tv = do { env <- mb_kind_info   -- `Maybe` monad
+                      ; lookupVarEnv env tv }
 
+
+tcInstBinderX _ subst (Anon ty)
      -- This is the *only* constraint currently handled in types.
   | Just (mk, role, k1, k2) <- get_pred_tys_maybe substed_ty
   = do { let origin = TypeEqOrigin { uo_actual   = k1
@@ -376,7 +387,7 @@ tcInstBinderX mb_kind_info subst binder
        ; co <- case role of
                  Nominal          -> unifyKind noThing k1 k2
                  Representational -> emitWantedEq origin KindLevel role k1 k2
-                 Phantom          -> pprPanic "tcInstBinderX Phantom" (ppr binder)
+                 Phantom          -> pprPanic "tcInstBinderX Phantom" (ppr ty)
        ; arg' <- mk co k1 k2
        ; return (subst, arg') }
 
@@ -391,14 +402,11 @@ tcInstBinderX mb_kind_info subst binder
 
 
   | otherwise
-  = do { ty <- newFlexiTyVarTy substed_ty
-       ; return (subst, ty) }
+  = do { tv_ty <- newFlexiTyVarTy substed_ty
+       ; return (subst, tv_ty) }
 
   where
-    substed_ty = substTy subst (binderType binder)
-
-    lookup_tv tv = do { env <- mb_kind_info   -- `Maybe` monad
-                      ; lookupVarEnv env tv }
+    substed_ty = substTy subst ty
 
       -- handle boxed equality constraints, because it's so easy
     get_pred_tys_maybe ty

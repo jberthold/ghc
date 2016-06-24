@@ -69,7 +69,7 @@ test('T2783', [ omit_ways(['ghci']), exit_code(1) ], compile_and_run, [''])
 test('testwsdeque', [unless(in_tree_compiler(), skip),
                     req_smp, # needs atomic 'cas'
                     c_src, only_ways(['threaded1', 'threaded2'])],
-                    compile_and_run, ['-I../../../rts'])
+                    compile_and_run, [''])
 
 test('T3236', [c_src, only_ways(['normal','threaded1']), exit_code(1)], compile_and_run, [''])
 
@@ -83,6 +83,8 @@ test('stack003', [ omit_ways('ghci'), # uses unboxed tuples
                  compile_and_run, [''])
 
 test('atomicinc', [ c_src, only_ways(['normal','threaded1', 'threaded2']) ], compile_and_run, [''])
+test('atomicxchg', [ c_src, only_ways(['threaded1', 'threaded2']) ],
+compile_and_run, [''])
 
 test('T3424', # it's slow:
               [ when(fast(), skip), only_ways(['normal','threaded1','ghci']) ],
@@ -171,8 +173,12 @@ def checkDynAsm(actual_file, normaliser):
 # These should have extra_clean() arguments, but I need
 # to somehow extract out the name of DLLs to do that
 
-test('T5435_v_asm', when(arch('powerpc64'), expect_broken(11259)), run_command, ['$MAKE -s --no-print-directory T5435_v_asm'])
-test('T5435_v_gcc', when(arch('powerpc64'), expect_broken(11259)), run_command, ['$MAKE -s --no-print-directory T5435_v_gcc'])
+test('T5435_v_asm', when(arch('powerpc64') or arch('powerpc64le'),
+     expect_broken(11259)), 
+     run_command, ['$MAKE -s --no-print-directory T5435_v_asm'])
+test('T5435_v_gcc', when(arch('powerpc64') or arch('powerpc64le'),
+     expect_broken(11259)),
+     run_command, ['$MAKE -s --no-print-directory T5435_v_gcc'])
 test('T5435_dyn_asm', check_stdout(checkDynAsm), run_command, ['$MAKE -s --no-print-directory T5435_dyn_asm'])
 test('T5435_dyn_gcc', normal , run_command, ['$MAKE -s --no-print-directory T5435_dyn_gcc'])
 
@@ -229,7 +235,7 @@ test('T7919',
 test('T8035', normal, compile_and_run, [''])
 
 test('linker_unload',
-     [ when(arch('powerpc64'), expect_broken(11259)),
+     [ when(arch('powerpc64') or arch('powerpc64le'), expect_broken(11259)),
        extra_clean(['Test.o','Test.hi', 'linker_unload']) ],
      run_command,
      ['$MAKE -s --no-print-directory linker_unload'])
@@ -260,7 +266,7 @@ test('T9078', [ omit_ways(threaded_ways) ], compile_and_run, ['-with-rtsopts="-D
 test('T10017', [ when(opsys('mingw32'), skip)
                , only_ways(threaded_ways), extra_run_opts('+RTS -N2 -RTS') ], compile_and_run, [''])
 
-test('T11108', normal, compile_and_run, [''])
+test('T11108', expect_broken_for(11108, ['ghci', 'hpc']), compile_and_run, [''])
 
 test('rdynamic', [ unless(opsys('linux') or opsys('mingw32'), skip)
                  # this needs runtime infrastructure to do in ghci:
@@ -269,9 +275,13 @@ test('rdynamic', [ unless(opsys('linux') or opsys('mingw32'), skip)
                  ],
      compile_and_run, ['-rdynamic -package ghc'])
 
-test('GcStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
+test('GcStaticPointers',
+     [when(doing_ghci(), extra_hc_opts('-fobject-code')),
+      expect_broken_for(12207, opt_ways)],
      compile_and_run, [''])
-test('ListStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
+test('ListStaticPointers',
+     [when(doing_ghci(), extra_hc_opts('-fobject-code')),
+      expect_broken_for(12207, opt_ways)],
      compile_and_run, [''])
 
 # 251 = RTS exit code for "out of memory"
@@ -336,8 +346,14 @@ test('T10728', [extra_run_opts('+RTS -maxN3 -RTS'), only_ways(['threaded2'])],
 test('T9405', [extra_clean(['T9405.ticky'])],
               run_command, ['$MAKE -s --no-print-directory T9405'])
 
+test('T11788', when(ghc_dynamic(), skip),
+              run_command, ['$MAKE -s --no-print-directory T11788'])
+
 test('T10296a', [extra_clean(['T10296a.o','T10296a_c.o','T10296a'])],
                 run_command,
                 ['$MAKE -s --no-print-directory T10296a'])
 
 test('T10296b', [only_ways('threaded2')], compile_and_run, [''])
+
+test('numa001', [ extra_run_opts('8'), extra_ways(['debug_numa']) ]
+                , compile_and_run, [''])

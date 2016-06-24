@@ -177,13 +177,9 @@ then
 
     if test "$ghc_host_os" = "mingw32"
     then
-        if test "${OSTYPE}" = "msys"
-        then
-            WithGhc=`echo "${WithGhc}" | sed "s#^/\([a-zA-Z]\)/#\1:/#"`
-        else
-            # Canonicalise to <drive>:/path/to/ghc
-            WithGhc=`cygpath -m "${WithGhc}"`
-        fi
+        # Canonicalise to <drive>:/path/to/ghc
+        WithGhc=`cygpath -m "${WithGhc}"`
+
         echo "GHC path canonicalised to: ${WithGhc}"
     fi
 fi
@@ -366,6 +362,8 @@ then
     NM="${mingwbin}nm.exe"
     RANLIB="${mingwbin}ranlib.exe"
     OBJDUMP="${mingwbin}objdump.exe"
+    Windres="${mingwbin}windres.exe"
+    DllWrap="${mingwbin}dllwrap.exe"
     fp_prog_ar="${mingwbin}ar.exe"
 
     # NB. Download the perl binaries if required
@@ -733,7 +731,6 @@ AC_SUBST(HaveDtrace)
 AC_PATH_PROG(HSCOLOUR,HsColour)
 # HsColour is passed to Cabal, so we need a native path
 if test "$HostOS"      = "mingw32" && \
-   test "${OSTYPE}"   != "msys"    && \
    test "${HSCOLOUR}" != ""
 then
     # Canonicalise to <drive>:/path/to/gcc
@@ -1092,14 +1089,32 @@ AC_DEFINE_UNQUOTED([RTS_LINKER_USE_MMAP], [$RtsLinkerUseMmap],
 
 dnl ** Have libdw?
 dnl --------------------------------------------------------------
-AC_ARG_ENABLE(libdw,
+UseLibdw=NO
+USE_LIBDW=0
+AC_ARG_ENABLE(dwarf-unwind,
     [AC_HELP_STRING([--enable-dwarf-unwind],
         [Enable DWARF unwinding support in the runtime system via elfutils' libdw [default=no]])],
-    [AC_CHECK_LIB(dw, dwfl_attach_state, [HaveLibdw=YES], [HaveLibdw=NO])],
-    [HaveLibdw=NO]
+    [AC_CHECK_LIB(dw, dwfl_attach_state, [UseLibdw=YES], [UseLibdw=NO])],
+    [UseLibdw=NO]
 )
-AC_SUBST(HaveLibdw)
+AC_SUBST(UseLibdw)
+if test $UseLibdw = "YES" ; then
+	USE_LIBDW=1
+fi
+AC_DEFINE_UNQUOTED([USE_LIBDW], [$USE_LIBDW], [Set to 1 to use libdw])
 
+dnl ** Have libnuma?
+dnl --------------------------------------------------------------
+HaveLibNuma=0
+AC_CHECK_HEADERS([numa.h numaif.h])
+
+if test "$ac_cv_header_numa_h$ac_cv_header_numaif_h" = "yesyes" ; then
+    AC_CHECK_LIB(numa, numa_available,HaveLibNuma=1)
+fi
+AC_DEFINE_UNQUOTED([USE_LIBNUMA], [$HaveLibNuma], [Define to 1 if you have libnuma])
+
+dnl ** Documentation
+dnl --------------------------------------------------------------
 if test -n "$SPHINXBUILD"; then
     BUILD_MAN=YES
     BUILD_SPHINX_HTML=YES

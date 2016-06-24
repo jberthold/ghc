@@ -21,7 +21,10 @@ test('cgrun017', normal, compile_and_run, [''])
 test('cgrun018', normal, compile_and_run, [''])
 test('cgrun019', normal, compile_and_run, [''])
 test('cgrun020', normal, compile_and_run, [''])
-test('cgrun021', normal, compile_and_run, [''])
+
+# cgrun021 does some GC, so let's use it to test GC parameters
+test('cgrun021', extra_ways(['nursery_chunks']), compile_and_run, [''])
+
 test('cgrun022', normal, compile_and_run, [''])
 test('cgrun024', normal, compile_and_run, [''])
 test('cgrun025',
@@ -114,7 +117,9 @@ test('T8103', only_ways(['normal']), compile_and_run, [''])
 test('T7953', reqlib('random'), compile_and_run, [''])
 test('T8256', normal, compile_and_run, ['-dcore-lint -O1'])
 test('T6084',normal, compile_and_run, ['-O2'])
-test('CgStaticPointers', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
+test('CgStaticPointers',
+     [when(doing_ghci(), extra_hc_opts('-fobject-code')),
+      expect_broken_for(12207, opt_ways)],
      compile_and_run, [''])
 test('StaticArraySize', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
      compile_and_run, ['-O2'])

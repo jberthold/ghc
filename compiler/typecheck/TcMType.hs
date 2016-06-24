@@ -51,12 +51,12 @@ module TcMType (
 
   --------------------------------
   -- Instantiation
-  newMetaTyVars, newMetaTyVarX, newMetaSigTyVars,
-  newSigTyVar,
+  newMetaTyVars, newMetaTyVarX,
+  newMetaSigTyVars, newMetaSigTyVarX,
+  newSigTyVar, newWildCardX,
   tcInstType,
-  tcInstSkolTyVars, tcInstSkolTyVarsLoc, tcInstSuperSkolTyVarsX,
-  tcInstSigTyVarsLoc, tcInstSigTyVars,
-  tcInstSkolType,
+  tcInstSkolTyVars, tcInstSuperSkolTyVarsX,
+  tcInstSigTyVars,
   tcSkolDFunType, tcSuperSkolTyVars,
 
   instSkolTyCoVars, freshenTyVarBndrs, freshenCoVarBndrsX,
@@ -71,9 +71,10 @@ module TcMType (
   zonkTyCoVarsAndFV, zonkTcTypeAndFV,
   zonkTyCoVarsAndFVList,
   zonkTcTypeAndSplitDepVars, zonkTcTypesAndSplitDepVars,
-  zonkQuantifiedTyVar, zonkQuantifiedTyVarOrType,
+  zonkQuantifiedTyVar,
   quantifyTyVars, quantifyZonkedTyVars,
-  zonkTcTyCoVarBndr, zonkTcTyBinder, zonkTcType, zonkTcTypes, zonkCo,
+  zonkTcTyCoVarBndr, zonkTcTyBinder, zonkTyConBinder,
+  zonkTcType, zonkTcTypes, zonkCo,
   zonkTyCoVarKind, zonkTcTypeMapper,
 
   zonkEvVar, zonkWC, zonkSimples, zonkId, zonkCt, zonkSkolemInfo,
@@ -87,6 +88,7 @@ module TcMType (
 import TyCoRep
 import TcType
 import Type
+import TyCon( TyConBinder )
 import Kind
 import Coercion
 import Class
@@ -433,11 +435,11 @@ inferTypeToType u tc_lvl ki ref
 
 tcInstType :: ([TyVar] -> TcM (TCvSubst, [TcTyVar]))
                    -- ^ How to instantiate the type variables
-           -> TcType                                  -- ^ Type to instantiate
-           -> TcM ([TcTyVar], TcThetaType, TcType)  -- ^ Result
+           -> Id                                            -- ^ Type to instantiate
+           -> TcM ([(Name, TcTyVar)], TcThetaType, TcType)  -- ^ Result
                 -- (type vars, preds (incl equalities), rho)
-tcInstType inst_tyvars ty
-  = case tcSplitForAllTys ty of
+tcInstType inst_tyvars id
+  = case tcSplitForAllTys (idType id) of
         ([],    rho) -> let     -- There may be overloading despite no type variables;
                                 --      (?x :: Int) => Int -> Int
                                 (theta, tau) = tcSplitPhiTy rho
@@ -446,12 +448,15 @@ tcInstType inst_tyvars ty
 
         (tyvars, rho) -> do { (subst, tyvars') <- inst_tyvars tyvars
                             ; let (theta, tau) = tcSplitPhiTy (substTyAddInScope subst rho)
-                            ; return (tyvars', theta, tau) }
+                                  tv_prs       = map tyVarName tyvars `zip` tyvars'
+                            ; return (tv_prs, theta, tau) }
 
-tcSkolDFunType :: Type -> TcM ([TcTyVar], TcThetaType, TcType)
+tcSkolDFunType :: DFunId -> TcM ([TcTyVar], TcThetaType, TcType)
 -- Instantiate a type signature with skolem constants.
 -- We could give them fresh names, but no need to do so
-tcSkolDFunType ty = tcInstType tcInstSuperSkolTyVars ty
+tcSkolDFunType dfun
+  = do { (tv_prs, theta, tau) <- tcInstType tcInstSuperSkolTyVars dfun
+       ; return (map snd tv_prs, theta, tau) }
 
 tcSuperSkolTyVars :: [TyVar] -> (TCvSubst, [TcTyVar])
 -- Make skolem constants, but do *not* give them new names, as above
@@ -466,11 +471,6 @@ tcSuperSkolTyVar subst tv
   where
     kind   = substTyUnchecked subst (tyVarKind tv)
     new_tv = mkTcTyVar (tyVarName tv) kind superSkolemTv
-
--- Wrappers
--- we need to be able to do this from outside the TcM monad:
-tcInstSkolTyVarsLoc :: SrcSpan -> [TyVar] -> TcRnIf gbl lcl (TCvSubst, [TcTyVar])
-tcInstSkolTyVarsLoc loc = instSkolTyCoVars (mkTcSkolTyVar loc False)
 
 -- | Given a list of @['TyVar']@, skolemize the type variables,
 -- returning a substitution mapping the original tyvars to the
@@ -501,23 +501,9 @@ mkTcSkolTyVar loc overlappable uniq old_name kind
               kind
               (SkolemTv overlappable)
 
-tcInstSigTyVarsLoc :: SrcSpan -> [TyVar]
-                   -> TcRnIf gbl lcl (TCvSubst, [TcTyVar])
--- We specify the location
-tcInstSigTyVarsLoc loc = instSkolTyCoVars (mkTcSkolTyVar loc False)
-
-tcInstSigTyVars :: [TyVar] -> TcRnIf gbl lcl (TCvSubst, [TcTyVar])
--- Get the location from the TyVar itself, not the monad
-tcInstSigTyVars
-  = instSkolTyCoVars mk_tv
-  where
-    mk_tv uniq old_name kind
-       = mkTcTyVar (setNameUnique old_name uniq) kind (SkolemTv False)
-
-tcInstSkolType :: TcType -> TcM ([TcTyVar], TcThetaType, TcType)
--- Instantiate a type with fresh skolem constants
--- Binding location comes from the monad
-tcInstSkolType ty = tcInstType tcInstSkolTyVars ty
+tcInstSigTyVars :: SrcSpan -> [TyVar]
+                -> TcRnIf gbl lcl (TCvSubst, [TcTyVar])
+tcInstSigTyVars loc = instSkolTyCoVars (mkTcSkolTyVar loc False)
 
 ------------------
 freshenTyVarBndrs :: [TyVar] -> TcRnIf gbl lcl (TCvSubst, [TyVar])
@@ -793,13 +779,18 @@ newMetaSigTyVarX :: TCvSubst -> TyVar -> TcM (TCvSubst, TcTyVar)
 -- Just like newMetaTyVarX, but make a SigTv
 newMetaSigTyVarX subst tyvar = new_meta_tv_x SigTv subst tyvar
 
+newWildCardX :: TCvSubst -> TyVar -> TcM (TCvSubst, TcTyVar)
+newWildCardX subst tv
+  = do { new_tv <- newAnonMetaTyVar TauTv (substTy subst (tyVarKind tv))
+       ; return (extendTvSubstWithClone subst tv new_tv, new_tv) }
+
 new_meta_tv_x :: MetaInfo -> TCvSubst -> TyVar -> TcM (TCvSubst, TcTyVar)
 new_meta_tv_x info subst tyvar
   = do  { uniq <- newUnique
         ; details <- newMetaDetails info
         ; let name   = mkSystemName uniq (getOccName tyvar)
                        -- See Note [Name of an instantiated type variable]
-              kind   = substTyUnchecked subst (tyVarKind tyvar)
+              kind   = substTy subst (tyVarKind tyvar)
               new_tv = mkTcTyVar name kind details
               subst1 = extendTvSubstWithClone subst tyvar new_tv
         ; return (subst1, new_tv) }
@@ -945,23 +936,9 @@ zonkQuantifiedTyVar :: Bool     -- True  <=> this is a kind var and -XNoPolyKind
 --    * RuntimeRep variables: we never quantify over these
 
 zonkQuantifiedTyVar default_kind tv
-  = do { mb_tv' <- zonkQuantifiedTyVarOrType default_kind tv
-       ; return (case mb_tv' of
-                   Left x  -> Just x    -- Quantify over this
-                   Right _ -> Nothing)  -- Do not quantify over this
-       }
-
--- | Like zonkQuantifiedTyVar, but if zonking reveals that the tyvar
--- should become a type (when defaulting a RuntimeRep var to PtrRepLifted), it
--- returns the type instead.
-zonkQuantifiedTyVarOrType :: Bool -- True  <=> this is a kind var and -XNoPolyKinds
-                                  -- False <=> not a kind var or -XPolyKindsBool
-                          -> TcTyVar
-                          -> TcM (Either TcTyVar TcType)
-zonkQuantifiedTyVarOrType default_kind tv
   = case tcTyVarDetails tv of
       SkolemTv {} -> do { kind <- zonkTcType (tyVarKind tv)
-                        ; return $ Left $ setTyVarKind tv kind }
+                        ; return $ Just (setTyVarKind tv kind) }
         -- It might be a skolem type variable,
         -- for example from a user type signature
 
@@ -972,19 +949,19 @@ zonkQuantifiedTyVarOrType default_kind tv
       _other -> pprPanic "zonkQuantifiedTyVar" (ppr tv) -- FlatSkol, RuntimeUnk
 
   where
-    zonk_meta_tv :: TcTyVar -> TcM (Either TcTyVar TcType)
+    zonk_meta_tv :: TcTyVar -> TcM (Maybe TcTyVar)
     zonk_meta_tv tv
       | isRuntimeRepVar tv   -- Never quantify over a RuntimeRep var
       = do { writeMetaTyVar tv ptrRepLiftedTy
-           ; return (Right ptrRepLiftedTy) }
+           ; return Nothing }
 
       | default_kind         -- -XNoPolyKinds and this is a kind var
-      = do { kind <- default_kind_var tv
-           ; return (Right kind) }
+      = do { _ <- default_kind_var tv
+           ; return Nothing }
 
       | otherwise
       = do { tv' <- skolemiseUnboundMetaTyVar tv vanillaSkolemTv
-           ; return (Left tv') }
+           ; return (Just tv') }
 
     default_kind_var :: TyVar -> TcM Type
        -- defaultKindVar is used exclusively with -XNoPolyKinds
@@ -1400,8 +1377,16 @@ zonkTcTyCoVarBndr tyvar
 
 -- | Zonk a TyBinder
 zonkTcTyBinder :: TcTyBinder -> TcM TcTyBinder
-zonkTcTyBinder (Anon ty)      = Anon <$> zonkTcType ty
-zonkTcTyBinder (Named tv vis) = Named <$> zonkTcTyCoVarBndr tv <*> pure vis
+zonkTcTyBinder (Anon ty)   = Anon  <$> zonkTcType ty
+zonkTcTyBinder (Named tvb) = Named <$> zonkTyVarBinder tvb
+
+zonkTyConBinder :: TyConBinder -> TcM TyConBinder
+zonkTyConBinder = zonkTyVarBinder
+
+zonkTyVarBinder :: TyVarBndr TyVar vis -> TcM (TyVarBndr TyVar vis)
+zonkTyVarBinder (TvBndr tv vis)
+  = do { tv' <- zonkTcTyCoVarBndr tv
+       ; return (TvBndr tv' vis) }
 
 zonkTcTyVar :: TcTyVar -> TcM TcType
 -- Simply look through all Flexis

@@ -901,7 +901,7 @@ mkEqnHelp overlap_mode tvs cls cls_tys tycon tc_args mtheta
              hidden_data_cons = not (isWiredInName (tyConName rep_tc)) &&
                                 (isAbstractTyCon rep_tc ||
                                  any not_in_scope data_con_names)
-             not_in_scope dc  = null (lookupGRE_Name rdr_env dc)
+             not_in_scope dc  = isNothing (lookupGRE_Name rdr_env dc)
 
        ; addUsedDataCons rdr_env rep_tc
        ; unless (isNothing mtheta || not hidden_data_cons)
@@ -1087,8 +1087,8 @@ inferConstraints tvs main_cls cls_tys inst_ty rep_tc rep_tc_args mkTheta
   where
     tc_binders = tyConBinders rep_tc
     choose_level bndr
-      | isNamedBinder bndr = KindLevel
-      | otherwise          = TypeLevel
+      | isNamedTyConBinder bndr = KindLevel
+      | otherwise               = TypeLevel
     t_or_ks = map choose_level tc_binders ++ repeat TypeLevel
        -- want to report *kind* errors when possible
 
@@ -1415,12 +1415,19 @@ cond_stdOK Nothing permissive (_, rep_tc)
 
     check_con :: DataCon -> Validity
     check_con con
-      | not (isVanillaDataCon con)
-      = NotValid (badCon con (text "has existentials or constraints in its type"))
+      | not (null eq_spec)
+      = bad "is a GADT"
+      | not (null ex_tvs)
+      = bad "has existential type variables in its type"
+      | not (null theta)
+      = bad "has constraints in its type"
       | not (permissive || all isTauTy (dataConOrigArgTys con))
-      = NotValid (badCon con (text "has a higher-rank type"))
+      = bad "has a higher-rank type"
       | otherwise
       = IsValid
+      where
+        (_, ex_tvs, eq_spec, theta, _, _) = dataConFullSig con
+        bad msg = NotValid (badCon con (text msg))
 
 no_cons_why :: TyCon -> SDoc
 no_cons_why rep_tc = quotes (pprSourceTyCon rep_tc) <+>
@@ -1928,8 +1935,8 @@ this by simplifying the RHS to a form in which
 
 Note [Deterministic simplifyInstanceContexts]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Canonicalisation uses cmpType which is nondeterministic. Sorting
-with cmpType puts the returned lists in a nondeterministic order.
+Canonicalisation uses nonDetCmpType which is nondeterministic. Sorting
+with nonDetCmpType puts the returned lists in a nondeterministic order.
 If we were to return them, we'd get class constraints in
 nondeterministic order.
 
@@ -1948,7 +1955,7 @@ Or:
 To prevent the order from being nondeterministic we only
 canonicalize when comparing and return them in the same order as
 simplifyDeriv returned them.
-See also Note [cmpType nondeterminism]
+See also Note [nonDetCmpType nondeterminism]
 -}
 
 
@@ -1999,7 +2006,7 @@ simplifyInstanceContexts infer_specs
     eqSolution a b = eqListBy (eqListBy eqType) (canSolution a) (canSolution b)
        -- Canonicalise for comparison
        -- See Note [Deterministic simplifyInstanceContexts]
-    canSolution = map (sortBy cmpType)
+    canSolution = map (sortBy nonDetCmpType)
     ------------------------------------------------------------------
     gen_soln :: DerivSpec ThetaOrigin -> TcM ThetaType
     gen_soln (DS { ds_loc = loc, ds_tvs = tyvars

@@ -164,6 +164,7 @@ import CmdLineParser
 import Constants
 import Panic
 import Util
+import UniqFM
 import Maybes
 import MonadUtils
 import qualified Pretty
@@ -633,10 +634,10 @@ instance Show SafeHaskellMode where
 instance Outputable SafeHaskellMode where
     ppr = text . show
 
-type SigOf = Map ModuleName Module
+type SigOf = ModuleNameEnv Module
 
 getSigOf :: DynFlags -> ModuleName -> Maybe Module
-getSigOf dflags n = Map.lookup n (sigOf dflags)
+getSigOf dflags n = lookupUFM (sigOf dflags) n
 
 -- | Contains not only a collection of 'GeneralFlag's but also a plethora of
 -- information relating to the compilation of a single file or GHC session
@@ -1489,7 +1490,7 @@ defaultDynFlags mySettings =
         ghcMode                 = CompManager,
         ghcLink                 = LinkBinary,
         hscTarget               = defaultHscTarget (sTargetPlatform mySettings),
-        sigOf                   = Map.empty,
+        sigOf                   = emptyUFM,
         verbosity               = 0,
         optLevel                = 0,
         debugLevel              = 0,
@@ -2038,7 +2039,7 @@ parseSigOf :: String -> SigOf
 parseSigOf str = case filter ((=="").snd) (readP_to_S parse str) of
     [(r, "")] -> r
     _ -> throwGhcException $ CmdLineError ("Can't parse -sig-of: " ++ str)
-  where parse = Map.fromList <$> sepBy parseEntry (R.char ',')
+  where parse = listToUFM <$> sepBy parseEntry (R.char ',')
         parseEntry = do
             n <- tok $ parseModuleName
             -- ToDo: deprecate this 'is' syntax?
@@ -3046,9 +3047,9 @@ dynamic_flags_deps = [
     wWarningFlagsDeps
  ++ map (mkFlag turnOff "fno-warn-" unSetWarningFlag . hideFlag)
     wWarningFlagsDeps
- ++ [ (NotDeprecated, unrecognisedWarning "W")
-    , (NotDeprecated, unrecognisedWarning "fwarn-")
-    , (NotDeprecated, unrecognisedWarning "fno-warn-") ]
+ ++ [ (NotDeprecated, unrecognisedWarning "W"),
+      (Deprecated,    unrecognisedWarning "fwarn-"),
+      (Deprecated,    unrecognisedWarning "fno-warn-") ]
  ++ map (mkFlag turnOn  "f"         setExtensionFlag  ) fLangFlagsDeps
  ++ map (mkFlag turnOff "fno-"      unSetExtensionFlag) fLangFlagsDeps
  ++ map (mkFlag turnOn  "X"         setExtensionFlag  ) xFlagsDeps
@@ -3067,7 +3068,7 @@ dynamic_flags_deps = [
 -- | This is where we handle unrecognised warning flags. We only issue a warning
 -- if -Wunrecognised-warning-flags is set. See Trac #11429 for context.
 unrecognisedWarning :: String -> Flag (CmdLineP DynFlags)
-unrecognisedWarning prefix = defFlag prefix (Prefix action)
+unrecognisedWarning prefix = defHiddenFlag prefix (Prefix action)
   where
     action :: String -> EwM (CmdLineP DynFlags) ()
     action flag = do

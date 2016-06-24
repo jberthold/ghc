@@ -165,7 +165,7 @@ solveSimpleWanteds simples
       | n `intGtLimit` limit
       = failTcS (hang (text "solveSimpleWanteds: too many iterations"
                        <+> parens (text "limit =" <+> ppr limit))
-                    2 (vcat [ text "Set limit with -fsolver-iterations=n; n=0 for no limit"
+                    2 (vcat [ text "Set limit with -fconstraint-solver-iterations=n; n=0 for no limit"
                             , text "Simples =" <+> ppr simples
                             , text "WC ="      <+> ppr wc ]))
 
@@ -1819,8 +1819,8 @@ Example, from the OutsideIn(X) paper:
        g :: forall a. Q [a] => [a] -> Int
        g x = wob x
 
-This will generate the impliation constraint:
-            Q [a] => (Q [beta], R beta [a])
+From 'g' we get the impliation constraint:
+            forall a. Q [a] => (Q [beta], R beta [a])
 If we react (Q [beta]) with its top-level axiom, we end up with a
 (P beta), which we have no way of discharging. On the other hand,
 if we react R beta [a] with the top-level we get  (beta ~ a), which
@@ -1833,7 +1833,8 @@ The partial solution is that:
   unifiable to this particular dictionary.
 
   We treat any meta-tyvar as "unifiable" for this purpose,
-  *including* untouchable ones
+  *including* untouchable ones.  But not skolems like 'a' in
+  the implication constraint above.
 
 The end effect is that, much as we do for overlapping instances, we
 delay choosing a class instance if there is a possibility of another
@@ -1877,7 +1878,8 @@ Other notes:
   and suppose we have -XNoMonoLocalBinds, so that we attempt to find the most
   general type for 'v'.  When generalising v's type we'll simplify its
   Q [alpha] constraint, but we don't have Q [a] in the 'givens', so we
-  will use the instance declaration after all. Trac #11948 was a case in point
+  will use the instance declaration after all. Trac #11948 was a case
+  in point.
 
 All of this is disgustingly delicate, so to discourage people from writing
 simplifiable class givens, we warn about signatures that contain them;#
@@ -2034,8 +2036,8 @@ doTyConApp clas ty args
 -- polymorphism, but no more.
 onlyNamedBndrsApplied :: TyCon -> [KindOrType] -> Bool
 onlyNamedBndrsApplied tc ks
- = all isNamedBinder used_bndrs &&
-   not (any isNamedBinder leftover_bndrs)
+ = all isNamedTyConBinder         used_bndrs &&
+   all (not . isNamedTyConBinder) leftover_bndrs
  where
    bndrs                        = tyConBinders tc
    (used_bndrs, leftover_bndrs) = splitAtList ks bndrs
@@ -2052,9 +2054,10 @@ doTyApp clas ty f tk
   | isForAllTy (typeKind f)
   = return NoInstance -- We can't solve until we know the ctr.
   | otherwise
-  = return $ GenInst [mk_typeable_pred clas f, mk_typeable_pred clas tk]
+  = do { traceTcS "doTyApp" (ppr clas $$ ppr ty $$ ppr f $$ ppr tk)
+       ; return $ GenInst [mk_typeable_pred clas f, mk_typeable_pred clas tk]
                      (\[t1,t2] -> EvTypeable ty $ EvTypeableTyApp t1 t2)
-                     True
+                     True }
 
 -- Emit a `Typeable` constraint for the given type.
 mk_typeable_pred :: Class -> Type -> PredType
@@ -2073,13 +2076,13 @@ doTyLit kc t = do { kc_clas <- tcLookupClass kc
 {- Note [Typeable (T a b c)]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For type applications we always decompose using binary application,
-vai doTyApp, until we get to a *kind* instantiation.  Exmaple
+via doTyApp, until we get to a *kind* instantiation.  Exmaple
    Proxy :: forall k. k -> *
 
 To solve Typeable (Proxy (* -> *) Maybe) we
   - First decompose with doTyApp,
     to get (Typeable (Proxy (* -> *))) and Typeable Maybe
-  - Then sovle (Typeable (Proxy (* -> *))) with doTyConApp
+  - Then solve (Typeable (Proxy (* -> *))) with doTyConApp
 
 If we attempt to short-cut by solving it all at once, via
 doTyCOnAPp

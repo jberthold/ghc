@@ -65,7 +65,7 @@ module HscMain
     , hscTcRnLookupRdrName
     , hscStmt, hscStmtWithLocation, hscParsedStmt
     , hscDecls, hscDeclsWithLocation
-    , hscTcExpr, hscImport, hscKcType
+    , hscTcExpr, TcRnExprMode(..), hscImport, hscKcType
     , hscParseExpr
     , hscCompileCoreExpr
     -- * Low-level exports for hooks
@@ -665,9 +665,8 @@ hscIncrementalCompile always_do_basic_recompilation_check m_tc_result
                 hm_iface = iface,
                 hm_linkable = Nothing
             })
-        Right (result, mb_old_hash) -> do
-            (status, hmi, no_change) <- case result of
-                FrontendTypecheck tc_result ->
+        Right (FrontendTypecheck tc_result, mb_old_hash) -> do
+            (status, hmi, no_change) <-
                     if hscTarget dflags /= HscNothing &&
                        ms_hsc_src mod_summary == HsSrcFile
                        then finish              hsc_env mod_summary tc_result mb_old_hash
@@ -1610,14 +1609,14 @@ hscImport hsc_env str = runInteractiveHsc hsc_env $ do
                      text "parse error in import declaration"
 
 -- | Typecheck an expression (but don't run it)
--- Returns its most general type
 hscTcExpr :: HscEnv
+          -> TcRnExprMode
           -> String -- ^ The expression
           -> IO Type
-hscTcExpr hsc_env0 expr = runInteractiveHsc hsc_env0 $ do
+hscTcExpr hsc_env0 mode expr = runInteractiveHsc hsc_env0 $ do
   hsc_env <- getHscEnv
   parsed_expr <- hscParseExpr expr
-  ioMsgMaybe $ tcRnExpr hsc_env parsed_expr
+  ioMsgMaybe $ tcRnExpr hsc_env mode parsed_expr
 
 -- | Find the kind of a type
 -- Currently this does *not* generalise the kinds of the type

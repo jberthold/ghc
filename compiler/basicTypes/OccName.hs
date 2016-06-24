@@ -60,7 +60,7 @@ module OccName (
         mkCon2TagOcc, mkTag2ConOcc, mkMaxTagOcc,
         mkClassDataConOcc, mkDictOcc, mkIPOcc,
         mkSpecOcc, mkForeignExportOcc, mkRepEqOcc,
-        mkGenD, mkGenR, mkGen1R, mkGenRCo, mkGenC, mkGenS,
+        mkGenR, mkGen1R,
         mkDataTOcc, mkDataCOcc, mkDataConWorkerOcc,
         mkSuperDictSelOcc, mkSuperDictAuxOcc,
         mkLocalOcc, mkMethodOcc, mkInstTyTcOcc,
@@ -91,7 +91,7 @@ module OccName (
         -- * The 'OccSet' type
         OccSet, emptyOccSet, unitOccSet, mkOccSet, extendOccSet,
         extendOccSetList,
-        unionOccSets, unionManyOccSets, minusOccSet, elemOccSet, occSetElts,
+        unionOccSets, unionManyOccSets, minusOccSet, elemOccSet,
         isEmptyOccSet, intersectOccSet, intersectsOccSet,
         filterOccSet,
 
@@ -112,7 +112,6 @@ import FastStringEnv
 import Outputable
 import Lexeme
 import Binary
-import Module
 import Data.Char
 import Data.Data
 
@@ -444,7 +443,6 @@ unionOccSets      :: OccSet -> OccSet -> OccSet
 unionManyOccSets  :: [OccSet] -> OccSet
 minusOccSet       :: OccSet -> OccSet -> OccSet
 elemOccSet        :: OccName -> OccSet -> Bool
-occSetElts        :: OccSet -> [OccName]
 isEmptyOccSet     :: OccSet -> Bool
 intersectOccSet   :: OccSet -> OccSet -> OccSet
 intersectsOccSet  :: OccSet -> OccSet -> Bool
@@ -459,7 +457,6 @@ unionOccSets      = unionUniqSets
 unionManyOccSets  = unionManyUniqSets
 minusOccSet       = minusUniqSet
 elemOccSet        = elementOfUniqSet
-occSetElts        = uniqSetToList
 isEmptyOccSet     = isEmptyUniqSet
 intersectOccSet   = intersectUniqSets
 intersectsOccSet s1 s2 = not (isEmptyOccSet (s1 `intersectOccSet` s2))
@@ -585,7 +582,7 @@ mkDataConWrapperOcc, mkWorkerOcc,
         mkDefaultMethodOcc,
         mkClassDataConOcc, mkDictOcc,
         mkIPOcc, mkSpecOcc, mkForeignExportOcc, mkRepEqOcc,
-        mkGenR, mkGen1R, mkGenRCo,
+        mkGenR, mkGen1R,
         mkDataTOcc, mkDataCOcc, mkDataConWorkerOcc, mkNewTyCoOcc,
         mkInstTyCoOcc, mkEqPredCoOcc, mkClassOpAuxOcc,
         mkCon2TagOcc, mkTag2ConOcc, mkMaxTagOcc,
@@ -621,32 +618,8 @@ mkTyConRepOcc occ = mk_simple_deriv varName prefix occ
            | otherwise     = "$tc"
 
 -- Generic deriving mechanism
-
--- | Generate a module-unique name, to be used e.g. while generating new names
--- for Generics types. We use module unit id to avoid name clashes when
--- package imports is used.
-mkModPrefix :: Module -> String
-mkModPrefix mod = pk ++ "_" ++ mn
-  where
-    pk = unitIdString (moduleUnitId mod)
-    mn = moduleNameString (moduleName mod)
-
-mkGenD :: Module -> OccName -> OccName
-mkGenD mod = mk_simple_deriv tcName ("D1_" ++ mkModPrefix mod ++ "_")
-
-mkGenC :: Module -> OccName -> Int -> OccName
-mkGenC mod occ m   =
-  mk_deriv tcName ("C1_" ++ show m) $
-    mkModPrefix mod ++ "_" ++ occNameString occ
-
-mkGenS :: Module -> OccName -> Int -> Int -> OccName
-mkGenS mod occ m n =
-  mk_deriv tcName ("S1_" ++ show m ++ "_" ++ show n) $
-    mkModPrefix mod ++ "_" ++ occNameString occ
-
 mkGenR   = mk_simple_deriv tcName "Rep_"
 mkGen1R  = mk_simple_deriv tcName "Rep1_"
-mkGenRCo = mk_simple_deriv tcName "CoRep_"
 
 -- data T = MkT ... deriving( Data ) needs definitions for
 --      $tT   :: Data.Generics.Basics.DataType

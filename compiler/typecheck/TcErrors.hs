@@ -1244,7 +1244,7 @@ mkCoercibleExplanation rdr_env fam_envs ty1 ty2
         | isNewTyCon tc
         , [data_con] <- tyConDataCons tc
         , let dc_name = dataConName data_con
-        , null (lookupGRE_Name rdr_env dc_name)
+        , isNothing (lookupGRE_Name rdr_env dc_name)
         = Just $ hang (text "The data constructor" <+> quotes (ppr dc_name))
                     2 (sep [ text "of newtype" <+> quotes (pprSourceTyCon tc)
                            , text "is not in scope" ])
@@ -1545,7 +1545,7 @@ suggestAddSig ctxt ty1 ty2
     inferred_bndrs = nub (get_inf ty1 ++ get_inf ty2)
     get_inf ty | Just tv <- tcGetTyVar_maybe ty
                , isSkolemTyVar tv
-               , (_, InferSkol prs) <- getSkolemInfo (cec_encl ctxt) tv
+               , InferSkol prs <- ic_info (getSkolemInfo (cec_encl ctxt) tv)
                = map fst prs
                | otherwise
                = []
@@ -1800,17 +1800,17 @@ expandSynonymsToMatch ty1 ty2 = (ty1_ret, ty2_ret)
           (t1_2', t2_2') = go t1_2 t2_2
        in (mkAppTy t1_1' t1_2', mkAppTy t2_1' t2_2')
 
-    go (ForAllTy (Anon t1_1) t1_2) (ForAllTy (Anon t2_1) t2_2) =
+    go (FunTy t1_1 t1_2) (FunTy t2_1 t2_2) =
       let (t1_1', t2_1') = go t1_1 t2_1
           (t1_2', t2_2') = go t1_2 t2_2
        in (mkFunTy t1_1' t1_2', mkFunTy t2_1' t2_2')
 
-    go (ForAllTy (Named tv1 vis1) t1) (ForAllTy (Named tv2 vis2) t2) =
+    go (ForAllTy b1 t1) (ForAllTy b2 t2) =
       -- NOTE: We may have a bug here, but we just can't reproduce it easily.
       -- See D1016 comments for details and our attempts at producing a test
       -- case. Short version: We probably need RnEnv2 to really get this right.
       let (t1', t2') = go t1 t2
-       in (ForAllTy (Named tv1 vis1) t1', ForAllTy (Named tv2 vis2) t2')
+       in (ForAllTy b1 t1', ForAllTy b2 t2')
 
     go (CastTy ty1 _) ty2 = go ty1 ty2
     go ty1 (CastTy ty2 _) = go ty1 ty2
@@ -1864,13 +1864,13 @@ expandSynonymsToMatch ty1 ty2 = (ty1_ret, ty2_ret)
       | otherwise = followExpansions tss
 
     sameShapes :: Type -> Type -> Bool
-    sameShapes AppTy{}              AppTy{}              = True
-    sameShapes (TyConApp tc1 _)     (TyConApp tc2 _)     = tc1 == tc2
-    sameShapes (ForAllTy Anon{} _)  (ForAllTy Anon{} _)  = True
-    sameShapes (ForAllTy Named{} _) (ForAllTy Named{} _) = True
-    sameShapes (CastTy ty1 _)       ty2                  = sameShapes ty1 ty2
-    sameShapes ty1                  (CastTy ty2 _)       = sameShapes ty1 ty2
-    sameShapes _                    _                    = False
+    sameShapes AppTy{}          AppTy{}          = True
+    sameShapes (TyConApp tc1 _) (TyConApp tc2 _) = tc1 == tc2
+    sameShapes (FunTy {})       (FunTy {})       = True
+    sameShapes (ForAllTy {})    (ForAllTy {})    = True
+    sameShapes (CastTy ty1 _)   ty2              = sameShapes ty1 ty2
+    sameShapes ty1              (CastTy ty2 _)   = sameShapes ty1 ty2
+    sameShapes _                _                = False
 
 sameOccExtra :: TcType -> TcType -> SDoc
 -- See Note [Disambiguating (X ~ X) errors]
@@ -2477,17 +2477,18 @@ mkAmbigMsg prepend_msg ct
 
 pprSkol :: [Implication] -> TcTyVar -> SDoc
 pprSkol implics tv
-  | (skol_tvs, skol_info) <- getSkolemInfo implics tv
   = case skol_info of
-      UnkSkol         -> pp_tv <+> text "is an unknown type variable"
+      UnkSkol         -> quotes (ppr tv) <+> text "is an unknown type variable"
       SigSkol ctxt ty -> ppr_rigid (pprSigSkolInfo ctxt
                                       (mkSpecForAllTys skol_tvs ty))
       _               -> ppr_rigid (pprSkolInfo skol_info)
   where
-    pp_tv = quotes (ppr tv)
-    ppr_rigid pp_info = hang (pp_tv <+> text "is a rigid type variable bound by")
-                           2 (sep [ pp_info
-                                  , text "at" <+> ppr (getSrcLoc tv) ])
+    Implic { ic_skols = skol_tvs, ic_info = skol_info }
+       = getSkolemInfo implics tv
+    ppr_rigid pp_info
+       = hang (quotes (ppr tv) <+> text "is a rigid type variable bound by")
+            2 (sep [ pp_info
+                   , text "at" <+> ppr (getSrcSpan tv) ])
 
 getAmbigTkvs :: Ct -> ([Var],[Var])
 getAmbigTkvs ct
@@ -2497,15 +2498,14 @@ getAmbigTkvs ct
     ambig_tkvs = filter isAmbiguousTyVar tkvs
     dep_tkv_set = tyCoVarsOfTypes (map tyVarKind tkvs)
 
-getSkolemInfo :: [Implication] -> TcTyVar -> ([TcTyVar], SkolemInfo)
+getSkolemInfo :: [Implication] -> TcTyVar -> Implication
 -- Get the skolem info for a type variable
 -- from the implication constraint that binds it
 getSkolemInfo [] tv
   = pprPanic "No skolem info:" (ppr tv)
 
 getSkolemInfo (implic:implics) tv
-  | let skols = ic_skols implic
-  , tv `elem` ic_skols implic = (skols, ic_info implic)
+  | tv `elem` ic_skols implic = implic
   | otherwise                 = getSkolemInfo implics tv
 
 -----------------------

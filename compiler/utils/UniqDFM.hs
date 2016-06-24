@@ -28,6 +28,7 @@ module UniqDFM (
         unitUDFM,
         addToUDFM,
         addToUDFM_C,
+        addListToUDFM,
         delFromUDFM,
         delListFromUDFM,
         adjustUDFM,
@@ -35,20 +36,22 @@ module UniqDFM (
         mapUDFM,
         plusUDFM,
         plusUDFM_C,
-        lookupUDFM,
+        lookupUDFM, lookupUDFM_Directly,
         elemUDFM,
         foldUDFM,
         eltsUDFM,
-        filterUDFM,
+        filterUDFM, filterUDFM_Directly,
         isNullUDFM,
         sizeUDFM,
         intersectUDFM, udfmIntersectUFM,
         intersectsUDFM,
         disjointUDFM, disjointUdfmUfm,
         minusUDFM,
+        listToUDFM,
         udfmMinusUFM,
         partitionUDFM,
-        anyUDFM,
+        anyUDFM, allUDFM,
+        pprUDFM,
 
         udfmToList,
         udfmToUfm,
@@ -154,6 +157,9 @@ addToUDFM_Directly_C f (UDFM m i) u v =
   where
   tf (TaggedVal a j) (TaggedVal b _) = TaggedVal (f a b) j
 
+addListToUDFM :: Uniquable key => UniqDFM elt -> [(key,elt)] -> UniqDFM elt
+addListToUDFM = foldl (\m (k, v) -> addToUDFM m k v)
+
 addToUDFM_C
   :: Uniquable key => (elt -> elt -> elt) -- old -> new -> result
   -> UniqDFM elt -- old
@@ -234,6 +240,9 @@ insertUDFMIntoLeft_C f udfml udfmr =
 lookupUDFM :: Uniquable key => UniqDFM elt -> key -> Maybe elt
 lookupUDFM (UDFM m _i) k = taggedFst `fmap` M.lookup (getKey $ getUnique k) m
 
+lookupUDFM_Directly :: UniqDFM elt -> Unique -> Maybe elt
+lookupUDFM_Directly (UDFM m _i) k = taggedFst `fmap` M.lookup (getKey k) m
+
 elemUDFM :: Uniquable key => key -> UniqDFM elt -> Bool
 elemUDFM k (UDFM m _i) = M.member (getKey $ getUnique k) m
 
@@ -255,6 +264,11 @@ eltsUDFM (UDFM m _i) =
 
 filterUDFM :: (elt -> Bool) -> UniqDFM elt -> UniqDFM elt
 filterUDFM p (UDFM m i) = UDFM (M.filter (\(TaggedVal v _) -> p v) m) i
+
+filterUDFM_Directly :: (Unique -> elt -> Bool) -> UniqDFM elt -> UniqDFM elt
+filterUDFM_Directly p (UDFM m i) = UDFM (M.filterWithKey p' m) i
+  where
+  p' k (TaggedVal v _) = p (getUnique k) v
 
 -- | Converts `UniqDFM` to a list, with elements in deterministic order.
 -- It's O(n log n) while the corresponding function on `UniqFM` is O(n).
@@ -313,6 +327,9 @@ udfmToUfm :: UniqDFM elt -> UniqFM elt
 udfmToUfm (UDFM m _i) =
   listToUFM_Directly [(getUnique k, taggedFst tv) | (k, tv) <- M.toList m]
 
+listToUDFM :: Uniquable key => [(key,elt)] -> UniqDFM elt
+listToUDFM = foldl (\m (k, v) -> addToUDFM m k v) emptyUDFM
+
 listToUDFM_Directly :: [(Unique, elt)] -> UniqDFM elt
 listToUDFM_Directly = foldl (\m (u, v) -> addToUDFM_Directly m u v) emptyUDFM
 
@@ -345,6 +362,9 @@ mapUDFM f (UDFM m i) = UDFM (M.map (fmap f) m) i
 anyUDFM :: (elt -> Bool) -> UniqDFM elt -> Bool
 anyUDFM p (UDFM m _i) = M.fold ((||) . p . taggedFst) False m
 
+allUDFM :: (elt -> Bool) -> UniqDFM elt -> Bool
+allUDFM p (UDFM m _i) = M.fold ((&&) . p . taggedFst) True m
+
 instance Monoid (UniqDFM a) where
   mempty = emptyUDFM
   mappend = plusUDFM
@@ -364,3 +384,9 @@ pprUniqDFM ppr_elt ufm
   = brackets $ fsep $ punctuate comma $
     [ ppr uq <+> text ":->" <+> ppr_elt elt
     | (uq, elt) <- udfmToList ufm ]
+
+pprUDFM :: UniqDFM a    -- ^ The things to be pretty printed
+       -> ([a] -> SDoc) -- ^ The pretty printing function to use on the elements
+       -> SDoc          -- ^ 'SDoc' where the things have been pretty
+                        -- printed
+pprUDFM ufm pp = pp (eltsUDFM ufm)

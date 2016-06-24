@@ -49,7 +49,8 @@ import DynFlags
 import Util             ( debugIsOn, partitionWith )
 import HscTypes         ( HscEnv, hsc_dflags )
 import ListSetOps       ( findDupsEq, removeDups, equivClasses )
-import Digraph          ( SCC, flattenSCC, flattenSCCs, stronglyConnCompFromEdgedVertices )
+import Digraph          ( SCC, flattenSCC, flattenSCCs
+                        , stronglyConnCompFromEdgedVerticesUniq )
 import UniqFM
 import qualified GHC.LanguageExtensions as LangExt
 
@@ -1338,7 +1339,7 @@ depAnalTyClDecls :: GlobalRdrEnv
                  -> [SCC (LTyClDecl Name)]
 -- See Note [Dependency analysis of type, class, and instance decls]
 depAnalTyClDecls rdr_env ds_w_fvs
-  = stronglyConnCompFromEdgedVertices edges
+  = stronglyConnCompFromEdgedVerticesUniq edges
   where
     edges = [ (d, tcdName (unLoc d), map (getParent rdr_env) (nonDetEltsUFM fvs))
             | (d, fvs) <- ds_w_fvs ]
@@ -1358,11 +1359,11 @@ toParents rdr_env ns
 getParent :: GlobalRdrEnv -> Name -> Name
 getParent rdr_env n
   = case lookupGRE_Name rdr_env n of
-      gre : _ -> case gre_par gre of
-                   ParentIs  { par_is = p } -> p
-                   FldParent { par_is = p } -> p
-                   _                        -> n
-      _ -> n
+      Just gre -> case gre_par gre of
+                    ParentIs  { par_is = p } -> p
+                    FldParent { par_is = p } -> p
+                    _                        -> n
+      Nothing -> n
 
 
 {- Note [Extra dependencies from .hs-boot files]
@@ -1529,7 +1530,7 @@ modules), we get better error messages, too.
 ----------------------------------------------------------
 -- | 'InstDeclFreeVarsMap is an association of an
 --   @InstDecl@ with @FreeVars@. The @FreeVars@ are
---   the names that are
+--   the tycon names that are both
 --     a) free in the instance declaration
 --     b) bound by this group of type/class/instance decls
 type InstDeclFreeVarsMap = [(LInstDecl Name, FreeVars)]
@@ -1546,6 +1547,12 @@ mkInstDeclFreeVarsMap rdr_env tycl_bndrs inst_ds_fvs
 
 -- | Get the @LInstDecl@s which have empty @FreeVars@ sets, and the
 --   @InstDeclFreeVarsMap@ with these entries removed.
+-- We call (getInsts tcs instd_map) when we've completed the declarations
+-- for 'tcs'.  The call returns (inst_decls, instd_map'), where
+--   inst_decls are the instance declarations all of
+--              whose free vars are now defined
+--   instd_map' is the inst-decl map with 'tcs' removed from
+--               the free-var set
 getInsts :: [Name] -> InstDeclFreeVarsMap -> ([LInstDecl Name], InstDeclFreeVarsMap)
 getInsts bndrs inst_decl_map
   = partitionWith pick_me inst_decl_map
@@ -1722,7 +1729,7 @@ rnDataDefn doc (HsDataDefn { dd_ND = new_or_data, dd_cType = cType
 badGadtStupidTheta :: HsDocContext -> SDoc
 badGadtStupidTheta _
   = vcat [text "No context is allowed on a GADT-style data declaration",
-          text "(You can put a context on each contructor, though.)"]
+          text "(You can put a context on each constructor, though.)"]
 
 rnFamDecl :: Maybe Name -- Just cls => this FamilyDecl is nested
                         --             inside an *class decl* for cls

@@ -60,14 +60,13 @@ class TestConfig:
 
         self.list_broken = False
 
-        # Path to the compiler
+        # Path to the compiler (stage2 by default)
         self.compiler = ''
         # and ghc-pkg
         self.ghc_pkg = ''
 
-        # Compiler version info
-        self.compiler_version = ''
-        self.compiler_maj_version = ''
+        # Is self.compiler a stage 1, 2 or 3 compiler?
+        self.stage = 2
 
         # Flags we always give to this compiler
         self.compiler_always_flags = []
@@ -187,9 +186,6 @@ class TestOptions:
        # don't give anything as stdin
        self.no_stdin = 0
 
-       # compile this test to .hc only
-       self.compile_to_hc = 0
-
        # We sometimes want to modify the compiler_always_flags, so
        # they are copied from config.compiler_always_flags when we
        # make a new instance of TestOptions.
@@ -273,6 +269,12 @@ class TestOptions:
        # How should the timeout be adjusted on this test?
        self.compile_timeout_multiplier = 1.0
        self.run_timeout_multiplier = 1.0
+
+       self.cleanup = True
+
+       # Sould we run tests in a local subdirectory (<testname>-run) or
+       # in temporary directory in /tmp? See Note [Running tests in /tmp].
+       self.local = True
 
 # The default set of options
 global default_testopts

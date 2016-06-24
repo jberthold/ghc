@@ -47,12 +47,12 @@ test('haddock.base',
             # 2016-04-06: 5509757068 (x86/Linux)
       ],
      stats,
-     ['../../../../libraries/base/dist-install/haddock.t'])
+     ['haddock.t'])
 
 test('haddock.Cabal',
      [unless(in_tree_compiler(), skip), req_haddock
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 11805238152, 5)
+          [(wordsize(64), 10070330520, 5)
             # 2012-08-14: 3255435248 (amd64/Linux)
             # 2012-08-29: 3324606664 (amd64/Linux, new codegen)
             # 2012-10-08: 3373401360 (amd64/Linux)
@@ -81,6 +81,8 @@ test('haddock.Cabal',
             # 2016-04-06: 11542374816 (amd64/Linux) - CSE improvements and others
             # 2016-04-07: 10963514352 (amd64/Linux) - Revert to what phabricator claims
             # 2016-05-22: 11805238152 (amd64/Linux) - Make Generic1 poly-kinded
+            # 2016-06-05: 10997887320 (amd64/Linux) - Refactor derived Generic instances to reduce allocations
+            # 2016-06-21: 10070330520 (amd64/Linux) - D2350: Make checkFamInstConsistency less expensive
 
           ,(platform('i386-unknown-mingw32'), 3293415576, 5)
             # 2012-10-30:                     1733638168 (x86/Windows)
@@ -88,7 +90,7 @@ test('haddock.Cabal',
             # 2014-01-28:                     1966911336 (x86/Windows)
             # 2014-04-24:                     2052220292 (x86/Windows)
             # 2014-12-01:                     3088635556 (x86/Windows)
-            # 2015-01-20:                     3293415576 
+            # 2015-01-20:                     3293415576
 
           ,(wordsize(32), 6268156056, 5)])
             # 2012-08-14: 1648610180 (x86/OSX)
@@ -97,12 +99,12 @@ test('haddock.Cabal',
             # 2016-04-06: 6268156056 (x86/Linux)
       ],
      stats,
-     ['../../../../libraries/Cabal/Cabal/dist-install/haddock.t'])
+     ['haddock.t'])
 
 test('haddock.compiler',
      [unless(in_tree_compiler(), skip), req_haddock
      ,stats_num_field('bytes allocated',
-          [(wordsize(64), 58017214568, 10)
+          [(wordsize(64), 55314944264, 10)
             # 2012P-08-14: 26070600504 (amd64/Linux)
             # 2012-08-29: 26353100288 (amd64/Linux, new CG)
             # 2012-09-18: 26882813032 (amd64/Linux)
@@ -116,6 +118,7 @@ test('haddock.compiler',
             # 2015-12-03: 44721228752 (amd64/Linux) slow creep upwards
             # 2015-12-15: 49395782136 (amd64/Linux) more creep, following kind-equalities
             # 2015-12-17: 58017214568 (amd64/Linux) update Haddock to master
+            # 2016-06-21: 55314944264 (amd64/Linux) D2350: Make checkFamInstConsistency less expensive
 
           ,(platform('i386-unknown-mingw32'),   902576468, 10)
             # 2012-10-30:                     13773051312 (x86/Windows)
@@ -131,4 +134,4 @@ test('haddock.compiler',
             # 2016-04-06: 16222702892 (x86/Linux)
       ],
      stats,
-     ['../../../../compiler/stage2/haddock.t'])
+     ['haddock.t'])

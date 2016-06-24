@@ -124,7 +124,9 @@ dsHsBind dflags
 dsHsBind dflags
          (FunBind { fun_id = L _ fun, fun_matches = matches
                   , fun_co_fn = co_fn, fun_tick = tick })
- = do   { (args, body) <- matchWrapper (FunRhs (idName fun)) Nothing matches
+ = do   { (args, body) <- matchWrapper
+                           (FunRhs (noLoc $ idName fun) Prefix)
+                           Nothing matches
         ; let body' = mkOptTickBox tick body
         ; rhs <- dsHsWrapper co_fn (mkLams args body')
         ; let core_binds@(id,_) = makeCorePair dflags fun False 0 rhs
@@ -313,7 +315,9 @@ dsHsBind dflags (AbsBindsSig { abs_tvs = tyvars, abs_ev_vars = dicts
   = putSrcSpanDs bind_loc $
     addDictsDs (toTcTypeBag (listToBag dicts)) $
              -- addDictsDs: push type constraints deeper for pattern match check
-    do { (args, body) <- matchWrapper (FunRhs (idName global)) Nothing matches
+    do { (args, body) <- matchWrapper
+                           (FunRhs (noLoc $ idName global) Prefix)
+                           Nothing matches
        ; let body' = mkOptTickBox tick body
        ; fun_rhs <- dsHsWrapper co_fn $
                     mkLams args body'
@@ -620,7 +624,7 @@ dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
              spec_name = mkInternalName uniq spec_occ (getSrcSpan poly_name)
        ; (bndrs, ds_lhs) <- liftM collectBinders
                                   (dsHsWrapper spec_co (Var poly_id))
-       ; let spec_ty = mkPiTypes bndrs (exprType ds_lhs)
+       ; let spec_ty = mkLamTypes bndrs (exprType ds_lhs)
        ; -- pprTrace "dsRule" (vcat [ text "Id:" <+> ppr poly_id
          --                         , text "spec_co:" <+> ppr spec_co
          --                         , text "ds_rhs:" <+> ppr ds_lhs ]) $

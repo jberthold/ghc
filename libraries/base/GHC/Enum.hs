@@ -1,5 +1,9 @@
+{-# LANGUAGE BangPatterns #-}
+{-# LANGUAGE CPP #-}
+{-# LANGUAGE MagicHash #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE CPP, NoImplicitPrelude, BangPatterns, MagicHash #-}
 {-# OPTIONS_HADDOCK hide #-}
 
 -----------------------------------------------------------------------------
@@ -150,10 +154,10 @@ predError inst_ty =
 -- Tuples
 ------------------------------------------------------------------------
 
-instance Bounded () where
-    minBound = ()
-    maxBound = ()
+-- | @since 2.01
+deriving instance Bounded ()
 
+-- | @since 2.01
 instance Enum () where
     succ _      = errorWithoutStackTrace "Prelude.Enum.().succ: bad argument"
     pred _      = errorWithoutStackTrace "Prelude.Enum.().pred: bad argument"
@@ -168,102 +172,71 @@ instance Enum () where
     enumFromThenTo () () () = let many = ():many in many
 
 -- Report requires instances up to 15
-instance (Bounded a, Bounded b) => Bounded (a,b) where
-   minBound = (minBound, minBound)
-   maxBound = (maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c) => Bounded (a,b,c) where
-   minBound = (minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d) => Bounded (a,b,c,d) where
-   minBound = (minBound, minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e) => Bounded (a,b,c,d,e) where
-   minBound = (minBound, minBound, minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f)
-        => Bounded (a,b,c,d,e,f) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g)
-        => Bounded (a,b,c,d,e,f,g) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g,
-          Bounded h)
-        => Bounded (a,b,c,d,e,f,g,h) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g,
-          Bounded h, Bounded i)
-        => Bounded (a,b,c,d,e,f,g,h,i) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound,
-               minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound,
-               maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g,
-          Bounded h, Bounded i, Bounded j)
-        => Bounded (a,b,c,d,e,f,g,h,i,j) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound,
-               minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound,
-               maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g,
-          Bounded h, Bounded i, Bounded j, Bounded k)
-        => Bounded (a,b,c,d,e,f,g,h,i,j,k) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound,
-               minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound,
-               maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g,
-          Bounded h, Bounded i, Bounded j, Bounded k, Bounded l)
-        => Bounded (a,b,c,d,e,f,g,h,i,j,k,l) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound,
-               minBound, minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound,
-               maxBound, maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g,
-          Bounded h, Bounded i, Bounded j, Bounded k, Bounded l, Bounded m)
-        => Bounded (a,b,c,d,e,f,g,h,i,j,k,l,m) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound,
-               minBound, minBound, minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound,
-               maxBound, maxBound, maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g,
-          Bounded h, Bounded i, Bounded j, Bounded k, Bounded l, Bounded m, Bounded n)
-        => Bounded (a,b,c,d,e,f,g,h,i,j,k,l,m,n) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound,
-               minBound, minBound, minBound, minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound,
-               maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
-
-instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e, Bounded f, Bounded g,
-          Bounded h, Bounded i, Bounded j, Bounded k, Bounded l, Bounded m, Bounded n, Bounded o)
-        => Bounded (a,b,c,d,e,f,g,h,i,j,k,l,m,n,o) where
-   minBound = (minBound, minBound, minBound, minBound, minBound, minBound, minBound, minBound,
-               minBound, minBound, minBound, minBound, minBound, minBound, minBound)
-   maxBound = (maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound,
-               maxBound, maxBound, maxBound, maxBound, maxBound, maxBound, maxBound)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b)
+        => Bounded (a,b)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c)
+        => Bounded (a,b,c)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d)
+        => Bounded (a,b,c,d)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e)
+        => Bounded (a,b,c,d,e)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f)
+        => Bounded (a,b,c,d,e,f)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f, Bounded g)
+        => Bounded (a,b,c,d,e,f,g)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f, Bounded g, Bounded h)
+        => Bounded (a,b,c,d,e,f,g,h)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f, Bounded g, Bounded h, Bounded i)
+        => Bounded (a,b,c,d,e,f,g,h,i)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f, Bounded g, Bounded h, Bounded i, Bounded j)
+        => Bounded (a,b,c,d,e,f,g,h,i,j)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k)
+        => Bounded (a,b,c,d,e,f,g,h,i,j,k)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k,
+          Bounded l)
+        => Bounded (a,b,c,d,e,f,g,h,i,j,k,l)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k,
+          Bounded l, Bounded m)
+        => Bounded (a,b,c,d,e,f,g,h,i,j,k,l,m)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k,
+          Bounded l, Bounded m, Bounded n)
+        => Bounded (a,b,c,d,e,f,g,h,i,j,k,l,m,n)
+-- | @since 2.01
+deriving instance (Bounded a, Bounded b, Bounded c, Bounded d, Bounded e,
+          Bounded f, Bounded g, Bounded h, Bounded i, Bounded j, Bounded k,
+          Bounded l, Bounded m, Bounded n, Bounded o)
+        => Bounded (a,b,c,d,e,f,g,h,i,j,k,l,m,n,o)
 
 ------------------------------------------------------------------------
 -- Bool
 ------------------------------------------------------------------------
 
-instance Bounded Bool where
-  minBound = False
-  maxBound = True
+-- | @since 2.01
+deriving instance Bounded Bool
 
+-- | @since 2.01
 instance Enum Bool where
   succ False = True
   succ True  = errorWithoutStackTrace "Prelude.Enum.Bool.succ: bad argument"
@@ -286,10 +259,9 @@ instance Enum Bool where
 -- Ordering
 ------------------------------------------------------------------------
 
-instance Bounded Ordering where
-  minBound = LT
-  maxBound = GT
-
+-- | @since 2.01
+deriving instance Bounded Ordering
+-- | @since 2.01
 instance Enum Ordering where
   succ LT = EQ
   succ EQ = GT
@@ -316,10 +288,12 @@ instance Enum Ordering where
 -- Char
 ------------------------------------------------------------------------
 
+-- | @since 2.01
 instance  Bounded Char  where
     minBound =  '\0'
     maxBound =  '\x10FFFF'
 
+-- | @since 2.01
 instance  Enum Char  where
     succ (C# c#)
        | isTrue# (ord# c# /=# 0x10FFFF#) = C# (chr# (ord# c# +# 1#))
@@ -443,10 +417,12 @@ Be careful about these instances.
         (c) remember that Int is bounded, so [1..] terminates at maxInt
 -}
 
+-- | @since 2.01
 instance  Bounded Int where
     minBound =  minInt
     maxBound =  maxInt
 
+-- | @since 2.01
 instance  Enum Int  where
     succ x
        | x == maxBound  = errorWithoutStackTrace "Prelude.Enum.succ{Int}: tried to take `succ' of maxBound"
@@ -609,6 +585,7 @@ efdtIntDnFB c n x1 x2 y    -- Be careful about underflow!
 -- Word
 ------------------------------------------------------------------------
 
+-- | @since 2.01
 instance Bounded Word where
     minBound = 0
 
@@ -622,6 +599,7 @@ instance Bounded Word where
 #error Unhandled value for WORD_SIZE_IN_BITS
 #endif
 
+-- | @since 2.01
 instance Enum Word where
     succ x
         | x /= maxBound = x + 1
@@ -661,6 +639,7 @@ wordToIntegerX (W# x#) = wordToInteger x#
 -- Integer
 ------------------------------------------------------------------------
 
+-- | @since 2.01
 instance  Enum Integer  where
     succ x               = x + 1
     pred x               = x - 1

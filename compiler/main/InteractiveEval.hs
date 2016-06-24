@@ -80,7 +80,6 @@ import MonadUtils
 import Module
 import PrelNames  ( toDynName, pretendNameIsInScope )
 import Panic
-import UniqFM
 import Maybes
 import ErrUtils
 import SrcLoc
@@ -118,7 +117,7 @@ getHistoryModule = breakInfo_module . historyBreakInfo
 getHistorySpan :: HscEnv -> History -> SrcSpan
 getHistorySpan hsc_env History{..} =
   let BreakInfo{..} = historyBreakInfo in
-  case lookupUFM (hsc_HPT hsc_env) (moduleName breakInfo_module) of
+  case lookupHpt (hsc_HPT hsc_env) (moduleName breakInfo_module) of
     Just hmi -> modBreaks_locs (getModBreaks hmi) ! breakInfo_number
     _ -> panic "getHistorySpan"
 
@@ -137,7 +136,7 @@ getModBreaks hmi
 findEnclosingDecls :: HscEnv -> BreakInfo -> [String]
 findEnclosingDecls hsc_env (BreakInfo modl ix) =
    let hmi = expectJust "findEnclosingDecls" $
-             lookupUFM (hsc_HPT hsc_env) (moduleName modl)
+             lookupHpt (hsc_HPT hsc_env) (moduleName modl)
        mb = getModBreaks hmi
    in modBreaks_decls mb ! ix
 
@@ -308,7 +307,8 @@ handleRunStatus step expr bindings final_ids status history
     = do
        hsc_env <- getSession
        let hmi = expectJust "handleRunStatus" $
-                   lookupUFM (hsc_HPT hsc_env) (mkUniqueGrimily mod_uniq)
+                   lookupHptDirectly (hsc_HPT hsc_env)
+                                     (mkUniqueGrimily mod_uniq)
            modl = mi_module (hm_iface hmi)
            breaks = getModBreaks hmi
 
@@ -338,7 +338,8 @@ handleRunStatus step expr bindings final_ids status history
          resume_ctxt_fhv <- liftIO $ mkFinalizedHValue hsc_env resume_ctxt
          apStack_fhv <- liftIO $ mkFinalizedHValue hsc_env apStack_ref
          let hmi = expectJust "handleRunStatus" $
-                     lookupUFM (hsc_HPT hsc_env) (mkUniqueGrimily mod_uniq)
+                     lookupHptDirectly (hsc_HPT hsc_env)
+                                       (mkUniqueGrimily mod_uniq)
              modl = mi_module (hm_iface hmi)
              bp | is_exception = Nothing
                 | otherwise = Just (BreakInfo modl ix)
@@ -509,7 +510,7 @@ bindLocalsAtBreakpoint hsc_env apStack Nothing = do
 bindLocalsAtBreakpoint hsc_env apStack_fhv (Just BreakInfo{..}) = do
    let
        hmi       = expectJust "bindLocalsAtBreakpoint" $
-                     lookupUFM (hsc_HPT hsc_env) (moduleName breakInfo_module)
+                     lookupHpt (hsc_HPT hsc_env) (moduleName breakInfo_module)
        breaks    = getModBreaks hmi
        info      = expectJust "bindLocalsAtBreakpoint2" $
                      IntMap.lookup breakInfo_number (modBreaks_breakInfo breaks)
@@ -738,7 +739,7 @@ availsToGlobalRdrEnv mod_name avails
 
 mkTopLevEnv :: HomePackageTable -> ModuleName -> Either String GlobalRdrEnv
 mkTopLevEnv hpt modl
-  = case lookupUFM hpt modl of
+  = case lookupHpt hpt modl of
       Nothing -> Left "not a home module"
       Just details ->
          case mi_globals (hm_iface details) of
@@ -758,7 +759,7 @@ moduleIsInterpreted :: GhcMonad m => Module -> m Bool
 moduleIsInterpreted modl = withSession $ \h ->
  if moduleUnitId modl /= thisPackage (hsc_dflags h)
         then return False
-        else case lookupUFM (hsc_HPT h) (moduleName modl) of
+        else case lookupHpt (hsc_HPT h) (moduleName modl) of
                 Just details       -> return (isJust (mi_globals (hm_iface details)))
                 _not_a_home_module -> return False
 
@@ -785,15 +786,14 @@ getInfo allInfo name
     plausible rdr_env names
           -- Dfun involving only names that are in ic_rn_glb_env
         = allInfo
-       || all ok (nameSetElems names)
+       || nameSetAll ok names
         where   -- A name is ok if it's in the rdr_env,
                 -- whether qualified or not
           ok n | n == name              = True
                        -- The one we looked for in the first place!
                | pretendNameIsInScope n = True
                | isBuiltInSyntax n      = True
-               | isExternalName n       = any ((== n) . gre_name)
-                                              (lookupGRE_Name rdr_env n)
+               | isExternalName n       = isJust (lookupGRE_Name rdr_env n)
                | otherwise              = True
 
 -- | Returns all names in scope in the current interactive context
@@ -864,10 +864,10 @@ parseThing parser dflags stmt = do
 -- Getting the type of an expression
 
 -- | Get the type of an expression
--- Returns its most general type
-exprType :: GhcMonad m => String -> m Type
-exprType expr = withSession $ \hsc_env -> do
-   ty <- liftIO $ hscTcExpr hsc_env expr
+-- Returns the type as described by 'TcRnExprMode'
+exprType :: GhcMonad m => TcRnExprMode -> String -> m Type
+exprType mode expr = withSession $ \hsc_env -> do
+   ty <- liftIO $ hscTcExpr hsc_env mode expr
    return $ tidyType emptyTidyEnv ty
 
 -- -----------------------------------------------------------------------------
@@ -950,7 +950,7 @@ showModule mod_summary =
 
 isModuleInterpreted :: GhcMonad m => ModSummary -> m Bool
 isModuleInterpreted mod_summary = withSession $ \hsc_env ->
-  case lookupUFM (hsc_HPT hsc_env) (ms_mod_name mod_summary) of
+  case lookupHpt (hsc_HPT hsc_env) (ms_mod_name mod_summary) of
         Nothing       -> panic "missing linkable"
         Just mod_info -> return (not obj_linkable)
                       where

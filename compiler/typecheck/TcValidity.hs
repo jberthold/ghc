@@ -10,7 +10,7 @@ module TcValidity (
   ContextKind(..), expectedKindInCtxt,
   checkValidTheta, checkValidFamPats,
   checkValidInstance, validDerivPred,
-  checkInstTermination,
+  checkInstTermination, checkTySynRhs,
   ClsInstInfo, checkValidCoAxiom, checkValidCoAxBranch,
   checkValidTyFamEqn,
   arityErr, badATErr,
@@ -49,7 +49,8 @@ import FamInst     ( makeInjectivityErrors )
 import Name
 import VarEnv
 import VarSet
-import Var         ( mkTyVar )
+import UniqFM
+import Var         ( TyVarBndr(..), mkTyVar )
 import ErrUtils
 import DynFlags
 import Util
@@ -354,11 +355,6 @@ checkValidType ctxt ty
         -- Check the internal validity of the type itself
        ; check_type env ctxt rank ty
 
-        -- Check that the thing has kind Type, and is lifted if necessary.
-        -- Do this *after* check_type, because we can't usefully take
-        -- the kind of an ill-formed type such as (a~Int)
-       ; check_kind env ctxt ty
-
        ; checkUserTypeError ty
 
        -- Check for ambiguous types.  See Note [When to call checkAmbiguity]
@@ -374,23 +370,18 @@ checkValidMonoType ty
   = do { env <- tcInitOpenTidyEnv (tyCoVarsOfTypeList ty)
        ; check_type env SigmaCtxt MustBeMonoType ty }
 
-check_kind :: TidyEnv -> UserTypeCtxt -> TcType -> TcM ()
--- Check that the type's kind is acceptable for the context
-check_kind env ctxt ty
-  | TySynCtxt {} <- ctxt
-  , returnsConstraintKind actual_kind
+checkTySynRhs :: UserTypeCtxt -> TcType -> TcM ()
+checkTySynRhs ctxt ty
+  | returnsConstraintKind actual_kind
   = do { ck <- xoptM LangExt.ConstraintKinds
        ; if ck
          then  when (isConstraintKind actual_kind)
                     (do { dflags <- getDynFlags
-                        ; check_pred_ty env dflags ctxt ty })
-         else addErrTcM (constraintSynErr env actual_kind) }
+                        ; check_pred_ty emptyTidyEnv dflags ctxt ty })
+         else addErrTcM (constraintSynErr emptyTidyEnv actual_kind) }
 
   | otherwise
-  = case expectedKindInCtxt ctxt of
-      TheKind k -> checkTcM (tcEqType actual_kind k)               (kindErr env actual_kind)
-      OpenKind  -> checkTcM (classifiesTypeWithValues actual_kind) (kindErr env actual_kind)
-      AnythingKind -> return ()
+  = return ()
   where
     actual_kind = typeKind ty
 
@@ -512,7 +503,7 @@ check_type env ctxt rank ty
 
 check_type _ _ _ (TyVarTy _) = return ()
 
-check_type env ctxt rank (ForAllTy (Anon arg_ty) res_ty)
+check_type env ctxt rank (FunTy arg_ty res_ty)
   = do  { check_type env ctxt arg_rank arg_ty
         ; when (representationPolymorphismForbidden ctxt) $
           checkForRepresentationPolymorphism empty arg_ty
@@ -652,9 +643,6 @@ forAllEscapeErr env ty tau_kind
 ubxArgTyErr :: TidyEnv -> Type -> (TidyEnv, SDoc)
 ubxArgTyErr env ty = (env, sep [text "Illegal unboxed tuple type as function argument:", ppr_tidy env ty])
 
-kindErr :: TidyEnv -> Kind -> (TidyEnv, SDoc)
-kindErr env kind = (env, sep [text "Expecting an ordinary type, but found a type of kind", ppr_tidy env kind])
-
 {-
 Note [Liberal type synonyms]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -723,7 +711,9 @@ check_valid_theta env ctxt theta
        ; traceTc "check_valid_theta" (ppr theta)
        ; mapM_ (check_pred_ty env dflags ctxt) theta }
   where
-    (_,dups) = removeDups cmpType theta
+    (_,dups) = removeDups nonDetCmpType theta
+    -- It's OK to use nonDetCmpType because dups only appears in the
+    -- warning
 
 -------------------------
 {- Note [Validity checking for constraints]
@@ -873,6 +863,8 @@ check_class_pred env dflags ctxt pred cls tys
 
     -- See Note [Simplifiable given constraints]
     check_simplifiable_class_constraint
+       | xopt LangExt.MonoLocalBinds dflags
+       = return ()
        | DataTyCtxt {} <- ctxt   -- Don't do this check for the "stupid theta"
        = return ()               -- of a data type declaration
        | otherwise
@@ -889,8 +881,8 @@ check_class_pred env dflags ctxt pred cls tys
      = vcat [ hang (text "The constraint" <+> quotes (ppr (tidyType env pred)))
                  2 (text "matches an instance declaration")
             , ppr match
-            , hang (text "This makes type inference very fragile;")
-                 2 (text "try simplifying it using the instance") ]
+            , hang (text "This makes type inference for inner bindings fragile;")
+                 2 (text "either use MonoLocalBinds, or simplify it using the instance") ]
     simplifiable_constraint_warn [] = pprPanic "check_class_pred" (ppr pred)
 
 {- Note [Simplifiable given constraints]
@@ -898,11 +890,16 @@ check_class_pred env dflags ctxt pred cls tys
 A type signature like
    f :: Eq [(a,b)] => a -> b
 is very fragile, for reasons described at length in TcInteract
+Note [Instance and Given overlap].  As that Note discusses, for the
+most part the clever stuff in TcInteract means that we don't use a
+top-level instance if a local Given might fire, so there is no
+fragility. But if we /infer/ the type of a local let-binding, things
+can go wrong (Trac #11948 is an example, discussed in the Note).
 
-Note [Instance and Given overlap].  So this warning discourages uses
-from writing simplifiable class constraints, at least unless the
-top-level instance is explicitly declared as OVERLAPPABLE.
-Trac #11948 provoked me to do this.
+So this warning is switched on only if we have NoMonoLocalBinds; in
+that case the warning discourages uses from writing simplifiable class
+constraints, at least unless the top-level instance is explicitly
+declared as OVERLAPPABLE.
 -}
 
 -------------------------
@@ -1016,7 +1013,7 @@ tyConArityErr tc tks
 
     -- tc_type_arity = number of *type* args expected
     -- tc_type_args  = number of *type* args encountered
-    tc_type_arity = count isVisibleBinder $ tyConBinders tc
+    tc_type_arity = count isVisibleTyConBinder (tyConBinders tc)
     tc_type_args  = length vis_tks
 
 arityErr :: Outputable a => String -> a -> Int -> Int -> SDoc
@@ -1127,13 +1124,13 @@ dropCasts :: Type -> Type
 -- To consider: drop only UnivCo(HoleProv) casts
 dropCasts (CastTy ty _)     = dropCasts ty
 dropCasts (AppTy t1 t2)     = mkAppTy (dropCasts t1) (dropCasts t2)
+dropCasts (FunTy t1 t2)     = mkFunTy (dropCasts t1) (dropCasts t2)
 dropCasts (TyConApp tc tys) = mkTyConApp tc (map dropCasts tys)
 dropCasts (ForAllTy b ty)   = ForAllTy (dropCastsB b) (dropCasts ty)
 dropCasts ty                = ty  -- LitTy, TyVarTy, CoercionTy
 
-dropCastsB :: TyBinder -> TyBinder
-dropCastsB (Anon ty) = Anon (dropCasts ty)
-dropCastsB b         = b   -- Don't bother in the kind of a forall
+dropCastsB :: TyVarBinder -> TyVarBinder
+dropCastsB b = b   -- Don't bother in the kind of a forall
 
 abstractClassKeys :: [Unique]
 abstractClassKeys = [ heqTyConKey
@@ -1677,7 +1674,7 @@ checkValidFamPats mb_clsinfo fam_tc tvs cvs ty_pats
          --     type instance F Int y = y
          -- because then the type (F Int) would be like (\y.y)
          checkTc (length ty_pats == fam_arity) $
-           wrongNumberOfParmsErr (fam_arity - count isInvisibleBinder fam_bndrs)
+           wrongNumberOfParmsErr (fam_arity - count isInvisibleTyConBinder fam_bndrs)
              -- report only explicit arguments
 
        ; mapM_ checkValidTypePat ty_pats
@@ -1863,7 +1860,9 @@ checkValidInferredKinds orig_kvs out_of_scope extra
 
   where
     (env1, _) = tidyTyCoVarBndrs emptyTidyEnv orig_kvs
-    (env, _)  = tidyTyCoVarBndrs env1         (varSetElems out_of_scope)
+    (env, _)  = tidyTyCoVarBndrs env1         (nonDetEltsUFM out_of_scope)
+      -- It's OK to use nonDetEltsUFM here because it's only used for
+      -- generating the error message
 
 {-
 ************************************************************************
@@ -1880,9 +1879,10 @@ fvType (TyVarTy tv)          = [tv]
 fvType (TyConApp _ tys)      = fvTypes tys
 fvType (LitTy {})            = []
 fvType (AppTy fun arg)       = fvType fun ++ fvType arg
-fvType (ForAllTy bndr ty)
-  = fvType (binderType bndr) ++
-    caseBinder bndr (\tv -> filter (/= tv)) (const id) (fvType ty)
+fvType (FunTy arg res)       = fvType arg ++ fvType res
+fvType (ForAllTy (TvBndr tv _) ty)
+  = fvType (tyVarKind tv) ++
+    filter (/= tv) (fvType ty)
 fvType (CastTy ty co)        = fvType ty ++ fvCo co
 fvType (CoercionTy co)       = fvCo co
 
@@ -1921,10 +1921,8 @@ sizeType (TyVarTy {})      = 1
 sizeType (TyConApp _ tys)  = sizeTypes tys + 1
 sizeType (LitTy {})        = 1
 sizeType (AppTy fun arg)   = sizeType fun + sizeType arg
-sizeType (ForAllTy (Anon arg) res)
-                           = sizeType arg + sizeType res + 1
-sizeType (ForAllTy (Named {}) ty)
-                           = sizeType ty
+sizeType (FunTy arg res)   = sizeType arg + sizeType res + 1
+sizeType (ForAllTy _ ty)   = sizeType ty
 sizeType (CastTy ty _)     = sizeType ty
 sizeType (CoercionTy _)    = 1
 

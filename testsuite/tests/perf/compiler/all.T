@@ -91,7 +91,7 @@ test('T1969',
              # 2014-06-29 303300692 (x86/Linux)
              # 2015-07-11 288699104 (x86/Linux, 64-bit machine) use +RTS -G1
              # 2016-04-06 344730660 (x86/Linux, 64-bit machine)
-           (wordsize(64), 695430728, 5)]),
+           (wordsize(64), 756138176, 5)]),
              # 17/11/2009 434845560 (amd64/Linux)
              # 08/12/2009 459776680 (amd64/Linux)
              # 17/05/2010 519377728 (amd64/Linux)
@@ -111,6 +111,7 @@ test('T1969',
              # 10/09/2014 630299456 (x86_64/Linux) post-AMP-cleanup
              # 03/06/2015 581460896 (x86_64/Linux) use +RTS -G1
              # 28/10/2015 695430728 (x86_64/Linux) emit Typeable at definition site
+             # 28/10/2015 756138176 (x86_64/Linux) inst-decl defaults go via typechecker (#12220)
       only_ways(['normal']),
 
       extra_hc_opts('-dcore-lint -static'),
@@ -545,7 +546,7 @@ test('T5642',
             # 2014-12-10:  641085256 Improvements in constraints solver
             # 2016-04-06:  462677300
 
-            (wordsize(64), 1300685592, 10)])
+            (wordsize(64),  916484672, 10)])
             # prev:        1300000000
             # 2014-07-17:  1358833928 (general round of updates)
             # 2014-08-07:  1402242360 (caused by 1fc60ea)
@@ -558,8 +559,9 @@ test('T5642',
             # 2014-12-10:  1282916024 Improvements in constraints solver
             # 2015-10-28:  1412808976 Emit Typeable at definition site
             # 2015-11-22:  1071915072 Use TypeLits in the metadata encoding
-            # 2016-02-08:  950004816  Pattern match checker re-rework
+            # 2016-02-08:   950004816 Pattern match checker re-rework
             # 2016-05-12:  1300685592 Make Generic1 poly-kinded
+            # 2016-06-05:   916484672 Refactor derived Generic instances to reduce allocations
       ],
       compile,['-O'])
 
@@ -742,13 +744,13 @@ test('T9872d',
           # 2014-12-18    739189056   Reduce type families even more eagerly
           # 2015-01-07    687562440   TrieMap leaf compression
           # 2015-03-17    726679784   tweak to solver; probably flattens more
+          # 2015-12-11    566134504   TypeInType; see #11196
           # 2016-02-08    534693648   Improved a bit by tyConRolesRepresentational
           # 2016-03-18    506691240   optimize Unify & zonking
            (wordsize(32), 264566040, 5)
           # some date     328810212
           # 2015-07-11    350369584
-          # 2015-12-11    566134504   TypeInType; see #11196
-          # 2016-04-06    264566040   x86/Linux, no idea, opened #11800
+          # 2016-04-06    264566040   x86/Linux
           ]),
       ],
      compile,
@@ -776,9 +778,10 @@ test('T9961',
 test('T9233',
     [ only_ways(['normal']),
       compiler_stats_num_field('bytes allocated',
-        [(wordsize(64), 1066246248, 5),
+        [(wordsize(64), 984268712, 5),
          # 2015-08-04    999826288     initial value
          # 2016-04-14   1066246248     Final demand analyzer run
+         # 2016-06-18    984268712     shuffling around of Data.Functor.Identity
          (wordsize(32),  515672240, 5)   # Put in your value here if you hit this
          # 2016-04-06    515672240     (x86/Linux) initial value
         ]),

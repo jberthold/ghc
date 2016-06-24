@@ -30,6 +30,12 @@
 #ifdef HAVE_FCNTL_H
 #include <fcntl.h>
 #endif
+#ifdef HAVE_NUMA_H
+#include <numa.h>
+#endif
+#ifdef HAVE_NUMAIF_H
+#include <numaif.h>
+#endif
 
 #include <errno.h>
 
@@ -287,12 +293,38 @@ osGetMBlocks(uint32_t n)
           ret = gen_map_mblocks(size);
       }
   }
+
   // Next time, we'll try to allocate right after the block we just got.
   // ToDo: check that we haven't already grabbed the memory at next_request
   next_request = (char *)ret + size;
 
   return ret;
 }
+
+void osBindMBlocksToNode(
+    void *addr STG_UNUSED,
+    StgWord size STG_UNUSED,
+    uint32_t node STG_UNUSED)
+{
+#if HAVE_LIBNUMA
+    int ret;
+    StgWord mask = 0;
+    mask |= 1 << node;
+    if (RtsFlags.GcFlags.numa) {
+        ret = mbind(addr, (unsigned long)size,
+                    MPOL_BIND, &mask, sizeof(StgWord)*8, MPOL_MF_STRICT);
+        // paranoia: MPOL_BIND guarantees memory on the correct node;
+        // MPOL_MF_STRICT will tell us if it didn't work.  We might want to
+        // relax these in due course, but I want to be sure it's doing what we
+        // want first.
+        if (ret != 0) {
+            sysErrorBelch("mbind");
+            stg_exit(EXIT_FAILURE);
+        }
+    }
+#endif
+}
+
 
 void osFreeMBlocks(void *addr, uint32_t n)
 {
@@ -513,3 +545,35 @@ void osReleaseHeapMemory(void)
 }
 
 #endif
+
+rtsBool osNumaAvailable(void)
+{
+#if HAVE_LIBNUMA
+    return (numa_available() != -1);
+#else
+    return rtsFalse;
+#endif
+}
+
+uint32_t osNumaNodes(void)
+{
+#if HAVE_LIBNUMA
+    return numa_num_configured_nodes();
+#else
+    return 1;
+#endif
+}
+
+StgWord osNumaMask(void)
+{
+#if HAVE_LIBNUMA
+    struct bitmask *mask;
+    mask = numa_get_mems_allowed();
+    if (mask->size > sizeof(StgWord)*8) {
+        barf("Too many NUMA nodes");
+    }
+    return mask->maskp[0];
+#else
+    return 1;
+#endif
+}

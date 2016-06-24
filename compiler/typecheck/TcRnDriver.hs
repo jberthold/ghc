@@ -13,7 +13,7 @@ https://ghc.haskell.org/trac/ghc/wiki/Commentary/Compiler/TypeChecker
 
 module TcRnDriver (
 #ifdef GHCI
-        tcRnStmt, tcRnExpr, tcRnType,
+        tcRnStmt, tcRnExpr, TcRnExprMode(..), tcRnType,
         tcRnImportDecls,
         tcRnLookupRdrName,
         getModuleInterface,
@@ -53,6 +53,7 @@ import TcExpr
 import TcRnMonad
 import TcEvidence
 import PprTyThing( pprTyThing )
+import MkIface( tyThingToIfaceDecl )
 import Coercion( pprCoAxiom )
 import CoreFVs( orphNamesOfFamInst )
 import FamInst
@@ -69,7 +70,6 @@ import TcInstDcls
 import TcIface
 import TcMType
 import TcType
-import MkIface
 import TcSimplify
 import TcTyClsDecls
 import TcTypeable ( mkTypeableBinds )
@@ -83,7 +83,7 @@ import Id
 import IdInfo
 import VarEnv
 import Module
-import UniqFM
+import UniqDFM
 import Name
 import NameEnv
 import NameSet
@@ -363,7 +363,7 @@ tcRnModuleTcRnM hsc_env hsc_src
             Nothing -> return tcg_env) ;
 
         -- The new type env is already available to stuff slurped from
-        -- interface files, via TcEnv.updateGlobalTypeEnv
+        -- interface files, via TcEnv.setGlobalTypeEnv
         -- It's important that this includes the stuff in checkHiBootIface,
         -- because the latter might add new bindings for boot_dfuns,
         -- which may be mentioned in imported unfoldings
@@ -400,7 +400,7 @@ tcRnImports hsc_env import_decls
   = do  { (rn_imports, rdr_env, imports, hpc_info) <- rnImports import_decls ;
 
         ; this_mod <- getModule
-        ; let { dep_mods :: ModuleNameEnv (ModuleName, IsBootInterface)
+        ; let { dep_mods :: DModuleNameEnv (ModuleName, IsBootInterface)
               ; dep_mods = imp_dep_mods imports
 
                 -- We want instance declarations from all home-package
@@ -411,7 +411,7 @@ tcRnImports hsc_env import_decls
                 -- modules batch (@--make@) compiled before this one, but
                 -- which are not below this one.
               ; want_instances :: ModuleName -> Bool
-              ; want_instances mod = mod `elemUFM` dep_mods
+              ; want_instances mod = mod `elemUDFM` dep_mods
                                    && mod /= moduleName this_mod
               ; (home_insts, home_fam_insts) = hptInstances hsc_env
                                                             want_instances
@@ -420,7 +420,7 @@ tcRnImports hsc_env import_decls
                 -- Record boot-file info in the EPS, so that it's
                 -- visible to loadHiBootInterface in tcRnSrcDecls,
                 -- and any other incrementally-performed imports
-        ; updateEps_ (\eps -> eps { eps_is_boot = dep_mods }) ;
+        ; updateEps_ (\eps -> eps { eps_is_boot = udfmToUfm dep_mods }) ;
 
                 -- Update the gbl env
         ; updGblEnv ( \ gbl ->
@@ -1169,15 +1169,20 @@ tcTopSrcDecls (HsGroup { hs_tyclds = tycl_decls,
         default_tys <- tcDefaults default_decls ;
         updGblEnv (\gbl -> gbl { tcg_default = default_tys }) $ do {
 
+                -- Value declarations next.
+                -- It is important that we check the top-level value bindings
+                -- before the GHC-generated derived bindings, since the latter
+                -- may be defined in terms of the former. (For instance,
+                -- the bindings produced in a Data instance.)
+        traceTc "Tc5" empty ;
+        tc_envs <- tcTopBinds val_binds val_sigs;
+        setEnvs tc_envs $ do {
+
                 -- Now GHC-generated derived bindings, generics, and selectors
                 -- Do not generate warnings from compiler-generated code;
                 -- hence the use of discardWarnings
-        tc_envs <- discardWarnings (tcTopBinds deriv_binds deriv_sigs) ;
-        setEnvs tc_envs $ do {
-
-                -- Value declarations next
-        traceTc "Tc5" empty ;
-        tc_envs@(tcg_env, tcl_env) <- tcTopBinds val_binds val_sigs;
+        tc_envs@(tcg_env, tcl_env)
+            <- discardWarnings (tcTopBinds deriv_binds deriv_sigs) ;
         setEnvs tc_envs $ do {  -- Environment doesn't change now
 
                 -- Second pass over class and instance declarations,
@@ -1634,8 +1639,9 @@ runTcInteractive hsc_env thing_inside
     -- See Note [Initialising the type environment for GHCi]
     is_closed thing
       | AnId id <- thing
-      , NotTopLevel <- isTypeClosedLetBndr id
-      = Left (idName id, ATcId { tct_id = id, tct_closed = NotTopLevel })
+      , not (isTypeClosedLetBndr id)
+      = Left (idName id, ATcId { tct_id = id
+                               , tct_info = NotLetBound })
       | otherwise
       = Right thing
 
@@ -1785,7 +1791,8 @@ tcUserStmt (L loc (BodyStmt expr _ _ _))
         ; uniq <- newUnique
         ; interPrintName <- getInteractivePrintName
         ; let fresh_it  = itName uniq loc
-              matches   = [mkMatch [] rn_expr (noLoc emptyLocalBinds)]
+              matches   = [mkMatch (FunRhs (L loc fresh_it) Prefix) [] rn_expr
+                                   (noLoc emptyLocalBinds)]
               -- [it = expr]
               the_bind  = L loc $ (mkTopFunBind FromSource (L loc fresh_it) matches) { bind_fvs = fvs }
                           -- Care here!  In GHCi the expression might have
@@ -1936,17 +1943,15 @@ tcGhciStmts stmts
 getGhciStepIO :: TcM (LHsExpr Name)
 getGhciStepIO = do
     ghciTy <- getGHCiMonad
-    fresh_a <- newUnique
-    loc     <- getSrcSpanM
-    let a_tv    = mkInternalName fresh_a (mkTyVarOccFS (fsLit "a")) loc
-        ghciM   = nlHsAppTy (nlHsTyVar ghciTy) (nlHsTyVar a_tv)
+    a_tv <- newName (mkTyVarOccFS (fsLit "a"))
+    let ghciM   = nlHsAppTy (nlHsTyVar ghciTy) (nlHsTyVar a_tv)
         ioM     = nlHsAppTy (nlHsTyVar ioTyConName) (nlHsTyVar a_tv)
 
         step_ty = noLoc $ HsForAllTy { hst_bndrs = [noLoc $ UserTyVar (noLoc a_tv)]
                                      , hst_body  = nlHsFunTy ghciM ioM }
 
         stepTy :: LHsSigWcType Name
-        stepTy = mkEmptyImplicitBndrs (mkEmptyWildCardBndrs step_ty)
+        stepTy = mkEmptyWildCardBndrs (mkEmptyImplicitBndrs step_ty)
 
     return (noLoc $ ExprWithTySig (nlHsVar ghciStepIoMName) stepTy)
 
@@ -1967,13 +1972,17 @@ isGHCiMonad hsc_env ty
             Just _  -> failWithTc $ text "Ambiguous type!"
             Nothing -> failWithTc $ text ("Can't find type:" ++ ty)
 
--- tcRnExpr just finds the type of an expression
+-- | How should we infer a type? See Note [TcRnExprMode]
+data TcRnExprMode = TM_Inst    -- ^ Instantiate the type fully (:type)
+                  | TM_NoInst  -- ^ Do not instantiate the type (:type +v)
+                  | TM_Default -- ^ Default the type eagerly (:type +d)
 
+-- | tcRnExpr just finds the type of an expression
 tcRnExpr :: HscEnv
+         -> TcRnExprMode
          -> LHsExpr RdrName
          -> IO (Messages, Maybe Type)
--- Type checks the expression and returns its most general type
-tcRnExpr hsc_env rdr_expr
+tcRnExpr hsc_env mode rdr_expr
   = runTcInteractive hsc_env $
     do {
 
@@ -1988,15 +1997,15 @@ tcRnExpr hsc_env rdr_expr
     (tclvl, lie, res_ty)
           <- pushLevelAndCaptureConstraints $
              do { (_tc_expr, expr_ty) <- tcInferSigma rn_expr
-                ; (_wrap, res_ty)   <- deeplyInstantiate orig expr_ty
-                     -- See [Note Deeply instantiate in :type]
-                ; return res_ty } ;
+                ; if inst
+                  then snd <$> deeplyInstantiate orig expr_ty
+                  else return expr_ty } ;
 
     -- Generalise
     ((qtvs, dicts, _), lie_top) <- captureConstraints $
                                    {-# SCC "simplifyInfer" #-}
                                    simplifyInfer tclvl
-                                                 False {- No MR for now -}
+                                                 infer_mode
                                                  []    {- No sig vars -}
                                                  [(fresh_it, res_ty)]
                                                  lie ;
@@ -2004,9 +2013,10 @@ tcRnExpr hsc_env rdr_expr
     stWC <- tcg_static_wc <$> getGblEnv >>= readTcRef ;
 
     -- Ignore the dictionary bindings
-    _ <- simplifyInteractive (andWC stWC lie_top) ;
+    _ <- perhaps_disable_default_warnings $
+         simplifyInteractive (andWC stWC lie_top) ;
 
-    let { all_expr_ty = mkInvForAllTys qtvs (mkPiTypes dicts res_ty) } ;
+    let { all_expr_ty = mkInvForAllTys qtvs (mkLamTypes dicts res_ty) } ;
     ty <- zonkTcType all_expr_ty ;
 
     -- We normalise type families, so that the type of an expression is the
@@ -2017,6 +2027,12 @@ tcRnExpr hsc_env rdr_expr
     -- irrelevant
     return (snd (normaliseType fam_envs Nominal ty))
     }
+  where
+    -- See Note [Deeply instantiate in :type]
+    (inst, infer_mode, perhaps_disable_default_warnings) = case mode of
+      TM_Inst    -> (True,  NoRestrictions, id)
+      TM_NoInst  -> (False, NoRestrictions, id)
+      TM_Default -> (True,  EagerDefaulting, unsetWOptM Opt_WarnTypeDefaults)
 
 --------------------------
 tcRnImportDecls :: HscEnv
@@ -2033,7 +2049,6 @@ tcRnImportDecls hsc_env import_decls
     zap_rdr_env gbl_env = gbl_env { tcg_rdr_env = emptyGlobalRdrEnv }
 
 -- tcRnType just finds the kind of a type
-
 tcRnType :: HscEnv
          -> Bool        -- Normalise the returned type
          -> LHsType RdrName
@@ -2068,20 +2083,63 @@ tcRnType hsc_env normalise rdr_type
 
        ; return (ty', mkInvForAllTys kvs (typeKind ty')) }
 
-{- Note [Deeply instantiate in :type]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Suppose (Trac #11376)
-  bar :: forall a b. Show a => a -> b -> a
-What should `:t bar @Int` show?
+{- Note [TcRnExprMode]
+~~~~~~~~~~~~~~~~~~~~~~
+How should we infer a type when a user asks for the type of an expression e
+at the GHCi prompt? We offer 3 different possibilities, described below. Each
+considers this example, with -fprint-explicit-foralls enabled:
 
- 1. forall b. Show Int => Int -> b -> Int
- 2. forall b. Int -> b -> Int
- 3. forall {b}. Int -> b -> Int
- 4. Int -> b -> Int
+  foo :: forall a f b. (Show a, Num b, Foldable f) => a -> f b -> String
+  :type{,-spec,-def} foo @Int
 
-We choose (3), which is the effect of deeply instantiating and
-re-generalising.  All the others seem deeply confusing.  That is
-why we deeply instantiate here.
+:type / TM_Inst
+
+  In this mode, we report the type that would be inferred if a variable
+  were assigned to expression e, without applying the monomorphism restriction.
+  This means we deeply instantiate the type and then regeneralize, as discussed
+  in #11376.
+
+  > :type foo @Int
+  forall {b} {f :: * -> *}. (Foldable f, Num b) => Int -> f b -> String
+
+  Note that the variables and constraints are reordered here, because this
+  is possible during regeneralization. Also note that the variables are
+  reported as Invisible instead of Specified.
+
+:type +v / TM_NoInst
+
+  This mode is for the benefit of users using TypeApplications. It does no
+  instantiation whatsoever, sometimes meaning that class constraints are not
+  solved.
+
+  > :type +v foo @Int
+  forall f b. (Show Int, Num b, Foldable f) => Int -> f b -> String
+
+  Note that Show Int is still reported, because the solver never got a chance
+  to see it.
+
+:type +d / TM_Default
+
+  This mode is for the benefit of users who wish to see instantiations of
+  generalized types, and in particular to instantiate Foldable and Traversable.
+  In this mode, any type variable that can be defaulted is defaulted. Because
+  GHCi uses -XExtendedDefaultRules, this means that Foldable and Traversable are
+  defaulted.
+
+  > :type +d foo @Int
+  Int -> [Integer] -> String
+
+  Note that this mode can sometimes lead to a type error, if a type variable is
+  used with a defaultable class but cannot actually be defaulted:
+
+  bar :: (Num a, Monoid a) => a -> a
+  > :type +d bar
+  ** error **
+
+  The error arises because GHC tries to default a but cannot find a concrete
+  type in the defaulting list that is both Num and Monoid. (If this list is
+  modified to include an element that is both Num and Monoid, the defaulting
+  would succeed, of course.)
 
 Note [Kind-generalise in tcRnType]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2428,15 +2486,11 @@ pprTcGblEnv (TcGblEnv { tcg_type_env  = type_env,
          , vcat (map ppr rules)
          , vcat (map ppr vects)
          , text "Dependent modules:" <+>
-                pprUFM (imp_dep_mods imports) (ppr . sortBy cmp_mp)
+                pprUDFM (imp_dep_mods imports) ppr
          , text "Dependent packages:" <+>
                 ppr (sortBy stableUnitIdCmp $ imp_dep_pkgs imports)]
-  where         -- The two uses of sortBy are just to reduce unnecessary
+  where         -- The use of sortBy is just to reduce unnecessary
                 -- wobbling in testsuite output
-    cmp_mp (mod_name1, is_boot1) (mod_name2, is_boot2)
-        = (mod_name1 `stableModuleNameCmp` mod_name2)
-                  `thenCmp`
-          (is_boot1 `compare` is_boot2)
 
 ppr_types :: TypeEnv -> SDoc
 ppr_types type_env
@@ -2483,10 +2537,13 @@ ppr_sigs ids
 
 ppr_tydecls :: [TyCon] -> SDoc
 ppr_tydecls tycons
-        -- Print type constructor info; sort by OccName
-  = vcat (map ppr_tycon (sortBy (comparing getOccName) tycons))
-  where
-    ppr_tycon tycon = vcat [ ppr (tyThingToIfaceDecl (ATyCon tycon)) ]
+  -- Print type constructor info for debug purposes
+  -- Sort by OccName to reduce unnecessary changes
+  = vcat [ ppr (tyThingToIfaceDecl (ATyCon tc))
+         | tc <- sortBy (comparing getOccName) tycons ]
+    -- The Outputable instance for IfaceDecl uses
+    -- showAll, which is what we want here, whereas
+    -- pprTyThing uses ShowSome.
 
 {-
 ********************************************************************************

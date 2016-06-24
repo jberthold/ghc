@@ -16,7 +16,7 @@ T11667.hs:18:28: error:
         arising from the "provided" constraints claimed by
           the signature of ‘Pat2’
       ‘b’ is a rigid type variable bound by
-        the signature for pattern synonym ‘Pat2’ at T11667.hs:17:17
+        the signature for pattern synonym ‘Pat2’ at T11667.hs:17:17-50
     • In the declaration for pattern synonym ‘Pat2’
     • Relevant bindings include y :: b (bound at T11667.hs:18:21)
 
@@ -38,4 +38,4 @@ T11667.hs:31:16: error:
         add (Num a) to the "required" context of
           the signature for pattern synonym ‘Pat4’
     • In the expression: MkS 42
-      In an equation for ‘$bPat4’: $bPat4 = MkS 42
+      In an equation for ‘Pat4’: Pat4 = MkS 42

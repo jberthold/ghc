@@ -926,6 +926,7 @@ finishTH = do
           liftIO $ withForeignRef fhv $ \rhv ->
             writeIServ i (putMessage (FinishTH rhv))
           () <- runRemoteTH i []
+          () <- readQResult i
           writeTcRef (tcg_th_remote_state tcg) Nothing
 
 runTHExp :: ForeignHValue -> TcM TH.Exp
@@ -946,12 +947,14 @@ runTH ty fhv = do
   dflags <- getDynFlags
   if not (gopt Opt_ExternalInterpreter dflags)
     then do
-       -- just run it in the local TcM
+       -- Run it in the local TcM
       hv <- liftIO $ wormhole dflags fhv
       r <- runQuasi (unsafeCoerce# hv :: TH.Q a)
       return r
     else
-      -- run it on the server
+      -- Run it on the server.  For an overview of how TH works with
+      -- Remote GHCi, see Note [Remote Template Haskell] in
+      -- libraries/ghci/GHCi/TH.hs.
       withIServ hsc_env $ \i -> do
         rstate <- getTHState i
         loc <- TH.qLocation
@@ -959,22 +962,21 @@ runTH ty fhv = do
           withForeignRef rstate $ \state_hv ->
           withForeignRef fhv $ \q_hv ->
             writeIServ i (putMessage (RunTH state_hv q_hv ty (Just loc)))
-        bs <- runRemoteTH i []
+        runRemoteTH i []
+        bs <- readQResult i
         return $! runGet get (LB.fromStrict bs)
 
--- | communicate with a remotely-running TH computation until it
--- finishes and returns a result.
+
+-- | communicate with a remotely-running TH computation until it finishes.
+-- See Note [Remote Template Haskell] in libraries/ghci/GHCi/TH.hs.
 runRemoteTH
-  :: Binary a
-  => IServ
+  :: IServ
   -> [Messages]   --  saved from nested calls to qRecover
-  -> TcM a
+  -> TcM ()
 runRemoteTH iserv recovers = do
-  Msg msg <- liftIO $ readIServ iserv getMessage
+  THMsg msg <- liftIO $ readIServ iserv getTHMessage
   case msg of
-    QDone -> liftIO $ readIServ iserv get
-    QException str -> liftIO $ throwIO (ErrorCall str)
-    QFail str -> fail str
+    RunTHDone -> return ()
     StartRecover -> do -- Note [TH recover with -fexternal-interpreter]
       v <- getErrsVar
       msgs <- readTcRef v
@@ -993,6 +995,15 @@ runRemoteTH iserv recovers = do
       r <- handleTHMessage msg
       liftIO $ writeIServ iserv (put r)
       runRemoteTH iserv recovers
+
+-- | Read a value of type QResult from the iserv
+readQResult :: Binary a => IServ -> TcM a
+readQResult i = do
+  qr <- liftIO $ readIServ i get
+  case qr of
+    QDone a -> return a
+    QException str -> liftIO $ throwIO (ErrorCall str)
+    QFail str -> fail str
 
 {- Note [TH recover with -fexternal-interpreter]
 
@@ -1022,6 +1033,13 @@ Back in GHC, when we receive:
     and merge in the new messages if caught_error is false.
 -}
 
+-- | Retrieve (or create, if it hasn't been created already), the
+-- remote TH state.  The TH state is a remote reference to an IORef
+-- QState living on the server, and we have to pass this to each RunTH
+-- call we make.
+--
+-- The TH state is stored in tcg_th_remote_state in the TcGblEnv.
+--
 getTHState :: IServ -> TcM (ForeignRef (IORef QState))
 getTHState i = do
   tcg <- getGblEnv
@@ -1041,7 +1059,7 @@ wrapTHResult tcm = do
     Left e -> return (THException (show e))
     Right a -> return (THComplete a)
 
-handleTHMessage :: Message a -> TcM a
+handleTHMessage :: THMessage a -> TcM a
 handleTHMessage msg = case msg of
   NewName a -> wrapTHResult $ TH.qNewName a
   Report b str -> wrapTHResult $ TH.qReport b str
@@ -1053,6 +1071,7 @@ handleTHMessage msg = case msg of
   ReifyAnnotations lookup tyrep ->
     wrapTHResult $ (map B.pack <$> getAnnotationsByTypeRep lookup tyrep)
   ReifyModule m -> wrapTHResult $ TH.qReifyModule m
+  ReifyConStrictness nm -> wrapTHResult $ TH.qReifyConStrictness nm
   AddDependentFile f -> wrapTHResult $ TH.qAddDependentFile f
   AddTopDecls decs -> wrapTHResult $ TH.qAddTopDecls decs
   IsExtEnabled ext -> wrapTHResult $ TH.qIsExtEnabled ext
@@ -1612,12 +1631,12 @@ reifyFamilyInstance is_poly_tvs inst@(FamInst { fi_flavor = flavor
 ------------------------------
 reifyType :: TyCoRep.Type -> TcM TH.Type
 -- Monadic only because of failure
-reifyType ty@(ForAllTy (Named _ _) _)        = reify_for_all ty
+reifyType ty@(ForAllTy {})  = reify_for_all ty
 reifyType (LitTy t)         = do { r <- reifyTyLit t; return (TH.LitT r) }
 reifyType (TyVarTy tv)      = return (TH.VarT (reifyName tv))
 reifyType (TyConApp tc tys) = reify_tc_app tc tys   -- Do not expand type synonyms here
 reifyType (AppTy t1 t2)     = do { [r1,r2] <- reifyTypes [t1,t2] ; return (r1 `TH.AppT` r2) }
-reifyType ty@(ForAllTy (Anon t1) t2)
+reifyType ty@(FunTy t1 t2)
   | isPredTy t1 = reify_for_all ty  -- Types like ((?x::Int) => Char -> Char)
   | otherwise   = do { [r1,r2] <- reifyTypes [t1,t2] ; return (TH.ArrowT `TH.AppT` r1 `TH.AppT` r2) }
 reifyType ty@(CastTy {})    = noTH (sLit "kind casts") (ppr ty)
@@ -1663,6 +1682,7 @@ reifyKind  ki
     reifyNonArrowKind k | isLiftedTypeKind k = return TH.StarT
                         | isConstraintKind k = return TH.ConstraintT
     reifyNonArrowKind (TyVarTy v)            = return (TH.VarT (reifyName v))
+    reifyNonArrowKind (FunTy _ k)            = reifyKind k
     reifyNonArrowKind (ForAllTy _ k)         = reifyKind k
     reifyNonArrowKind (TyConApp kc kis)      = reify_kc_app kc kis
     reifyNonArrowKind (AppTy k1 k2)          = do { k1' <- reifyKind k1
@@ -1780,7 +1800,7 @@ reify_tc_app tc tys
         isEmptyVarSet $
         filterVarSet isTyVar $
         tyCoVarsOfType $
-        mkForAllTys (dropList tys tc_binders) tc_res_kind
+        mkTyConKind (dropList tys tc_binders) tc_res_kind
 
 reifyPred :: TyCoRep.PredType -> TcM TH.Pred
 reifyPred ty

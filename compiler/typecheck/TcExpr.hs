@@ -7,6 +7,7 @@
 -}
 
 {-# LANGUAGE CPP, TupleSections, ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleContexts #-}
 
 module TcExpr ( tcPolyExpr, tcMonoExpr, tcMonoExprNC,
                 tcInferSigma, tcInferSigmaNC, tcInferRho, tcInferRhoNC,
@@ -26,9 +27,9 @@ import TcRnMonad
 import TcUnify
 import BasicTypes
 import Inst
-import TcBinds          ( chooseInferredQuantifiers, tcLocalBinds
-                        , tcUserTypeSig, tcExtendTyVarEnvFromSig )
-import TcSimplify       ( simplifyInfer )
+import TcBinds          ( chooseInferredQuantifiers, tcLocalBinds )
+import TcSigs           ( tcUserTypeSig, tcInstSig )
+import TcSimplify       ( simplifyInfer, InferMode(..) )
 import FamInst          ( tcGetFamInstEnvs, tcLookupDataFamInst )
 import FamInstEnv       ( FamInstEnvs )
 import RnEnv            ( addUsedGRE, addNameClashErrRn
@@ -48,6 +49,8 @@ import ConLike
 import DataCon
 import PatSyn
 import Name
+import NameEnv
+import NameSet
 import RdrName
 import TyCon
 import Type
@@ -237,7 +240,7 @@ tcExpr (HsLam match) res_ty
     match_ctxt = MC { mc_what = LambdaExpr, mc_body = tcBody }
     herald = sep [ text "The lambda expression" <+>
                    quotes (pprSetDepth (PartWay 1) $
-                           pprMatches (LambdaExpr :: HsMatchContext Name) match),
+                           pprMatches match),
                         -- The pprSetDepth makes the abstraction print briefly
                    text "has"]
 
@@ -253,8 +256,9 @@ tcExpr e@(HsLamCase matches) res_ty
     match_ctxt = MC { mc_what = CaseAlt, mc_body = tcBody }
 
 tcExpr e@(ExprWithTySig expr sig_ty) res_ty
-  = do { sig_info <- checkNoErrs $  -- Avoid error cascade
-                     tcUserTypeSig sig_ty Nothing
+  = do { let loc = getLoc (hsSigWcType sig_ty)
+       ; sig_info <- checkNoErrs $  -- Avoid error cascade
+                     tcUserTypeSig loc sig_ty Nothing
        ; (expr', poly_ty) <- tcExprSig expr sig_info
        ; let expr'' = ExprWithTySigOut expr' sig_ty
        ; tcWrapResult e expr'' poly_ty res_ty }
@@ -530,9 +534,10 @@ tcExpr (HsCase scrut matches) res_ty
 
 tcExpr (HsIf Nothing pred b1 b2) res_ty    -- Ordinary 'if'
   = do { pred' <- tcMonoExpr pred (mkCheckExpType boolTy)
-            -- this forces the branches to be fully instantiated
-            -- (See #10619)
-       ; res_ty <- mkCheckExpType <$> expTypeToType res_ty
+       ; res_ty <- tauifyExpType res_ty
+           -- Just like Note [Case branches must never infer a non-tau type]
+           -- in TcMatches (See #10619)
+
        ; b1' <- tcMonoExpr b1 res_ty
        ; b2' <- tcMonoExpr b2 res_ty
        ; return (HsIf Nothing pred' b1' b2') }
@@ -550,9 +555,10 @@ tcExpr (HsIf (Just fun) pred b1 b2) res_ty
 tcExpr (HsMultiIf _ alts) res_ty
   = do { res_ty <- if isSingleton alts
                    then return res_ty
-                   else mkCheckExpType <$> expTypeToType res_ty
-        -- Just like Note [Case branches must never infer a non-tau type]
-        -- in TcMatches
+                   else tauifyExpType res_ty
+             -- Just like TcMatches
+             -- Note [Case branches must never infer a non-tau type]
+
        ; alts' <- mapM (wrapLocM $ tcGRHS match_ctxt res_ty) alts
        ; res_ty <- readExpType res_ty
        ; return (HsMultiIf res_ty alts') }
@@ -875,12 +881,13 @@ tcExpr expr@(RecordUpd { rupd_expr = record_expr, rupd_flds = rbnds }) res_ty
 
         ; (result_subst, con1_tvs') <- newMetaTyVars con1_tvs
         ; let result_inst_tys = mkTyVarTys con1_tvs'
+              init_subst = mkEmptyTCvSubst (getTCvInScope result_subst)
 
-        ; (scrut_subst, scrut_inst_tys) <- mapAccumLM mk_inst_ty emptyTCvSubst
+        ; (scrut_subst, scrut_inst_tys) <- mapAccumLM mk_inst_ty init_subst
                                                       (con1_tvs `zip` result_inst_tys)
 
         ; let rec_res_ty    = TcType.substTy result_subst con1_res_ty
-              scrut_ty      = TcType.substTyUnchecked scrut_subst con1_res_ty
+              scrut_ty      = TcType.substTy scrut_subst  con1_res_ty
               con1_arg_tys' = map (TcType.substTy result_subst) con1_arg_tys
 
         ; wrap_res <- tcSubTypeHR (exprCtOrigin expr)
@@ -1182,13 +1189,14 @@ tcArgs fun orig_fun_ty fun_orig orig_args herald
       = do { (wrap1, upsilon_ty) <- topInstantiateInferred fun_orig fun_ty
                -- wrap1 :: fun_ty "->" upsilon_ty
            ; case tcSplitForAllTy_maybe upsilon_ty of
-               Just (binder, inner_ty)
-                 | Just tv <- binderVar_maybe binder ->
-                 ASSERT2( binderVisibility binder == Specified
-                        , (vcat [ ppr fun_ty, ppr upsilon_ty, ppr binder
+               Just (tvb, inner_ty) ->
+                 do { let tv   = binderVar tvb
+                          vis  = binderVisibility tvb
+                          kind = tyVarKind tv
+                    ; MASSERT2( vis == Specified
+                        , (vcat [ ppr fun_ty, ppr upsilon_ty, ppr tvb
                                 , ppr inner_ty, pprTvBndr tv
-                                , ppr (binderVisibility binder) ]) )
-                 do { let kind = tyVarKind tv
+                                , ppr vis ]) )
                     ; ty_arg <- tcHsTypeApp hs_ty_arg kind
                     ; let insted_ty = substTyWithUnchecked [tv] [ty_arg] inner_ty
                     ; (inner_wrap, args', res_ty)
@@ -1438,20 +1446,14 @@ in the other order, the extra signature in f2 is reqd.
 ********************************************************************* -}
 
 tcExprSig :: LHsExpr Name -> TcIdSigInfo -> TcM (LHsExpr TcId, TcType)
-tcExprSig expr sig@(TISI { sig_bndr  = s_bndr
-                         , sig_skols = skol_prs
-                         , sig_theta = theta
-                         , sig_tau   = tau })
-  | null skol_prs  -- Fast path when there is no quantification at all
-  , null theta
-  , CompleteSig {} <- s_bndr
-  = do { expr' <- tcPolyExprNC expr tau
-       ; return (expr', tau) }
-
-  | CompleteSig poly_id <- s_bndr
-  = do { given <- newEvVars theta
+tcExprSig expr (CompleteSig { sig_bndr = poly_id, sig_loc = loc })
+  = setSrcSpan loc $   -- Sets the location for the implication constraint
+    do { (tv_prs, theta, tau) <- tcInstType (tcInstSigTyVars loc) poly_id
+       ; given <- newEvVars theta
+       ; let skol_info = SigSkol ExprSigCtxt (mkPhiTy theta tau)
+             skol_tvs  = map snd tv_prs
        ; (ev_binds, expr') <- checkConstraints skol_info skol_tvs given $
-                              tcExtendTyVarEnvFromSig sig $
+                              tcExtendTyVarEnv2 tv_prs $
                               tcPolyExprNC expr tau
 
        ; let poly_wrap = mkWpTyLams   skol_tvs
@@ -1459,20 +1461,29 @@ tcExprSig expr sig@(TISI { sig_bndr  = s_bndr
                          <.> mkWpLet  ev_binds
        ; return (mkLHsWrap poly_wrap expr', idType poly_id) }
 
-  | PartialSig { sig_name = name, sig_wcs = wc_prs, sig_hs_ty = hs_ty } <- s_bndr
-  = do { (tclvl, wanted, expr')
+tcExprSig expr sig@(PartialSig { psig_name = name, sig_loc = loc })
+  = setSrcSpan loc $   -- Sets the location for the implication constraint
+    do { (tclvl, wanted, (expr', sig_inst))
              <- pushLevelAndCaptureConstraints  $
-                tcExtendTyVarEnvFromSig sig $
-                do { addErrCtxt (pprSigCtxt ExprSigCtxt (ppr hs_ty)) $
-                     emitWildCardHoleConstraints wc_prs
-                   ; tcPolyExprNC expr tau }
+                do { sig_inst <- tcInstSig sig
+                   ; expr' <- tcExtendTyVarEnv2 (sig_inst_skols sig_inst) $
+                              tcExtendTyVarEnv2 (sig_inst_wcs   sig_inst) $
+                              tcPolyExprNC expr (sig_inst_tau sig_inst)
+                   ; return (expr', sig_inst) }
+       -- See Note [Partial expression signatures]
+       ; let tau = sig_inst_tau sig_inst
+             infer_mode | null (sig_inst_theta sig_inst)
+                        , isNothing (sig_inst_wcx sig_inst)
+                        = ApplyMR
+                        | otherwise
+                        = NoRestrictions
        ; (qtvs, givens, ev_binds)
-                 <- simplifyInfer tclvl False [sig] [(name, tau)] wanted
+                 <- simplifyInfer tclvl infer_mode [sig_inst] [(name, tau)] wanted
        ; tau <- zonkTcType tau
        ; let inferred_theta = map evVarPred givens
              tau_tvs        = tyCoVarsOfType tau
        ; (binders, my_theta) <- chooseInferredQuantifiers inferred_theta
-                                   tau_tvs qtvs (Just sig)
+                                   tau_tvs qtvs (Just sig_inst)
        ; let inferred_sigma = mkInvSigmaTy qtvs inferred_theta tau
              my_sigma       = mkForAllTys binders (mkPhiTy  my_theta tau)
        ; wrap <- if inferred_sigma `eqType` my_sigma -- NB: eqType ignores vis.
@@ -1489,10 +1500,34 @@ tcExprSig expr sig@(TISI { sig_bndr  = s_bndr
                          <.> mkWpLet  ev_binds
        ; return (mkLHsWrap poly_wrap expr', my_sigma) }
 
-  | otherwise = panic "tcExprSig"   -- Can't happen
-  where
-    skol_info = SigSkol ExprSigCtxt (mkPhiTy theta tau)
-    skol_tvs = map snd skol_prs
+
+{- Note [Partial expression signatures]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Partial type signatures on expressions are easy to get wrong.  But
+here is a guiding principile
+    e :: ty
+should behave like
+    let x :: ty
+        x = e
+    in x
+
+So for partial signatures we apply the MR if no context is given.  So
+   e :: IO _          apply the MR
+   e :: _ => IO _     do not apply the MR
+just like in TcBinds.decideGeneralisationPlan
+
+This makes a difference (Trac #11670):
+   peek :: Ptr a -> IO CLong
+   peek ptr = peekElemOff undefined 0 :: _
+from (peekElemOff undefined 0) we get
+          type: IO w
+   constraints: Storable w
+
+We must NOT try to generalise over 'w' because the signature specifies
+no constraints so we'll complain about not being able to solve
+Storable w.  Instead, don't generalise; then _ gets instantiated to
+CLong, as it should.
+-}
 
 {- *********************************************************************
 *                                                                      *
@@ -2498,11 +2533,152 @@ fieldNotInType p rdr
 ************************************************************************
 -}
 
+-- | A data type to describe why a variable is not closed.
+data NotClosedReason = NotLetBoundReason
+                     | NotTypeClosed VarSet
+                     | NotClosed Name NotClosedReason
+
+-- | Checks if the given name is closed and emits an error if not.
+--
+-- See Note [Not-closed error messages].
 checkClosedInStaticForm :: Name -> TcM ()
 checkClosedInStaticForm name = do
-    thing <- tcLookup name
-    case thing of
-      ATcId { tct_closed = NotTopLevel } ->
-         addErrTc $ quotes (ppr name) <+>
-                    text "is used in a static form but it is not closed."
-      _ -> return ()
+    type_env <- getLclTypeEnv
+    case checkClosed type_env name of
+      Nothing -> return ()
+      Just reason -> addErrTc $ explain name reason
+  where
+    -- See Note [Checking closedness].
+    checkClosed :: TcTypeEnv -> Name -> Maybe NotClosedReason
+    checkClosed type_env n = checkLoop type_env (unitNameSet n) n
+
+    checkLoop :: TcTypeEnv -> NameSet -> Name -> Maybe NotClosedReason
+    checkLoop type_env visited n = do
+      -- The @visited@ set is an accumulating parameter that contains the set of
+      -- visited nodes, so we avoid repeating cycles in the traversal.
+      case lookupNameEnv type_env n of
+        Just (ATcId { tct_id = tcid, tct_info = info }) -> case info of
+          ClosedLet   -> Nothing
+          NotLetBound -> Just NotLetBoundReason
+          NonClosedLet fvs type_closed -> listToMaybe $
+            -- Look for a non-closed variable in fvs
+            [ NotClosed n' reason
+            | n' <- nameSetElemsStable fvs
+            , not (elemNameSet n' visited)
+            , Just reason <- [checkLoop type_env (extendNameSet visited n') n']
+            ] ++
+            if type_closed then
+              []
+            else
+              -- We consider non-let-bound variables easier to figure out than
+              -- non-closed types, so we report non-closed types to the user
+              -- only if we cannot spot the former.
+              [ NotTypeClosed $ tyCoVarsOfType (idType tcid) ]
+        -- The binding is closed.
+        _ -> Nothing
+
+    -- Converts a reason into a human-readable sentence.
+    --
+    -- @explain name reason@ starts with
+    --
+    -- "<name> is used in a static form but it is not closed because it"
+    --
+    -- and then follows a list of causes. For each id in the path, the text
+    --
+    -- "uses <id> which"
+    --
+    -- is appended, yielding something like
+    --
+    -- "uses <id> which uses <id1> which uses <id2> which"
+    --
+    -- until the end of the path is reached, which is reported as either
+    --
+    -- "is not let-bound"
+    --
+    -- when the final node is not let-bound, or
+    --
+    -- "has a non-closed type because it contains the type variables:
+    -- v1, v2, v3"
+    --
+    -- when the final node has a non-closed type.
+    --
+    explain :: Name -> NotClosedReason -> SDoc
+    explain name reason =
+      quotes (ppr name) <+> text "is used in a static form but it is not closed"
+                        <+> text "because it"
+                        $$
+                        sep (causes reason)
+
+    causes :: NotClosedReason -> [SDoc]
+    causes NotLetBoundReason = [text "is not let-bound."]
+    causes (NotTypeClosed vs) =
+      [ text "has a non-closed type because it contains the"
+      , text "type variables:" <+>
+        pprVarSet vs (hsep . punctuate comma . map (quotes . ppr))
+      ]
+    causes (NotClosed n reason) =
+      let msg = text "uses" <+> quotes (ppr n) <+> text "which"
+       in case reason of
+            NotClosed _ _ -> msg : causes reason
+            _   -> let (xs0, xs1) = splitAt 1 $ causes reason
+                    in fmap (msg <+>) xs0 ++ xs1
+
+-- Note [Not-closed error messages]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+--
+-- When variables in a static form are not closed, we go through the trouble
+-- of explaining why they aren't.
+--
+-- Thus, the following program
+--
+-- > {-# LANGUAGE StaticPointers #-}
+-- > module M where
+-- >
+-- > f x = static g
+-- >   where
+-- >     g = h
+-- >     h = x
+--
+-- produces the error
+--
+--    'g' is used in a static form but it is not closed because it
+--    uses 'h' which uses 'x' which is not let-bound.
+--
+-- And a program like
+--
+-- > {-# LANGUAGE StaticPointers #-}
+-- > module M where
+-- >
+-- > import Data.Typeable
+-- > import GHC.StaticPtr
+-- >
+-- > f :: Typeable a => a -> StaticPtr TypeRep
+-- > f x = const (static (g undefined)) (h x)
+-- >   where
+-- >     g = h
+-- >     h = typeOf
+--
+-- produces the error
+--
+--    'g' is used in a static form but it is not closed because it
+--    uses 'h' which has a non-closed type because it contains the
+--    type variables: 'a'
+--
+
+-- Note [Checking closedness]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~
+--
+-- @checkClosed@ checks if a binding is closed and returns a reason if it is
+-- not.
+--
+-- The bindings define a graph where the nodes are ids, and there is an edge
+-- from @id1@ to @id2@ if the rhs of @id1@ contains @id2@ among its free
+-- variables.
+--
+-- When @n@ is not closed, it has to exist in the graph some node reachable
+-- from @n@ that it is not a let-bound variable or that it has a non-closed
+-- type. Thus, the "reason" is a path from @n@ to this offending node.
+--
+-- When @n@ is not closed, we traverse the graph reachable from @n@ to build
+-- the reason.
+--

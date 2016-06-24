@@ -10,10 +10,10 @@ module NameSet (
 
         -- ** Manipulating these sets
         emptyNameSet, unitNameSet, mkNameSet, unionNameSet, unionNameSets,
-        minusNameSet, elemNameSet, nameSetElems, extendNameSet, extendNameSetList,
+        minusNameSet, elemNameSet, extendNameSet, extendNameSetList,
         delFromNameSet, delListFromNameSet, isEmptyNameSet, filterNameSet,
         intersectsNameSet, intersectNameSet,
-        nameSetAny, nameSetAll,
+        nameSetAny, nameSetAll, nameSetElemsStable,
 
         -- * Free variables
         FreeVars,
@@ -35,6 +35,8 @@ module NameSet (
 
 import Name
 import UniqSet
+import UniqFM
+import Data.List (sortBy)
 
 {-
 ************************************************************************
@@ -55,7 +57,6 @@ unionNameSet      :: NameSet -> NameSet -> NameSet
 unionNameSets  :: [NameSet] -> NameSet
 minusNameSet       :: NameSet -> NameSet -> NameSet
 elemNameSet        :: Name -> NameSet -> Bool
-nameSetElems      :: NameSet -> [Name]
 isEmptyNameSet     :: NameSet -> Bool
 delFromNameSet     :: NameSet -> Name -> NameSet
 delListFromNameSet :: NameSet -> [Name] -> NameSet
@@ -75,7 +76,6 @@ unionNameSet     = unionUniqSets
 unionNameSets = unionManyUniqSets
 minusNameSet      = minusUniqSet
 elemNameSet       = elementOfUniqSet
-nameSetElems     = uniqSetToList
 delFromNameSet    = delOneFromUniqSet
 filterNameSet     = filterUniqSet
 intersectNameSet  = intersectUniqSets
@@ -89,6 +89,16 @@ nameSetAny = uniqSetAny
 
 nameSetAll :: (Name -> Bool) -> NameSet -> Bool
 nameSetAll = uniqSetAll
+
+-- | Get the elements of a NameSet with some stable ordering.
+-- This only works for Names that originate in the source code or have been
+-- tidied.
+-- See Note [Deterministic UniqFM] to learn about nondeterminism
+nameSetElemsStable :: NameSet -> [Name]
+nameSetElemsStable ns =
+  sortBy stableNameCmp $ nonDetEltsUFM ns
+  -- It's OK to use nonDetEltsUFM here because we immediately sort
+  -- with stableNameCmp
 
 {-
 ************************************************************************
@@ -195,7 +205,7 @@ findUses dus uses
         = rhs_uses `unionNameSet` uses
     get (Just defs, rhs_uses) uses
         | defs `intersectsNameSet` uses         -- Used
-        || any (startsWithUnderscore . nameOccName) (nameSetElems defs)
+        || nameSetAny (startsWithUnderscore . nameOccName) defs
                 -- At least one starts with an "_",
                 -- so treat the group as used
         = rhs_uses `unionNameSet` uses

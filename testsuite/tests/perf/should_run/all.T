@@ -68,7 +68,7 @@ test('lazy-bs-alloc',
             # 2014-01-28: Widen 1->2% (x86/Windows was at 425212)
             # 2016-04-06: 429760 (x86/Linux) no idea what happened
       only_ways(['normal']),
-      extra_run_opts('../../numeric/should_run/arith011.stdout'),
+      extra_run_opts('arith011.stdout'),
       ignore_output,
 
       # Use `+RTS -G1` for more stable residency measurements. Note [residency].
@@ -204,9 +204,10 @@ test('T5549',
                     # expected value: 3362958676 (Windows)
                     # 2014-12-01:     4096606332 (Windows) integer-gmp2
 
-                       (wordsize(64), 8193140752, 5)]),
+                       (wordsize(64), 5793140200, 5)]),
                     # expected value: 6725846120 (amd64/Linux)
                     #                 8193140752 (amd64/Linux) integer-gmp2
+                    #                 5793140200 (amd64/Linux) integer-gmp2
       only_ways(['normal'])
       ],
      compile_and_run,
@@ -275,9 +276,10 @@ test('T7257',
                       [(wordsize(32), 989850664, 10),
                         # expected value: 1246287228 (i386/Linux)
                         # 2016-04-06: 989850664 (i386/Linux) no idea what happened
-                       (wordsize(64), 1654893248, 5)]),
+                       (wordsize(64), 1414893248, 5)]),
                         # 2012-09-21: 1774893760 (amd64/Linux)
                         # 2015-11-03: 1654893248 (amd64/Linux)
+                        # 2016-06-22: 1414893248 (amd64/Linux, sizeExpr fix)
       stats_num_field('peak_megabytes_allocated',
                       [(wordsize(32), 217, 5),
                         # 2012-10-08: 217 (x86/Linux)

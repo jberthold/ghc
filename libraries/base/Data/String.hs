@@ -1,5 +1,8 @@
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE NoImplicitPrelude #-}
+{-# LANGUAGE StandaloneDeriving #-}
 {-# LANGUAGE Trustworthy #-}
-{-# LANGUAGE NoImplicitPrelude, FlexibleInstances #-}
 {-# LANGUAGE TypeFamilies #-}
 
 -----------------------------------------------------------------------------
@@ -29,6 +32,7 @@ module Data.String (
 
 import GHC.Base
 import Data.Functor.Const (Const (Const))
+import Data.Functor.Identity (Identity (Identity))
 import Data.List (lines, words, unlines, unwords)
 
 -- | Class for string-like datastructures; used by the overloaded string
@@ -75,9 +79,13 @@ A test case (should_run/overloadedstringsrun01.hs) has been added to
 ensure the good behavior of the above example remains in the future.
 -}
 
+-- | @(a ~ Char)@ context was introduced in @4.9.0.0@
+--
+-- @since 2.01
 instance (a ~ Char) => IsString [a] where
          -- See Note [IsString String]
     fromString xs = xs
 
-instance IsString a => IsString (Const a b) where
-    fromString = Const . fromString
+-- | @since 4.9.0.0
+deriving instance IsString a => IsString (Const a b)
+deriving instance IsString a => IsString (Identity a)

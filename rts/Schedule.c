@@ -986,7 +986,8 @@ schedulePushWork(Capability *cap USED_IF_THREADS,
         } while (n_wanted_caps < n_capabilities-1);
     }
 
-    // Grab free capabilities, starting from cap->no+1.
+    // First grab as many free Capabilities as we can.  ToDo: we should use
+    // capabilities on the same NUMA node preferably, but not exclusively.
     for (i = (cap->no + 1) % n_capabilities, n_free_caps=0;
          n_free_caps < n_wanted_caps && i != cap->no;
          i = (i + 1) % n_capabilities) {
@@ -1398,7 +1399,7 @@ scheduleHandleHeapOverflow( Capability *cap, StgTSO *t )
                                                // nursery has only one
                                                // block.
 
-            bd = allocGroup_lock(blocks);
+            bd = allocGroupOnNode_lock(cap->node,blocks);
             cap->r.rNursery->n_blocks += blocks;
 
             // link the new group after CurrentNursery
@@ -2136,8 +2137,6 @@ delete_threads_and_gc:
         }
         task->cap = cap;
     }
-
-    stgFree(idle_cap);
 #endif
 
     if (heap_overflow && sched_state < SCHED_INTERRUPTING) {
@@ -2166,6 +2165,8 @@ delete_threads_and_gc:
 #endif
 
 #if defined(THREADED_RTS)
+    stgFree(idle_cap);
+
     if (gc_type == SYNC_GC_SEQ) {
         // release our stash of capabilities.
         releaseAllCapabilities(n_capabilities, cap, task);

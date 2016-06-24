@@ -50,7 +50,6 @@ typedef struct _GC_FLAGS {
     double  pcFreeHeap;
 
     uint32_t     generations;
-    uint32_t     steps;
     rtsBool squeezeUpdFrames;
 
     rtsBool compact;		/* True <=> "compact all the time" */
@@ -59,7 +58,6 @@ typedef struct _GC_FLAGS {
     rtsBool sweep;		/* use "mostly mark-sweep" instead of copying
                                  * for the oldest generation */
     rtsBool ringBell;
-    rtsBool frontpanel;
 
     Time    idleGCDelayTime;    /* units: TIME_RESOLUTION */
     rtsBool doIdleGC;
@@ -73,6 +71,9 @@ typedef struct _GC_FLAGS {
                                  * to handle the exception before we
                                  * raise it again.
                                  */
+
+    rtsBool numa;               /* Use NUMA */
+    StgWord numaMask;
 } GC_FLAGS;
 
 /* See Note [Synchronization of flags and base APIs] */
@@ -93,6 +94,7 @@ typedef struct _DEBUG_FLAGS {
     rtsBool squeeze;        /* 'z'  stack squeezing & lazy blackholing */
     rtsBool hpc; 	    /* 'c' coverage */
     rtsBool sparks; 	    /* 'r' */
+    rtsBool numa; 	    /* '--debug-numa' */
 } DEBUG_FLAGS;
 
 /* See Note [Synchronization of flags and base APIs] */
@@ -209,8 +211,7 @@ typedef struct _PAR_FLAGS {
   uint32_t      placement;
   long          wait;
 #endif /* PARALLEL_RTS */
-#ifdef THREADED_RTS
-  uint32_t       nNodes;         /* number of threads to run simultaneously */
+  uint32_t       nCapabilities;  /* number of threads to run simultaneously */
   rtsBool        migrate;        /* migrate threads between capabilities */
   uint32_t       maxLocalSparks;
   rtsBool        parGcEnabled;   /* enable parallel GC */
@@ -235,7 +236,6 @@ typedef struct _PAR_FLAGS {
                                   * GC (default: use all nNodes). */
 
   rtsBool        setAffinity;    /* force thread affinity with CPUs */
-#endif /* THREADED_RTS */
 } PAR_FLAGS;
 
 /* See Note [Synchronization of flags and base APIs] */
@@ -257,7 +257,6 @@ typedef struct _RTS_FLAGS {
     PROFILING_FLAGS   ProfFlags;
     TRACE_FLAGS       TraceFlags;
     TICKY_FLAGS	      TickyFlags;
-
     PAR_FLAGS	      ParFlags;
 } RTS_FLAGS;
 

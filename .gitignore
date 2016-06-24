@@ -12,6 +12,9 @@ Thumbs.db
 *.orig
 *.prof
 *.rej
+*.patch
+*.stackdump
+foo*
 
 *.hi
 *.hi-boot
@@ -163,8 +166,8 @@ _darcs/
 /rts/package.conf.install
 /rts/package.conf.install.raw
 /stage3.package.conf
-/testsuite_summary.txt
-/testlog
+/testsuite_summary*.txt
+/testlog*
 /utils/runghc/runghc.cabal
 
 /extra-gcc-opts
@@ -183,3 +186,6 @@ GIT_COMMIT_ID
 .ghc
 .bash_history
 .gitconfig
+
+# Should be equal to testdir_suffix from testsuite/driver/testlib.py.
+*.run
