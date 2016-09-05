@@ -131,23 +131,18 @@ class TestRun:
        self.start_time = None
        self.total_tests = 0
        self.total_test_cases = 0
-       self.n_framework_failures = 0
-       self.framework_failures = {}
+
        self.n_tests_skipped = 0
-       self.tests_skipped = {}
        self.n_expected_passes = 0
-       self.expected_passes = {}
        self.n_expected_failures = 0
-       self.expected_failures = {}
-       self.n_missing_libs = 0
-       self.missing_libs = {}
-       self.n_unexpected_passes = 0
-       self.unexpected_passes = {}
-       self.n_unexpected_failures = 0
-       self.unexpected_failures = {}
-       self.n_unexpected_stat_failures = 0
-       self.unexpected_stat_failures = {}
-       
+
+       self.missing_libs = []
+       self.framework_failures = []
+
+       self.unexpected_passes = []
+       self.unexpected_failures = []
+       self.unexpected_stat_failures = []
+
 global t
 t = TestRun()
 
@@ -181,10 +176,8 @@ class TestOptions:
        self.stdin = ''
 
        # don't compare output
-       self.ignore_output = 0
-
-       # don't give anything as stdin
-       self.no_stdin = 0
+       self.ignore_stdout = False
+       self.ignore_stderr = False
 
        # We sometimes want to modify the compiler_always_flags, so
        # they are copied from config.compiler_always_flags when we
@@ -253,6 +246,9 @@ class TestOptions:
        # stdout file.  Accepts two arguments: filename of actual stdout
        # output, and a normaliser function given other test options
        self.check_stdout = None
+
+       # Check .hp file when profiling libraries are available?
+       self.check_hp = True
 
        # Extra normalisation for compiler error messages
        self.extra_errmsg_normaliser = lambda x: x

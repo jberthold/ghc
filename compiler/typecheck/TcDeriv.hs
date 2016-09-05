@@ -31,14 +31,11 @@ import TcHsType
 import TcMType
 import TcSimplify
 import TcUnify( buildImplicationFor )
-import LoadIface( loadInterfaceForName )
-import Module( getModule )
 
 import RnNames( extendGlobalRdrEnvRn )
 import RnBinds
 import RnEnv
 import RnSource   ( addTcgDUs )
-import HscTypes
 import Avail
 
 import Unify( tcUnifyTy )
@@ -390,13 +387,12 @@ tcDeriving deriv_infos deriv_decls
 
         ; let (inst_infos, deriv_stuff, maybe_fvs) = unzip3 (insts1 ++ insts2)
         ; loc <- getSrcSpanM
-        ; let (binds, famInsts, extraInstances) =
-                genAuxBinds loc (unionManyBags deriv_stuff)
+        ; let (binds, famInsts) = genAuxBinds loc (unionManyBags deriv_stuff)
 
         ; dflags <- getDynFlags
 
         ; (inst_info, rn_binds, rn_dus) <-
-            renameDeriv is_boot (inst_infos ++ (bagToList extraInstances)) binds
+            renameDeriv is_boot inst_infos binds
 
         ; unless (isEmptyBag inst_info) $
              liftIO (dumpIfSet_dyn dflags Opt_D_dump_deriv "Derived instances"
@@ -616,7 +612,7 @@ deriveTyData :: [TyVar] -> TyCon -> [Type]   -- LHS of data or data instance
 -- I.e. not standalone deriving
 deriveTyData tvs tc tc_args deriv_pred
   = setSrcSpan (getLoc (hsSigType deriv_pred)) $  -- Use loc of the 'deriving' item
-    do  { (deriv_tvs, cls, cls_tys, cls_arg_kind)
+    do  { (deriv_tvs, cls, cls_tys, cls_arg_kinds)
                 <- tcExtendTyVarEnv tvs $
                    tcHsDeriv deriv_pred
                 -- Deriving preds may (now) mention
@@ -627,6 +623,9 @@ deriveTyData tvs tc tc_args deriv_pred
                 -- Typeable is special, because Typeable :: forall k. k -> Constraint
                 -- so the argument kind 'k' is not decomposable by splitKindFunTys
                 -- as is the case for all other derivable type classes
+        ; when (length cls_arg_kinds /= 1) $
+            failWithTc (nonUnaryErr deriv_pred)
+        ; let [cls_arg_kind] = cls_arg_kinds
         ; if className cls == typeableClassName
           then do warnUselessTypeable
                   return []
@@ -1308,6 +1307,10 @@ checkSideConditions dflags mtheta cls cls_tys rep_tc
 
 classArgsErr :: Class -> [Type] -> SDoc
 classArgsErr cls cls_tys = quotes (ppr (mkClassPred cls cls_tys)) <+> text "is not a class"
+
+nonUnaryErr :: LHsSigType Name -> SDoc
+nonUnaryErr ct = quotes (ppr ct)
+  <+> text "is not a unary constraint, as expected by a deriving clause"
 
 nonStdErr :: Class -> SDoc
 nonStdErr cls =
@@ -2273,7 +2276,7 @@ genInst :: DerivSpec ThetaType
         -> TcM (InstInfo RdrName, BagDerivStuff, Maybe Name)
 genInst spec@(DS { ds_tvs = tvs, ds_tc = rep_tycon
                  , ds_theta = theta, ds_newtype = is_newtype, ds_tys = tys
-                 , ds_name = dfun_name, ds_cls = clas, ds_loc = loc })
+                 , ds_cls = clas, ds_loc = loc })
   | Just rhs_ty <- is_newtype   -- See Note [Bindings for Generalised Newtype Deriving]
   = do { inst_spec <- newDerivClsInst theta spec
        ; return ( InstInfo
@@ -2290,9 +2293,7 @@ genInst spec@(DS { ds_tvs = tvs, ds_tc = rep_tycon
               -- See Note [Newtype deriving and unused constructors]
 
   | otherwise
-  = do { (meth_binds, deriv_stuff) <- genDerivStuff loc clas
-                                        dfun_name rep_tycon
-                                        tys tvs
+  = do { (meth_binds, deriv_stuff) <- genDerivStuff loc clas rep_tycon tys tvs
        ; inst_spec <- newDerivClsInst theta spec
        ; traceTc "newder" (ppr inst_spec)
        ; let inst_info = InstInfo { iSpec   = inst_spec
@@ -2306,9 +2307,9 @@ genInst spec@(DS { ds_tvs = tvs, ds_tc = rep_tycon
 
 -- Generate the bindings needed for a derived class that isn't handled by
 -- -XGeneralizedNewtypeDeriving.
-genDerivStuff :: SrcSpan -> Class -> Name -> TyCon -> [Type] -> [TyVar]
+genDerivStuff :: SrcSpan -> Class -> TyCon -> [Type] -> [TyVar]
               -> TcM (LHsBinds RdrName, BagDerivStuff)
-genDerivStuff loc clas dfun_name tycon inst_tys tyvars
+genDerivStuff loc clas tycon inst_tys tyvars
   -- Special case for DeriveGeneric
   | let ck = classKey clas
   , ck `elem` [genClassKey, gen1ClassKey]
@@ -2316,55 +2317,32 @@ genDerivStuff loc clas dfun_name tycon inst_tys tyvars
         -- TODO NSF: correctly identify when we're building Both instead of One
     in do
       (binds, faminst) <- gen_Generic_binds gk tycon inst_tys
-                                            (nameModule dfun_name)
       return (binds, unitBag (DerivFamInst faminst))
 
   -- Not deriving Generic(1), so we first check if the compiler has built-in
   -- support for deriving the class in question.
+  | Just gen_fn <- hasBuiltinDeriving clas
+  = gen_fn loc tycon
+
   | otherwise
-  = do { dflags <- getDynFlags
-       ; fix_env <- getDataConFixityFun tycon
-       ; case hasBuiltinDeriving dflags fix_env clas of
-              Just gen_fn -> return (gen_fn loc tycon)
-              Nothing -> genDerivAnyClass dflags }
+  = do { -- If there isn't compiler support for deriving the class, our last
+         -- resort is -XDeriveAnyClass (since -XGeneralizedNewtypeDeriving
+         -- fell through).
+        let mini_env   = mkVarEnv (classTyVars clas `zip` inst_tys)
+            mini_subst = mkTvSubst (mkInScopeSet (mkVarSet tyvars)) mini_env
 
-  where
-    genDerivAnyClass :: DynFlags -> TcM (LHsBinds RdrName, BagDerivStuff)
-    genDerivAnyClass dflags =
-      do { -- If there isn't compiler support for deriving the class, our last
-           -- resort is -XDeriveAnyClass (since -XGeneralizedNewtypeDeriving
-           -- fell through).
-          let mini_env   = mkVarEnv (classTyVars clas `zip` inst_tys)
-              mini_subst = mkTvSubst (mkInScopeSet (mkVarSet tyvars)) mini_env
-
-         ; tyfam_insts <-
-             ASSERT2( isNothing (canDeriveAnyClass dflags tycon clas)
-                    , ppr "genDerivStuff: bad derived class" <+> ppr clas )
-             mapM (tcATDefault False loc mini_subst emptyNameSet)
-                  (classATItems clas)
-         ; return ( emptyBag -- No method bindings are needed...
-                  , listToBag (map DerivFamInst (concat tyfam_insts))
-                  -- ...but we may need to generate binding for associated type
-                  -- family default instances.
-                  -- See Note [DeriveAnyClass and default family instances]
-                  ) }
-
-getDataConFixityFun :: TyCon -> TcM (Name -> Fixity)
--- If the TyCon is locally defined, we want the local fixity env;
--- but if it is imported (which happens for standalone deriving)
--- we need to get the fixity env from the interface file
--- c.f. RnEnv.lookupFixity, and Trac #9830
-getDataConFixityFun tc
-  = do { this_mod <- getModule
-       ; if nameIsLocalOrFrom this_mod name
-         then do { fix_env <- getFixityEnv
-                 ; return (lookupFixity fix_env) }
-         else do { iface <- loadInterfaceForName doc name
-                            -- Should already be loaded!
-                 ; return (mi_fix iface . nameOccName) } }
-  where
-    name = tyConName tc
-    doc = text "Data con fixities for" <+> ppr name
+       ; dflags <- getDynFlags
+       ; tyfam_insts <-
+           ASSERT2( isNothing (canDeriveAnyClass dflags tycon clas)
+                  , ppr "genDerivStuff: bad derived class" <+> ppr clas )
+           mapM (tcATDefault False loc mini_subst emptyNameSet)
+                (classATItems clas)
+       ; return ( emptyBag -- No method bindings are needed...
+                , listToBag (map DerivFamInst (concat tyfam_insts))
+                -- ...but we may need to generate binding for associated type
+                -- family default instances.
+                -- See Note [DeriveAnyClass and default family instances]
+                ) }
 
 {-
 Note [Bindings for Generalised Newtype Deriving]

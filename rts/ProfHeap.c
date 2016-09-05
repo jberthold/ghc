@@ -20,6 +20,7 @@
 #include "LdvProfile.h"
 #include "Arena.h"
 #include "Printer.h"
+#include "Trace.h"
 #include "sm/GCThread.h"
 
 #include <string.h>
@@ -371,6 +372,19 @@ printSample(rtsBool beginSample, StgDouble sampleValue)
     }
 }
 
+static void
+dumpCostCentresToEventLog(void)
+{
+#ifdef PROFILING
+    CostCentre *cc, *next;
+    for (cc = CC_LIST; cc != NULL; cc = next) {
+        next = cc->link;
+        traceHeapProfCostCentre(cc->ccID, cc->label, cc->module,
+                                cc->srcloc, cc->is_caf);
+    }
+#endif
+}
+
 /* --------------------------------------------------------------------------
  * Initialize the heap profilier
  * ----------------------------------------------------------------------- */
@@ -400,7 +414,7 @@ initHeapProfiling(void)
     }
 
     // max_era = 2^LDV_SHIFT
-        max_era = 1 << LDV_SHIFT;
+    max_era = 1 << LDV_SHIFT;
 
     n_censuses = 32;
     censuses = stgMallocBytes(sizeof(Census) * n_censuses, "initHeapProfiling");
@@ -436,6 +450,9 @@ initHeapProfiling(void)
         initRetainerProfiling();
     }
 #endif
+
+    traceHeapProfBegin(0);
+    dumpCostCentresToEventLog();
 
     return 0;
 }
@@ -744,10 +761,12 @@ dumpCensus( Census *census )
     ssize_t count;
 
     printSample(rtsTrue, census->time);
+    traceHeapProfSampleBegin(era);
 
 #ifdef PROFILING
     if (RtsFlags.ProfFlags.doHeapProfile == HEAP_BY_LDV) {
-      fprintf(hp_file, "VOID\t%lu\n", (unsigned long)(census->void_total) * sizeof(W_));
+        fprintf(hp_file, "VOID\t%lu\n",
+                (unsigned long)(census->void_total) * sizeof(W_));
         fprintf(hp_file, "LAG\t%lu\n",
                 (unsigned long)(census->not_used - census->void_total) * sizeof(W_));
         fprintf(hp_file, "USE\t%lu\n",
@@ -788,6 +807,8 @@ dumpCensus( Census *census )
         switch (RtsFlags.ProfFlags.doHeapProfile) {
         case HEAP_BY_CLOSURE_TYPE:
             fprintf(hp_file, "%s", (char *)ctr->identity);
+            traceHeapProfSampleString(0, (char *)ctr->identity,
+                                      count * sizeof(W_));
             break;
         }
 #endif
@@ -795,12 +816,17 @@ dumpCensus( Census *census )
 #ifdef PROFILING
         switch (RtsFlags.ProfFlags.doHeapProfile) {
         case HEAP_BY_CCS:
-            fprint_ccs(hp_file, (CostCentreStack *)ctr->identity, RtsFlags.ProfFlags.ccsLength);
+            fprint_ccs(hp_file, (CostCentreStack *)ctr->identity,
+                       RtsFlags.ProfFlags.ccsLength);
+            traceHeapProfSampleCostCentre(0, (CostCentreStack *)ctr->identity,
+                                          count * sizeof(W_));
             break;
         case HEAP_BY_MOD:
         case HEAP_BY_DESCR:
         case HEAP_BY_TYPE:
             fprintf(hp_file, "%s", (char *)ctr->identity);
+            traceHeapProfSampleString(0, (char *)ctr->identity,
+                                      count * sizeof(W_));
             break;
         case HEAP_BY_RETAINER:
         {
@@ -912,6 +938,24 @@ static void heapProfObject(Census *census, StgClosure *p, size_t size,
                     }
                 }
             }
+}
+
+// Compact objects require special handling code because they
+// are not stored consecutively in memory (rather, each object
+// is a list of objects), and that would break the while loop
+// below. But we know that each block holds at most one object
+// so we don't need the loop.
+//
+// See Note [Compact Normal Forms] for details.
+static void
+heapCensusCompactList(Census *census, bdescr *bd)
+{
+    for (; bd != NULL; bd = bd->link) {
+        StgCompactNFDataBlock *block = (StgCompactNFDataBlock*)bd->start;
+        StgCompactNFData *str = block->owner;
+        heapProfObject(census, (StgClosure*)str,
+                       compact_nfdata_full_sizeW(str), rtsTrue);
+    }
 }
 
 /* -----------------------------------------------------------------------------
@@ -1090,6 +1134,10 @@ heapCensusChain( Census *census, bdescr *bd )
                 size = sizeofW(StgTRecChunk);
                 break;
 
+            case COMPACT_NFDATA:
+                barf("heapCensus, found compact object in the wrong list");
+                break;
+
             default:
                 barf("heapCensus, unknown object: %d", info->type);
             }
@@ -1127,6 +1175,7 @@ void heapCensus (Time t)
       // Are we interested in large objects?  might be
       // confusing to include the stack in a heap profile.
       heapCensusChain( census, generations[g].large_objects );
+      heapCensusCompactList ( census, generations[g].compact_objects );
 
       for (n = 0; n < n_capabilities; n++) {
           ws = &gc_threads[n]->gens[g];

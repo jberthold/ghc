@@ -14,7 +14,7 @@
 
 # Euch, hideous hack:
 # XXX This should be in a different Makefile
-CABAL_DOTTED_VERSION := $(shell grep "^version:" libraries/Cabal/Cabal/Cabal.cabal | sed "s/^version: //")
+CABAL_DOTTED_VERSION := $(shell grep "^version:" libraries/Cabal/Cabal/Cabal.cabal | sed "s/^version: *//")
 CABAL_VERSION := $(subst .,$(comma),$(CABAL_DOTTED_VERSION))
 CABAL_CONSTRAINT := --constraint="Cabal == $(CABAL_DOTTED_VERSION)"
 
@@ -63,7 +63,8 @@ $(ghc-cabal_DIST_BINARY): utils/ghc-cabal/Main.hs $(TOUCH_DEP) | $$(dir $$@)/. b
 	       -ilibraries/binary/src -DGENERICS \
 	       -ilibraries/filepath \
 	       -ilibraries/hpc \
-	       $(utils/ghc-cabal_dist_EXTRA_HC_OPTS)
+	       $(utils/ghc-cabal_dist_EXTRA_HC_OPTS) \
+	       $(EXTRA_HC_OPTS)
 	"$(TOUCH_CMD)" $@
 endif
 

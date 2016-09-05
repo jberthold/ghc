@@ -432,7 +432,9 @@ cmmNativeGens dflags this_mod modLoc ncgImpl h dbgMap us
         -- Generate .file directives for every new file that has been
         -- used. Note that it is important that we generate these in
         -- ascending order, as Clang's 3.6 assembler complains.
-        let newFileIds = sortBy (comparing snd) $ eltsUFM $ fileIds' `minusUFM` fileIds
+        let newFileIds = sortBy (comparing snd) $
+                         nonDetEltsUFM $ fileIds' `minusUFM` fileIds
+            -- See Note [Unique Determinism and code generation]
             pprDecl (f,n) = text "\t.file " <> ppr n <+>
                             doubleQuotes (ftext f)
 
@@ -535,10 +537,8 @@ cmmNativeGen dflags this_mod modLoc ncgImpl us fileIds dbgMap cmm count
 
         -- allocate registers
         (alloced, usAlloc, ppr_raStatsColor, ppr_raStatsLinear) <-
-         if False
-           -- Disabled, see #7679, #8657
-           --  ( gopt Opt_RegsGraph dflags
-           --  || gopt Opt_RegsIterative dflags)
+         if ( gopt Opt_RegsGraph dflags
+           || gopt Opt_RegsIterative dflags )
           then do
                 -- the regs usable for allocation
                 let (alloc_regs :: UniqFM (UniqSet RealReg))
@@ -549,7 +549,7 @@ cmmNativeGen dflags this_mod modLoc ncgImpl us fileIds dbgMap cmm count
 
                 -- do the graph coloring register allocation
                 let ((alloced, regAllocStats), usAlloc)
-                        = {-# SCC "RegAlloc" #-}
+                        = {-# SCC "RegAlloc-color" #-}
                           initUs usLive
                           $ Color.regAlloc
                                 dflags
@@ -593,7 +593,7 @@ cmmNativeGen dflags this_mod modLoc ncgImpl us fileIds dbgMap cmm count
                            return (alloced', ra_stats )
 
                 let ((alloced, regAllocStats), usAlloc)
-                        = {-# SCC "RegAlloc" #-}
+                        = {-# SCC "RegAlloc-linear" #-}
                           initUs usLive
                           $ liftM unzip
                           $ mapM reg_alloc withLiveness

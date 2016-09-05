@@ -106,6 +106,7 @@ module TcRnMonad(
   -- * Template Haskell context
   recordThUse, recordThSpliceUse, recordTopLevelSpliceLoc,
   getTopLevelSpliceLocs, keepAlive, getStage, getStageAndBindLevel, setStage,
+  addModFinalizersWithLclEnv,
 
   -- * Safe Haskell context
   recordUnsafeInfer, finalSafeMode, fixSafeInstances,
@@ -117,8 +118,8 @@ module TcRnMonad(
   mkIfLclEnv,
   initIfaceTcRn,
   initIfaceCheck,
-  initIfaceTc,
   initIfaceLcl,
+  initIfaceLoad,
   getIfModule,
   failIfM,
   forkM_maybe,
@@ -174,6 +175,7 @@ import Data.Set ( Set )
 import qualified Data.Set as Set
 
 #ifdef GHCI
+import {-# SOURCE #-} TcSplice ( runRemoteModFinalizers )
 import qualified Data.Map as Map
 #endif
 
@@ -1529,6 +1531,21 @@ getStageAndBindLevel name
 setStage :: ThStage -> TcM a -> TcRn a
 setStage s = updLclEnv (\ env -> env { tcl_th_ctxt = s })
 
+#ifdef GHCI
+-- | Adds the given modFinalizers to the global environment and set them to use
+-- the current local environment.
+addModFinalizersWithLclEnv :: ThModFinalizers -> TcM ()
+addModFinalizersWithLclEnv mod_finalizers
+  = do lcl_env <- getLclEnv
+       th_modfinalizers_var <- fmap tcg_th_modfinalizers getGblEnv
+       updTcRef th_modfinalizers_var $ \fins ->
+         setLclEnv lcl_env (runRemoteModFinalizers mod_finalizers)
+         : fins
+#else
+addModFinalizersWithLclEnv :: ThModFinalizers -> TcM ()
+addModFinalizersWithLclEnv ThModFinalizers = return ()
+#endif
+
 {-
 ************************************************************************
 *                                                                      *
@@ -1583,9 +1600,11 @@ setLocalRdrEnv rdr_env thing_inside
 ************************************************************************
 -}
 
-mkIfLclEnv :: Module -> SDoc -> IfLclEnv
-mkIfLclEnv mod loc = IfLclEnv { if_mod     = mod,
+mkIfLclEnv :: Module -> SDoc -> Bool -> IfLclEnv
+mkIfLclEnv mod loc boot
+                   = IfLclEnv { if_mod     = mod,
                                 if_loc     = loc,
+                                if_boot    = boot,
                                 if_tv_env  = emptyFsEnv,
                                 if_id_env  = emptyFsEnv }
 
@@ -1602,40 +1621,34 @@ initIfaceTcRn thing_inside
               ; get_type_env = readTcRef (tcg_type_env_var tcg_env) }
         ; setEnvs (if_env, ()) thing_inside }
 
-initIfaceCheck :: HscEnv -> IfG a -> IO a
+-- Used when sucking in a ModIface into a ModDetails to put in
+-- the HPT.  Notably, unlike initIfaceCheck, this does NOT use
+-- hsc_type_env_var (since we're not actually going to typecheck,
+-- so this variable will never get updated!)
+initIfaceLoad :: HscEnv -> IfG a -> IO a
+initIfaceLoad hsc_env do_this
+ = do let gbl_env = IfGblEnv {
+                        if_doc = text "initIfaceLoad",
+                        if_rec_types = Nothing
+                    }
+      initTcRnIf 'i' hsc_env gbl_env () do_this
+
+initIfaceCheck :: SDoc -> HscEnv -> IfG a -> IO a
 -- Used when checking the up-to-date-ness of the old Iface
 -- Initialise the environment with no useful info at all
-initIfaceCheck hsc_env do_this
+initIfaceCheck doc hsc_env do_this
  = do let rec_types = case hsc_type_env_var hsc_env of
                          Just (mod,var) -> Just (mod, readTcRef var)
                          Nothing        -> Nothing
           gbl_env = IfGblEnv {
-                        if_doc = text "initIfaceCheck",
+                        if_doc = text "initIfaceCheck" <+> doc,
                         if_rec_types = rec_types
                     }
       initTcRnIf 'i' hsc_env gbl_env () do_this
 
-initIfaceTc :: ModIface
-            -> (TcRef TypeEnv -> IfL a) -> TcRnIf gbl lcl a
--- Used when type-checking checking an up-to-date interface file
--- No type envt from the current module, but we do know the module dependencies
-initIfaceTc iface do_this
- = do   { tc_env_var <- newTcRef emptyTypeEnv
-        ; let { gbl_env = IfGblEnv {
-                            if_doc = text "initIfaceTc",
-                            if_rec_types = Just (mod, readTcRef tc_env_var)
-                          } ;
-              ; if_lenv = mkIfLclEnv mod doc
-           }
-        ; setEnvs (gbl_env, if_lenv) (do_this tc_env_var)
-    }
-  where
-    mod = mi_module iface
-    doc = text "The interface for" <+> quotes (ppr mod)
-
-initIfaceLcl :: Module -> SDoc -> IfL a -> IfM lcl a
-initIfaceLcl mod loc_doc thing_inside
-  = setLclEnv (mkIfLclEnv mod loc_doc) thing_inside
+initIfaceLcl :: Module -> SDoc -> Bool -> IfL a -> IfM lcl a
+initIfaceLcl mod loc_doc hi_boot_file thing_inside
+  = setLclEnv (mkIfLclEnv mod loc_doc hi_boot_file) thing_inside
 
 getIfModule :: IfL Module
 getIfModule = do { env <- getLclEnv; return (if_mod env) }

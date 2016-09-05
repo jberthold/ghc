@@ -94,6 +94,7 @@ data Message a where
    :: Int     -- ptr words
    -> Int     -- non-ptr words
    -> Int     -- constr tag
+   -> Int     -- pointer tag
    -> [Word8] -- constructor desccription
    -> Message (RemotePtr StgInfoTable)
 
@@ -172,9 +173,6 @@ data Message a where
   -- | Start a new TH module, return a state token that should be
   StartTH :: Message (RemoteRef (IORef QState))
 
-  -- | Run TH module finalizers, and free the HValueRef
-  FinishTH :: RemoteRef (IORef QState) -> Message (QResult ())
-
   -- | Evaluate a TH computation.
   --
   -- Returns a ByteString, because we have to force the result
@@ -189,6 +187,10 @@ data Message a where
    -> Maybe TH.Loc
    -> Message (QResult ByteString)
 
+  -- | Run the given mod finalizers.
+  RunModFinalizers :: RemoteRef (IORef QState)
+                   -> [RemoteRef (TH.Q ())]
+                   -> Message (QResult ())
 
 deriving instance Show (Message a)
 
@@ -223,6 +225,7 @@ data THMessage a where
   ReifyConStrictness :: TH.Name -> THMessage (THResult [TH.DecidedStrictness])
 
   AddDependentFile :: FilePath -> THMessage (THResult ())
+  AddModFinalizer :: RemoteRef (TH.Q ()) -> THMessage (THResult ())
   AddTopDecls :: [TH.Dec] -> THMessage (THResult ())
   IsExtEnabled :: Extension -> THMessage (THResult Bool)
   ExtsEnabled :: THMessage (THResult [Extension])
@@ -258,7 +261,8 @@ getTHMessage = do
     13 -> THMsg <$> return ExtsEnabled
     14 -> THMsg <$> return StartRecover
     15 -> THMsg <$> EndRecover <$> get
-    _  -> return (THMsg RunTHDone)
+    16 -> return (THMsg RunTHDone)
+    _  -> THMsg <$> AddModFinalizer <$> get
 
 putTHMessage :: THMessage a -> Put
 putTHMessage m = case m of
@@ -279,6 +283,7 @@ putTHMessage m = case m of
   StartRecover                -> putWord8 14
   EndRecover a                -> putWord8 15 >> put a
   RunTHDone                   -> putWord8 16
+  AddModFinalizer a           -> putWord8 17 >> put a
 
 
 data EvalOpts = EvalOpts
@@ -368,8 +373,6 @@ instance Binary THResultType
 data QState = QState
   { qsMap        :: Map TypeRep Dynamic
        -- ^ persistent data between splices in a module
-  , qsFinalizers :: [TH.Q ()]
-       -- ^ registered finalizers (in reverse order)
   , qsLocation   :: Maybe TH.Loc
        -- ^ location for current splice, if any
   , qsPipe :: Pipe
@@ -401,7 +404,7 @@ getMessage = do
       15 -> Msg <$> MallocStrings <$> get
       16 -> Msg <$> (PrepFFI <$> get <*> get <*> get)
       17 -> Msg <$> FreeFFI <$> get
-      18 -> Msg <$> (MkConInfoTable <$> get <*> get <*> get <*> get)
+      18 -> Msg <$> (MkConInfoTable <$> get <*> get <*> get <*> get <*> get)
       19 -> Msg <$> (EvalStmt <$> get <*> get)
       20 -> Msg <$> (ResumeStmt <$> get <*> get)
       21 -> Msg <$> (AbandonStmt <$> get)
@@ -415,7 +418,7 @@ getMessage = do
       29 -> Msg <$> (BreakpointStatus <$> get <*> get)
       30 -> Msg <$> (GetBreakpointVar <$> get <*> get)
       31 -> Msg <$> return StartTH
-      32 -> Msg <$> FinishTH <$> get
+      32 -> Msg <$> (RunModFinalizers <$> get <*> get)
       _  -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
 
 putMessage :: Message a -> Put
@@ -438,7 +441,7 @@ putMessage m = case m of
   MallocStrings bss           -> putWord8 15 >> put bss
   PrepFFI conv args res       -> putWord8 16 >> put conv >> put args >> put res
   FreeFFI p                   -> putWord8 17 >> put p
-  MkConInfoTable p n t d      -> putWord8 18 >> put p >> put n >> put t >> put d
+  MkConInfoTable p n t pt d   -> putWord8 18 >> put p >> put n >> put t >> put pt >> put d
   EvalStmt opts val           -> putWord8 19 >> put opts >> put val
   ResumeStmt opts val         -> putWord8 20 >> put opts >> put val
   AbandonStmt val             -> putWord8 21 >> put val
@@ -452,7 +455,7 @@ putMessage m = case m of
   BreakpointStatus arr ix     -> putWord8 29 >> put arr >> put ix
   GetBreakpointVar a b        -> putWord8 30 >> put a >> put b
   StartTH                     -> putWord8 31
-  FinishTH val                -> putWord8 32 >> put val
+  RunModFinalizers a b        -> putWord8 32 >> put a >> put b
   RunTH st q loc ty           -> putWord8 33 >> put st >> put q >> put loc >> put ty
 
 -- -----------------------------------------------------------------------------

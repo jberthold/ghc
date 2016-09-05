@@ -25,7 +25,7 @@ AC_DEFUN([GHC_SELECT_FILE_EXTENSIONS],
     x86_64-apple-darwin)
         $3='.dylib'
         ;;
-    arm-apple-darwin10|i386-apple-darwin11|aarch64-apple-darwin14)
+    arm-apple-darwin10|i386-apple-darwin11|aarch64-apple-darwin14|x86_64-apple-darwin14)
         $2='.a'
         $3='.dylib'
         ;;
@@ -651,6 +651,13 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         $3="$$3 -D_THREAD_SAFE -Wl,-bnotextro"
         $4="$$4 -bnotextro"
         $5="$$5 -D_THREAD_SAFE"
+        ;;
+
+    x86_64-*-openbsd*)
+        # We need -z wxneeded at least to link ghc-stage2 to workaround
+        # W^X issue in GHCi on OpenBSD current (as of Aug 2016)
+        $3="$$3 -Wl,-zwxneeded"
+        $4="$$4 -z wxneeded"
         ;;
 
     esac
@@ -1936,7 +1943,7 @@ AC_DEFUN([GHC_CONVERT_VENDOR],[
 # converts os from gnu to ghc naming, and assigns the result to $target_var
 AC_DEFUN([GHC_CONVERT_OS],[
 case "$1-$2" in
-  darwin10-arm|darwin11-i386|darwin14-aarch64)
+  darwin10-arm|darwin11-i386|darwin14-aarch64|darwin14-x86_64)
     $3="ios"
     ;;
   *)

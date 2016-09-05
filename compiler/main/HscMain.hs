@@ -1,4 +1,5 @@
 {-# LANGUAGE BangPatterns, CPP, MagicHash, NondecreasingIndentation #-}
+{-# OPTIONS_GHC -fprof-auto-top #-}
 
 -------------------------------------------------------------------------------
 --
@@ -158,6 +159,7 @@ import Control.Monad
 import Data.IORef
 import System.FilePath as FilePath
 import System.Directory
+import System.IO (fixIO)
 import qualified Data.Map as Map
 
 #include "HsVersions.h"
@@ -644,9 +646,13 @@ hscIncrementalCompile always_do_basic_recompilation_check m_tc_result
   = do
     -- One-shot mode needs a knot-tying mutable variable for interface
     -- files. See TcRnTypes.TcGblEnv.tcg_type_env_var.
+    -- See also Note [hsc_type_env_var hack]
     type_env_var <- newIORef emptyNameEnv
     let mod = ms_mod mod_summary
-        hsc_env = hsc_env'{ hsc_type_env_var = Just (mod, type_env_var) }
+        hsc_env | isOneShot (ghcMode (hsc_dflags hsc_env'))
+                = hsc_env' { hsc_type_env_var = Just (mod, type_env_var) }
+                | otherwise
+                = hsc_env'
 
     -- NB: enter Hsc monad here so that we don't bail out early with
     -- -Werror on typechecker warnings; we also want to run the desugarer
@@ -658,13 +664,30 @@ hscIncrementalCompile always_do_basic_recompilation_check m_tc_result
     e <- hscIncrementalFrontend always_do_basic_recompilation_check m_tc_result mHscMessage
             mod_summary source_modified mb_old_iface mod_index
     case e of
+        -- We didn't need to do any typechecking; the old interface
+        -- file on disk was good enough.
         Left iface -> do
-            details <- liftIO $ genModDetails hsc_env iface
-            return (HscUpToDate, HomeModInfo{
-                hm_details = details,
-                hm_iface = iface,
-                hm_linkable = Nothing
-            })
+            -- Knot tying!  See Note [Knot-tying typecheckIface]
+            hmi <- liftIO . fixIO $ \hmi' -> do
+                let hsc_env' =
+                        hsc_env {
+                            hsc_HPT = addToHpt (hsc_HPT hsc_env)
+                                        (ms_mod_name mod_summary) hmi'
+                        }
+                -- NB: This result is actually not that useful
+                -- in one-shot mode, since we're not going to do
+                -- any further typechecking.  It's much more useful
+                -- in make mode, since this HMI will go into the HPT.
+                details <- genModDetails hsc_env' iface
+                return HomeModInfo{
+                    hm_details = details,
+                    hm_iface = iface,
+                    hm_linkable = Nothing }
+            return (HscUpToDate, hmi)
+        -- We finished type checking.  (mb_old_hash is the hash of
+        -- the interface that existed on disk; it's possible we had
+        -- to retypecheck but the resulting interface is exactly
+        -- the same.)
         Right (FrontendTypecheck tc_result, mb_old_hash) -> do
             (status, hmi, no_change) <-
                     if hscTarget dflags /= HscNothing &&
@@ -734,11 +757,12 @@ hscMaybeWriteIface dflags iface changed summary =
 -- NoRecomp handlers
 --------------------------------------------------------------
 
+-- NB: this must be knot-tied appropriately, see hscIncrementalCompile
 genModDetails :: HscEnv -> ModIface -> IO ModDetails
 genModDetails hsc_env old_iface
   = do
     new_details <- {-# SCC "tcRnIface" #-}
-                   initIfaceCheck hsc_env (typecheckIface old_iface)
+                   initIfaceLoad hsc_env (typecheckIface old_iface)
     dumpIfaceStats hsc_env
     return new_details
 
@@ -1337,16 +1361,16 @@ hscCompileCmmFile hsc_env filename output_filename = runHsc hsc_env $ do
     liftIO $ do
         us <- mkSplitUniqSupply 'S'
         let initTopSRT = initUs_ us emptySRT
-        dumpIfSet_dyn dflags Opt_D_dump_cmm "Parsed Cmm" (ppr cmm)
+        dumpIfSet_dyn dflags Opt_D_dump_cmm_verbose "Parsed Cmm" (ppr cmm)
         (_, cmmgroup) <- cmmPipeline hsc_env initTopSRT cmm
         rawCmms <- cmmToRawCmm dflags (Stream.yield cmmgroup)
         _ <- codeOutput dflags no_mod output_filename no_loc NoStubs [] rawCmms
         return ()
   where
-    no_mod = panic "hscCmmFile: no_mod"
+    no_mod = panic "hscCompileCmmFile: no_mod"
     no_loc = ModLocation{ ml_hs_file  = Just filename,
-                          ml_hi_file  = panic "hscCmmFile: no hi file",
-                          ml_obj_file = panic "hscCmmFile: no obj file" }
+                          ml_hi_file  = panic "hscCompileCmmFile: no hi file",
+                          ml_obj_file = panic "hscCompileCmmFile: no obj file" }
 
 -------------------- Stuff for new code gen ---------------------
 
@@ -1372,8 +1396,8 @@ doCodeGen hsc_env this_mod data_tycons
         -- CmmGroup on input may produce many CmmGroups on output due
         -- to proc-point splitting).
 
-    let dump1 a = do dumpIfSet_dyn dflags Opt_D_dump_cmm
-                       "Cmm produced by new codegen" (ppr a)
+    let dump1 a = do dumpIfSet_dyn dflags Opt_D_dump_cmm_from_stg
+                       "Cmm produced by codegen" (ppr a)
                      return a
 
         ppr_stream1 = Stream.mapM dump1 cmm_stream
@@ -1406,7 +1430,8 @@ doCodeGen hsc_env this_mod data_tycons
                 Stream.yield (srtToData topSRT)
 
     let
-        dump2 a = do dumpIfSet_dyn dflags Opt_D_dump_cmm "Output Cmm" $ ppr a
+        dump2 a = do dumpIfSet_dyn dflags Opt_D_dump_cmm
+                        "Output Cmm" (ppr a)
                      return a
 
         ppr_stream2 = Stream.mapM dump2 pipeline_stream

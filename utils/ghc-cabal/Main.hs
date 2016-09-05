@@ -1,3 +1,4 @@
+{-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
 
 module Main (main) where
 
@@ -227,12 +228,7 @@ doRegister directory distDir ghc ghcpkg topdir
             progs' <- configurePrograms [ghcProgram', ghcPkgProgram'] progs
             instInfos <- dump (hcPkgInfo progs') verbosity GlobalPackageDB
             let installedPkgs' = PackageIndex.fromList instInfos
-            let updateComponentConfig (cn, clbi, deps)
-                    = (cn, updateComponentLocalBuildInfo clbi, deps)
-                updateComponentLocalBuildInfo clbi = clbi -- TODO: remove
-                ccs' = map updateComponentConfig (componentsConfigs lbi)
-                lbi' = lbi {
-                               componentsConfigs = ccs',
+            let lbi' = lbi {
                                installedPkgs = installedPkgs',
                                installDirTemplates = idts,
                                withPrograms = progs'
@@ -308,7 +304,8 @@ generate directory distdir dll0Modules config_args
       let pd = updatePackageDescription hooked_bi pd0
 
       -- generate Paths_<pkg>.hs and cabal-macros.h
-      writeAutogenFiles verbosity pd lbi
+      withAllComponentsInBuildOrder pd lbi $ \_ clbi ->
+        writeAutogenFiles verbosity pd lbi clbi
 
       -- generate inplace-pkg-config
       withLibLBI pd lbi $ \lib clbi ->
@@ -328,7 +325,7 @@ generate directory distdir dll0Modules config_args
           comp = compiler lbi
           libBiModules lib = (libBuildInfo lib, libModules lib)
           exeBiModules exe = (buildInfo exe, ModuleName.main : exeModules exe)
-          biModuless = (maybeToList $ fmap libBiModules $ library pd)
+          biModuless = (map libBiModules . maybeToList $ library pd)
                     ++ (map exeBiModules $ executables pd)
           buildableBiModuless = filter isBuildable biModuless
               where isBuildable (bi', _) = buildable bi'

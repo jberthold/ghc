@@ -16,7 +16,7 @@ import HsSyn
 import TcBinds
 import TcTyClsDecls
 import TcClassDcl( tcClassDecl2, tcATDefault,
-                   HsSigFun, lookupHsSig, mkHsSigFun,
+                   HsSigFun, mkHsSigFun,
                    findMethodBind, instantiateMethod )
 import TcSigs
 import TcRnMonad
@@ -142,7 +142,7 @@ Note [Instances and loop breakers]
 
 * Instead the idea is to inline df_i into op1_i, which may then select
   methods from the MkC record, and thereby break the recursion with
-  df_i, leaving a *self*-recurisve op1_i.  (If op1_i doesn't call op at
+  df_i, leaving a *self*-recursive op1_i.  (If op1_i doesn't call op at
   the same type, it won't mention df_i, so there won't be recursion in
   the first place.)
 
@@ -671,7 +671,7 @@ tcDataFamInstDecl mb_clsinfo
                                           (map (const Nominal) full_tvs)
                                           (fmap unLoc cType) stupid_theta
                                           tc_rhs parent
-                                          Recursive gadt_syntax
+                                          gadt_syntax
                  -- We always assume that indexed types are recursive.  Why?
                  -- (1) Due to their open nature, we can never be sure that a
                  -- further instance might not introduce a new recursive
@@ -888,7 +888,7 @@ wrapId wrapper id = mkHsWrap wrapper (HsVar (noLoc id))
 
 {- Note [Typechecking plan for instance declarations]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-For intance declarations we generate the following bindings and implication
+For instance declarations we generate the following bindings and implication
 constraints.  Example:
 
    instance Ord a => Ord [a] where compare = <compare-rhs>
@@ -1349,8 +1349,8 @@ tcMethodBody clas tyvars dfun_ev_vars inst_tys
 
 tcMethodBodyHelp :: HsSigFun -> Id -> TcId
                  -> LHsBind Name -> TcM (LHsBinds TcId)
-tcMethodBodyHelp sig_fn sel_id local_meth_id meth_bind
-  | Just hs_sig_ty <- lookupHsSig sig_fn sel_name
+tcMethodBodyHelp hs_sig_fn sel_id local_meth_id meth_bind
+  | Just hs_sig_ty <- hs_sig_fn sel_name
               -- There is a signature in the instance
               -- See Note [Instance method signatures]
   = do { let ctxt = FunSigCtxt sel_name True
@@ -1516,7 +1516,7 @@ mkDefMethBind :: Class -> [Type] -> Id -> Name -> TcM (LHsBind Name, [LSig Name]
 -- The is a default method (vanailla or generic) defined in the class
 -- So make a binding   op = $dmop @t1 @t2
 -- where $dmop is the name of the default method in the class,
--- and t1,t2 are the instace types.
+-- and t1,t2 are the instance types.
 -- See Note [Default methods in instances] for why we use
 -- visible type application here
 mkDefMethBind clas inst_tys sel_id dm_name
@@ -1532,7 +1532,7 @@ mkDefMethBind clas inst_tys sel_id dm_name
 
               fn   = noLoc (idName sel_id)
               visible_inst_tys = [ ty | (tcb, ty) <- tyConBinders (classTyCon clas) `zip` inst_tys
-                                      , tyConBinderVisibility tcb /= Invisible ]
+                                      , tyConBinderArgFlag tcb /= Inferred ]
               rhs  = foldl mk_vta (nlHsVar dm_name) visible_inst_tys
               bind = noLoc $ mkTopFunBind Generated fn $
                              [mkSimpleMatch (FunRhs fn Prefix) [] rhs]

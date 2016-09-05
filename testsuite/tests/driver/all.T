@@ -333,7 +333,7 @@ test('T5313',
 
 test('T2464', normal, compile, [''])
 test('T3674',
-     [ignore_output,
+     [
       extra_clean(['T3674_pre.hi', 'T3674_pre.o', 'T3674_pre', 'T3674_pre.exe'])],
      run_command,
      ['$MAKE -s --no-print-directory T3674'])
@@ -480,8 +480,8 @@ test('T11429c', normal, compile_fail, ['-Wunrecognised-warning-flags -Werror -Wf
 test('T11763', normal, compile_and_run, ['-fno-version-macros'])
 
 test('T10320',
-     [ ignore_output
-     , extra_clean(['T10320', 'T10320.o', 'T10320.hi'])],
+     [
+       extra_clean(['T10320', 'T10320.o', 'T10320.hi'])],
      run_command,
      ['$MAKE -s --no-print-directory T10320'])
 
@@ -491,5 +491,9 @@ test('T12135',
      run_command,
      ['$MAKE -s --no-print-directory T12135'])
 
-test('T12192', normal, run_command,
-     ['mkdir foo && (cd foo && {compiler} -v0 ../T12192)'])
+test('T12192', normal, run_command, ['mkdir foo && (cd foo && {compiler} -v0 ../T12192)']) 
+
+test('T10923',
+     extra_clean(['T10923.o', 'T10923.hi']),
+     run_command,
+     ['$MAKE -s --no-print-directory T10923'])

@@ -87,7 +87,7 @@ module HscTypes (
         TypeEnv, lookupType, lookupTypeHscEnv, mkTypeEnv, emptyTypeEnv,
         typeEnvFromEntities, mkTypeEnvWithImplicits,
         extendTypeEnv, extendTypeEnvList,
-        extendTypeEnvWithIds,
+        extendTypeEnvWithIds, plusTypeEnv,
         lookupTypeEnv,
         typeEnvElts, typeEnvTyCons, typeEnvIds, typeEnvPatSyns,
         typeEnvDataCons, typeEnvCoAxioms, typeEnvClasses,
@@ -399,7 +399,7 @@ data HscEnv
         hsc_type_env_var :: Maybe (Module, IORef TypeEnv)
                 -- ^ Used for one-shot compilation only, to initialise
                 -- the 'IfGblEnv'. See 'TcRnTypes.tcg_type_env_var' for
-                -- 'TcRnTypes.TcGblEnv'
+                -- 'TcRnTypes.TcGblEnv'.  See also Note [hsc_type_env_var hack]
 
 #ifdef GHCI
         , hsc_iserv :: MVar (Maybe IServ)
@@ -407,6 +407,49 @@ data HscEnv
                 -- time it is needed.
 #endif
  }
+
+-- Note [hsc_type_env_var hack]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- hsc_type_env_var is used to initialize tcg_type_env_var, and
+-- eventually it is the mutable variable that is queried from
+-- if_rec_types to get a TypeEnv.  So, clearly, it's something
+-- related to knot-tying (see Note [Tying the knot]).
+-- hsc_type_env_var is used in two places: initTcRn (where
+-- it initializes tcg_type_env_var) and initIfaceCheck
+-- (where it initializes if_rec_types).
+--
+-- But why do we need a way to feed a mutable variable in?  Why
+-- can't we just initialize tcg_type_env_var when we start
+-- typechecking?  The problem is we need to knot-tie the
+-- EPS, and we may start adding things to the EPS before type
+-- checking starts.
+--
+-- Here is a concrete example. Suppose we are running
+-- "ghc -c A.hs", and we have this file system state:
+--
+--  A.hs-boot   A.hi-boot **up to date**
+--  B.hs        B.hi      **up to date**
+--  A.hs        A.hi      **stale**
+--
+-- The first thing we do is run checkOldIface on A.hi.
+-- checkOldIface will call loadInterface on B.hi so it can
+-- get its hands on the fingerprints, to find out if A.hi
+-- needs recompilation.  But loadInterface also populates
+-- the EPS!  And so if compilation turns out to be necessary,
+-- as it is in this case, the thunks we put into the EPS for
+-- B.hi need to have the correct if_rec_types mutable variable
+-- to query.
+--
+-- If the mutable variable is only allocated WHEN we start
+-- typechecking, then that's too late: we can't get the
+-- information to the thunks.  So we need to pre-commit
+-- to a type variable in 'hscIncrementalCompile' BEFORE we
+-- check the old interface.
+--
+-- This is all a massive hack because arguably checkOldIface
+-- should not populate the EPS. But that's a refactor for
+-- another day.
+
 
 #ifdef GHCI
 data IServ = IServ
@@ -1650,7 +1693,8 @@ mkPrintUnqualified dflags env = QueryQualify qual_name
                             -- Eg  f = True; g = 0; f = False
       where
         is_name :: Name -> Bool
-        is_name name = nameModule name == mod && nameOccName name == occ
+        is_name name = ASSERT2( isExternalName name, ppr name )
+                       nameModule name == mod && nameOccName name == occ
 
         forceUnqualNames :: [Name]
         forceUnqualNames =
@@ -1939,6 +1983,9 @@ extendTypeEnvList env things = foldl extendTypeEnv env things
 extendTypeEnvWithIds :: TypeEnv -> [Id] -> TypeEnv
 extendTypeEnvWithIds env ids
   = extendNameEnvList env [(getName id, AnId id) | id <- ids]
+
+plusTypeEnv :: TypeEnv -> TypeEnv -> TypeEnv
+plusTypeEnv env1 env2 = plusNameEnv env1 env2
 
 -- | Find the 'TyThing' for the given 'Name' by using all the resources
 -- at our disposal: the compiled modules in the 'HomePackageTable' and the
@@ -2639,7 +2686,7 @@ on just the OccName easily in a Core pass.
 --
 data VectInfo
   = VectInfo
-    { vectInfoVar            :: VarEnv  (Var    , Var  )    -- ^ @(f, f_v)@ keyed on @f@
+    { vectInfoVar            :: DVarEnv (Var    , Var  )    -- ^ @(f, f_v)@ keyed on @f@
     , vectInfoTyCon          :: NameEnv (TyCon  , TyCon)    -- ^ @(T, T_v)@ keyed on @T@
     , vectInfoDataCon        :: NameEnv (DataCon, DataCon)  -- ^ @(C, C_v)@ keyed on @C@
     , vectInfoParallelVars   :: DVarSet                     -- ^ set of parallel variables
@@ -2673,11 +2720,11 @@ data IfaceVectInfo
 
 noVectInfo :: VectInfo
 noVectInfo
-  = VectInfo emptyVarEnv emptyNameEnv emptyNameEnv emptyDVarSet emptyNameSet
+  = VectInfo emptyDVarEnv emptyNameEnv emptyNameEnv emptyDVarSet emptyNameSet
 
 plusVectInfo :: VectInfo -> VectInfo -> VectInfo
 plusVectInfo vi1 vi2 =
-  VectInfo (vectInfoVar            vi1 `plusVarEnv`    vectInfoVar            vi2)
+  VectInfo (vectInfoVar            vi1 `plusDVarEnv`   vectInfoVar            vi2)
            (vectInfoTyCon          vi1 `plusNameEnv`   vectInfoTyCon          vi2)
            (vectInfoDataCon        vi1 `plusNameEnv`   vectInfoDataCon        vi2)
            (vectInfoParallelVars   vi1 `unionDVarSet`  vectInfoParallelVars   vi2)

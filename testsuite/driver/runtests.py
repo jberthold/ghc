@@ -257,7 +257,7 @@ print('Timeout is ' + str(config.timeout))
 if config.rootdirs == []:
     config.rootdirs = ['.']
 
-t_files = findTFiles(config.rootdirs)
+t_files = list(findTFiles(config.rootdirs))
 
 print('Found', len(t_files), '.T files...')
 
@@ -298,20 +298,26 @@ def cleanup_and_exit(exitcode):
     exit(exitcode)
 
 # First collect all the tests to be run
+t_files_ok = True
 for file in t_files:
     if_verbose(2, '====> Scanning %s' % file)
     newTestDir(tempdir, os.path.dirname(file))
     try:
         exec(open(file).read())
-    except Exception:
-        print('*** framework failure: found an error while executing ', file, ':')
-        t.n_framework_failures = t.n_framework_failures + 1
+    except Exception as e:
         traceback.print_exc()
+        framework_fail(file, '', str(e))
+        t_files_ok = False
 
-if config.only:
-    # See Note [Mutating config.only]
-    sys.stderr.write("ERROR: tests not found: {0}\n".format(list(config.only)))
-    cleanup_and_exit(1)
+for name in config.only:
+    if t_files_ok:
+        # See Note [Mutating config.only]
+        framework_fail(name, '', 'test not found')
+    else:
+        # Let user fix .T file errors before reporting on unfound tests.
+        # The reson the test can not be found is likely because of those
+        # .T file errors.
+        pass
 
 if config.list_broken:
     global brokens
@@ -320,8 +326,8 @@ if config.list_broken:
     print(' '.join(map (lambda bdn: '#' + str(bdn[0]) + '(' + bdn[1] + '/' + bdn[2] + ')', brokens)))
     print('')
 
-    if t.n_framework_failures != 0:
-        print('WARNING:', str(t.n_framework_failures), 'framework failures!')
+    if t.framework_failures:
+        print('WARNING:', len(framework_failures), 'framework failures!')
         print('')
 else:
     # Now run all the tests

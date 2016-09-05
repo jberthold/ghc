@@ -40,7 +40,7 @@ module Id (
         mkWorkerId,
 
         -- ** Taking an Id apart
-        idName, idType, idUnique, idInfo, idDetails, idRepArity,
+        idName, idType, idUnique, idInfo, idDetails,
         recordSelectorTyCon,
 
         -- ** Modifying an Id
@@ -90,7 +90,6 @@ module Id (
         idOccInfo,
 
         -- ** Writing 'IdInfo' fields
-        setIdUnfoldingLazily,
         setIdUnfolding,
         setIdArity,
         setIdCallArity,
@@ -139,8 +138,7 @@ import Util
 import StaticFlags
 
 -- infixl so you can say (id `set` a `set` b)
-infixl  1 `setIdUnfoldingLazily`,
-          `setIdUnfolding`,
+infixl  1 `setIdUnfolding`,
           `setIdArity`,
           `setIdCallArity`,
           `setIdOccInfo`,
@@ -488,7 +486,7 @@ hasNoBinding :: Id -> Bool
 hasNoBinding id = case Var.idDetails id of
                         PrimOpId _       -> True        -- See Note [Primop wrappers]
                         FCallId _        -> True
-                        DataConWorkId dc -> isUnboxedTupleCon dc
+                        DataConWorkId dc -> isUnboxedTupleCon dc || isUnboxedSumCon dc
                         _                -> False
 
 isImplicitId :: Id -> Bool
@@ -566,9 +564,6 @@ idCallArity id = callArityInfo (idInfo id)
 setIdCallArity :: Id -> Arity -> Id
 setIdCallArity id arity = modifyIdInfo (`setCallArityInfo` arity) id
 
-idRepArity :: Id -> RepArity
-idRepArity x = typeRepArity (idArity x) (idType x)
-
 -- | Returns true if an application to n args would diverge
 isBottomingId :: Id -> Bool
 isBottomingId id = isBottomingSig (idStrictness id)
@@ -608,9 +603,6 @@ idUnfolding id
 realIdUnfolding :: Id -> Unfolding
 -- Expose the unfolding if there is one, including for loop breakers
 realIdUnfolding id = unfoldingInfo (idInfo id)
-
-setIdUnfoldingLazily :: Id -> Unfolding -> Id
-setIdUnfoldingLazily id unfolding = modifyIdInfo (`setUnfoldingInfoLazily` unfolding) id
 
 setIdUnfolding :: Id -> Unfolding -> Id
 setIdUnfolding id unfolding = modifyIdInfo (`setUnfoldingInfo` unfolding) id

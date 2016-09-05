@@ -446,6 +446,15 @@ rnPatAndThen mk (TuplePat pats boxed _)
        ; pats' <- rnLPatsAndThen mk pats
        ; return (TuplePat pats' boxed []) }
 
+rnPatAndThen mk (SumPat pat alt arity _)
+  = do { pat <- rnLPatAndThen mk pat
+       ; return (SumPat pat alt arity PlaceHolder)
+       }
+
+-- If a splice has been run already, just rename the result.
+rnPatAndThen mk (SplicePat (HsSpliced mfs (HsSplicedPat pat)))
+  = SplicePat . HsSpliced mfs . HsSplicedPat <$> rnPatAndThen mk pat
+
 rnPatAndThen mk (SplicePat splice)
   = do { eith <- liftCpsFV $ rnSplicePat splice
        ; case eith of   -- See Note [rnSplicePat] in RnSplice

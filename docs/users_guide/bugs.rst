@@ -152,7 +152,7 @@ Numbers, basic types, and built-in classes
 ``Num`` superclasses
     The ``Num`` class does not have ``Show`` or ``Eq`` superclasses.
 
-    
+
     You can make code that works with both Haskell98/Haskell2010 and GHC
     by:
 
@@ -177,6 +177,16 @@ Numbers, basic types, and built-in classes
 
     -  Always define the ``bit``, ``testBit`` and ``popCount`` methods
         in ``Bits`` instances.
+
+``Read`` class methods
+    The ``Read`` class has two extra methods, ``readPrec`` and
+    ``readListPrec``, that are not found in the Haskell 2010 since they rely
+    on the ``ReadPrec`` data type, which requires the :ghc-flag:`-XRankNTypes`
+    extension. GHC also derives ``Read`` instances by implementing ``readPrec``
+    instead of ``readsPrec``, and relies on a default implementation of
+    ``readsPrec`` that is defined in terms of ``readPrec``. GHC adds these two
+    extra methods simply because ``ReadPrec`` is more efficient than ``ReadS``
+    (the type on which ``readsPrec`` is based).
 
 Extra instances
     The following extra instances are defined: ::
@@ -478,13 +488,6 @@ Bugs in GHC
 -  Despite appearances ``*`` and ``Constraint`` aren't really distinct kinds
    in the compiler's internal representation and can be unified producing
    unexpected results. See :ghc-ticket:`11715` for one example.
-
--  :ghc-flag:`-XTypeInType` still has a few rough edges, especially where
-   it interacts with other advanced type-system features. For instance,
-   this definition causes the typechecker to loop (:ghc-ticket:`11559`), ::
-
-     data A :: Type where
-       B :: forall (a :: A). A
 
 .. _bugs-ghci:
 

@@ -14,7 +14,7 @@ module Type (
         -- $type_classification
 
         -- $representation_types
-        TyThing(..), Type, VisibilityFlag(..), KindOrType, PredType, ThetaType,
+        TyThing(..), Type, ArgFlag(..), KindOrType, PredType, ThetaType,
         Var, TyVar, isTyVar, TyCoVar, TyBinder, TyVarBinder,
 
         -- ** Constructing and deconstructing types
@@ -86,22 +86,24 @@ module Type (
         mkTyVarBinder, mkTyVarBinders,
         mkAnonBinder,
         isAnonTyBinder, isNamedTyBinder,
-        binderVar, binderVars, binderKind, binderVisibility,
+        binderVar, binderVars, binderKind, binderArgFlag,
         tyBinderType,
         binderRelevantType_maybe, caseBinder,
-        isVisible, isInvisible, isVisibleBinder, isInvisibleBinder,
+        isVisibleArgFlag, isInvisibleArgFlag, isVisibleBinder, isInvisibleBinder,
         tyConBindersTyBinders,
+        mkTyBinderTyConBinder,
 
         -- ** Common type constructors
         funTyCon,
 
         -- ** Predicates on types
-        isTyVarTy, isFunTy, isDictTy, isPredTy, isVoidTy, isCoercionTy,
+        isTyVarTy, isFunTy, isDictTy, isPredTy, isCoercionTy,
         isCoercionTy_maybe, isCoercionType, isForAllTy,
         isPiTy,
 
         -- (Lifting and boxity)
-        isUnliftedType, isUnboxedTupleType, isAlgType, isClosedAlgType,
+        isUnliftedType, isUnboxedTupleType, isUnboxedSumType,
+        isAlgType, isClosedAlgType,
         isPrimitiveType, isStrictType,
         isRuntimeRepTy, isRuntimeRepVar, isRuntimeRepKindedTy,
         dropRuntimeRepArgs,
@@ -141,11 +143,7 @@ module Type (
         -- * Other views onto Types
         coreView, coreViewOneStarKind,
 
-        UnaryType, RepType(..), flattenRepType, repType,
         tyConsOfType,
-
-        -- * Type representation for the code generator
-        typePrimRep, typeRepArity, tyConPrimRep,
 
         -- * Main type substitution data types
         TvSubstEnv,     -- Representation widely visible
@@ -160,7 +158,8 @@ module Type (
         zapTCvSubst, getTCvInScope, getTCvSubstRangeFVs,
         extendTCvInScope, extendTCvInScopeList, extendTCvInScopeSet,
         extendTCvSubst, extendCvSubst,
-        extendTvSubst, extendTvSubstList, extendTvSubstAndInScope,
+        extendTvSubst, extendTvSubstBinder,
+        extendTvSubstList, extendTvSubstAndInScope,
         extendTvSubstWithClone,
         isInScope, composeTCvSubstEnv, composeTCvSubst, zipTyEnv, zipCoEnv,
         isEmptyTCvSubst, unionTCvSubst,
@@ -219,7 +218,6 @@ import CoAxiom
 import {-# SOURCE #-} Coercion
 
 -- others
-import BasicTypes       ( Arity, RepArity )
 import Util
 import Outputable
 import FastString
@@ -227,6 +225,9 @@ import Pair
 import ListSetOps
 import Digraph
 import Unique ( nonDetCmpUnique )
+import SrcLoc  ( SrcSpan )
+import OccName ( OccName )
+import Name    ( mkInternalName )
 
 import Maybes           ( orElse )
 import Data.Maybe       ( isJust, mapMaybe )
@@ -269,13 +270,14 @@ import Control.Arrow    ( first, second )
 -- Some examples of type classifications that may make this a bit clearer are:
 --
 -- @
--- Type         primitive       boxed           lifted          algebraic
+-- Type          primitive       boxed           lifted          algebraic
 -- -----------------------------------------------------------------------------
--- Int#         Yes             No              No              No
--- ByteArray#   Yes             Yes             No              No
--- (\# a, b \#)   Yes             No              No              Yes
--- (  a, b  )   No              Yes             Yes             Yes
--- [a]          No              Yes             Yes             Yes
+-- Int#          Yes             No              No              No
+-- ByteArray#    Yes             Yes             No              No
+-- (\# a, b \#)  Yes             No              No              Yes
+-- (\# a | b \#) Yes             No              No              Yes
+-- (  a, b  )    No              Yes             Yes             Yes
+-- [a]           No              Yes             Yes             Yes
 -- @
 
 -- $representation_types
@@ -462,7 +464,7 @@ data TyCoMapper env m
           -- ^ What to do with coercion holes. See Note [Coercion holes] in
           -- TyCoRep.
 
-      , tcm_tybinder :: env -> TyVar -> VisibilityFlag -> m (env, TyVar)
+      , tcm_tybinder :: env -> TyVar -> ArgFlag -> m (env, TyVar)
           -- ^ The returned env is used in the extended scope
       }
 
@@ -505,7 +507,7 @@ mapCoercion mapper@(TyCoMapper { tcm_smart = smart, tcm_covar = covar
     go (AppCo c1 c2) = mkappco <$> go c1 <*> go c2
     go (ForAllCo tv kind_co co)
       = do { kind_co' <- go kind_co
-           ; (env', tv') <- tybinder env tv Invisible
+           ; (env', tv') <- tybinder env tv Inferred
            ; co' <- mapCoercion mapper env' co
            ; return $ mkforallco tv' kind_co' co' }
         -- See Note [Efficiency for mapCoercion ForAllCo case]
@@ -1197,7 +1199,7 @@ interfaces.  Notably this plays a role in tcTySigs in TcBinds.hs.
 -- | Make a dependent forall.
 mkInvForAllTy :: TyVar -> Type -> Type
 mkInvForAllTy tv ty = ASSERT( isTyVar tv )
-                      ForAllTy (TvBndr tv Invisible) ty
+                      ForAllTy (TvBndr tv Inferred) ty
 
 -- | Like mkForAllTys, but assumes all variables are dependent and invisible,
 -- a common case
@@ -1214,18 +1216,18 @@ mkSpecForAllTys tvs = ASSERT( all isTyVar tvs )
 -- | Like mkForAllTys, but assumes all variables are dependent and visible
 mkVisForAllTys :: [TyVar] -> Type -> Type
 mkVisForAllTys tvs = ASSERT( all isTyVar tvs )
-                     mkForAllTys [ TvBndr tv Visible | tv <- tvs ]
+                     mkForAllTys [ TvBndr tv Required | tv <- tvs ]
 
 mkLamType  :: Var -> Type -> Type
 -- ^ Makes a @(->)@ type or an implicit forall type, depending
 -- on whether it is given a type variable or a term variable.
 -- This is used, for example, when producing the type of a lambda.
--- Always uses Invisible binders.
+-- Always uses Inferred binders.
 mkLamTypes :: [Var] -> Type -> Type
 -- ^ 'mkLamType' for multiple type or value arguments
 
 mkLamType v ty
-   | isTyVar v = ForAllTy (TvBndr v Invisible) ty
+   | isTyVar v = ForAllTy (TvBndr v Inferred) ty
    | otherwise = FunTy    (varType v)          ty
 
 mkLamTypes vs ty = foldr mkLamType ty vs
@@ -1239,7 +1241,7 @@ mkTyConBindersPreferAnon vars inner_ty = fst (go vars)
     go :: [TyVar] -> ([TyConBinder], VarSet) -- also returns the free vars
     go [] = ([], tyCoVarsOfType inner_ty)
     go (v:vs) |  v `elemVarSet` fvs
-              = ( TvBndr v (NamedTCB Visible) : binders
+              = ( TvBndr v (NamedTCB Required) : binders
                 , fvs `delVarSet` v `unionVarSet` kind_vars )
               | otherwise
               = ( TvBndr v AnonTCB : binders
@@ -1333,7 +1335,7 @@ splitPiTysInvisible ty = split ty ty []
    where
     split orig_ty ty bs | Just ty' <- coreView ty = split orig_ty ty' bs
     split _       (ForAllTy b@(TvBndr _ vis) res) bs
-      | isInvisible vis                = split res res (Named b  : bs)
+      | isInvisibleArgFlag vis         = split res res (Named b  : bs)
     split _       (FunTy arg res)  bs
       | isPredTy arg                   = split res res (Anon arg : bs)
     split orig_ty _                bs  = (reverse bs, orig_ty)
@@ -1348,8 +1350,8 @@ filterOutInvisibleTyVars tc tvs = snd $ partitionInvisibles tc mkTyVarTy tvs
 
 -- | Given a tycon and a list of things (which correspond to arguments),
 -- partitions the things into
---      Invisible or Specified ones and
---      Visible ones
+--      Inferred or Specified ones and
+--      Required ones
 -- The callback function is necessary for this scenario:
 --
 -- > T :: forall k. k -> k
@@ -1370,8 +1372,8 @@ partitionInvisibles tc get_ty = go emptyTCvSubst (tyConKind tc)
   where
     go _ _ [] = ([], [])
     go subst (ForAllTy (TvBndr tv vis) res_ki) (x:xs)
-      | isVisible vis = second (x :) (go subst' res_ki xs)
-      | otherwise     = first  (x :) (go subst' res_ki xs)
+      | isVisibleArgFlag vis = second (x :) (go subst' res_ki xs)
+      | otherwise            = first  (x :) (go subst' res_ki xs)
       where
         subst' = extendTvSubst subst tv (get_ty x)
     go subst (TyVarTy tv) xs
@@ -1389,11 +1391,11 @@ partitionInvisibles tc get_ty = go emptyTCvSubst (tyConKind tc)
 -}
 
 -- | Make a named binder
-mkTyVarBinder :: VisibilityFlag -> Var -> TyVarBinder
+mkTyVarBinder :: ArgFlag -> Var -> TyVarBinder
 mkTyVarBinder vis var = TvBndr var vis
 
 -- | Make many named binders
-mkTyVarBinders :: VisibilityFlag -> [TyVar] -> [TyVarBinder]
+mkTyVarBinders :: ArgFlag -> [TyVar] -> [TyVarBinder]
 mkTyVarBinders vis = map (mkTyVarBinder vis)
 
 -- | Make an anonymous binder
@@ -1434,6 +1436,16 @@ caseBinder (Anon t)  _ d = d t
 zipTyBinderSubst :: [TyBinder] -> [Type] -> TCvSubst
 zipTyBinderSubst bndrs tys
   = mkTvSubstPrs [ (tv, ty) | (Named (TvBndr tv _), ty) <- zip bndrs tys ]
+
+-- | Manufacture a new 'TyConBinder' from a 'TyBinder'. Anonymous
+-- 'TyBinder's are still assigned names as 'TyConBinder's, so we need
+-- the extra gunk with which to construct a 'Name'. Used when producing
+-- tyConTyVars from a datatype kind signature. Defined here to avoid module
+-- loops.
+mkTyBinderTyConBinder :: TyBinder -> SrcSpan -> Unique -> OccName -> TyConBinder
+mkTyBinderTyConBinder (Named (TvBndr tv argf)) _ _ _ = TvBndr tv (NamedTCB argf)
+mkTyBinderTyConBinder (Anon kind) loc uniq occ
+  = TvBndr (mkTyVar (mkInternalName uniq occ loc) kind) AnonTCB
 
 {-
 %************************************************************************
@@ -1723,114 +1735,6 @@ typeSize (TyConApp _ ts)            = 1 + sum (map typeSize ts)
 typeSize (CastTy ty co)             = typeSize ty + coercionSize co
 typeSize (CoercionTy co)            = coercionSize co
 
-
-{- **********************************************************************
-*                                                                       *
-                Representation types
-*                                                                       *
-********************************************************************** -}
-
-type UnaryType = Type
-
-data RepType
-  = UbxTupleRep [UnaryType] -- Represented by multiple values
-                            -- Can be zero, one, or more
-  | UnaryRep UnaryType      -- Represented by a single value
-
-instance Outputable RepType where
-  ppr (UbxTupleRep tys) = text "UbxTupleRep" <+> ppr tys
-  ppr (UnaryRep ty)     = text "UnaryRep"    <+> ppr ty
-
-flattenRepType :: RepType -> [UnaryType]
-flattenRepType (UbxTupleRep tys) = tys
-flattenRepType (UnaryRep ty)     = [ty]
-
--- | 'repType' figure out how a type will be represented
---   at runtime.  It looks through
---
---      1. For-alls
---      2. Synonyms
---      3. Predicates
---      4. All newtypes, including recursive ones, but not newtype families
---      5. Casts
---
-repType :: Type -> RepType
-repType ty
-  = go initRecTc ty
-  where
-    go :: RecTcChecker -> Type -> RepType
-    go rec_nts ty                       -- Expand predicates and synonyms
-      | Just ty' <- coreView ty
-      = go rec_nts ty'
-
-    go rec_nts (ForAllTy _ ty2)  -- Drop type foralls
-      = go rec_nts ty2
-
-    go rec_nts (TyConApp tc tys)        -- Expand newtypes
-      | isNewTyCon tc
-      , tys `lengthAtLeast` tyConArity tc
-      , Just rec_nts' <- checkRecTc rec_nts tc   -- See Note [Expanding newtypes] in TyCon
-      = go rec_nts' (newTyConInstRhs tc tys)
-
-      | isUnboxedTupleTyCon tc
-      = UbxTupleRep (concatMap (flattenRepType . go rec_nts) non_rr_tys)
-      where
-          -- See Note [Unboxed tuple RuntimeRep vars] in TyCon
-        non_rr_tys = dropRuntimeRepArgs tys
-
-    go rec_nts (CastTy ty _)
-      = go rec_nts ty
-
-    go _ ty@(CoercionTy _)
-      = pprPanic "repType" (ppr ty)
-
-    go _ ty = UnaryRep ty
-
--- ToDo: this could be moved to the code generator, using splitTyConApp instead
--- of inspecting the type directly.
-
--- | Discovers the primitive representation of a more abstract 'UnaryType'
-typePrimRep :: UnaryType -> PrimRep
-typePrimRep ty = kindPrimRep (typeKind ty)
-
--- | Find the primitive representation of a 'TyCon'. Defined here to
--- avoid module loops. Call this only on unlifted tycons.
-tyConPrimRep :: TyCon -> PrimRep
-tyConPrimRep tc = kindPrimRep res_kind
-  where
-    res_kind = tyConResKind tc
-
--- | Take a kind (of shape @TYPE rr@) and produce the 'PrimRep' of values
--- of types of this kind.
-kindPrimRep :: Kind -> PrimRep
-kindPrimRep ki | Just ki' <- coreViewOneStarKind ki = kindPrimRep ki'
-kindPrimRep (TyConApp typ [runtime_rep])
-  = ASSERT( typ `hasKey` tYPETyConKey )
-    go runtime_rep
-  where
-    go rr | Just rr' <- coreView rr = go rr'
-    go (TyConApp rr_dc args)
-      | RuntimeRep fun <- tyConRuntimeRepInfo rr_dc
-      = fun args
-    go rr = pprPanic "kindPrimRep.go" (ppr rr)
-kindPrimRep ki = WARN( True
-                     , text "kindPrimRep defaulting to PtrRep on" <+> ppr ki )
-                 PtrRep  -- this can happen legitimately for, e.g., Any
-
-typeRepArity :: Arity -> Type -> RepArity
-typeRepArity 0 _ = 0
-typeRepArity n ty = case repType ty of
-  UnaryRep (FunTy arg res) -> length (flattenRepType (repType arg)) + typeRepArity (n - 1) res
-  _ -> pprPanic "typeRepArity: arity greater than type can handle" (ppr (n, ty, repType ty))
-
-isVoidTy :: Type -> Bool
--- True if the type has zero width
-isVoidTy ty = case repType ty of
-                UnaryRep (TyConApp tc _) -> isUnliftedTyCon tc &&
-                                            isVoidRep (tyConPrimRep tc)
-                _                        -> False
-
-
 {-
 %************************************************************************
 %*                                                                      *
@@ -1969,6 +1873,11 @@ isUnboxedTupleType :: Type -> Bool
 isUnboxedTupleType ty = case tyConAppTyCon_maybe ty of
                            Just tc -> isUnboxedTupleTyCon tc
                            _       -> False
+
+isUnboxedSumType :: Type -> Bool
+isUnboxedSumType ty = case tyConAppTyCon_maybe ty of
+                        Just tc -> isUnboxedSumTyCon tc
+                        _       -> False
 
 -- | See "Type#type_classification" for what an algebraic type is.
 -- Should only be applied to /types/, as opposed to e.g. partially

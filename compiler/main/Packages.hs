@@ -339,7 +339,8 @@ listPackageConfigMap dflags = eltsUDFM (pkgIdMap (pkgState dflags))
 -- 'pkgState' in 'DynFlags' and return a list of packages to
 -- link in.
 initPackages :: DynFlags -> IO (DynFlags, [UnitId])
-initPackages dflags = do
+initPackages dflags0 = do
+  dflags <- interpretPackageEnv dflags0
   pkg_db <-
     case pkgDatabase dflags of
         Nothing -> readPackageConfigs dflags
@@ -879,9 +880,7 @@ mkPackageState
            UnitId) -- this package, might be modified if the current
                       -- package is a wired-in package.
 
-mkPackageState dflags0 dbs preload0 = do
-  dflags <- interpretPackageEnv dflags0
-
+mkPackageState dflags dbs preload0 = do
   -- Compute the unit id
   let this_package = thisPackage dflags
 
@@ -1233,8 +1232,8 @@ packageHsLibs dflags p = map (mkDynName . addSuffix) (hsLibraries p)
         -- the name of a shared library is libHSfoo-ghc<version>.so
         -- we leave out the _dyn, because it is superfluous
 
-        -- debug RTS includes support for -eventlog
-        ways2 | WayDebug `elem` ways1
+        -- debug and profiled RTSs include support for -eventlog
+        ways2 | WayDebug `elem` ways1 || WayProf `elem` ways1
               = filter (/= WayEventLog) ways1
               | otherwise
               = ways1

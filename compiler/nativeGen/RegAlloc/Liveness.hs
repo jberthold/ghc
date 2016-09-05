@@ -55,9 +55,7 @@ import State
 
 import Data.List
 import Data.Maybe
-import Data.Map                 (Map)
-import Data.Set                 (Set)
-import qualified Data.Map       as Map
+import Data.IntSet              (IntSet)
 
 -----------------------------------------------------------------------------
 type RegSet = UniqSet Reg
@@ -173,7 +171,7 @@ data LiveInfo
                 [BlockId]                 -- entry points (first one is the
                                           -- entry point for the proc).
                 (Maybe (BlockMap RegSet)) -- argument locals live on entry to this block
-                (Map BlockId (Set Int))   -- stack slots live on entry to this block
+                (BlockMap IntSet)         -- stack slots live on entry to this block
 
 
 -- | A basic block with liveness information.
@@ -221,7 +219,7 @@ instance Outputable instr
          where  pprRegs :: SDoc -> RegSet -> SDoc
                 pprRegs name regs
                  | isEmptyUniqSet regs  = empty
-                 | otherwise            = name <> (hcat $ punctuate space $ map ppr $ uniqSetToList regs)
+                 | otherwise            = name <> (pprUFM regs (hcat . punctuate space . map ppr))
 
 instance Outputable LiveInfo where
     ppr (LiveInfo mb_static entryIds liveVRegsOnEntry liveSlotsOnEntry)
@@ -462,10 +460,14 @@ slurpReloadCoalesce live
         mergeSlotMaps :: UniqFM Reg -> UniqFM Reg -> UniqFM Reg
         mergeSlotMaps map1 map2
                 = listToUFM
-                $ [ (k, r1)     | (k, r1)       <- ufmToList map1
-                                , case lookupUFM map2 k of
-                                        Nothing -> False
-                                        Just r2 -> r1 == r2 ]
+                $ [ (k, r1)
+                  | (k, r1) <- nonDetUFMToList map1
+                  -- This is non-deterministic but we do not
+                  -- currently support deterministic code-generation.
+                  -- See Note [Unique Determinism and code generation]
+                  , case lookupUFM map2 k of
+                          Nothing -> False
+                          Just r2 -> r1 == r2 ]
 
 
 -- | Strip away liveness information, yielding NatCmmDecl
@@ -568,7 +570,8 @@ patchEraseLive patchF cmm
         patchCmm (CmmProc info label live sccs)
          | LiveInfo static id (Just blockMap) mLiveSlots <- info
          = let
-                patchRegSet set = mkUniqSet $ map patchF $ uniqSetToList set
+                patchRegSet set = mkUniqSet $ map patchF $ nonDetEltsUFM set
+                  -- See Note [Unique Determinism and code generation]
                 blockMap'       = mapMap patchRegSet blockMap
 
                 info'           = LiveInfo static id (Just blockMap') mLiveSlots
@@ -625,9 +628,10 @@ patchRegsLiveInstr patchF li
                 (patchRegsOfInstr instr patchF)
                 (Just live
                         { -- WARNING: have to go via lists here because patchF changes the uniq in the Reg
-                          liveBorn      = mkUniqSet $ map patchF $ uniqSetToList $ liveBorn live
-                        , liveDieRead   = mkUniqSet $ map patchF $ uniqSetToList $ liveDieRead live
-                        , liveDieWrite  = mkUniqSet $ map patchF $ uniqSetToList $ liveDieWrite live })
+                          liveBorn      = mkUniqSet $ map patchF $ nonDetEltsUFM $ liveBorn live
+                        , liveDieRead   = mkUniqSet $ map patchF $ nonDetEltsUFM $ liveDieRead live
+                        , liveDieWrite  = mkUniqSet $ map patchF $ nonDetEltsUFM $ liveDieWrite live })
+                          -- See Note [Unique Determinism and code generation]
 
 
 --------------------------------------------------------------------------------
@@ -642,7 +646,7 @@ natCmmTopToLive (CmmData i d)
         = CmmData i d
 
 natCmmTopToLive (CmmProc info lbl live (ListGraph []))
-        = CmmProc (LiveInfo info [] Nothing Map.empty) lbl live []
+        = CmmProc (LiveInfo info [] Nothing emptyBlockMap) lbl live []
 
 natCmmTopToLive proc@(CmmProc info lbl live (ListGraph blocks@(first : _)))
  = let  first_id        = blockId first
@@ -653,7 +657,7 @@ natCmmTopToLive proc@(CmmProc info lbl live (ListGraph blocks@(first : _)))
                                         BasicBlock l (map (\i -> LiveInstr (Instr i) Nothing) instrs)))
                         $ sccs
 
-   in   CmmProc (LiveInfo info (first_id : entry_ids) Nothing Map.empty)
+   in   CmmProc (LiveInfo info (first_id : entry_ids) Nothing emptyBlockMap)
                 lbl live sccsLive
 
 
@@ -719,7 +723,7 @@ regLiveness _ (CmmData i d)
 regLiveness _ (CmmProc info lbl live [])
         | LiveInfo static mFirst _ _    <- info
         = return $ CmmProc
-                        (LiveInfo static mFirst (Just mapEmpty) Map.empty)
+                        (LiveInfo static mFirst (Just mapEmpty) emptyBlockMap)
                         lbl live []
 
 regLiveness platform (CmmProc info lbl live sccs)
@@ -753,7 +757,8 @@ checkIsReverseDependent sccs'
          = let  dests           = slurpJumpDestsOfBlock block
                 blocksSeen'     = unionUniqSets blocksSeen $ mkUniqSet [blockId block]
                 badDests        = dests `minusUniqSet` blocksSeen'
-           in   case uniqSetToList badDests of
+           in   case nonDetEltsUFM badDests of
+                 -- See Note [Unique Determinism and code generation]
                  []             -> go blocksSeen' sccs
                  bad : _        -> Just bad
 
@@ -761,7 +766,8 @@ checkIsReverseDependent sccs'
          = let  dests           = unionManyUniqSets $ map slurpJumpDestsOfBlock blocks
                 blocksSeen'     = unionUniqSets blocksSeen $ mkUniqSet $ map blockId blocks
                 badDests        = dests `minusUniqSet` blocksSeen'
-           in   case uniqSetToList badDests of
+           in   case nonDetEltsUFM badDests of
+                 -- See Note [Unique Determinism and code generation]
                  []             -> go blocksSeen' sccs
                  bad : _        -> Just bad
 
@@ -854,7 +860,8 @@ livenessSCCs platform blockmap done
                 = a' == b'
               where a' = map f $ mapToList a
                     b' = map f $ mapToList b
-                    f (key,elt) = (key, uniqSetToList elt)
+                    f (key,elt) = (key, nonDetEltsUFM elt)
+                    -- See Note [Unique Determinism and code generation]
 
 
 
@@ -990,7 +997,8 @@ liveness1 platform liveregs blockmap (LiveInstr instr _)
             -- registers that are live only in the branch targets should
             -- be listed as dying here.
             live_branch_only = live_from_branch `minusUniqSet` liveregs
-            r_dying_br  = uniqSetToList (mkUniqSet r_dying `unionUniqSets`
+            r_dying_br  = nonDetEltsUFM (mkUniqSet r_dying `unionUniqSets`
                                         live_branch_only)
+                          -- See Note [Unique Determinism and code generation]
 
 

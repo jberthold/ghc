@@ -465,6 +465,7 @@ PACKAGES_STAGE1 += ghc-boot
 PACKAGES_STAGE1 += template-haskell
 PACKAGES_STAGE1 += hoopl
 PACKAGES_STAGE1 += transformers
+PACKAGES_STAGE1 += compact
 
 ifeq "$(HADDOCK_DOCS)" "YES"
 PACKAGES_STAGE1 += xhtml
@@ -711,6 +712,7 @@ BUILD_DIRS := $(filter-out utils/haddock,$(BUILD_DIRS))
 BUILD_DIRS := $(filter-out utils/haddock/doc,$(BUILD_DIRS))
 endif
 ifeq "$(BUILD_SPHINX_HTML) $(BUILD_SPHINX_PDF)" "NO NO"
+BUILD_DIRS := $(filter-out docs/users_guide,$(BUILD_DIRS))
 # Don't to build this little utility if we're not building the User's Guide.
 BUILD_DIRS := $(filter-out utils/mkUserGuidePart,$(BUILD_DIRS))
 endif

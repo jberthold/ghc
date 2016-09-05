@@ -170,9 +170,12 @@ defaultCallStacks wanteds
   handle_simples simples
     = catBagMaybes <$> mapBagM defaultCallStack simples
 
-  handle_implic implic = do
-    wanteds <- defaultCallStacks (ic_wanted implic)
-    return (implic { ic_wanted = wanteds })
+  handle_implic implic
+    = do { wanteds <- setEvBindsTcS (ic_binds implic) $
+                      -- defaultCallStack sets a binding, so
+                      -- we must set the correct binding group
+                      defaultCallStacks (ic_wanted implic)
+         ; return (implic { ic_wanted = wanteds }) }
 
   defaultCallStack ct
     | Just _ <- isCallStackPred (ctPred ct)
@@ -480,7 +483,7 @@ signature
 where F is a type function.  This happened in Trac #3972.
 
 We could do more than once but we'd have to have /some/ limit: in the
-the recurisve case, we would go on forever in the common case where
+the recursive case, we would go on forever in the common case where
 the constraints /are/ satisfiable (Trac #10592 comment:12!).
 
 For stratightforard situations without type functions the try_harder

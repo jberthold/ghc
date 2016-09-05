@@ -64,7 +64,13 @@ RTS_RET(stg_maskAsyncExceptionszh_ret);
 RTS_RET(stg_stack_underflow_frame);
 RTS_RET(stg_restore_cccs);
 
-// RTS_FUN(stg_interp_constr_entry);
+// RTS_FUN(stg_interp_constr1_entry);
+// RTS_FUN(stg_interp_constr2_entry);
+// RTS_FUN(stg_interp_constr3_entry);
+// RTS_FUN(stg_interp_constr4_entry);
+// RTS_FUN(stg_interp_constr5_entry);
+// RTS_FUN(stg_interp_constr6_entry);
+// RTS_FUN(stg_interp_constr7_entry);
 //
 // This is referenced using the FFI in the compiler (ByteCodeItbls),
 // so we can't give it the correct type here because the prototypes
@@ -105,6 +111,7 @@ RTS_ENTRY(stg_TVAR_CLEAN);
 RTS_ENTRY(stg_TVAR_DIRTY);
 RTS_ENTRY(stg_TSO);
 RTS_ENTRY(stg_STACK);
+RTS_ENTRY(stg_RUBBISH_ENTRY);
 RTS_ENTRY(stg_ARR_WORDS);
 RTS_ENTRY(stg_MUT_ARR_WORDS);
 RTS_ENTRY(stg_MUT_ARR_PTRS_CLEAN);
@@ -144,6 +151,7 @@ RTS_ENTRY(stg_END_STM_WATCH_QUEUE);
 RTS_ENTRY(stg_END_INVARIANT_CHECK_QUEUE);
 RTS_ENTRY(stg_END_STM_CHUNK_LIST);
 RTS_ENTRY(stg_NO_TREC);
+RTS_ENTRY(stg_COMPACT_NFDATA);
 
 /* closures */
 
@@ -406,6 +414,17 @@ RTS_FUN_DECL(stg_raiseIOzh);
 RTS_FUN_DECL(stg_makeStableNamezh);
 RTS_FUN_DECL(stg_makeStablePtrzh);
 RTS_FUN_DECL(stg_deRefStablePtrzh);
+
+RTS_FUN_DECL(stg_compactNewzh);
+RTS_FUN_DECL(stg_compactAppendzh);
+RTS_FUN_DECL(stg_compactResizzezh);
+RTS_FUN_DECL(stg_compactGetRootzh);
+RTS_FUN_DECL(stg_compactContainszh);
+RTS_FUN_DECL(stg_compactContainsAnyzh);
+RTS_FUN_DECL(stg_compactGetFirstBlockzh);
+RTS_FUN_DECL(stg_compactGetNextBlockzh);
+RTS_FUN_DECL(stg_compactAllocateBlockzh);
+RTS_FUN_DECL(stg_compactFixupPointerszh);
 
 RTS_FUN_DECL(stg_forkzh);
 RTS_FUN_DECL(stg_forkOnzh);

@@ -33,18 +33,17 @@ import StgCmmClosure
 
 import CLabel
 
-import DynFlags
-import MkGraph
 import BlockId
 import CmmExpr
 import CmmUtils
+import DynFlags
 import Id
-import VarEnv
-import Control.Monad
+import MkGraph
 import Name
-import StgSyn
 import Outputable
+import StgSyn
 import UniqFM
+import VarEnv
 
 -------------------------------------
 --        Non-void types
@@ -166,9 +165,8 @@ cgLookupPanic id
 
 --------------------
 getArgAmode :: NonVoid StgArg -> FCode CmmExpr
-getArgAmode (NonVoid (StgVarArg var))  =
-  do { info  <- getCgIdInfo var; return (idInfoToAmode info) }
-getArgAmode (NonVoid (StgLitArg lit))  = liftM CmmLit $ cgLit lit
+getArgAmode (NonVoid (StgVarArg var)) = idInfoToAmode <$> getCgIdInfo var
+getArgAmode (NonVoid (StgLitArg lit)) = CmmLit <$> cgLit lit
 
 getNonVoidArgAmodes :: [StgArg] -> FCode [CmmExpr]
 -- NB: Filters out void args,
@@ -177,8 +175,9 @@ getNonVoidArgAmodes [] = return []
 getNonVoidArgAmodes (arg:args)
   | isVoidRep (argPrimRep arg) = getNonVoidArgAmodes args
   | otherwise = do { amode  <- getArgAmode (NonVoid arg)
-                    ; amodes <- getNonVoidArgAmodes args
-                    ; return ( amode : amodes ) }
+                   ; amodes <- getNonVoidArgAmodes args
+                   ; return ( amode : amodes ) }
+
 
 ------------------------------------------------------------------------
 --        Interface functions for binding and re-binding names

@@ -54,9 +54,9 @@ import SrcLoc
 import Util
 import Bag
 import Outputable
-import FastString
 import PatSyn
 
+import Data.List        ( intercalate )
 import Data.IORef       ( atomicModifyIORef' )
 
 import Control.Monad
@@ -314,6 +314,13 @@ dsExpr (ExplicitTuple tup_args boxity)
        ; return $ mkCoreLams lam_vars $
                   mkCoreTupBoxity boxity args }
 
+dsExpr (ExplicitSum alt arity expr types)
+  = do { core_expr <- dsLExpr expr
+       ; return $ mkCoreConApps (sumDataCon alt arity)
+                                (map (Type . getRuntimeRep "dsExpr ExplicitSum") types ++
+                                 map Type types ++
+                                 [core_expr]) }
+
 dsExpr (HsSCC _ cc expr@(L loc _)) = do
     dflags <- getDynFlags
     if gopt Opt_SccProfilingOn dflags
@@ -470,12 +477,10 @@ dsExpr (HsStatic _ expr@(L loc _)) = do
     mkStaticPtrFingerprint :: Module -> DsM Fingerprint
     mkStaticPtrFingerprint this_mod = do
       n <- mkGenPerModuleNum this_mod
-      return $ fingerprintString $ unpackFS $ concatFS
-        [ unitIdFS $ moduleUnitId this_mod
-        , fsLit ":"
-        , moduleNameFS $ moduleName this_mod
-        , fsLit ":"
-        , mkFastString $ show n
+      return $ fingerprintString $ intercalate ":"
+        [ unitIdString $ moduleUnitId this_mod
+        , moduleNameString $ moduleName this_mod
+        , show n
         ]
 
     mkGenPerModuleNum :: Module -> DsM Int

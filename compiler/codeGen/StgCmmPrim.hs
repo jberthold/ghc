@@ -308,8 +308,11 @@ emitPrimOp _ [res] GetCurrentCCSOp [_dummy_arg]
 emitPrimOp dflags [res] ReadMutVarOp [mutv]
    = emitAssign (CmmLocal res) (cmmLoadIndexW dflags mutv (fixedHdrSizeW dflags) (gcWord dflags))
 
-emitPrimOp dflags [] WriteMutVarOp [mutv,var]
-   = do emitStore (cmmOffsetW dflags mutv (fixedHdrSizeW dflags)) var
+emitPrimOp dflags res@[] WriteMutVarOp [mutv,var]
+   = do -- Without this write barrier, other CPUs may see this pointer before
+        -- the writes for the closure it points to have occurred.
+        emitPrimCall res MO_WriteBarrier []
+        emitStore (cmmOffsetW dflags mutv (fixedHdrSizeW dflags)) var
         emitCCall
                 [{-no results-}]
                 (CmmLit (CmmLabel mkDirty_MUT_VAR_Label))
@@ -351,12 +354,15 @@ emitPrimOp dflags [res] EqStableNameOp [arg1,arg2]
                                    cmmLoadIndexW dflags arg2 (fixedHdrSizeW dflags) (bWord dflags)
                          ])
 
-
 emitPrimOp dflags [res] ReallyUnsafePtrEqualityOp [arg1,arg2]
    = emitAssign (CmmLocal res) (CmmMachOp (mo_wordEq dflags) [arg1,arg2])
 
 --  #define addrToHValuezh(r,a) r=(P_)a
 emitPrimOp _      [res] AddrToAnyOp [arg]
+   = emitAssign (CmmLocal res) arg
+
+--  #define hvalueToAddrzh(r, a) r=(W_)a
+emitPrimOp _      [res] AnyToAddrOp [arg]
    = emitAssign (CmmLocal res) arg
 
 --  #define dataToTagzh(r,a)  r=(GET_TAG(((StgClosure *)a)->header.info))

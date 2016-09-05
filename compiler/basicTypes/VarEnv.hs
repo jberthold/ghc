@@ -9,10 +9,11 @@ module VarEnv (
 
         -- ** Manipulating these environments
         emptyVarEnv, unitVarEnv, mkVarEnv, mkVarEnv_Directly,
-        elemVarEnv, varEnvElts,
+        elemVarEnv,
         extendVarEnv, extendVarEnv_C, extendVarEnv_Acc, extendVarEnv_Directly,
         extendVarEnvList,
-        plusVarEnv, plusVarEnv_C, plusVarEnv_CD, alterVarEnv,
+        plusVarEnv, plusVarEnv_C, plusVarEnv_CD, plusVarEnvList,
+        alterVarEnv,
         delVarEnvList, delVarEnv, delVarEnv_Directly,
         minusVarEnv, intersectsVarEnv,
         lookupVarEnv, lookupVarEnv_NF, lookupWithDefaultVarEnv,
@@ -27,15 +28,16 @@ module VarEnv (
         DVarEnv, DIdEnv, DTyVarEnv,
 
         -- ** Manipulating these environments
-        emptyDVarEnv,
+        emptyDVarEnv, mkDVarEnv,
         dVarEnvElts,
         extendDVarEnv, extendDVarEnv_C,
+        extendDVarEnvList,
         lookupDVarEnv,
         isEmptyDVarEnv, foldDVarEnv,
         mapDVarEnv,
         modifyDVarEnv,
         alterDVarEnv,
-        plusDVarEnv_C,
+        plusDVarEnv, plusDVarEnv_C,
         unitDVarEnv,
         delDVarEnv,
         delDVarEnvList,
@@ -194,7 +196,9 @@ uniqAway' (InScope set n) var
 ************************************************************************
 -}
 
--- | When we are comparing (or matching) types or terms, we are faced with
+-- | Rename Environment 2
+--
+-- When we are comparing (or matching) types or terms, we are faced with
 -- \"going under\" corresponding binders.  E.g. when comparing:
 --
 -- > \x. e1     ~   \y. e2
@@ -389,7 +393,9 @@ succeeding with [a -> v y], which is bogus of course.
 ************************************************************************
 -}
 
--- | When tidying up print names, we keep a mapping of in-scope occ-names
+-- | Tidy Environment
+--
+-- When tidying up print names, we keep a mapping of in-scope occ-names
 -- (the 'TidyOccEnv') and a Var-to-Var of the current renamings
 type TidyEnv = (TidyOccEnv, VarEnv Var)
 
@@ -404,10 +410,19 @@ emptyTidyEnv = (emptyTidyOccEnv, emptyVarEnv)
 ************************************************************************
 -}
 
+-- | Variable Environment
 type VarEnv elt     = UniqFM elt
+
+-- | Identifier Environment
 type IdEnv elt      = VarEnv elt
+
+-- | Type Variable Environment
 type TyVarEnv elt   = VarEnv elt
+
+-- | Type or Coercion Variable Environment
 type TyCoVarEnv elt = VarEnv elt
+
+-- | Coercion Variable Environment
 type CoVarEnv elt   = VarEnv elt
 
 emptyVarEnv       :: VarEnv a
@@ -421,6 +436,7 @@ extendVarEnv_C    :: (a->a->a) -> VarEnv a -> Var -> a -> VarEnv a
 extendVarEnv_Acc  :: (a->b->b) -> (a->b) -> VarEnv b -> Var -> a -> VarEnv b
 extendVarEnv_Directly :: VarEnv a -> Unique -> a -> VarEnv a
 plusVarEnv        :: VarEnv a -> VarEnv a -> VarEnv a
+plusVarEnvList    :: [VarEnv a] -> VarEnv a
 extendVarEnvList  :: VarEnv a -> [(Var, a)] -> VarEnv a
 
 lookupVarEnv_Directly :: VarEnv a -> Unique -> Maybe a
@@ -436,7 +452,6 @@ plusVarEnv_C      :: (a -> a -> a) -> VarEnv a -> VarEnv a -> VarEnv a
 plusVarEnv_CD     :: (a -> a -> a) -> VarEnv a -> a -> VarEnv a -> a -> VarEnv a
 mapVarEnv         :: (a -> b) -> VarEnv a -> VarEnv b
 modifyVarEnv      :: (a -> a) -> VarEnv a -> Var -> VarEnv a
-varEnvElts        :: VarEnv a -> [a]
 
 isEmptyVarEnv     :: VarEnv a -> Bool
 lookupVarEnv      :: VarEnv a -> Var -> Maybe a
@@ -461,6 +476,7 @@ delVarEnv        = delFromUFM
 minusVarEnv      = minusUFM
 intersectsVarEnv e1 e2 = not (isEmptyVarEnv (e1 `intersectUFM` e2))
 plusVarEnv       = plusUFM
+plusVarEnvList   = plusUFMList
 lookupVarEnv     = lookupUFM
 filterVarEnv     = filterUFM
 lookupWithDefaultVarEnv = lookupWithDefaultUFM
@@ -468,7 +484,6 @@ mapVarEnv        = mapUFM
 mkVarEnv         = listToUFM
 mkVarEnv_Directly= listToUFM_Directly
 emptyVarEnv      = emptyUFM
-varEnvElts       = eltsUFM
 unitVarEnv       = unitUFM
 isEmptyVarEnv    = isNullUFM
 lookupVarEnv_Directly = lookupUFM_Directly
@@ -505,8 +520,13 @@ modifyVarEnv_Directly mangle_fn env key
 -- See Note [Deterministic UniqFM] in UniqDFM for explanation why we need
 -- DVarEnv.
 
+-- | Deterministic Variable Environment
 type DVarEnv elt = UniqDFM elt
+
+-- | Deterministic Identifier Environment
 type DIdEnv elt = DVarEnv elt
+
+-- | Deterministic Type Variable Environment
 type DTyVarEnv elt = DVarEnv elt
 
 emptyDVarEnv :: DVarEnv a
@@ -514,6 +534,9 @@ emptyDVarEnv = emptyUDFM
 
 dVarEnvElts :: DVarEnv a -> [a]
 dVarEnvElts = eltsUDFM
+
+mkDVarEnv :: [(Var, a)] -> DVarEnv a
+mkDVarEnv = listToUDFM
 
 extendDVarEnv :: DVarEnv a -> Var -> a -> DVarEnv a
 extendDVarEnv = addToUDFM
@@ -529,6 +552,9 @@ mapDVarEnv = mapUDFM
 
 alterDVarEnv :: (Maybe a -> Maybe a) -> DVarEnv a -> Var -> DVarEnv a
 alterDVarEnv = alterUDFM
+
+plusDVarEnv :: DVarEnv a -> DVarEnv a -> DVarEnv a
+plusDVarEnv = plusUDFM
 
 plusDVarEnv_C :: (a -> a -> a) -> DVarEnv a -> DVarEnv a -> DVarEnv a
 plusDVarEnv_C = plusUDFM_C
@@ -556,6 +582,9 @@ modifyDVarEnv mangle_fn env key
 
 partitionDVarEnv :: (a -> Bool) -> DVarEnv a -> (DVarEnv a, DVarEnv a)
 partitionDVarEnv = partitionUDFM
+
+extendDVarEnvList :: DVarEnv a -> [(Var, a)] -> DVarEnv a
+extendDVarEnvList = addListToUDFM
 
 anyDVarEnv :: (a -> Bool) -> DVarEnv a -> Bool
 anyDVarEnv = anyUDFM

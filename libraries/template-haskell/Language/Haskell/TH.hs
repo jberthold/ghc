@@ -24,6 +24,7 @@ module Language.Haskell.TH(
         Info(..), ModuleInfo(..),
         InstanceDec,
         ParentName,
+        SumAlt, SumArity,
         Arity,
         Unlifted,
         -- *** Language extension lookup
@@ -95,7 +96,7 @@ module Language.Haskell.TH(
         intPrimL, wordPrimL, floatPrimL, doublePrimL, integerL, rationalL,
         charL, stringL, stringPrimL, charPrimL,
     -- *** Patterns
-        litP, varP, tupP, conP, uInfixP, parensP, infixP,
+        litP, varP, tupP, unboxedSumP, conP, uInfixP, parensP, infixP,
         tildeP, bangP, asP, wildP, recP,
         listP, sigP, viewP,
         fieldPat,
@@ -104,10 +105,10 @@ module Language.Haskell.TH(
         normalB, guardedB, normalG, normalGE, patG, patGE, match, clause,
 
     -- *** Expressions
-        dyn, varE, conE, litE, appE, uInfixE, parensE, staticE,
+        dyn, varE, conE, litE, appE, appTypeE, uInfixE, parensE, staticE,
         infixE, infixApp, sectionL, sectionR,
-        lamE, lam1E, lamCaseE, tupE, condE, multiIfE, letE, caseE, appsE,
-        listE, sigE, recConE, recUpdE, stringE, fieldExp,
+        lamE, lam1E, lamCaseE, tupE, unboxedSumE, condE, multiIfE, letE, caseE,
+        appsE, listE, sigE, recConE, recUpdE, stringE, fieldExp,
     -- **** Ranges
     fromE, fromThenE, fromToE, fromThenToE,
 
@@ -120,8 +121,8 @@ module Language.Haskell.TH(
 
     -- *** Types
         forallT, varT, conT, appT, arrowT, infixT, uInfixT, parensT, equalityT,
-        listT, tupleT, sigT, litT, promotedT, promotedTupleT, promotedNilT,
-        promotedConsT,
+        listT, tupleT, unboxedSumT, sigT, litT, promotedT, promotedTupleT,
+        promotedNilT, promotedConsT,
     -- **** Type literals
     numTyLit, strTyLit,
     -- **** Strictness

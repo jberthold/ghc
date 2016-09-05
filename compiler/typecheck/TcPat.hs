@@ -47,6 +47,7 @@ import Outputable
 import qualified GHC.LanguageExtensions as LangExt
 import Control.Monad
 import Control.Arrow  ( second )
+import ListSetOps ( getNth )
 
 {-
 ************************************************************************
@@ -467,6 +468,18 @@ tc_pat penv (TuplePat pats boxity _) pat_ty thing_inside
           return (mkHsWrapPat coi possibly_mangled_result pat_ty, res)
         }
 
+tc_pat penv (SumPat pat alt arity _) pat_ty thing_inside
+  = do  { let tc = sumTyCon arity
+        ; (coi, arg_tys) <- matchExpectedPatTy (matchExpectedTyConApp tc)
+                                               penv pat_ty
+        ; -- Drop levity vars, we don't care about them here
+          let con_arg_tys = drop arity arg_tys
+        ; (pat', res) <- tc_lpat pat (mkCheckExpType (con_arg_tys `getNth` (alt - 1)))
+                                 penv thing_inside
+        ; pat_ty <- readExpType pat_ty
+        ; return (mkHsWrapPat coi (SumPat pat' alt arity con_arg_tys) pat_ty, res)
+        }
+
 ------------------------
 -- Data constructors
 tc_pat penv (ConPatIn con arg_pats) pat_ty thing_inside
@@ -582,6 +595,15 @@ tc_pat penv (NPlusKPat (L nm_loc name) (L loc lit) _ ge minus _) pat_ty thing_in
               pat' = NPlusKPat (L nm_loc bndr_id) (L loc lit1') lit2'
                                ge' minus'' pat_ty
         ; return (pat', res) }
+
+-- HsSpliced is an annotation produced by 'RnSplice.rnSplicePat'.
+-- Here we get rid of it and add the finalizers to the global environment.
+--
+-- See Note [Delaying modFinalizers in untyped splices] in RnSplice.
+tc_pat penv (SplicePat (HsSpliced mod_finalizers (HsSplicedPat pat)))
+            pat_ty thing_inside
+  = do addModFinalizersWithLclEnv mod_finalizers
+       tc_pat penv pat pat_ty thing_inside
 
 tc_pat _ _other_pat _ _ = panic "tc_pat"        -- ConPatOut, SigPatOut
 

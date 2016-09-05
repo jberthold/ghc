@@ -136,7 +136,14 @@ reportUnsolved wanted
                         | warn_partial_sigs = HoleWarn
                         | otherwise         = HoleDefer
 
-       ; report_unsolved (Just binds_var) False type_errors expr_holes type_holes wanted
+       ; defer_out_of_scope <- goptM Opt_DeferOutOfScopeVariables
+       ; warn_out_of_scope <- woptM Opt_WarnDeferredOutOfScopeVariables
+       ; let out_of_scope_holes | not defer_out_of_scope = HoleError
+                                | warn_out_of_scope      = HoleWarn
+                                | otherwise              = HoleDefer
+
+       ; report_unsolved (Just binds_var) False type_errors expr_holes
+          type_holes out_of_scope_holes wanted
        ; getTcEvBinds binds_var }
 
 -- | Report *all* unsolved goals as errors, even if -fdefer-type-errors is on
@@ -148,14 +155,14 @@ reportUnsolved wanted
 -- and for simplifyDefault.
 reportAllUnsolved :: WantedConstraints -> TcM ()
 reportAllUnsolved wanted
-  = report_unsolved Nothing False TypeError HoleError HoleError wanted
+  = report_unsolved Nothing False TypeError HoleError HoleError HoleError wanted
 
 -- | Report all unsolved goals as warnings (but without deferring any errors to
 -- run-time). See Note [Safe Haskell Overlapping Instances Implementation] in
 -- TcSimplify
 warnAllUnsolved :: WantedConstraints -> TcM ()
 warnAllUnsolved wanted
-  = report_unsolved Nothing True TypeWarn HoleWarn HoleWarn wanted
+  = report_unsolved Nothing True TypeWarn HoleWarn HoleWarn HoleWarn wanted
 
 -- | Report unsolved goals as errors or warnings.
 report_unsolved :: Maybe EvBindsVar  -- cec_binds
@@ -163,8 +170,10 @@ report_unsolved :: Maybe EvBindsVar  -- cec_binds
                 -> TypeErrorChoice   -- Deferred type errors
                 -> HoleChoice        -- Expression holes
                 -> HoleChoice        -- Type holes
+                -> HoleChoice        -- Out of scope holes
                 -> WantedConstraints -> TcM ()
-report_unsolved mb_binds_var err_as_warn type_errors expr_holes type_holes wanted
+report_unsolved mb_binds_var err_as_warn type_errors expr_holes
+    type_holes out_of_scope_holes wanted
   | isEmptyWC wanted
   = return ()
   | otherwise
@@ -188,6 +197,7 @@ report_unsolved mb_binds_var err_as_warn type_errors expr_holes type_holes wante
                             , cec_errors_as_warns = err_as_warn
                             , cec_expr_holes = expr_holes
                             , cec_type_holes = type_holes
+                            , cec_out_of_scope_holes = out_of_scope_holes
                             , cec_suppress = False -- See Note [Suppressing error messages]
                             , cec_warn_redundant = warn_redundant
                             , cec_binds    = mb_binds_var }
@@ -246,6 +256,16 @@ data HoleChoice
   | HoleWarn      -- Defer to runtime, emit a compile-time warning
   | HoleDefer     -- Defer to runtime, no warning
 
+instance Outputable HoleChoice where
+  ppr HoleError = text "HoleError"
+  ppr HoleWarn  = text "HoleWarn"
+  ppr HoleDefer = text "HoleDefer"
+
+instance Outputable TypeErrorChoice  where
+  ppr TypeError = text "TypeError"
+  ppr TypeWarn  = text "TypeWarn"
+  ppr TypeDefer = text "TypeDefer"
+
 data ReportErrCtxt
     = CEC { cec_encl :: [Implication]  -- Enclosing implications
                                        --   (innermost first)
@@ -268,8 +288,13 @@ data ReportErrCtxt
           , cec_defer_type_errors :: TypeErrorChoice -- Defer type errors until runtime
                                                      -- Irrelevant if cec_binds = Nothing
 
-          , cec_expr_holes :: HoleChoice  -- Holes in expressions
-          , cec_type_holes :: HoleChoice  -- Holes in types
+          -- cec_expr_holes is a union of:
+          --   cec_type_holes - a set of typed holes: '_', '_a', '_foo'
+          --   cec_out_of_scope_holes - a set of variables which are
+          --                            out of scope: 'x', 'y', 'bar'
+          , cec_expr_holes :: HoleChoice           -- Holes in expressions
+          , cec_type_holes :: HoleChoice           -- Holes in types
+          , cec_out_of_scope_holes :: HoleChoice   -- Out of scope holes
 
           , cec_warn_redundant :: Bool    -- True <=> -Wredundant-constraints
 
@@ -427,7 +452,7 @@ reportWanteds ctxt tc_lvl (WC { wc_simple = simples, wc_insol = insols, wc_impl 
               , ("skolem eq1",   very_wrong,      True, mkSkolReporter)
               , ("skolem eq2",   skolem_eq,       True, mkSkolReporter)
               , ("non-tv eq",    non_tv_eq,       True, mkSkolReporter)
-              , ("Out of scope", is_out_of_scope, True,  mkHoleReporter)
+              , ("Out of scope", is_out_of_scope, True, mkHoleReporter)
               , ("Holes",        is_hole,         False, mkHoleReporter)
 
                   -- The only remaining equalities are alpha ~ ty,
@@ -536,14 +561,14 @@ mkSkolReporter ctxt cts
 mkHoleReporter :: Reporter
 -- Reports errors one at a time
 mkHoleReporter ctxt
-  = mapM_ $ \ct ->
-    do { err <- mkHoleError ctxt ct
-       ; maybeReportHoleError ctxt ct err
-       ; maybeAddDeferredHoleBinding ctxt err ct }
+  = mapM_ $ \ct -> do { err <- mkHoleError ctxt ct
+                      ; maybeReportHoleError ctxt ct err
+                      ; maybeAddDeferredHoleBinding ctxt err ct }
 
 mkUserTypeErrorReporter :: Reporter
 mkUserTypeErrorReporter ctxt
-  = mapM_ $ \ct -> maybeReportError ctxt =<< mkUserTypeError ctxt ct
+  = mapM_ $ \ct -> do { err <- mkUserTypeError ctxt ct
+                      ; maybeReportError ctxt err }
 
 mkUserTypeError :: ReportErrCtxt -> Ct -> TcM ErrMsg
 mkUserTypeError ctxt ct = mkErrorMsgFromCt ctxt ct
@@ -561,7 +586,6 @@ mkGroupReporter :: (ReportErrCtxt -> [Ct] -> TcM ErrMsg)
 -- and report only the first (to avoid a cascade)
 mkGroupReporter mk_err ctxt cts
   = mapM_ (reportGroup mk_err ctxt) (equivClasses cmp_loc cts)
-  where
 
 eq_lhs_type :: Ct -> Ct -> Bool
 eq_lhs_type ct1 ct2
@@ -585,9 +609,13 @@ reportGroup mk_err ctxt cts =
 
         (_, cts') -> do { err <- mk_err ctxt cts'
                         ; maybeReportError ctxt err
-                        ; mapM_ (maybeAddDeferredBinding ctxt err) cts' }
-                                -- Add deferred bindings for all
-                                -- But see Note [Always warn with -fdefer-type-errors]
+                            -- But see Note [Always warn with -fdefer-type-errors]
+                        ; traceTc "reportGroup" (ppr cts')
+                        ; mapM_ (addDeferredBinding ctxt err) cts' }
+                            -- Add deferred bindings for all
+                            -- Redundant if we are going to abort compilation,
+                            -- but that's hard to know for sure, and if we don't
+                            -- abort, we need bindings for all (e.g. Trac #12156)
   where
     isMonadFailInstanceMissing ct =
         case ctLocOrigin (ctLoc ct) of
@@ -608,9 +636,22 @@ maybeReportHoleError ctxt ct err
        HoleWarn  -> reportWarning (Reason Opt_WarnPartialTypeSignatures) err
        HoleDefer -> return ()
 
-  -- Otherwise this is a typed hole in an expression
+  -- Always report an error for out-of-scope variables
+  -- Unless -fdefer-out-of-scope-variables is on,
+  -- in which case the messages are discarded.
+  -- See Trac #12170, #12406
+  | isOutOfScopeCt ct
+  = -- If deferring, report a warning only if -Wout-of-scope-variables is on
+    case cec_out_of_scope_holes ctxt of
+      HoleError -> reportError err
+      HoleWarn  ->
+        reportWarning (Reason Opt_WarnDeferredOutOfScopeVariables) err
+      HoleDefer -> return ()
+
+  -- Otherwise this is a typed hole in an expression,
+  -- but not for an out-of-scope variable
   | otherwise
-  = -- If deferring, report a warning only if -Wtyped-holds is on
+  = -- If deferring, report a warning only if -Wtyped-holes is on
     case cec_expr_holes ctxt of
        HoleError -> reportError err
        HoleWarn  -> reportWarning (Reason Opt_WarnTypedHoles) err
@@ -657,23 +698,10 @@ addDeferredBinding ctxt err ct
 
 maybeAddDeferredHoleBinding :: ReportErrCtxt -> ErrMsg -> Ct -> TcM ()
 maybeAddDeferredHoleBinding ctxt err ct
-    | isExprHoleCt ct
-    , case cec_expr_holes ctxt of
-        HoleDefer -> True
-        HoleWarn  -> True
-        HoleError -> False
-    = addDeferredBinding ctxt err ct  -- Only add bindings for holes in expressions
-    | otherwise                       -- not for holes in partial type signatures
-    = return ()
-
-maybeAddDeferredBinding :: ReportErrCtxt -> ErrMsg -> Ct -> TcM ()
-maybeAddDeferredBinding ctxt err ct =
-  case cec_defer_type_errors ctxt of
-        TypeDefer -> deferred
-        TypeWarn -> deferred
-        TypeError -> return ()
-  where
-    deferred = addDeferredBinding ctxt err ct
+  | isExprHoleCt ct
+  = addDeferredBinding ctxt err ct  -- Only add bindings for holes in expressions
+  | otherwise                       -- not for holes in partial type signatures
+  = return ()
 
 tryReporters :: ReportErrCtxt -> [ReporterSpec] -> [Ct] -> TcM (ReportErrCtxt, [Ct])
 -- Use the first reporter in the list whose predicate says True
@@ -696,9 +724,10 @@ tryReporters ctxt reporters cts
 tryReporter :: ReportErrCtxt -> ReporterSpec -> [Ct] -> TcM (ReportErrCtxt, [Ct])
 tryReporter ctxt (str, keep_me,  suppress_after, reporter) cts
   | null yeses = return (ctxt, cts)
-  | otherwise  = do { traceTc "tryReporter:" (text str <+> ppr yeses)
+  | otherwise  = do { traceTc "tryReporter{ " (text str <+> ppr yeses)
                     ; reporter ctxt yeses
                     ; let ctxt' = ctxt { cec_suppress = suppress_after || cec_suppress ctxt }
+                    ; traceTc "tryReporter end }" (text str <+> ppr (cec_suppress ctxt) <+> ppr suppress_after)
                     ; return (ctxt', nos) }
   where
     (yeses, nos) = partition (\ct -> keep_me ct (classifyPredType (ctPred ct))) cts
@@ -1452,7 +1481,7 @@ mkEqInfoMsg ct ty1 ty2
       _                                        -> (ty1, ty2)
 
     invis_msg | Just vis <- tcEqTypeVis act_ty exp_ty
-              , vis /= Visible
+              , not vis
               = ppSuggestExplicitKinds
               | otherwise
               = empty
@@ -2545,7 +2574,7 @@ relevantBindings want_filtering ctxt ct
        ; (tidy_env', docs, discards)
               <- go env1 ct_tvs (maxRelevantBinds dflags)
                     emptyVarSet [] False
-                    (tcl_bndrs lcl_env)
+                    (remove_shadowing $ tcl_bndrs lcl_env)
          -- tcl_bndrs has the innermost bindings first,
          -- which are probably the most relevant ones
 
@@ -2570,6 +2599,16 @@ relevantBindings want_filtering ctxt ct
 
     dec_max :: Maybe Int -> Maybe Int
     dec_max = fmap (\n -> n - 1)
+
+    ---- fixes #12177
+    ---- builds up a list of bindings whose OccName has not been seen before
+    remove_shadowing :: [TcIdBinder] -> [TcIdBinder]
+    remove_shadowing bindings = reverse $ fst $ foldl
+      (\(bindingAcc, seenNames) binding ->
+        if (occName binding) `elemOccSet` seenNames -- if we've seen it
+          then (bindingAcc, seenNames)              -- skip it
+          else (binding:bindingAcc, extendOccSet seenNames (occName binding)))
+      ([], emptyOccSet) bindings
 
     go :: TidyEnv -> TcTyVarSet -> Maybe Int -> TcTyVarSet -> [SDoc]
        -> Bool                          -- True <=> some filtered out due to lack of fuel

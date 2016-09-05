@@ -45,12 +45,16 @@ module CoreUtils (
 
         -- * Working with ticks
         stripTicksTop, stripTicksTopE, stripTicksTopT,
-        stripTicksE, stripTicksT
+        stripTicksE, stripTicksT,
+
+        -- * StaticPtr
+        collectStaticPtrSatArgs
     ) where
 
 #include "HsVersions.h"
 
 import CoreSyn
+import PrelNames ( staticPtrDataConName )
 import PprCore
 import CoreFVs( exprFreeVars )
 import Var
@@ -1832,6 +1836,7 @@ diffIdInfo env bndr1 bndr2
 -- redundant, and can lead to an exponential blow-up in complexity.
 diffUnfold :: RnEnv2 -> Unfolding -> Unfolding -> [SDoc]
 diffUnfold _   NoUnfolding    NoUnfolding                 = []
+diffUnfold _   BootUnfolding  BootUnfolding               = []
 diffUnfold _   (OtherCon cs1) (OtherCon cs2) | cs1 == cs2 = []
 diffUnfold env (DFunUnfolding bs1 c1 a1)
                (DFunUnfolding bs2 c2 a2)
@@ -2203,3 +2208,25 @@ isEmptyTy ty
     = True
     | otherwise
     = False
+
+{-
+*****************************************************
+*
+* StaticPtr
+*
+*****************************************************
+-}
+
+-- | @collectStaticPtrSatArgs e@ yields @Just (s, args)@ when @e = s args@
+-- and @s = StaticPtr@ and the application of @StaticPtr@ is saturated.
+--
+-- Yields @Nothing@ otherwise.
+collectStaticPtrSatArgs :: Expr b -> Maybe (Expr b, [Arg b])
+collectStaticPtrSatArgs e
+    | (fun@(Var b), args, _) <- collectArgsTicks (const True) e
+    , Just con <- isDataConId_maybe b
+    , dataConName con == staticPtrDataConName
+    , length args == 5
+    = Just (fun, args)
+collectStaticPtrSatArgs _
+    = Nothing

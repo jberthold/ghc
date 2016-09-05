@@ -16,9 +16,9 @@ module TcSMonad (
     TcS, runTcS, runTcSDeriveds, runTcSWithEvBinds,
     failTcS, warnTcS, addErrTcS,
     runTcSEqualities,
-    nestTcS, nestImplicTcS,
+    nestTcS, nestImplicTcS, setEvBindsTcS,
 
-    runTcPluginTcS, addUsedDataCons, deferTcSForAllEq,
+    runTcPluginTcS, addUsedGREs, deferTcSForAllEq,
 
     -- Tracing etc
     panicTcS, traceTcS,
@@ -136,7 +136,7 @@ import TyCon
 import TcErrors   ( solverDepthErrorTcS )
 
 import Name
-import RdrName ( GlobalRdrEnv)
+import RdrName ( GlobalRdrEnv, GlobalRdrElt )
 import qualified RnEnv as TcM
 import Var
 import VarEnv
@@ -1631,7 +1631,7 @@ After solving the Givens we take two things out of the inert set
            We get [D] 1 <= n, and we must remove it!
          Otherwise we unflatten it more then once, and assign
          to its fmv more than once...disaster.
-     It's ok to remove them because they turned not not to
+     It's ok to remove them because they turned out not to
      yield an insoluble, and hence have now done their work.
 -}
 
@@ -2380,8 +2380,11 @@ bumpStepCountTcS = TcS $ \env -> do { let ref = tcs_count env
 
 -- | Mark variables as used filling a coercion hole
 useVars :: TyCoVarSet -> TcS ()
-useVars vars = TcS $ \env -> do { let ref = tcs_used_tcvs env
-                                ; TcM.updTcRef ref (`unionVarSet` vars) }
+useVars vars = TcS $ \env -> useVarsTcM (tcs_used_tcvs env) vars
+
+-- | Like 'useVars' but in the TcM monad
+useVarsTcM :: IORef TyCoVarSet -> TyCoVarSet -> TcM ()
+useVarsTcM ref vars = TcM.updTcRef ref (`unionVarSet` vars)
 
 csTraceTcS :: SDoc -> TcS ()
 csTraceTcS doc
@@ -2487,51 +2490,54 @@ checkForCyclicBinds ev_binds
             -- Note [Deterministic SCC] in Digraph.
 #endif
 
+setEvBindsTcS :: Maybe EvBindsVar -> TcS a -> TcS a
+setEvBindsTcS m_ref (TcS thing_inside)
+ = TcS $ \ env -> thing_inside (env { tcs_ev_binds = m_ref })
+
 nestImplicTcS :: Maybe EvBindsVar -> TyCoVarSet -- bound in this implication
               -> TcLevel -> TcS a
               -> TcS (a, TyCoVarSet)  -- also returns any vars used when filling
                                       -- coercion holes (for redundant-constraint
                                       -- tracking)
 nestImplicTcS m_ref bound_tcvs inner_tclvl (TcS thing_inside)
-  = do { (res, used_tcvs) <-
-         TcS $ \ TcSEnv { tcs_unified       = unified_var
-                        , tcs_inerts        = old_inert_var
-                        , tcs_count         = count
-                        , tcs_need_deriveds = solve_deriveds
-                        } ->
-      do { inerts <- TcM.readTcRef old_inert_var
-         ; let nest_inert = inerts { inert_flat_cache = emptyExactFunEqs }
+  = TcS $ \ TcSEnv { tcs_unified       = unified_var
+                   , tcs_inerts        = old_inert_var
+                   , tcs_count         = count
+                   , tcs_used_tcvs     = used_var
+                   , tcs_need_deriveds = solve_deriveds
+                   } ->
+    do { inerts <- TcM.readTcRef old_inert_var
+       ; let nest_inert = inerts { inert_flat_cache = emptyExactFunEqs }
                                      -- See Note [Do not inherit the flat cache]
-         ; new_inert_var <- TcM.newTcRef nest_inert
-         ; new_wl_var    <- TcM.newTcRef emptyWorkList
-         ; new_used_var  <- TcM.newTcRef emptyVarSet
-         ; let nest_env = TcSEnv { tcs_ev_binds      = m_ref
-                                 , tcs_unified       = unified_var
-                                 , tcs_count         = count
-                                 , tcs_inerts        = new_inert_var
-                                 , tcs_worklist      = new_wl_var
-                                 , tcs_used_tcvs     = new_used_var
-                                 , tcs_need_deriveds = solve_deriveds }
-         ; res <- TcM.setTcLevel inner_tclvl $
-                  thing_inside nest_env
+       ; new_inert_var <- TcM.newTcRef nest_inert
+       ; new_wl_var    <- TcM.newTcRef emptyWorkList
+       ; new_used_var  <- TcM.newTcRef emptyVarSet
+       ; let nest_env = TcSEnv { tcs_ev_binds      = m_ref
+                               , tcs_unified       = unified_var
+                               , tcs_count         = count
+                               , tcs_inerts        = new_inert_var
+                               , tcs_worklist      = new_wl_var
+                               , tcs_used_tcvs     = new_used_var
+                               , tcs_need_deriveds = solve_deriveds }
+       ; res <- TcM.setTcLevel inner_tclvl $
+                thing_inside nest_env
 
 #ifdef DEBUG
-         -- Perform a check that the thing_inside did not cause cycles
-         ; whenIsJust m_ref $ \ ref ->
-           do { ev_binds <- TcM.getTcEvBinds ref
-              ; checkForCyclicBinds ev_binds }
+       -- Perform a check that the thing_inside did not cause cycles
+       ; whenIsJust m_ref $ \ ref ->
+         do { ev_binds <- TcM.getTcEvBinds ref
+            ; checkForCyclicBinds ev_binds }
 #endif
-         ; used_tcvs <- TcM.readTcRef new_used_var
-         ; return (res, used_tcvs) }
+       ; used_tcvs <- TcM.readTcRef new_used_var
 
        ; local_ev_vars <- case m_ref of
            Nothing  -> return emptyVarSet
-           Just ref -> do { binds <- wrapTcS $ TcM.getTcEvBinds ref
+           Just ref -> do { binds <- TcM.getTcEvBinds ref
                           ; return $ mkVarSet $ map evBindVar $ bagToList binds }
        ; let all_locals = bound_tcvs `unionVarSet` local_ev_vars
              (inner_used_tcvs, outer_used_tcvs)
                = partitionVarSet (`elemVarSet` all_locals) used_tcvs
-       ; useVars outer_used_tcvs
+       ; useVarsTcM used_var outer_used_tcvs
 
        ; return (res, inner_used_tcvs) }
 
@@ -2730,8 +2736,8 @@ tcLookupClass c = wrapTcS $ TcM.tcLookupClass c
 -- Setting names as used (used in the deriving of Coercible evidence)
 -- Too hackish to expose it to TcS? In that case somehow extract the used
 -- constructors from the result of solveInteract
-addUsedDataCons :: GlobalRdrEnv -> TyCon -> TcS ()
-addUsedDataCons rdr_env tycon = wrapTcS  $ TcM.addUsedDataCons rdr_env tycon
+addUsedGREs :: [GlobalRdrElt] -> TcS ()
+addUsedGREs gres = wrapTcS  $ TcM.addUsedGREs gres
 
 -- Various smaller utilities [TODO, maybe will be absorbed in the instance matcher]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

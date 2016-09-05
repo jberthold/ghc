@@ -1,3 +1,5 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+
 {-
 (c) The GRASP/AQUA Project, Glasgow University, 1992-1998
 
@@ -547,24 +549,19 @@ depAnalBinds binds_w_dus
 mkSigTvFn :: [LSig Name] -> (Name -> [Name])
 -- Return a lookup function that maps an Id Name to the names
 -- of the type variables that should scope over its body.
-mkSigTvFn sigs
-  = \n -> lookupNameEnv env n `orElse` []
+mkSigTvFn sigs = \n -> lookupNameEnv env n `orElse` []
   where
-    env :: NameEnv [Name]
-    env = foldr add_scoped_sig emptyNameEnv sigs
+    env = mkHsSigEnv get_scoped_tvs sigs
 
-    add_scoped_sig :: LSig Name -> NameEnv [Name] -> NameEnv [Name]
-    add_scoped_sig (L _ (ClassOpSig _ names sig_ty)) env
-      = add_scoped_tvs names (hsScopedTvs sig_ty) env
-    add_scoped_sig (L _ (TypeSig names sig_ty)) env
-      = add_scoped_tvs names (hsWcScopedTvs sig_ty) env
-    add_scoped_sig (L _ (PatSynSig name sig_ty)) env
-      = add_scoped_tvs [name] (hsScopedTvs sig_ty) env
-    add_scoped_sig _ env = env
-
-    add_scoped_tvs :: [Located Name] -> [Name] -> NameEnv [Name] -> NameEnv [Name]
-    add_scoped_tvs id_names tv_names env
-      = foldr (\(L _ id_n) env -> extendNameEnv env id_n tv_names) env id_names
+    get_scoped_tvs :: LSig Name -> Maybe ([Located Name], [Name])
+    -- Returns (binders, scoped tvs for those binders)
+    get_scoped_tvs (L _ (ClassOpSig _ names sig_ty))
+      = Just (names, hsScopedTvs sig_ty)
+    get_scoped_tvs (L _ (TypeSig names sig_ty))
+      = Just (names, hsWcScopedTvs sig_ty)
+    get_scoped_tvs (L _ (PatSynSig names sig_ty))
+      = Just (names, hsScopedTvs sig_ty)
+    get_scoped_tvs _ = Nothing
 
 -- Process the fixity declarations, making a FastString -> (Located Fixity) map
 -- (We keep the location around for reporting duplicate fixity declarations.)
@@ -925,13 +922,17 @@ renameSig ctxt sig@(MinimalSig s (L l bf))
   = do new_bf <- traverse (lookupSigOccRn ctxt sig) bf
        return (MinimalSig s (L l new_bf), emptyFVs)
 
-renameSig ctxt sig@(PatSynSig v ty)
-  = do  { v' <- lookupSigOccRn ctxt sig v
+renameSig ctxt sig@(PatSynSig vs ty)
+  = do  { new_vs <- mapM (lookupSigOccRn ctxt sig) vs
         ; (ty', fvs) <- rnHsSigType ty_ctxt ty
-        ; return (PatSynSig v' ty', fvs) }
+        ; return (PatSynSig new_vs ty', fvs) }
   where
     ty_ctxt = GenericCtx (text "a pattern synonym signature for"
-                          <+> quotes (ppr v))
+                          <+> ppr_sig_bndrs vs)
+
+renameSig ctxt sig@(SCCFunSig st v s)
+  = do  { new_v <- lookupSigOccRn ctxt sig v
+        ; return (SCCFunSig st new_v s, emptyFVs) }
 
 ppr_sig_bndrs :: [Located RdrName] -> SDoc
 ppr_sig_bndrs bs = quotes (pprWithCommas ppr bs)
@@ -971,6 +972,9 @@ okHsSig ctxt (L _ sig)
      (MinimalSig {}, ClsDeclCtxt {}) -> True
      (MinimalSig {}, _)              -> False
 
+     (SCCFunSig {}, HsBootCtxt {}) -> False
+     (SCCFunSig {}, _)             -> True
+
 -------------------
 findDupSigs :: [LSig RdrName] -> [[(Located RdrName, Sig RdrName)]]
 -- Check for duplicates on RdrName version,
@@ -988,6 +992,8 @@ findDupSigs sigs
     expand_sig sig@(InlineSig n _)           = [(n,sig)]
     expand_sig sig@(TypeSig ns _)            = [(n,sig) | n <- ns]
     expand_sig sig@(ClassOpSig _ ns _)       = [(n,sig) | n <- ns]
+    expand_sig sig@(PatSynSig ns  _ )        = [(n,sig) | n <- ns]
+    expand_sig sig@(SCCFunSig _ n _)         = [(n,sig)]
     expand_sig _ = []
 
     matching_sig (L _ n1,sig1) (L _ n2,sig2)       = n1 == n2 && mtch sig1 sig2
@@ -995,6 +1001,8 @@ findDupSigs sigs
     mtch (InlineSig {})        (InlineSig {})      = True
     mtch (TypeSig {})          (TypeSig {})        = True
     mtch (ClassOpSig d1 _ _)   (ClassOpSig d2 _ _) = d1 == d2
+    mtch (PatSynSig _ _)       (PatSynSig _ _)     = True
+    mtch (SCCFunSig{})         (SCCFunSig{})       = True
     mtch _ _ = False
 
 -- Warn about multiple MINIMAL signatures

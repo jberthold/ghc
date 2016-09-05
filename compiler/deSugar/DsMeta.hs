@@ -695,12 +695,11 @@ rep_sigs sigs = do locs_cores <- rep_sigs' sigs
 
 rep_sigs' :: [LSig Name] -> DsM [(SrcSpan, Core TH.DecQ)]
         -- We silently ignore ones we don't recognise
-rep_sigs' sigs = do { sigs1 <- mapM rep_sig sigs ;
-                     return (concat sigs1) }
+rep_sigs' = concatMapM rep_sig
 
 rep_sig :: LSig Name -> DsM [(SrcSpan, Core TH.DecQ)]
 rep_sig (L loc (TypeSig nms ty))      = mapM (rep_wc_ty_sig sigDName loc ty) nms
-rep_sig (L loc (PatSynSig nm ty))     = (:[]) <$> rep_patsyn_ty_sig loc ty nm
+rep_sig (L loc (PatSynSig nms ty))    = mapM (rep_patsyn_ty_sig loc ty) nms
 rep_sig (L loc (ClassOpSig is_deflt nms ty))
   | is_deflt                          = mapM (rep_ty_sig defaultSigDName loc ty) nms
   | otherwise                         = mapM (rep_ty_sig sigDName loc ty) nms
@@ -711,6 +710,7 @@ rep_sig (L loc (SpecSig nm tys ispec))
   = concatMapM (\t -> rep_specialise nm t ispec loc) tys
 rep_sig (L loc (SpecInstSig _ ty))    = rep_specialiseInst ty loc
 rep_sig (L _   (MinimalSig {}))       = notHandled "MINIMAL pragmas" empty
+rep_sig (L _   (SCCFunSig {}))        = notHandled "SCC pragmas" empty
 
 rep_ty_sig :: Name -> SrcSpan -> LHsSigType Name -> Located Name
            -> DsM (SrcSpan, Core TH.DecQ)
@@ -977,6 +977,9 @@ repTy (HsTupleTy HsUnboxedTuple tys) = do
 repTy (HsTupleTy _ tys)     = do tys1 <- repLTys tys
                                  tcon <- repTupleTyCon (length tys)
                                  repTapps tcon tys1
+repTy (HsSumTy tys)         = do tys1 <- repLTys tys
+                                 tcon <- repUnboxedSumTyCon (length tys)
+                                 repTapps tcon tys1
 repTy (HsOpTy ty1 n ty2)    = repLTy ((nlHsTyVar (unLoc n) `nlHsAppTy` ty1)
                                    `nlHsAppTy` ty2)
 repTy (HsParTy t)           = repLTy t
@@ -1071,6 +1074,7 @@ repSplice :: HsSplice Name -> DsM (Core a)
 repSplice (HsTypedSplice   n _)  = rep_splice n
 repSplice (HsUntypedSplice n _)  = rep_splice n
 repSplice (HsQuasiQuote n _ _ _) = rep_splice n
+repSplice e@(HsSpliced _ _)      = pprPanic "repSplice" (ppr e)
 
 rep_splice :: Name -> DsM (Core a)
 rep_splice splice_name
@@ -1120,6 +1124,9 @@ repE (HsLamCase (MG { mg_alts = L _ ms }))
                         ; core_ms <- coreList matchQTyConName ms'
                         ; repLamCase core_ms }
 repE (HsApp x y)   = do {a <- repLE x; b <- repLE y; repApp a b}
+repE (HsAppType e t) = do { a <- repLE e
+                          ; s <- repLTy (hswc_body t)
+                          ; repAppType a s }
 
 repE (OpApp e1 op _ e2) =
   do { arg1 <- repLE e1;
@@ -1174,6 +1181,10 @@ repE e@(ExplicitTuple es boxed)
   | isBoxed boxed  = do { xs <- repLEs [e | L _ (Present e) <- es]; repTup xs }
   | otherwise      = do { xs <- repLEs [e | L _ (Present e) <- es]
                         ; repUnboxedTup xs }
+
+repE (ExplicitSum alt arity e _)
+ = do { e1 <- repLE e
+      ; repUnboxedSum e1 alt arity }
 
 repE (RecordCon { rcon_con_name = c, rcon_flds = flds })
  = do { x <- lookupLOcc c;
@@ -1583,6 +1594,7 @@ repP (ListPat ps ty1 (Just (_,e))) = do { p <- repP (ListPat ps ty1 Nothing); e'
 repP (TuplePat ps boxed _)
   | isBoxed boxed       = do { qs <- repLPs ps; repPtup qs }
   | otherwise           = do { qs <- repLPs ps; repPunboxedTup qs }
+repP (SumPat p alt arity _) = do { p1 <- repLP p; repPunboxedSum p1 alt arity }
 repP (ConPatIn dc details)
  = do { con_str <- lookupLOcc dc
       ; case details of
@@ -1792,6 +1804,14 @@ repPtup (MkC ps) = rep2 tupPName [ps]
 repPunboxedTup :: Core [TH.PatQ] -> DsM (Core TH.PatQ)
 repPunboxedTup (MkC ps) = rep2 unboxedTupPName [ps]
 
+repPunboxedSum :: Core TH.PatQ -> TH.SumAlt -> TH.SumArity -> DsM (Core TH.PatQ)
+-- Note: not Core TH.SumAlt or Core TH.SumArity; it's easier to be direct here
+repPunboxedSum (MkC p) alt arity
+ = do { dflags <- getDynFlags
+      ; rep2 unboxedSumPName [ p
+                             , mkIntExprInt dflags alt
+                             , mkIntExprInt dflags arity ] }
+
 repPcon   :: Core TH.Name -> Core [TH.PatQ] -> DsM (Core TH.PatQ)
 repPcon (MkC s) (MkC ps) = rep2 conPName [s, ps]
 
@@ -1836,6 +1856,9 @@ repLit (MkC c) = rep2 litEName [c]
 repApp :: Core TH.ExpQ -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repApp (MkC x) (MkC y) = rep2 appEName [x,y]
 
+repAppType :: Core TH.ExpQ -> Core TH.TypeQ -> DsM (Core TH.ExpQ)
+repAppType (MkC x) (MkC y) = rep2 appTypeEName [x,y]
+
 repLam :: Core [TH.PatQ] -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repLam (MkC ps) (MkC e) = rep2 lamEName [ps, e]
 
@@ -1847,6 +1870,14 @@ repTup (MkC es) = rep2 tupEName [es]
 
 repUnboxedTup :: Core [TH.ExpQ] -> DsM (Core TH.ExpQ)
 repUnboxedTup (MkC es) = rep2 unboxedTupEName [es]
+
+repUnboxedSum :: Core TH.ExpQ -> TH.SumAlt -> TH.SumArity -> DsM (Core TH.ExpQ)
+-- Note: not Core TH.SumAlt or Core TH.SumArity; it's easier to be direct here
+repUnboxedSum (MkC e) alt arity
+ = do { dflags <- getDynFlags
+      ; rep2 unboxedSumEName [ e
+                             , mkIntExprInt dflags alt
+                             , mkIntExprInt dflags arity ] }
 
 repCond :: Core TH.ExpQ -> Core TH.ExpQ -> Core TH.ExpQ -> DsM (Core TH.ExpQ)
 repCond (MkC x) (MkC y) (MkC z) = rep2 condEName [x,y,z]
@@ -2183,6 +2214,11 @@ repUnboxedTupleTyCon :: Int -> DsM (Core TH.TypeQ)
 -- Note: not Core Int; it's easier to be direct here
 repUnboxedTupleTyCon i = do dflags <- getDynFlags
                             rep2 unboxedTupleTName [mkIntExprInt dflags i]
+
+repUnboxedSumTyCon :: TH.SumArity -> DsM (Core TH.TypeQ)
+-- Note: not Core TH.SumArity; it's easier to be direct here
+repUnboxedSumTyCon arity = do dflags <- getDynFlags
+                              rep2 unboxedSumTName [mkIntExprInt dflags arity]
 
 repArrowTyCon :: DsM (Core TH.TypeQ)
 repArrowTyCon = rep2 arrowTName []

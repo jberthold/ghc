@@ -3,6 +3,8 @@
 ## next *TBA*
   * Bundled with GHC *TBA*
 
+  * `Data.Type.Bool.Not` given a type family dependency (#12057).
+
   * `Foreign.Ptr` now exports the constructors for `IntPtr` and `WordPtr`
     (#11983)
 
@@ -12,7 +14,16 @@
   * `New modules `Data.Bifoldable` and `Data.Bitraversable` (previously defined
     in the `bifunctors` package) (#10448)
 
-## 4.9.0.0  *TBA*
+  * `Data.Either` now provides `fromLeft` and `fromRight` (#12402)
+
+  * `Data.Type.Coercion` now provides `gcoerceWith` (#12493)
+
+  * New methods `liftReadList(2)` and `liftReadListPrec(2)` in the
+    `Read1`/`Read2` classes that are defined in terms of `ReadPrec` instead of
+    `ReadS`, as well as related combinators, have been added to
+    `Data.Functor.Classes` (#12358)
+
+## 4.9.0.0  *May 2016*
 
   * Bundled with GHC 8.0
 

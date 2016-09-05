@@ -46,7 +46,8 @@ test('T4334',
 test('T2762',
      [# peak_megabytes_allocated is 2 with 7.0.2.
       # Was 57 with 6.12.3.
-      stats_num_field('peak_megabytes_allocated', (2, 0)),
+      # 2016-08-31:     3 (allocation area size bumped to 1MB)
+      stats_num_field('peak_megabytes_allocated', (3, 0)),
       only_ways(['normal']),
       extra_clean(['T2762A.hi', 'T2762A.o'])],
      compile_and_run, ['-O'])
@@ -57,14 +58,19 @@ test('T4018',
 
 test('T4029',
      [stats_num_field('peak_megabytes_allocated',
-          [(wordsize(64), 82, 10)]),
+          [(wordsize(64), 71, 10)]),
             # 2016-02-26: 66 (amd64/Linux)           INITIAL
             # 2016-05-23: 82 (amd64/Linux)           Use -G1
+            # 2016-07-13: 92 (amd64/Linux)           Changes to tidyType
+            # 2016-09-01: 71 (amd64/Linux)           Restore w/w limit (#11565)
       stats_num_field('max_bytes_used',
-          [(wordsize(64), 25247216, 5)]),
+          [(wordsize(64), 21648488, 5)]),
             # 2016-02-26: 24071720 (amd64/Linux)     INITIAL
             # 2016-04-21: 25542832 (amd64/Linux)
             # 2016-05-23: 25247216 (amd64/Linux)     Use -G1
+            # 2016-07-13: 27575416 (amd64/Linux)     Changes to tidyType
+            # 2016-07-20: 22920616 (amd64/Linux)     Fix laziness of instance matching
+            # 2016-09-01: 21648488 (amd64/Linux)     Restore w/w limit (#11565)
       extra_hc_opts('+RTS -G1 -RTS' ),
       ],
      ghci_script,

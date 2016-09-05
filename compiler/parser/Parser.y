@@ -369,7 +369,7 @@ output it generates.
  'pattern'      { L _ ITpattern } -- for pattern synonyms
  'static'       { L _ ITstatic }  -- for static pointers extension
 
- '{-# INLINE'             { L _ (ITinline_prag _ _ _) }
+ '{-# INLINE'             { L _ (ITinline_prag _ _ _) } -- INLINE or INLINABLE
  '{-# SPECIALISE'         { L _ (ITspec_prag _) }
  '{-# SPECIALISE_INLINE'  { L _ (ITspec_inline_prag _ _) }
  '{-# SOURCE'             { L _ (ITsource_prag _) }
@@ -835,7 +835,7 @@ topdecl :: { LHsDecl RdrName }
         -- The $(..) form is one possible form of infixexp
         -- but we treat an arbitrary expression just as if
         -- it had a $(..) wrapped around it
-        | infixexp                              { sLL $1 $> $ mkSpliceDecl $1 }
+        | infixexp_top                          { sLL $1 $> $ mkSpliceDecl $1 }
 
 -- Type classes
 --
@@ -1194,8 +1194,8 @@ where_decls :: { Located ([AddAnn]
                                           ,sL1 $3 (snd $ unLoc $3)) }
 
 pattern_synonym_sig :: { LSig RdrName }
-        : 'pattern' con '::' sigtype
-                   {% ams (sLL $1 $> $ PatSynSig $2 (mkLHsSigType $4))
+        : 'pattern' con_list '::' sigtype
+                   {% ams (sLL $1 $> $ PatSynSig (unLoc $2) (mkLHsSigType $4))
                           [mj AnnPattern $1, mu AnnDcolon $3] }
 
 -----------------------------------------------------------------------------
@@ -1682,6 +1682,8 @@ atype :: { LHsType RdrName }
                                              [mo $1,mc $2] }
         | '(#' comma_types1 '#)'      {% ams (sLL $1 $> $ HsTupleTy HsUnboxedTuple $2)
                                              [mo $1,mc $3] }
+        | '(#' bar_types2 '#)'        {% ams (sLL $1 $> $ HsSumTy $2)
+                                             [mo $1,mc $3] }
         | '[' ctype ']'               {% ams (sLL $1 $> $ HsListTy  $2) [mos $1,mcs $3] }
         | '[:' ctype ':]'             {% ams (sLL $1 $> $ HsPArrTy  $2) [mo $1,mc $3] }
         | '(' ctype ')'               {% ams (sLL $1 $> $ HsParTy   $2) [mop $1,mcp $3] }
@@ -1739,6 +1741,12 @@ comma_types0  :: { [LHsType RdrName] }  -- Zero or more:  ty,ty,ty
 comma_types1    :: { [LHsType RdrName] }  -- One or more:  ty,ty,ty
         : ctype                        { [$1] }
         | ctype  ',' comma_types1      {% addAnnotation (gl $1) AnnComma (gl $2)
+                                          >> return ($1 : $3) }
+
+bar_types2    :: { [LHsType RdrName] }  -- Two or more:  ty|ty|ty
+        : ctype  '|' ctype             {% addAnnotation (gl $1) AnnVbar (gl $2)
+                                          >> return [$1,$3] }
+        | ctype  '|' bar_types2        {% addAnnotation (gl $1) AnnVbar (gl $2)
                                           >> return ($1 : $3) }
 
 tv_bndrs :: { [LHsTyVarBndr RdrName] }
@@ -1989,7 +1997,7 @@ decl_no_th :: { LHsDecl RdrName }
                                 -- Turn it all into an expression so that
                                 -- checkPattern can check that bangs are enabled
 
-        | infixexp opt_sig rhs  {% do { (ann,r) <- checkValDef empty $1 (snd $2) $3;
+        | infixexp_top opt_sig rhs  {% do { (ann,r) <- checkValDef empty $1 (snd $2) $3;
                                         let { l = comb2 $1 $> };
                                         case r of {
                                           (FunBind n _ _ _ _) ->
@@ -2029,7 +2037,7 @@ gdrh :: { LGRHS RdrName (LHsExpr RdrName) }
 sigdecl :: { LHsDecl RdrName }
         :
         -- See Note [Declaration/signature overlap] for why we need infixexp here
-          infixexp '::' sigtypedoc
+          infixexp_top '::' sigtypedoc
                         {% do v <- checkValSigLhs $1
                         ; _ <- ams (sLL $1 $> ()) [mu AnnDcolon $2]
                         ; return (sLL $1 $> $ SigD $
@@ -2050,11 +2058,22 @@ sigdecl :: { LHsDecl RdrName }
 
         | pattern_synonym_sig   { sLL $1 $> . SigD . unLoc $ $1 }
 
+        -- This rule is for both INLINE and INLINABLE pragmas
         | '{-# INLINE' activation qvar '#-}'
                 {% ams ((sLL $1 $> $ SigD (InlineSig $3
                             (mkInlinePragma (getINLINE_PRAGs $1) (getINLINE $1)
                                             (snd $2)))))
                        ((mo $1:fst $2) ++ [mc $4]) }
+
+        | '{-# SCC' qvar '#-}'
+          {% ams (sLL $1 $> (SigD (SCCFunSig (getSCC_PRAGs $1) $2 Nothing)))
+                 [mo $1, mc $3] }
+
+        | '{-# SCC' qvar STRING '#-}'
+          {% do { scc <- getSCC $3
+                ; let str_lit = StringLiteral (getSTRINGs $3) scc
+                ; ams (sLL $1 $> (SigD (SCCFunSig (getSCC_PRAGs $1) $2 (Just str_lit))))
+                      [mo $1, mc $4] } }
 
         | '{-# SPECIALISE' activation qvar '::' sigtypes1 '#-}'
              {% ams (
@@ -2121,14 +2140,18 @@ exp   :: { LHsExpr RdrName }
         | infixexp              { $1 }
 
 infixexp :: { LHsExpr RdrName }
-        : exp10                   { $1 }
-        | infixexp qop exp10      {% ams (sLL $1 $>
-                                             (OpApp $1 $2 placeHolderFixity $3))
-                                         [mj AnnVal $2] }
+        : exp10 { $1 }
+        | infixexp qop exp10  {% ams (sLL $1 $> (OpApp $1 $2 placeHolderFixity $3))
+                                     [mj AnnVal $2] }
                  -- AnnVal annotation for NPlusKPat, which discards the operator
 
+infixexp_top :: { LHsExpr RdrName }
+        : exp10_top               { $1 }
+        | infixexp_top qop exp10_top
+                                  {% ams (sLL $1 $> (OpApp $1 $2 placeHolderFixity $3))
+                                         [mj AnnVal $2] }
 
-exp10 :: { LHsExpr RdrName }
+exp10_top :: { LHsExpr RdrName }
         : '\\' apat apats opt_asig '->' exp
                    {% ams (sLL $1 $> $ HsLam (mkMatchGroup FromSource
                             [sLL $1 $> $ Match { m_ctxt = LambdaExpr
@@ -2170,9 +2193,6 @@ exp10 :: { LHsExpr RdrName }
                                               (mkHsDo MDoExpr (snd $ unLoc $2)))
                                            (mj AnnMdo $1:(fst $ unLoc $2)) }
 
-        | scc_annot exp        {% ams (sLL $1 $> $ HsSCC (snd $ fst $ unLoc $1) (snd $ unLoc $1) $2)
-                                      (fst $ fst $ unLoc $1) }
-
         | hpc_annot exp        {% ams (sLL $1 $> $ HsTickPragma (snd $ fst $ fst $ unLoc $1)
                                                                 (snd $ fst $ unLoc $1) (snd $ unLoc $1) $2)
                                       (fst $ fst $ fst $ unLoc $1) }
@@ -2190,6 +2210,11 @@ exp10 :: { LHsExpr RdrName }
                                               ,mc $3] }
                                           -- hdaume: core annotation
         | fexp                         { $1 }
+
+exp10 :: { LHsExpr RdrName }
+        : exp10_top            { $1 }
+        | scc_annot exp        {% ams (sLL $1 $> $ HsSCC (snd $ fst $ unLoc $1) (snd $ unLoc $1) $2)
+                                      (fst $ fst $ unLoc $1) }
 
 optSemi :: { ([Located a],Bool) }
         : ';'         { ([$1],True) }
@@ -2273,14 +2298,14 @@ aexp2   :: { LHsExpr RdrName }
         -- correct Haskell (you'd have to write '((+ 3), (4 -))')
         -- but the less cluttered version fell out of having texps.
         | '(' texp ')'                  {% ams (sLL $1 $> (HsPar $2)) [mop $1,mcp $3] }
-        | '(' tup_exprs ')'             {% ams (sLL $1 $> (ExplicitTuple $2 Boxed))
-                                               [mop $1,mcp $3] }
+        | '(' tup_exprs ')'             {% do { e <- mkSumOrTuple Boxed (comb2 $1 $3) $2
+                                              ; ams (sLL $1 $> e) [mop $1,mcp $3] } }
 
         | '(#' texp '#)'                {% ams (sLL $1 $> (ExplicitTuple [L (gl $2)
                                                          (Present $2)] Unboxed))
                                                [mo $1,mc $3] }
-        | '(#' tup_exprs '#)'           {% ams (sLL $1 $> (ExplicitTuple $2 Unboxed))
-                                               [mo $1,mc $3] }
+        | '(#' tup_exprs '#)'           {% do { e <- mkSumOrTuple Unboxed (comb2 $1 $3) $2
+                                              ; ams (sLL $1 $> e) [mo $1,mc $3] } }
 
         | '[' list ']'      {% ams (sLL $1 $> (snd $2)) (mos $1:mcs $3:(fst $2)) }
         | '[:' parr ':]'    {% ams (sLL $1 $> (snd $2)) (mo $1:mc $3:(fst $2)) }
@@ -2368,16 +2393,25 @@ texp :: { LHsExpr RdrName }
        -- View patterns get parenthesized above
         | exp '->' texp   {% ams (sLL $1 $> $ EViewPat $1 $3) [mu AnnRarrow $2] }
 
--- Always at least one comma
-tup_exprs :: { [LHsTupArg RdrName] }
+-- Always at least one comma or bar.
+tup_exprs :: { SumOrTuple }
            : texp commas_tup_tail
                           {% do { addAnnotation (gl $1) AnnComma (fst $2)
-                                ; return ((sL1 $1 (Present $1)) : snd $2) } }
+                                ; return (Tuple ((sL1 $1 (Present $1)) : snd $2)) } }
+
+           | texp bars
+                          {% do { mapM_ (\ll -> addAnnotation ll AnnVbar ll) (fst $2)
+                                ; return (Sum 1  (snd $2 + 1) $1) } }
 
            | commas tup_tail
                 {% do { mapM_ (\ll -> addAnnotation ll AnnComma ll) (fst $1)
                       ; return
-                           (map (\l -> L l missingTupArg) (fst $1) ++ $2) } }
+                           (Tuple (map (\l -> L l missingTupArg) (fst $1) ++ $2)) } }
+
+           | bars texp bars0
+                {% do { mapM_ (\ll -> addAnnotation ll AnnVbar ll) (fst $1)
+                      ; mapM_ (\ll -> addAnnotation ll AnnVbar ll) (fst $3)
+                      ; return (Sum (snd $1 + 1) (snd $1 + snd $3 + 1) $2) } }
 
 -- Always starts with commas; always follows an expr
 commas_tup_tail :: { (SrcSpan,[LHsTupArg RdrName]) }
@@ -3104,6 +3138,14 @@ modid   :: { Located ModuleName }
 commas :: { ([SrcSpan],Int) }   -- One or more commas
         : commas ','             { ((fst $1)++[gl $2],snd $1 + 1) }
         | ','                    { ([gl $1],1) }
+
+bars0 :: { ([SrcSpan],Int) }     -- Zero or more bars
+        : bars                   { $1 }
+        |                        { ([], 0) }
+
+bars :: { ([SrcSpan],Int) }     -- One or more bars
+        : bars '|'               { ((fst $1)++[gl $2],snd $1 + 1) }
+        | '|'                    { ([gl $1],1) }
 
 -----------------------------------------------------------------------------
 -- Documentation comments

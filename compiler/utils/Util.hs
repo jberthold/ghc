@@ -1,6 +1,6 @@
 -- (c) The University of Glasgow 2006
 
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP, BangPatterns #-}
 
 -- | Highly random utility functions
 --
@@ -77,6 +77,9 @@ module Util (
 
         -- * Argument processing
         getCmd, toCmdArgs, toArgs,
+
+        -- * Integers
+        exactLog2,
 
         -- * Floating point
         readRational,
@@ -443,9 +446,9 @@ atLength :: ([a] -> b)   -- Called when length ls >= n, passed (drop n ls)
          -> [a]
          -> Int
          -> b
-atLength atLenPred atEnd ls n
-  | n < 0     = atLenPred ls
-  | otherwise = go n ls
+atLength atLenPred atEnd ls0 n0
+  | n0 < 0    = atLenPred ls0
+  | otherwise = go n0 ls0
   where
     -- go's first arg n >= 0
     go 0 ls     = atLenPred ls
@@ -454,15 +457,24 @@ atLength atLenPred atEnd ls n
 
 -- Some special cases of atLength:
 
+-- | @(lengthExceeds xs n) = (length xs > n)@
 lengthExceeds :: [a] -> Int -> Bool
--- ^ > (lengthExceeds xs n) = (length xs > n)
-lengthExceeds = atLength notNull False
+lengthExceeds lst n
+  | n < 0
+  = True
+  | otherwise
+  = atLength notNull False lst n
 
 lengthAtLeast :: [a] -> Int -> Bool
 lengthAtLeast = atLength (const True) False
 
+-- | @(lengthIs xs n) = (length xs == n)@
 lengthIs :: [a] -> Int -> Bool
-lengthIs = atLength null False
+lengthIs lst n
+  | n < 0
+  = False
+  | otherwise
+  = atLength null False lst n
 
 listLengthCmp :: [a] -> Int -> Ordering
 listLengthCmp = atLength atLen atEnd
@@ -610,9 +622,10 @@ all2 _ _      _      = False
 -- Count the number of times a predicate is true
 
 count :: (a -> Bool) -> [a] -> Int
-count _ [] = 0
-count p (x:xs) | p x       = 1 + count p xs
-               | otherwise = count p xs
+count p = go 0
+  where go !n [] = n
+        go !n (x:xs) | p x       = go (n+1) xs
+                     | otherwise = go n xs
 
 {-
 @splitAt@, @take@, and @drop@ but with length of another
@@ -975,6 +988,27 @@ toArgs str
                     Right (arg, rest)
                 _ ->
                     Left ("Couldn't read " ++ show s ++ " as String")
+-----------------------------------------------------------------------------
+-- Integers
+
+-- This algorithm for determining the $\log_2$ of exact powers of 2 comes
+-- from GCC.  It requires bit manipulation primitives, and we use GHC
+-- extensions.  Tough.
+
+exactLog2 :: Integer -> Maybe Integer
+exactLog2 x
+  = if (x <= 0 || x >= 2147483648) then
+       Nothing
+    else
+       if (x .&. (-x)) /= x then
+          Nothing
+       else
+          Just (pow2 x)
+  where
+    pow2 x | x == 1 = 0
+           | otherwise = 1 + pow2 (x `shiftR` 1)
+
+
 {-
 -- -----------------------------------------------------------------------------
 -- Floats

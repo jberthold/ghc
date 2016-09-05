@@ -46,7 +46,7 @@ module MkCore (
         rEC_CON_ERROR_ID, iRREFUT_PAT_ERROR_ID, rUNTIME_ERROR_ID,
         nON_EXHAUSTIVE_GUARDS_ERROR_ID, nO_METHOD_BINDING_ERROR_ID,
         pAT_ERROR_ID, rEC_SEL_ERROR_ID, aBSENT_ERROR_ID,
-        tYPE_ERROR_ID
+        tYPE_ERROR_ID,
     ) where
 
 #include "HsVersions.h"
@@ -323,17 +323,17 @@ Usually we want the former, but occasionally the latter.
 -}
 
 -- | Build a small tuple holding the specified variables
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkCoreVarTup :: [Id] -> CoreExpr
 mkCoreVarTup ids = mkCoreTup (map Var ids)
 
 -- | Build the type of a small tuple that holds the specified variables
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkCoreVarTupTy :: [Id] -> Type
 mkCoreVarTupTy ids = mkBoxedTupleTy (map idType ids)
 
 -- | Build a small tuple holding the specified expressions
--- One-tuples are flattened; see NOte [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkCoreTup :: [CoreExpr] -> CoreExpr
 mkCoreTup []  = Var unitDataConId
 mkCoreTup [c] = c
@@ -357,7 +357,7 @@ mkCoreTupBoxity Boxed   exps = mkCoreTup exps
 mkCoreTupBoxity Unboxed exps = mkCoreUbxTup (map exprType exps) exps
 
 -- | Build a big tuple holding the specified variables
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreVarTup :: [Id] -> CoreExpr
 mkBigCoreVarTup ids = mkBigCoreTup (map Var ids)
 
@@ -369,17 +369,17 @@ mkBigCoreVarTup1 [id] = mkCoreConApps (tupleDataCon Boxed 1)
 mkBigCoreVarTup1 ids  = mkBigCoreTup (map Var ids)
 
 -- | Build the type of a big tuple that holds the specified variables
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreVarTupTy :: [Id] -> Type
 mkBigCoreVarTupTy ids = mkBigCoreTupTy (map idType ids)
 
 -- | Build a big tuple holding the specified expressions
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreTup :: [CoreExpr] -> CoreExpr
 mkBigCoreTup = mkChunkified mkCoreTup
 
 -- | Build the type of a big tuple that holds the specified type of thing
--- One-tuples are flattened; see Note [Flattening of one-tuples]
+-- One-tuples are flattened; see Note [Flattening one-tuples]
 mkBigCoreTupTy :: [Type] -> Type
 mkBigCoreTupTy = mkChunkified mkBoxedTupleTy
 
@@ -703,8 +703,7 @@ err_nm str uniq id = mkWiredInIdName cONTROL_EXCEPTION_BASE (fsLit str) uniq id
 
 rEC_SEL_ERROR_ID, rUNTIME_ERROR_ID, iRREFUT_PAT_ERROR_ID, rEC_CON_ERROR_ID :: Id
 pAT_ERROR_ID, nO_METHOD_BINDING_ERROR_ID, nON_EXHAUSTIVE_GUARDS_ERROR_ID :: Id
-tYPE_ERROR_ID :: Id
-aBSENT_ERROR_ID :: Id
+tYPE_ERROR_ID, aBSENT_ERROR_ID :: Id
 rEC_SEL_ERROR_ID                = mkRuntimeErrorId recSelErrorName
 rUNTIME_ERROR_ID                = mkRuntimeErrorId runtimeErrorName
 iRREFUT_PAT_ERROR_ID            = mkRuntimeErrorId irrefutPatErrorName
@@ -722,8 +721,6 @@ mkRuntimeErrorId :: Name -> Id
 -- which diverges after being given one argument
 -- The Addr# is expected to be the address of
 --   a UTF8-encoded error string
--- For the RuntimeRep part, see
---   Note [Error and friends have an "open-tyvar" forall]
 mkRuntimeErrorId name
  = mkVanillaGlobalWithInfo name runtime_err_ty bottoming_info
  where
@@ -743,6 +740,8 @@ mkRuntimeErrorId name
     strict_sig = mkClosedStrictSig [evalDmd] exnRes
               -- exnRes: these throw an exception, not just diverge
 
+    -- forall (rr :: RuntimeRep) (a :: rr). Addr# -> a
+    --   See Note [Error and friends have an "open-tyvar" forall]
     runtime_err_ty = mkSpecSigmaTy [runtimeRep1TyVar, openAlphaTyVar] []
                                    (mkFunTy addrPrimTy openAlphaTy)
 

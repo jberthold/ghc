@@ -18,7 +18,10 @@ import {-# SOURCE #-} TcMatches ( tcGRHSsPat, tcMatchesFun )
 import {-# SOURCE #-} TcExpr  ( tcMonoExpr )
 import {-# SOURCE #-} TcPatSyn ( tcInferPatSynDecl, tcCheckPatSynDecl
                                , tcPatSynBuilderBind )
+import CoreSyn (Tickish (..))
+import CostCentre (mkUserCC)
 import DynFlags
+import FastString
 import HsSyn
 import HscTypes( isHsBootOrSig )
 import TcSigs
@@ -57,6 +60,7 @@ import BasicTypes
 import Outputable
 import PrelNames( gHC_PRIM, ipClassName )
 import TcValidity (checkValidType)
+import Unique (getUnique)
 import UniqFM
 import qualified GHC.LanguageExtensions as LangExt
 
@@ -275,53 +279,6 @@ time by defaulting.  No no no.
 
 However [Oct 10] this is all handled automatically by the
 untouchable-range idea.
-
-Note [Inlining and hs-boot files]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Consider this example (Trac #10083):
-
-    ---------- RSR.hs-boot ------------
-    module RSR where
-      data RSR
-      eqRSR :: RSR -> RSR -> Bool
-
-    ---------- SR.hs ------------
-    module SR where
-      import {-# SOURCE #-} RSR
-      data SR = MkSR RSR
-      eqSR (MkSR r1) (MkSR r2) = eqRSR r1 r2
-
-    ---------- RSR.hs ------------
-    module RSR where
-      import SR
-      data RSR = MkRSR SR -- deriving( Eq )
-      eqRSR (MkRSR s1) (MkRSR s2) = (eqSR s1 s2)
-      foo x y = not (eqRSR x y)
-
-When compiling RSR we get this code
-
-    RSR.eqRSR :: RSR -> RSR -> Bool
-    RSR.eqRSR = \ (ds1 :: RSR.RSR) (ds2 :: RSR.RSR) ->
-                case ds1 of _ { RSR.MkRSR s1 ->
-                case ds2 of _ { RSR.MkRSR s2 ->
-                SR.eqSR s1 s2 }}
-
-    RSR.foo :: RSR -> RSR -> Bool
-    RSR.foo = \ (x :: RSR) (y :: RSR) -> not (RSR.eqRSR x y)
-
-Now, when optimising foo:
-    Inline eqRSR (small, non-rec)
-    Inline eqSR  (small, non-rec)
-but the result of inlining eqSR from SR is another call to eqRSR, so
-everything repeats.  Neither eqSR nor eqRSR are (apparently) loop
-breakers.
-
-Solution: when compiling RSR, add a NOINLINE pragma to every function
-exported by the boot-file for RSR (if it exists).
-
-ALAS: doing so makes the boostrappted GHC itself slower by 8% overall
-      (on Trac #9872a-d, and T1969.  So I un-did this change, and
-      parked it for now.  Sigh.
 -}
 
 tcValBinds :: TopLevelFlag
@@ -336,19 +293,7 @@ tcValBinds top_lvl binds sigs thing_inside
         ; (poly_ids, sig_fn) <- tcAddPatSynPlaceholders patsyns $
                                 tcTySigs sigs
 
-        ; _self_boot <- tcSelfBootInfo
         ; let prag_fn = mkPragEnv sigs (foldr (unionBags . snd) emptyBag binds)
-
--- -------  See Note [Inlining and hs-boot files] (change parked) --------
---              prag_fn | isTopLevel top_lvl   -- See Note [Inlining and hs-boot files]
---                      , SelfBoot { sb_ids = boot_id_names } <- self_boot
---                      = foldNameSet add_no_inl prag_fn1 boot_id_names
---                      | otherwise
---                      = prag_fn1
---              add_no_inl boot_id_name prag_fn
---                = extendPragEnv prag_fn (boot_id_name, no_inl_sig boot_id_name)
---              no_inl_sig name = L boot_loc (InlineSig (L boot_loc name) neverInlinePragma)
---              boot_loc = mkGeneralSrcSpan (fsLit "The hs-boot file for this module")
 
                 -- Extend the envt right away with all the Ids
                 -- declared with complete type signatures
@@ -659,11 +604,12 @@ tcPolyCheck prag_fn
        ; spec_prags <- tcSpecPrags poly_id prag_sigs
        ; poly_id    <- addInlinePrags poly_id prag_sigs
 
+       ; mod <- getModule
        ; let bind' = FunBind { fun_id      = L nm_loc mono_id
                              , fun_matches = matches'
                              , fun_co_fn   = co_fn
                              , bind_fvs    = placeHolderNamesTc
-                             , fun_tick    = [] }
+                             , fun_tick    = funBindTicks nm_loc mono_id mod prag_sigs }
 
              abs_bind = L loc $ AbsBindsSig
                         { abs_sig_export  = poly_id
@@ -677,6 +623,22 @@ tcPolyCheck prag_fn
 
 tcPolyCheck _prag_fn sig bind
   = pprPanic "tcPolyCheck" (ppr sig $$ ppr bind)
+
+funBindTicks :: SrcSpan -> TcId -> Module -> [LSig Name] -> [Tickish TcId]
+funBindTicks loc fun_id mod sigs
+  | (mb_cc_str : _) <- [ cc_name | L _ (SCCFunSig _ _ cc_name) <- sigs ]
+      -- this can only be a singleton list, as duplicate pragmas are rejected
+      -- by the renamer
+  , let cc_str
+          | Just cc_str <- mb_cc_str
+          = sl_fs cc_str
+          | otherwise
+          = getOccFS (Var.varName fun_id)
+        cc_name = moduleNameFS (moduleName mod) `appendFS` consFS '.' cc_str
+        cc = mkUserCC cc_name mod loc (getUnique fun_id)
+  = [ProfNote cc True True]
+  | otherwise
+  = []
 
 {- Note [Instantiate sig with fresh variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -770,9 +732,9 @@ mkExport prag_fn qtvs theta
         -- NB: we have already done checkValidType, including an ambiguity check,
         --     on the type; either when we checked the sig or in mkInferredPolyId
         ; let poly_ty     = idType poly_id
-              sel_poly_ty = mkInvSigmaTy qtvs theta mono_ty
+              sel_poly_ty = mkInfSigmaTy qtvs theta mono_ty
                 -- This type is just going into tcSubType,
-                -- so Inv vs. Spec doesn't matter
+                -- so Inferred vs. Specified doesn't matter
 
         ; wrap <- if sel_poly_ty `eqType` poly_ty  -- NB: eqType ignores visibility
                   then return idHsWrapper  -- Fast path; also avoids complaint when we infer
@@ -842,7 +804,7 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs Nothing
     do { let free_tvs = closeOverKinds (growThetaTyVars inferred_theta tau_tvs)
                         -- Include kind variables!  Trac #7916
              my_theta = pickCapturedPreds free_tvs inferred_theta
-             binders  = [ mkTyVarBinder Invisible tv
+             binders  = [ mkTyVarBinder Inferred tv
                         | tv <- qtvs
                         , tv `elemVarSet` free_tvs ]
        ; return (binders, my_theta) }
@@ -891,7 +853,7 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
         | tv <- qtvs
         , tv `elemVarSet` free_tvs
         , let vis | tv `elemVarSet` spec_tv_set = Specified
-                  | otherwise                   = Invisible ]
+                  | otherwise                   = Inferred ]
                           -- Pulling from qtvs maintains original order
 
     mk_ctuple [pred] = return pred

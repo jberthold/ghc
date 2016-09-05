@@ -42,6 +42,7 @@ import Coercion
 import SrcLoc
 import Kind
 import Type
+import RepType
 import TyCoRep       -- checks validity of types/coercions
 import TyCon
 import CoAxiom
@@ -552,10 +553,7 @@ lintRhs :: CoreExpr -> LintM OutType
 -- but produce errors otherwise.
 lintRhs rhs
     | (binders0, rhs') <- collectTyBinders rhs
-    , (fun@(Var b), args, _) <- collectArgsTicks (const True) rhs'
-    , Just con <- isDataConId_maybe b
-    , dataConName con == staticPtrDataConName
-    , length args == 5
+    , Just (fun, args) <- collectStaticPtrSatArgs rhs'
     = flip fix binders0 $ \loopBinders binders -> case binders of
         -- imitate @lintCoreExpr (Lam ...)@
         var : vars -> addLoc (LambdaBodyOf var) $
@@ -717,7 +715,7 @@ lintCoreExpr e@(Case scrut var alt_ty alts) =
      ; when (null alts) $
      do { checkL (not (exprIsHNF scrut))
           (text "No alternatives for a case scrutinee in head-normal form:" <+> ppr scrut)
-        ; checkL scrut_diverges
+        ; checkWarnL scrut_diverges
           (text "No alternatives for a case scrutinee not known to diverge for sure:" <+> ppr scrut)
         }
 
@@ -1289,7 +1287,7 @@ lintCoercion :: OutCoercion -> LintM (LintedKind, LintedKind, LintedType, Linted
 -- Check the kind of a coercion term, returning the kind
 -- Post-condition: the returned OutTypes are lint-free
 --
--- If   lintCorecion co = (k1, k2, s1, s2, r)
+-- If   lintCoercion co = (k1, k2, s1, s2, r)
 -- then co :: s1 ~r s2
 --      s1 :: k2
 --      s2 :: k2
@@ -1404,13 +1402,10 @@ lintCoercion co@(UnivCo prov r ty1 ty2)
      checkTypes t1 t2
        = case (repType t1, repType t2) of
            (UnaryRep _, UnaryRep _) ->
-              validateCoercion (typePrimRep t1)
-                               (typePrimRep t2)
-           (UbxTupleRep rep1, UbxTupleRep rep2) -> do
-              checkWarnL (length rep1 == length rep2)
-                         (report "unboxed tuples of different length")
-              zipWithM_ checkTypes rep1 rep2
-           _  -> addWarnL (report "unboxed tuple and ordinary type")
+              validateCoercion (typePrimRep t1) (typePrimRep t2)
+           (MultiRep rep1, MultiRep rep2) ->
+              checkWarnL (rep1 == rep2) (report "multi values with different reps")
+           _  -> addWarnL (report "multi rep and unary rep")
      validateCoercion :: PrimRep -> PrimRep -> LintM ()
      validateCoercion rep1 rep2
        = do { dflags <- getDynFlags

@@ -40,6 +40,7 @@ import Id
 import PrimOp
 import TyCon
 import Type
+import RepType          ( isVoidTy, countConRepArgs )
 import CostCentre       ( CostCentreStack, currentCCS )
 import Maybes
 import Util
@@ -64,7 +65,7 @@ cgExpr (StgOpApp (StgPrimOp SeqOp) [StgVarArg a, _] _res_ty) =
   cgIdApp a []
 
 cgExpr (StgOpApp op args ty) = cgOpApp op args ty
-cgExpr (StgConApp con args)  = cgConApp con args
+cgExpr (StgConApp con args _)= cgConApp con args
 cgExpr (StgTick t e)         = cgTick t >> cgExpr e
 cgExpr (StgLit lit)       = do cmm_lit <- cgLit lit
                                emitReturn [CmmLit cmm_lit]
@@ -142,7 +143,9 @@ cgLetNoEscapeRhsBody
 cgLetNoEscapeRhsBody local_cc bndr (StgRhsClosure cc _bi _ _upd args body)
   = cgLetNoEscapeClosure bndr local_cc cc (nonVoidIds args) body
 cgLetNoEscapeRhsBody local_cc bndr (StgRhsCon cc con args)
-  = cgLetNoEscapeClosure bndr local_cc cc [] (StgConApp con args)
+  = cgLetNoEscapeClosure bndr local_cc cc []
+      (StgConApp con args (pprPanic "cgLetNoEscapeRhsBody" $
+                           text "StgRhsCon doesn't have type args"))
         -- For a constructor RHS we want to generate a single chunk of
         -- code which can be jumped to from many places, which will
         -- return the constructor. It's easy; just behave as if it
@@ -224,7 +227,7 @@ Suppose the inner loop is P->R->P->R etc.  Then here is
 how many heap checks we get in the *inner loop* under various
 conditions
 
-  Alooc   Heap check in branches (!Q!, !R!)?
+  Alloc   Heap check in branches (!Q!, !R!)?
   P Q R      yes     no (absorb to !P!)
 --------------------------------------
   n n n      0          0
@@ -528,8 +531,9 @@ chooseReturnBndrs :: Id -> AltType -> [StgAlt] -> [NonVoid Id]
 chooseReturnBndrs bndr (PrimAlt _) _alts
   = nonVoidIds [bndr]
 
-chooseReturnBndrs _bndr (UbxTupAlt _) [(_, ids, _)]
-  = nonVoidIds ids      -- 'bndr' is not assigned!
+chooseReturnBndrs _bndr (MultiValAlt n) [(_, ids, _)]
+  = ASSERT2(n == length (nonVoidIds ids), ppr n $$ ppr ids $$ ppr _bndr)
+    nonVoidIds ids      -- 'bndr' is not assigned!
 
 chooseReturnBndrs bndr (AlgAlt _) _alts
   = nonVoidIds [bndr]   -- Only 'bndr' is assigned
@@ -547,7 +551,7 @@ cgAlts :: (GcPlan,ReturnKind) -> NonVoid Id -> AltType -> [StgAlt]
 cgAlts gc_plan _bndr PolyAlt [(_, _, rhs)]
   = maybeAltHeapCheck gc_plan (cgExpr rhs)
 
-cgAlts gc_plan _bndr (UbxTupAlt _) [(_, _, rhs)]
+cgAlts gc_plan _bndr (MultiValAlt _) [(_, _, rhs)]
   = maybeAltHeapCheck gc_plan (cgExpr rhs)
         -- Here bndrs are *already* in scope, so don't rebind them
 
@@ -671,7 +675,7 @@ cgConApp con stg_args
        ; emitReturn arg_exprs }
 
   | otherwise   --  Boxed constructors; allocate and return
-  = ASSERT2( stg_args `lengthIs` dataConRepRepArity con, ppr con <+> ppr stg_args )
+  = ASSERT2( stg_args `lengthIs` countConRepArgs con, ppr con <> parens (ppr (countConRepArgs con)) <+> ppr stg_args )
     do  { (idinfo, fcode_init) <- buildDynCon (dataConWorkId con) False
                                      currentCCS con stg_args
                 -- The first "con" says that the name bound to this
@@ -703,7 +707,7 @@ cgIdApp fun_id args = do
     case getCallMethod dflags fun_name cg_fun_id lf_info n_args v_args (cg_loc fun_info) self_loop_info of
 
             -- A value in WHNF, so we can just return it.
-        ReturnIt -> emitReturn [fun]    -- ToDo: does ReturnIt guarantee tagged?
+        ReturnIt -> emitReturn [fun] -- ToDo: does ReturnIt guarantee tagged?
 
         EnterIt -> ASSERT( null args )  -- Discarding arguments
                    emitEnter fun
@@ -850,7 +854,7 @@ emitEnter fun = do
       --
       -- Right now, we do what the old codegen did, and omit the tag
       -- test, just generating an enter.
-      Return _ -> do
+      Return -> do
         { let entry = entryCode dflags $ closureInfoPtr dflags $ CmmReg nodeReg
         ; emit $ mkJump dflags NativeNodeCall entry
                         [cmmUntag dflags fun] updfr_off
@@ -873,7 +877,7 @@ emitEnter fun = do
       --
       -- Note in particular that the label Lret is used as a
       -- destination by both the tag-test and the call.  This is
-      -- becase Lret will necessarily be a proc-point, and we want to
+      -- because Lret will necessarily be a proc-point, and we want to
       -- ensure that we generate only one proc-point for this
       -- sequence.
       --

@@ -57,9 +57,9 @@ module Var (
         mustHaveLocalBinding,
 
         -- * TyVar's
-        TyVarBndr(..), VisibilityFlag(..), TyVarBinder,
-        binderVar, binderVars, binderVisibility, binderKind,
-        isVisible, isInvisible, sameVis,
+        TyVarBndr(..), ArgFlag(..), TyVarBinder,
+        binderVar, binderVars, binderArgFlag, binderKind,
+        isVisibleArgFlag, isInvisibleArgFlag, sameVis,
 
         -- ** Constructing TyVar's
         mkTyVar, mkTcTyVar,
@@ -101,32 +101,53 @@ import Data.Data
 -- large number of SOURCE imports of Id.hs :-(
 -}
 
+-- | Identifier
 type Id    = Var       -- A term-level identifier
                        --  predicate: isId
 
+-- | Coercion Variable
 type CoVar = Id        -- See Note [Evidence: EvIds and CoVars]
                        --   predicate: isCoVar
 
+-- |
 type NcId  = Id        -- A term-level (value) variable that is
                        -- /not/ an (unlifted) coercion
                        --    predicate: isNonCoVarId
 
+-- | Type or kind Variable
 type TyVar   = Var     -- Type *or* kind variable (historical)
 
+-- | Type or Kind Variable
 type TKVar   = Var     -- Type *or* kind variable (historical)
+
+-- | Type Variable
 type TypeVar = Var     -- Definitely a type variable
+
+-- | Kind Variable
 type KindVar = Var     -- Definitely a kind variable
                        -- See Note [Kind and type variables]
 
 -- See Note [Evidence: EvIds and CoVars]
+-- | Evidence Identifier
 type EvId   = Id        -- Term-level evidence: DictId, IpId, or EqVar
+
+-- | Evidence Variable
 type EvVar  = EvId      -- ...historical name for EvId
+
+-- | Dictionary Function Identifier
 type DFunId = Id        -- A dictionary function
+
+-- | Dictionary Identifier
 type DictId = EvId      -- A dictionary variable
+
+-- | Implicit parameter Identifier
 type IpId   = EvId      -- A term-level implicit parameter
+
+-- | Equality Variable
 type EqVar  = EvId      -- Boxed equality evidence
 
-type TyCoVar = Id       -- Type, kind, *or* coercion variable
+-- | Type or Coercion Variable
+type TyCoVar = Id       -- Type, *or* coercion variable
                         --   predicate: isTyCoVar
 
 {- Note [Evidence: EvIds and CoVars]
@@ -163,7 +184,9 @@ strictness).  The essential info about different kinds of @Vars@ is
 in its @VarDetails@.
 -}
 
--- | Essentially a typed 'Name', that may also contain some additional information
+-- | Variable
+--
+-- Essentially a typed 'Name', that may also contain some additional information
 -- about the 'Var' and it's use sites.
 data Var
   = TyVar {  -- Type and kind variables
@@ -193,6 +216,7 @@ data Var
         id_details :: IdDetails,        -- Stable, doesn't change
         id_info    :: IdInfo }          -- Unstable, updated by simplifier
 
+-- | Identifier Scope
 data IdScope    -- See Note [GlobalId/LocalId]
   = GlobalId
   | LocalId ExportFlag
@@ -317,33 +341,36 @@ updateVarTypeM f id = do { ty' <- f (varType id)
 
 {- *********************************************************************
 *                                                                      *
-*                   VisibilityFlag
+*                   ArgFlag
 *                                                                      *
 ********************************************************************* -}
 
--- | Is something required to appear in source Haskell ('Visible'),
+-- | Argument Flag
+--
+-- Is something required to appear in source Haskell ('Required'),
 -- permitted by request ('Specified') (visible type application), or
--- prohibited entirely from appearing in source Haskell ('Invisible')?
--- See Note [TyBinders and VisibilityFlags] in TyCoRep
-data VisibilityFlag = Visible | Specified | Invisible
+-- prohibited entirely from appearing in source Haskell ('Inferred')?
+-- See Note [TyBinders and ArgFlags] in TyCoRep
+data ArgFlag = Required | Specified | Inferred
   deriving (Eq, Data)
 
-isVisible :: VisibilityFlag -> Bool
-isVisible Visible = True
-isVisible _       = False
+-- | Does this 'ArgFlag' classify an argument that is written in Haskell?
+isVisibleArgFlag :: ArgFlag -> Bool
+isVisibleArgFlag Required = True
+isVisibleArgFlag _        = False
 
-isInvisible :: VisibilityFlag -> Bool
-isInvisible v = not (isVisible v)
+-- | Does this 'ArgFlag' classify an argument that is not written in Haskell?
+isInvisibleArgFlag :: ArgFlag -> Bool
+isInvisibleArgFlag = not . isVisibleArgFlag
 
--- | Do these denote the same level of visibility? Except that
--- 'Specified' and 'Invisible' are considered the same. Used
--- for printing.
-sameVis :: VisibilityFlag -> VisibilityFlag -> Bool
-sameVis Visible Visible = True
-sameVis Visible _       = False
-sameVis _       Visible = False
-sameVis _       _       = True
-
+-- | Do these denote the same level of visibility? 'Required'
+-- arguments are visible, others are not. So this function
+-- equates 'Specified' and 'Inferred'. Used for printing.
+sameVis :: ArgFlag -> ArgFlag -> Bool
+sameVis Required Required = True
+sameVis Required _        = False
+sameVis _        Required = False
+sameVis _        _        = True
 
 {- *********************************************************************
 *                                                                      *
@@ -351,27 +378,31 @@ sameVis _       _       = True
 *                                                                      *
 ********************************************************************* -}
 
+-- Type Variable Binder
+--
 -- TyVarBndr is polymorphic in both tyvar and visiblity fields:
 --   * tyvar can be TyVar or IfaceTv
---   * vis   can be VisibilityFlag or TyConBndrVis
-data TyVarBndr tyvar vis = TvBndr tyvar vis
+--   * argf  can be ArgFlag or TyConBndrVis
+data TyVarBndr tyvar argf = TvBndr tyvar argf
   deriving( Data )
 
--- | A `TyVarBinder` is the binder of a ForAllTy
+-- | Type Variable Binder
+--
+-- A 'TyVarBinder' is the binder of a ForAllTy
 -- It's convenient to define this synonym here rather its natural
 -- home in TyCoRep, because it's used in DataCon.hs-boot
-type TyVarBinder = TyVarBndr TyVar VisibilityFlag
+type TyVarBinder = TyVarBndr TyVar ArgFlag
 
-binderVar :: TyVarBndr tv vis -> tv
+binderVar :: TyVarBndr tv argf -> tv
 binderVar (TvBndr v _) = v
 
-binderVars :: [TyVarBndr tv vis] -> [tv]
+binderVars :: [TyVarBndr tv argf] -> [tv]
 binderVars tvbs = map binderVar tvbs
 
-binderVisibility :: TyVarBndr tv vis -> vis
-binderVisibility (TvBndr _ vis) = vis
+binderArgFlag :: TyVarBndr tv argf -> argf
+binderArgFlag (TvBndr _ argf) = argf
 
-binderKind :: TyVarBndr TyVar vis -> Kind
+binderKind :: TyVarBndr TyVar argf -> Kind
 binderKind (TvBndr tv _) = tyVarKind tv
 
 {-
@@ -429,15 +460,15 @@ setTcTyVarDetails :: TyVar -> TcTyVarDetails -> TyVar
 setTcTyVarDetails tv details = tv { tc_tv_details = details }
 
 -------------------------------------
-instance Outputable tv => Outputable (TyVarBndr tv VisibilityFlag) where
-  ppr (TvBndr v Visible)   = ppr v
+instance Outputable tv => Outputable (TyVarBndr tv ArgFlag) where
+  ppr (TvBndr v Required)  = ppr v
   ppr (TvBndr v Specified) = char '@' <> ppr v
-  ppr (TvBndr v Invisible) = braces (ppr v)
+  ppr (TvBndr v Inferred)  = braces (ppr v)
 
-instance Outputable VisibilityFlag where
-  ppr Visible   = text "[vis]"
+instance Outputable ArgFlag where
+  ppr Required  = text "[req]"
   ppr Specified = text "[spec]"
-  ppr Invisible = text "[invis]"
+  ppr Inferred  = text "[infrd]"
 
 instance (Binary tv, Binary vis) => Binary (TyVarBndr tv vis) where
   put_ bh (TvBndr tv vis) = do { put_ bh tv; put_ bh vis }
@@ -445,17 +476,17 @@ instance (Binary tv, Binary vis) => Binary (TyVarBndr tv vis) where
   get bh = do { tv <- get bh; vis <- get bh; return (TvBndr tv vis) }
 
 
-instance Binary VisibilityFlag where
-  put_ bh Visible   = putByte bh 0
+instance Binary ArgFlag where
+  put_ bh Required  = putByte bh 0
   put_ bh Specified = putByte bh 1
-  put_ bh Invisible = putByte bh 2
+  put_ bh Inferred  = putByte bh 2
 
   get bh = do
     h <- getByte bh
     case h of
-      0 -> return Visible
+      0 -> return Required
       1 -> return Specified
-      _ -> return Invisible
+      _ -> return Inferred
 
 {-
 %************************************************************************

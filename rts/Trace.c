@@ -25,32 +25,13 @@
 #include <unistd.h>
 #endif
 
-#ifdef DEBUG
-// debugging flags, set with +RTS -D<something>
-int DEBUG_sched;
-int DEBUG_interp;
-int DEBUG_weak;
-int DEBUG_gccafs;
-int DEBUG_gc;
-int DEBUG_block_alloc;
-int DEBUG_sanity;
-int DEBUG_stable;
-int DEBUG_stm;
-int DEBUG_prof;
-int DEBUG_gran;
-int DEBUG_par;
-int DEBUG_linker;
-int DEBUG_squeeze;
-int DEBUG_hpc;
-int DEBUG_sparks;
-#endif
-
 // events
 int TRACE_sched;
 int TRACE_gc;
 int TRACE_spark_sampled;
 int TRACE_spark_full;
 int TRACE_user;
+int TRACE_cap;
 
 #ifdef THREADED_RTS
 static Mutex trace_utx;
@@ -66,27 +47,6 @@ void initTracing (void)
 {
 #ifdef THREADED_RTS
     initMutex(&trace_utx);
-#endif
-
-#ifdef DEBUG
-#define DEBUG_FLAG(name, class) \
-    class = RtsFlags.DebugFlags.name ? 1 : 0;
-
-    DEBUG_FLAG(scheduler,    DEBUG_sched);
-
-    DEBUG_FLAG(interpreter,  DEBUG_interp);
-    DEBUG_FLAG(weak,         DEBUG_weak);
-    DEBUG_FLAG(gccafs,       DEBUG_gccafs);
-    DEBUG_FLAG(gc,           DEBUG_gc);
-    DEBUG_FLAG(block_alloc,  DEBUG_block_alloc);
-    DEBUG_FLAG(sanity,       DEBUG_sanity);
-    DEBUG_FLAG(stable,       DEBUG_stable);
-    DEBUG_FLAG(stm,          DEBUG_stm);
-    DEBUG_FLAG(prof,         DEBUG_prof);
-    DEBUG_FLAG(linker,       DEBUG_linker);
-    DEBUG_FLAG(squeeze,      DEBUG_squeeze);
-    DEBUG_FLAG(hpc,          DEBUG_hpc);
-    DEBUG_FLAG(sparks,       DEBUG_sparks);
 #endif
 
     // -Ds turns on scheduler tracing too
@@ -113,6 +73,14 @@ void initTracing (void)
 
     TRACE_user =
         RtsFlags.TraceFlags.user;
+
+    // We trace cap events if we're tracing anything else
+    TRACE_cap =
+        TRACE_sched ||
+        TRACE_gc ||
+        TRACE_spark_sampled ||
+        TRACE_spark_full ||
+        TRACE_user;
 
     eventlog_enabled = RtsFlags.TraceFlags.tracing == TRACE_EVENTLOG;
 
@@ -378,8 +346,8 @@ void traceEventGcStats_  (Capability *cap,
     }
 }
 
-void traceCapEvent (Capability   *cap,
-                    EventTypeNum  tag)
+void traceCapEvent_ (Capability   *cap,
+                     EventTypeNum  tag)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
@@ -410,9 +378,9 @@ void traceCapEvent (Capability   *cap,
     }
 }
 
-void traceCapsetEvent (EventTypeNum tag,
-                       CapsetID     capset,
-                       StgWord      info)
+void traceCapsetEvent_ (EventTypeNum tag,
+                        CapsetID     capset,
+                        StgWord      info)
 {
 #ifdef DEBUG
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR && TRACE_sched)
@@ -621,6 +589,49 @@ void traceTaskDelete_ (Task *task)
         postTaskDeleteEvent(taskid);
     }
 }
+
+void traceHeapProfBegin(StgWord8 profile_id)
+{
+    if (eventlog_enabled) {
+        postHeapProfBegin(profile_id);
+    }
+}
+
+void traceHeapProfSampleBegin(StgInt era)
+{
+    if (eventlog_enabled) {
+        postHeapProfSampleBegin(era);
+    }
+}
+
+void traceHeapProfSampleString(StgWord8 profile_id,
+                               const char *label, StgWord residency)
+{
+    if (eventlog_enabled) {
+        postHeapProfSampleString(profile_id, label, residency);
+    }
+}
+
+#ifdef PROFILING
+void traceHeapProfCostCentre(StgWord32 ccID,
+                             const char *label,
+                             const char *module,
+                             const char *srcloc,
+                             StgBool is_caf)
+{
+    if (eventlog_enabled) {
+        postHeapProfCostCentre(ccID, label, module, srcloc, is_caf);
+    }
+}
+
+void traceHeapProfSampleCostCentre(StgWord8 profile_id,
+                                   CostCentreStack *stack, StgWord residency)
+{
+    if (eventlog_enabled) {
+        postHeapProfSampleCostCentre(profile_id, stack, residency);
+    }
+}
+#endif
 
 #ifdef DEBUG
 static void vtraceCap_stderr(Capability *cap, char *msg, va_list ap)

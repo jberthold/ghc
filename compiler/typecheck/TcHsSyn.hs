@@ -53,7 +53,9 @@ import TyCon
 import Coercion
 import ConLike
 import DataCon
+import HscTypes
 import Name
+import NameEnv
 import Var
 import VarSet
 import VarEnv
@@ -98,6 +100,7 @@ hsPatType (ListPat _ ty Nothing)      = mkListTy ty
 hsPatType (ListPat _ _ (Just (ty,_))) = ty
 hsPatType (PArrPat _ ty)              = mkPArrTy ty
 hsPatType (TuplePat _ bx tys)         = mkTupleTy bx tys
+hsPatType (SumPat _ _ _ tys)          = mkSumTy tys
 hsPatType (ConPatOut { pat_con = L _ con, pat_arg_tys = tys })
                                       = conLikeResTy con tys
 hsPatType (SigPatOut _ ty)            = ty
@@ -256,8 +259,11 @@ setZonkType :: ZonkEnv -> UnboundTyVarZonker -> ZonkEnv
 setZonkType (ZonkEnv _ ty_env id_env) zonk_ty
   = ZonkEnv zonk_ty ty_env id_env
 
-zonkEnvIds :: ZonkEnv -> [Id]
-zonkEnvIds (ZonkEnv _ _ id_env) = varEnvElts id_env
+zonkEnvIds :: ZonkEnv -> TypeEnv
+zonkEnvIds (ZonkEnv _ _ id_env) =
+  mkNameEnv [(getName id, AnId id) | id <- nonDetEltsUFM id_env]
+  -- It's OK to use nonDetEltsUFM here because we forget the ordering
+  -- immediately by creating a TypeEnv
 
 zonkIdOcc :: ZonkEnv -> TcId -> Id
 -- Ids defined in this module should be in the envt;
@@ -357,7 +363,7 @@ zonkTopLExpr e = zonkLExpr emptyZonkEnv e
 zonkTopDecls :: Bag EvBind
              -> LHsBinds TcId
              -> [LRuleDecl TcId] -> [LVectDecl TcId] -> [LTcSpecPrag] -> [LForeignDecl TcId]
-             -> TcM ([Id],
+             -> TcM (TypeEnv,
                      Bag EvBind,
                      LHsBinds Id,
                      [LForeignDecl Id],
@@ -687,6 +693,11 @@ zonkExpr env (ExplicitTuple tup_args boxed)
                                         ; return (L l (Present e')) }
     zonk_tup_arg (L l (Missing t)) = do { t' <- zonkTcTypeToType env t
                                         ; return (L l (Missing t')) }
+
+zonkExpr env (ExplicitSum alt arity expr args)
+  = do new_args <- mapM (zonkTcTypeToType env) args
+       new_expr <- zonkLExpr env expr
+       return (ExplicitSum alt arity new_expr new_args)
 
 zonkExpr env (HsCase expr ms)
   = do new_expr <- zonkLExpr env expr
@@ -1212,6 +1223,11 @@ zonk_pat env (TuplePat pats boxed tys)
         ; (env', pats') <- zonkPats env pats
         ; return (env', TuplePat pats' boxed tys') }
 
+zonk_pat env (SumPat pat alt arity tys)
+  = do  { tys' <- mapM (zonkTcTypeToType env) tys
+        ; (env', pat') <- zonkPat env pat
+        ; return (env', SumPat pat' alt arity tys') }
+
 zonk_pat env p@(ConPatOut { pat_arg_tys = tys, pat_tvs = tyvars
                           , pat_dicts = evs, pat_binds = binds
                           , pat_args = args, pat_wrap = wrapper })
@@ -1713,14 +1729,14 @@ ensureNotRepresentationPolymorphic ty doc
 checkForRepresentationPolymorphism :: SDoc -> Type -> TcM ()
 checkForRepresentationPolymorphism extra ty
   | Just (tc, tys) <- splitTyConApp_maybe ty
-  , isUnboxedTupleTyCon tc
+  , isUnboxedTupleTyCon tc || isUnboxedSumTyCon tc
   = mapM_ (checkForRepresentationPolymorphism extra) (dropRuntimeRepArgs tys)
 
-  | runtime_rep `eqType` unboxedTupleRepDataConTy
+  | tuple_rep || sum_rep
   = addErr (vcat [ text "The type" <+> quotes (ppr tidy_ty) <+>
-                     text "is not an unboxed tuple,"
+                     (text "is not an unboxed" <+> tuple_or_sum <> comma)
                  , text "and yet its kind suggests that it has the representation"
-                 , text "of an unboxed tuple. This is not allowed." ] $$
+                 , text "of an unboxed" <+> tuple_or_sum <> text ". This is not allowed." ] $$
             extra)
 
   | not (isEmptyVarSet (tyCoVarsOfType runtime_rep))
@@ -1733,6 +1749,10 @@ checkForRepresentationPolymorphism extra ty
   | otherwise
   = return ()
   where
+    tuple_rep    = runtime_rep `eqType` unboxedTupleRepDataConTy
+    sum_rep      = runtime_rep `eqType` unboxedSumRepDataConTy
+    tuple_or_sum = text (if tuple_rep then "tuple" else "sum")
+
     ki          = typeKind ty
     runtime_rep = getRuntimeRepFromKind "check_type" ki
 

@@ -472,6 +472,15 @@ tcExpr expr@(ExplicitTuple tup_args boxity) res_ty
 
        ; return $ mkHsWrap wrap (ExplicitTuple tup_args1 boxity) }
 
+tcExpr (ExplicitSum alt arity expr _) res_ty
+  = do { let sum_tc = sumTyCon arity
+       ; res_ty <- expTypeToType res_ty
+       ; (coi, arg_tys) <- matchExpectedTyConApp sum_tc res_ty
+       ; -- Drop levity vars, we don't care about them here
+         let arg_tys' = drop arity arg_tys
+       ; expr' <- tcPolyExpr expr (arg_tys' `getNth` (alt - 1))
+       ; return $ mkHsWrapCo coi (ExplicitSum alt arity expr' arg_tys') }
+
 tcExpr (ExplicitList _ witness exprs) res_ty
   = case witness of
       Nothing   -> do  { res_ty <- expTypeToType res_ty
@@ -981,6 +990,14 @@ tcExpr (PArrSeq _ _) _
 ************************************************************************
 -}
 
+-- HsSpliced is an annotation produced by 'RnSplice.rnSpliceExpr'.
+-- Here we get rid of it and add the finalizers to the global environment.
+--
+-- See Note [Delaying modFinalizers in untyped splices] in RnSplice.
+tcExpr (HsSpliceE (HsSpliced mod_finalizers (HsSplicedExpr expr)))
+       res_ty
+  = do addModFinalizersWithLclEnv mod_finalizers
+       tcExpr expr res_ty
 tcExpr (HsSpliceE splice)        res_ty
   = tcSpliceExpr splice res_ty
 tcExpr (HsBracket brack)         res_ty
@@ -1191,7 +1208,7 @@ tcArgs fun orig_fun_ty fun_orig orig_args herald
            ; case tcSplitForAllTy_maybe upsilon_ty of
                Just (tvb, inner_ty) ->
                  do { let tv   = binderVar tvb
-                          vis  = binderVisibility tvb
+                          vis  = binderArgFlag tvb
                           kind = tyVarKind tv
                     ; MASSERT2( vis == Specified
                         , (vcat [ ppr fun_ty, ppr upsilon_ty, ppr tvb
@@ -1484,7 +1501,7 @@ tcExprSig expr sig@(PartialSig { psig_name = name, sig_loc = loc })
              tau_tvs        = tyCoVarsOfType tau
        ; (binders, my_theta) <- chooseInferredQuantifiers inferred_theta
                                    tau_tvs qtvs (Just sig_inst)
-       ; let inferred_sigma = mkInvSigmaTy qtvs inferred_theta tau
+       ; let inferred_sigma = mkInfSigmaTy qtvs inferred_theta tau
              my_sigma       = mkForAllTys binders (mkPhiTy  my_theta tau)
        ; wrap <- if inferred_sigma `eqType` my_sigma -- NB: eqType ignores vis.
                  then return idHsWrapper  -- Fast path; also avoids complaint when we infer
@@ -1641,16 +1658,16 @@ tc_infer_id lbl id_name
 
 
 tcUnboundId :: UnboundVar -> ExpRhoType -> TcM (HsExpr TcId)
--- Typechedk an occurrence of an unbound Id
+-- Typecheck an occurrence of an unbound Id
 --
--- Some of these started life as a true hole "_".  Others might simply
--- be variables that accidentally have no binding site
+-- Some of these started life as a true expression hole "_".
+-- Others might simply be variables that accidentally have no binding site
 --
 -- We turn all of them into HsVar, since HsUnboundVar can't contain an
 -- Id; and indeed the evidence for the CHoleCan does bind it, so it's
 -- not unbound any more!
 tcUnboundId unbound res_ty
- = do { ty <- newFlexiTyVarTy liftedTypeKind
+ = do { ty <- newOpenFlexiTyVarTy  -- Allow Int# etc (Trac #12531)
       ; let occ = unboundVarOcc unbound
       ; name <- newSysName occ
       ; let ev = mkLocalId name ty
@@ -2438,7 +2455,7 @@ badFieldsUpd rbinds data_cons
       sortBy (compare `on` fst) .
       map (\ item@(_, membershipRow) -> (countTrue membershipRow, item))
 
-    countTrue = length . filter id
+    countTrue = count id
 
 {-
 Note [Finding the conflicting fields]

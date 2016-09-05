@@ -41,7 +41,7 @@ import Unify
 import Outputable
 import ErrUtils
 import BasicTypes
-import UniqFM
+import UniqDFM
 import Util
 import Id
 import Data.Data        ( Data )
@@ -55,11 +55,25 @@ import Data.Maybe       ( isJust, isNothing )
 ************************************************************************
 -}
 
+-- | A type-class instance. Note that there is some tricky laziness at work
+-- here. See Note [ClsInst laziness and the rough-match fields] for more
+-- details.
 data ClsInst
-  = ClsInst {   -- Used for "rough matching"; see Note [Rough-match field]
+  = ClsInst {   -- Used for "rough matching"; see
+                -- Note [ClsInst laziness and the rough-match fields]
                 -- INVARIANT: is_tcs = roughMatchTcs is_tys
-               is_cls_nm :: Name  -- Class name
-             , is_tcs  :: [Maybe Name]  -- Top of type args
+               is_cls_nm :: Name        -- ^ Class name
+             , is_tcs  :: [Maybe Name]  -- ^ Top of type args
+
+               -- | @is_dfun_name = idName . is_dfun@.
+               --
+               -- We use 'is_dfun_name' for the visibility check,
+               -- 'instIsVisible', which needs to know the 'Module' which the
+               -- dictionary is defined in. However, we cannot use the 'Module'
+               -- attached to 'is_dfun' since doing so would mean we would
+               -- potentially pull in an entire interface file unnecessarily.
+               -- This was the cause of #12367.
+             , is_dfun_name :: Name
 
                 -- Used for "proper matching"; see Note [Proper-match fields]
              , is_tvs  :: [TyVar]       -- Fresh template tyvars for full match
@@ -96,6 +110,45 @@ isOverlapping  i = hasOverlappingFlag  (overlapMode (is_flag i))
 isIncoherent   i = hasIncoherentFlag   (overlapMode (is_flag i))
 
 {-
+Note [ClsInst laziness and the rough-match fields]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we load 'instance A.C B.T' from A.hi, but suppose that the type B.T is
+otherwise unused in the program. Then it's stupid to load B.hi, the data type
+declaration for B.T -- and perhaps further instance declarations!
+
+We avoid this as follows:
+
+* is_cls_nm, is_tcs, is_dfun_name are all Names. We can poke them to our heart's
+  content.
+
+* Proper-match fields. is_dfun, and its related fields is_tvs, is_cls, is_tys
+  contain TyVars, Class, Type, Class etc, and so are all lazy thunks. When we
+  poke any of these fields we'll typecheck the DFunId declaration, and hence
+  pull in interfaces that it refers to. See Note [Proper-match fields].
+
+* Rough-match fields. During instance lookup, we use the is_cls_nm :: Name and
+  is_tcs :: [Maybe Name] fields to perform a "rough match", *without* poking
+  inside the DFunId. The rough-match fields allow us to say "definitely does not
+  match", based only on Names.
+
+  This laziness is very important; see Trac #12367. Try hard to avoid pulling on
+  the structured fields unless you really need the instance.
+
+* Another place to watch is InstEnv.instIsVisible, which needs the module to
+  which the ClsInst belongs. We can get this from is_dfun_name.
+
+* In is_tcs,
+    Nothing  means that this type arg is a type variable
+
+    (Just n) means that this type arg is a
+                TyConApp with a type constructor of n.
+                This is always a real tycon, never a synonym!
+                (Two different synonyms might match, but two
+                different real tycons can't.)
+                NB: newtypes are not transparent, though!
+-}
+
+{-
 Note [Template tyvars are fresh]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The is_tvs field of a ClsInst has *completely fresh* tyvars.
@@ -108,31 +161,12 @@ etc, and that requires the tyvars to be distinct.
 
 The invariant is checked by the ASSERT in lookupInstEnv'.
 
-Note [Rough-match field]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The is_cls_nm, is_tcs fields allow a "rough match" to be done
-*without* poking inside the DFunId.  Poking the DFunId forces
-us to suck in all the type constructors etc it involves,
-which is a total waste of time if it has no chance of matching
-So the Name, [Maybe Name] fields allow us to say "definitely
-does not match", based only on the Name.
-
-In is_tcs,
-    Nothing  means that this type arg is a type variable
-
-    (Just n) means that this type arg is a
-                TyConApp with a type constructor of n.
-                This is always a real tycon, never a synonym!
-                (Two different synonyms might match, but two
-                different real tycons can't.)
-                NB: newtypes are not transparent, though!
-
 Note [Proper-match fields]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 The is_tvs, is_cls, is_tys fields are simply cached values, pulled
 out (lazily) from the dfun id. They are cached here simply so
 that we don't need to decompose the DFunId each time we want
-to match it.  The hope is that the fast-match fields mean
+to match it.  The hope is that the rough-match fields mean
 that we often never poke the proper-match fields.
 
 However, note that:
@@ -226,6 +260,7 @@ mkLocalInstance :: DFunId -> OverlapFlag
 mkLocalInstance dfun oflag tvs cls tys
   = ClsInst { is_flag = oflag, is_dfun = dfun
             , is_tvs = tvs
+            , is_dfun_name = dfun_name
             , is_cls = cls, is_cls_nm = cls_name
             , is_tys = tys, is_tcs = roughMatchTcs tys
             , is_orphan = orph
@@ -257,19 +292,21 @@ mkLocalInstance dfun oflag tvs cls tys
 
     choose_one nss = chooseOrphanAnchor (unionNameSets nss)
 
-mkImportedInstance :: Name
-                   -> [Maybe Name]
-                   -> DFunId
-                   -> OverlapFlag
-                   -> IsOrphan
+mkImportedInstance :: Name         -- ^ the name of the class
+                   -> [Maybe Name] -- ^ the types which the class was applied to
+                   -> Name         -- ^ the 'Name' of the dictionary binding
+                   -> DFunId       -- ^ the 'Id' of the dictionary.
+                   -> OverlapFlag  -- ^ may this instance overlap?
+                   -> IsOrphan     -- ^ is this instance an orphan?
                    -> ClsInst
 -- Used for imported instances, where we get the rough-match stuff
 -- from the interface file
 -- The bound tyvars of the dfun are guaranteed fresh, because
 -- the dfun has been typechecked out of the same interface file
-mkImportedInstance cls_nm mb_tcs dfun oflag orphan
+mkImportedInstance cls_nm mb_tcs dfun_name dfun oflag orphan
   = ClsInst { is_flag = oflag, is_dfun = dfun
             , is_tvs = tvs, is_tys = tys
+            , is_dfun_name = dfun_name
             , is_cls_nm = cls_nm, is_cls = cls, is_tcs = mb_tcs
             , is_orphan = orphan }
   where
@@ -330,7 +367,21 @@ or, to put it another way, we have
 -}
 
 ---------------------------------------------------
-type InstEnv = UniqFM ClsInstEnv        -- Maps Class to instances for that class
+{-
+Note [InstEnv determinism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+We turn InstEnvs into a list in some places that don't directly affect
+the ABI. That happens when we create output for `:info`.
+Unfortunately that nondeterminism is nonlocal and it's hard to tell what it
+affects without following a chain of functions. It's also easy to accidentally
+make that nondeterminism affect the ABI. Furthermore the envs should be
+relatively small, so it should be free to use deterministic maps here.
+Testing with nofib and validate detected no difference between UniqFM and
+UniqDFM. See also Note [Deterministic UniqFM]
+-}
+
+type InstEnv = UniqDFM ClsInstEnv      -- Maps Class to instances for that class
+  -- See Note [InstEnv determinism]
 
 -- | 'InstEnvs' represents the combination of the global type class instance
 -- environment, the local type class instance environment, and the set of
@@ -365,10 +416,11 @@ instance Outputable ClsInstEnv where
 -- the dfun type.
 
 emptyInstEnv :: InstEnv
-emptyInstEnv = emptyUFM
+emptyInstEnv = emptyUDFM
 
 instEnvElts :: InstEnv -> [ClsInst]
-instEnvElts ie = [elt | ClsIE elts <- eltsUFM ie, elt <- elts]
+instEnvElts ie = [elt | ClsIE elts <- eltsUDFM ie, elt <- elts]
+  -- See Note [InstEnv determinism]
 
 -- | Test if an instance is visible, by checking that its origin module
 -- is in 'VisibleOrphanModules'.
@@ -382,13 +434,13 @@ instIsVisible vis_mods ispec
   | IsOrphan <- is_orphan ispec = mod `elemModuleSet` vis_mods
   | otherwise                   = True
   where
-    mod = nameModule (idName (is_dfun ispec))
+    mod = nameModule $ is_dfun_name ispec
 
 classInstances :: InstEnvs -> Class -> [ClsInst]
 classInstances (InstEnvs { ie_global = pkg_ie, ie_local = home_ie, ie_visible = vis_mods }) cls
   = get home_ie ++ get pkg_ie
   where
-    get env = case lookupUFM env cls of
+    get env = case lookupUDFM env cls of
                 Just (ClsIE insts) -> filter (instIsVisible vis_mods) insts
                 Nothing            -> []
 
@@ -397,20 +449,20 @@ classInstances (InstEnvs { ie_global = pkg_ie, ie_local = home_ie, ie_visible = 
 memberInstEnv :: InstEnv -> ClsInst -> Bool
 memberInstEnv inst_env ins_item@(ClsInst { is_cls_nm = cls_nm } ) =
     maybe False (\(ClsIE items) -> any (identicalClsInstHead ins_item) items)
-          (lookupUFM inst_env cls_nm)
+          (lookupUDFM inst_env cls_nm)
 
 extendInstEnvList :: InstEnv -> [ClsInst] -> InstEnv
 extendInstEnvList inst_env ispecs = foldl extendInstEnv inst_env ispecs
 
 extendInstEnv :: InstEnv -> ClsInst -> InstEnv
 extendInstEnv inst_env ins_item@(ClsInst { is_cls_nm = cls_nm })
-  = addToUFM_C add inst_env cls_nm (ClsIE [ins_item])
+  = addToUDFM_C add inst_env cls_nm (ClsIE [ins_item])
   where
     add (ClsIE cur_insts) _ = ClsIE (ins_item : cur_insts)
 
 deleteFromInstEnv :: InstEnv -> ClsInst -> InstEnv
 deleteFromInstEnv inst_env ins_item@(ClsInst { is_cls_nm = cls_nm })
-  = adjustUFM adjust inst_env cls_nm
+  = adjustUDFM adjust inst_env cls_nm
   where
     adjust (ClsIE items) = ClsIE (filterOut (identicalClsInstHead ins_item) items)
 
@@ -702,7 +754,7 @@ lookupInstEnv' ie vis_mods cls tys
     all_tvs    = all isNothing rough_tcs
 
     --------------
-    lookup env = case lookupUFM env cls of
+    lookup env = case lookupUDFM env cls of
                    Nothing -> ([],[])   -- No instances for this class
                    Just (ClsIE insts) -> find [] [] insts
 

@@ -471,7 +471,8 @@ tcRnSrcDecls :: Bool  -- False => no 'module M(..) where' header at all
 tcRnSrcDecls explicit_mod_hdr decls
  = do { -- Do all the declarations
       ; ((tcg_env, tcl_env), lie) <- captureConstraints $
-              do { (tcg_env, tcl_env) <- tc_rn_src_decls decls ;
+              do { envs <- tc_rn_src_decls decls
+                 ; (tcg_env, tcl_env) <- setEnvs envs run_th_modfinalizers
 
                    -- Check for the 'main' declaration
                    -- Must do this inside the captureConstraints
@@ -521,13 +522,13 @@ tcRnSrcDecls explicit_mod_hdr decls
                          tcg_fords     = fords } = tcg_env
             ; all_ev_binds = cur_ev_binds `unionBags` new_ev_binds } ;
 
-      ; (bind_ids, ev_binds', binds', fords', imp_specs', rules', vects')
+      ; (bind_env, ev_binds', binds', fords', imp_specs', rules', vects')
             <- {-# SCC "zonkTopDecls" #-}
                zonkTopDecls all_ev_binds binds rules vects
                             imp_specs fords ;
       ; traceTc "Tc11" empty
 
-      ; let { final_type_env = extendTypeEnvWithIds type_env bind_ids
+      ; let { final_type_env = plusTypeEnv type_env bind_env
             ; tcg_env' = tcg_env { tcg_binds    = binds',
                                    tcg_ev_binds = ev_binds',
                                    tcg_imp_specs = imp_specs',
@@ -538,6 +539,27 @@ tcRnSrcDecls explicit_mod_hdr decls
       ; setGlobalTypeEnv tcg_env' final_type_env
 
    } }
+
+#ifdef GHCI
+-- | Runs TH finalizers and renames and typechecks the top-level declarations
+-- that they could introduce.
+run_th_modfinalizers :: TcM (TcGblEnv, TcLclEnv)
+run_th_modfinalizers = do
+  th_modfinalizers_var <- fmap tcg_th_modfinalizers getGblEnv
+  th_modfinalizers <- readTcRef th_modfinalizers_var
+  if null th_modfinalizers
+  then getEnvs
+  else do
+    writeTcRef th_modfinalizers_var []
+    sequence_ th_modfinalizers
+    -- Finalizers can add top-level declarations with addTopDecls.
+    envs <- tc_rn_src_decls []
+    -- addTopDecls can add declarations which add new finalizers.
+    setEnvs envs run_th_modfinalizers
+#else
+run_th_modfinalizers :: TcM (TcGblEnv, TcLclEnv)
+run_th_modfinalizers = getEnvs
+#endif /* GHCI */
 
 tc_rn_src_decls :: [LHsDecl RdrName]
                 -> TcM (TcGblEnv, TcLclEnv)
@@ -717,32 +739,82 @@ checkHiBootIface tcg_env boot_info
              , tcg_insts    = local_insts
              , tcg_type_env = local_type_env
              , tcg_exports  = local_exports } <- tcg_env
-  = do  { dfun_prs <- checkHiBootIface' local_insts local_type_env
-                                        local_exports boot_details
-        ; let boot_dfuns = map fst dfun_prs
-              dfun_binds = listToBag [ mkVarBind boot_dfun (nlHsVar dfun)
-                                     | (boot_dfun, dfun) <- dfun_prs ]
+  = do  { -- This code is tricky, see Note [DFun knot-tying]
+        ; let boot_dfuns = filter isDFunId (typeEnvIds (md_types boot_details))
               type_env'  = extendTypeEnvWithIds local_type_env boot_dfuns
-              tcg_env'   = tcg_env { tcg_binds = binds `unionBags` dfun_binds }
+          -- Why the seq?  Without, we will put a TypeEnv thunk in
+          -- tcg_type_env_var.  That thunk will eventually get
+          -- forced if we are typechecking interfaces, but that
+          -- is no good if we are trying to typecheck the very
+          -- DFun we were going to put in.
+          -- TODO: Maybe setGlobalTypeEnv should be strict.
+        ; tcg_env <- type_env' `seq` setGlobalTypeEnv tcg_env type_env'
+        ; dfun_prs <- checkHiBootIface' local_insts type_env'
+                                        local_exports boot_details
+        ; let dfun_binds = listToBag [ mkVarBind boot_dfun (nlHsVar dfun)
+                                     | (boot_dfun, dfun) <- dfun_prs ]
 
-        ; setGlobalTypeEnv tcg_env' type_env' }
-             -- Update the global type env *including* the knot-tied one
-             -- so that if the source module reads in an interface unfolding
-             -- mentioning one of the dfuns from the boot module, then it
-             -- can "see" that boot dfun.   See Trac #4003
+        ; return tcg_env { tcg_binds = binds `unionBags` dfun_binds } }
 
   | otherwise = panic "checkHiBootIface: unreachable code"
+
+-- Note [DFun knot-tying]
+-- ~~~~~~~~~~~~~~~~~~~~~~
+-- The 'SelfBootInfo' that is fed into 'checkHiBootIface' comes
+-- from typechecking the hi-boot file that we are presently
+-- implementing.  Suppose we are typechecking the module A:
+-- when we typecheck the hi-boot file, whenever we see an
+-- identifier A.T, we knot-tie this identifier to the
+-- *local* type environment (via if_rec_types.)  The contract
+-- then is that we don't *look* at 'SelfBootInfo' until
+-- we've finished typechecking the module and updated the
+-- type environment with the new tycons and ids.
+--
+-- This most works well, but there is one problem: DFuns!
+-- In general, it's not possible to know a priori what an
+-- hs-boot file named a DFun (see Note [DFun impedance matching]),
+-- so we look at the ClsInsts from the boot file to figure out
+-- what DFuns to add to the type environment.  But we're not
+-- allowed to poke the DFuns of the ClsInsts in the SelfBootInfo
+-- until we've added the DFuns to the type environment.  A
+-- Gordian knot!
+--
+-- We cut the knot by a little trick: we first *unconditionally*
+-- add all of the boot-declared DFuns to the type environment
+-- (so that knot tying works, see Trac #4003), without the
+-- actual bindings for them.  Then, we compute the impedance
+-- matching bindings, and add them to the environment.
+--
+-- There is one subtlety to doing this: we have to get the
+-- DFuns from md_types, not md_insts, even though involves
+-- filtering a bunch of TyThings we don't care about.  The
+-- reason is only the TypeEnv in md_types has the actual
+-- Id we want to add to the environment; the DFun fields
+-- in md_insts are typechecking thunks that will attempt to
+-- go through if_rec_types to lookup the real Id... but
+-- that's what we're trying to setup right now.
 
 checkHiBootIface' :: [ClsInst] -> TypeEnv -> [AvailInfo]
                   -> ModDetails -> TcM [(Id, Id)]
 -- Variant which doesn't require a full TcGblEnv; you could get the
 -- local components from another ModDetails.
 --
+-- Note [DFun impedance matching]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 -- We return a list of "impedance-matching" bindings for the dfuns
 -- defined in the hs-boot file, such as
 --           $fxEqT = $fEqT
 -- We need these because the module and hi-boot file might differ in
--- the name it chose for the dfun.
+-- the name it chose for the dfun: the name of a dfun is not
+-- uniquely determined by its type; there might be multiple dfuns
+-- which, individually, would map to the same name (in which case
+-- we have to disambiguate them.)  There's no way for the hi file
+-- to know exactly what disambiguation to use... without looking
+-- at the hi-boot file itself.
+--
+-- In fact, the names will always differ because we always pick names
+-- prefixed with "$fx" for boot dfuns, and "$f" for real dfuns
+-- (so that this impedance matching is always possible).
 
 checkHiBootIface'
         local_insts local_type_env local_exports
@@ -2104,7 +2176,7 @@ considers this example, with -fprint-explicit-foralls enabled:
 
   Note that the variables and constraints are reordered here, because this
   is possible during regeneralization. Also note that the variables are
-  reported as Invisible instead of Specified.
+  reported as Inferred instead of Specified.
 
 :type +v / TM_NoInst
 

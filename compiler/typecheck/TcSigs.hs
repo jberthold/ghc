@@ -196,10 +196,11 @@ tcTySig (L loc (TypeSig names sig_ty))
                           | L _ name <- names ]
        ; return (map TcIdSig sigs) }
 
-tcTySig (L loc (PatSynSig (L _ name) sig_ty))
+tcTySig (L loc (PatSynSig names sig_ty))
   = setSrcSpan loc $
-    do { tpsi <- tcPatSynSig name sig_ty
-       ; return [TcPatSynSig tpsi] }
+    do { tpsigs <- sequence [ tcPatSynSig name sig_ty
+                            | L _ name <- names ]
+       ; return (map TcPatSynSig tpsigs) }
 
 tcTySig _ = return []
 
@@ -393,7 +394,7 @@ tcPatSynSig name sig_ty
               , text "prov" <+> ppr prov
               , text "body_ty" <+> ppr body_ty ]
        ; return (TPSI { patsig_name = name
-                      , patsig_implicit_bndrs = mkTyVarBinders Invisible kvs ++
+                      , patsig_implicit_bndrs = mkTyVarBinders Inferred kvs ++
                                                 mkTyVarBinders Specified implicit_tvs
                       , patsig_univ_bndrs     = univ_tvs
                       , patsig_req            = req
@@ -489,6 +490,7 @@ mkPragEnv sigs binds
     get_sig :: LSig Name -> Maybe (Name, LSig Name)
     get_sig (L l (SpecSig lnm@(L _ nm) ty inl)) = Just (nm, L l $ SpecSig   lnm ty (add_arity nm inl))
     get_sig (L l (InlineSig lnm@(L _ nm) inl))  = Just (nm, L l $ InlineSig lnm    (add_arity nm inl))
+    get_sig (L l (SCCFunSig st lnm@(L _ nm) str))  = Just (nm, L l $ SCCFunSig st lnm str)
     get_sig _                                   = Nothing
 
     add_arity n inl_prag   -- Adjust inl_sat field to match visible arity of function
@@ -665,7 +667,7 @@ tcSpecPrags poly_id prag_sigs
   where
     spec_sigs = filter isSpecLSig prag_sigs
     bad_sigs  = filter is_bad_sig prag_sigs
-    is_bad_sig s = not (isSpecLSig s || isInlineLSig s)
+    is_bad_sig s = not (isSpecLSig s || isInlineLSig s || isSCCFunSig s)
 
     warn_discarded_sigs
       = addWarnTc NoReason

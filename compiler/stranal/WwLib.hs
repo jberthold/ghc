@@ -8,6 +8,7 @@
 
 module WwLib ( mkWwBodies, mkWWstr, mkWorkerArgs
              , deepSplitProductType_maybe, findTypeShape
+             , isWorkerSmallEnough
  ) where
 
 #include "HsVersions.h"
@@ -24,6 +25,7 @@ import TysPrim          ( voidPrimTy )
 import TysWiredIn       ( tupleDataCon )
 import VarEnv           ( mkInScopeSet )
 import Type
+import RepType          ( isVoidTy )
 import Coercion
 import FamInstEnv
 import BasicTypes       ( Boxity(..) )
@@ -142,7 +144,8 @@ mkWwBodies dflags fam_envs fun_ty demands res_info
               wrapper_body = wrap_fn_args . wrap_fn_cpr . wrap_fn_str . applyToVars work_call_args . Var
               worker_body = mkLams work_lam_args. work_fn_str . work_fn_cpr . work_fn_args
 
-        ; if useful1 && not only_one_void_argument || useful2
+        ; if isWorkerSmallEnough dflags work_args
+             && (useful1 && not only_one_void_argument || useful2)
           then return (Just (worker_args_dmds, wrapper_body, worker_body))
           else return Nothing
         }
@@ -163,6 +166,12 @@ mkWwBodies dflags fam_envs fun_ty demands res_info
       | otherwise
       = False
 
+-- See Note [Limit w/w arity]
+isWorkerSmallEnough :: DynFlags -> [Var] -> Bool
+isWorkerSmallEnough dflags vars = count isId vars <= maxWorkerArgs dflags
+    -- We count only Free variables (isId) to skip Type, Kind
+    -- variables which have no runtime representation.
+
 {-
 Note [Always do CPR w/w]
 ~~~~~~~~~~~~~~~~~~~~~~~~
@@ -176,6 +185,30 @@ a disaster, because then the enclosing function might say it has the CPR
 property, but now doesn't and there a cascade of disaster.  A good example
 is Trac #5920.
 
+Note [Limit w/w arity]
+~~~~~~~~~~~~~~~~~~~~~~~~
+Guard against high worker arity as it generates a lot of stack traffic.
+A simplified example is Trac #11565#comment:6
+
+Current strategy is very simple: don't perform w/w transformation at all
+if the result produces a wrapper with arity higher than -fmax-worker-args=.
+
+It is a bit all or nothing, consider
+
+        f (x,y) (a,b,c,d,e ... , z) = rhs
+
+Currently we will remove all w/w ness entirely. But actually we could
+w/w on the (x,y) pair... it's the huge product that is the problem.
+
+Could we instead refrain from w/w on an arg-by-arg basis? Yes, that'd
+solve f. But we can get a lot of args from deeply-nested products:
+
+        g (a, (b, (c, (d, ...)))) = rhs
+
+This is harder to spot on an arg-by-arg basis. Previously mkWwStr was
+given some "fuel" saying how many arguments it could add; when we ran
+out of fuel it would stop w/wing.
+Still not very clever because it had a left-right bias.
 
 ************************************************************************
 *                                                                      *
@@ -708,7 +741,7 @@ every primitive type, so the function is partial.
 mk_absent_let :: DynFlags -> Id -> Maybe (CoreExpr -> CoreExpr)
 mk_absent_let dflags arg
   | not (isUnliftedType arg_ty)
-  = Just (Let (NonRec arg abs_rhs))
+  = Just (Let (NonRec lifted_arg abs_rhs))
   | Just tc <- tyConAppTyCon_maybe arg_ty
   , Just lit <- absentLiteralOf tc
   = Just (Let (NonRec arg (Lit lit)))
@@ -718,10 +751,14 @@ mk_absent_let dflags arg
   = WARN( True, text "No absent value for" <+> ppr arg_ty )
     Nothing
   where
-    arg_ty  = idType arg
-    abs_rhs = mkRuntimeErrorApp aBSENT_ERROR_ID arg_ty msg
-    msg     = showSDoc (gopt_set dflags Opt_SuppressUniques)
-                       (ppr arg <+> ppr (idType arg))
+    arg_ty     = idType arg
+    abs_rhs    = mkRuntimeErrorApp aBSENT_ERROR_ID arg_ty msg
+    lifted_arg = arg `setIdStrictness` exnSig
+              -- Note in strictness signature that this is bottoming
+              -- (for the sake of the "empty case scrutinee not known to
+              -- diverge for sure lint" warning)
+    msg        = showSDoc (gopt_set dflags Opt_SuppressUniques)
+                          (ppr arg <+> ppr (idType arg))
               -- We need to suppress uniques here because otherwise they'd
               -- end up in the generated code as strings. This is bad for
               -- determinism, because with different uniques the strings

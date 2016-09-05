@@ -12,8 +12,9 @@ import Class
 import Type
 import TyCon
 import DataCon
-import BasicTypes
 import DynFlags
+import BasicTypes( DefMethSpec(..) )
+import SrcLoc( SrcSpan, noSrcSpan )
 import Var
 import Name
 import Outputable
@@ -51,9 +52,6 @@ vectTyConDecl tycon name'
              opTys        = drop (length argTys - length opItems) argTys  -- only method types
        ; methods' <- sequence [ vectMethod id meth ty | ((id, meth), ty) <- zip opItems opTys]
 
-           -- keep the original recursiveness flag
-       ; let rec_flag = boolToRecFlag (isRecursiveTyCon tycon)
-
            -- construct the vectorised class (this also creates the class type constructors and its
            -- data constructor)
            --
@@ -68,7 +66,6 @@ vectTyConDecl tycon name'
                      []                         -- no associated types (for the moment)
                      methods'                   -- method info
                      (classMinimalDef cls)      -- Inherit minimal complete definition from cls
-                     rec_flag                   -- whether recursive
 
            -- the original dictionary constructor must map to the vectorised one
        ; let tycon'        = classTyCon cls'
@@ -94,9 +91,8 @@ vectTyConDecl tycon name'
            -- vectorise the data constructor of the class tycon
        ; rhs' <- vectAlgTyConRhs tycon (algTyConRhs tycon)
 
-           -- keep the original recursiveness and GADT flags
-       ; let rec_flag  = boolToRecFlag (isRecursiveTyCon tycon)
-             gadt_flag = isGadtSyntaxTyCon tycon
+           -- keep the original GADT flags
+       ; let gadt_flag = isGadtSyntaxTyCon tycon
 
            -- build the vectorised type constructor
        ; tc_rep_name <- mkDerivedName mkTyConRepOcc name'
@@ -109,7 +105,6 @@ vectTyConDecl tycon name'
                     []                      -- no stupid theta
                     rhs'                    -- new constructor defs
                     (VanillaAlgTyCon tc_rep_name)
-                    rec_flag                -- whether recursive
                     gadt_flag               -- whether in GADT syntax
        }
 
@@ -130,6 +125,13 @@ vectMethod id defMeth ty
 
       ; return  (Var.varName id', ty', defMethSpecOfDefMeth defMeth)
       }
+
+-- | Convert a `DefMethInfo` to a `DefMethSpec`, which discards the name field in
+--   the `DefMeth` constructor of the `DefMeth`.
+defMethSpecOfDefMeth :: DefMethInfo -> Maybe (DefMethSpec (SrcSpan, Type))
+defMethSpecOfDefMeth Nothing = Nothing
+defMethSpecOfDefMeth (Just (_, VanillaDM))    = Just VanillaDM
+defMethSpecOfDefMeth (Just (_, GenericDM ty)) = Just (GenericDM (noSrcSpan, ty))
 
 -- |Vectorise the RHS of an algebraic type.
 --
@@ -152,6 +154,12 @@ vectAlgTyConRhs tc (TupleTyCon { data_con = con })
     -- I'm not certain this is what you want to do for tuples,
     -- but it's the behaviour we had before I refactored the
     -- representation of AlgTyConRhs to add tuples
+
+vectAlgTyConRhs tc (SumTyCon { data_cons = cons })
+  = -- FIXME (osa): I'm pretty sure this is broken.. TupleTyCon case is probably
+    -- also broken when the tuple is unboxed.
+    vectAlgTyConRhs tc (DataTyCon { data_cons = cons
+                                  , is_enum = all (((==) 0) . dataConRepArity) cons })
 
 vectAlgTyConRhs tc (NewTyCon {})
   = do dflags <- getDynFlags

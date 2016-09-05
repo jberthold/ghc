@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP, MagicHash, RecordWildCards #-}
+{-# OPTIONS_GHC -fprof-auto-top #-}
 --
 --  (c) The University of Glasgow 2002-2006
 --
@@ -31,6 +32,7 @@ import Literal
 import PrimOp
 import CoreFVs
 import Type
+import RepType
 import Kind            ( isLiftedTypeKind )
 import DataCon
 import TyCon
@@ -56,6 +58,7 @@ import UniqSupply
 import Module
 import Control.Arrow ( second )
 
+import Control.Exception
 import Data.Array
 import Data.Map (Map)
 import Data.IntMap (IntMap)
@@ -92,10 +95,21 @@ byteCodeGen hsc_env this_mod binds tycs mb_modBreaks
         dumpIfSet_dyn dflags Opt_D_dump_BCOs
            "Proto-BCOs" (vcat (intersperse (char ' ') (map ppr proto_bcos)))
 
-        assembleBCOs hsc_env proto_bcos tycs
+        cbc <- assembleBCOs hsc_env proto_bcos tycs
           (case modBreaks of
              Nothing -> Nothing
              Just mb -> Just mb{ modBreaks_breakInfo = breakInfo })
+
+        -- Squash space leaks in the CompiledByteCode.  This is really
+        -- important, because when loading a set of modules into GHCi
+        -- we don't touch the CompiledByteCode until the end when we
+        -- do linking.  Forcing out the thunks here reduces space
+        -- usage by more than 50% when loading a large number of
+        -- modules.
+        evaluate (seqCompiledByteCode cbc)
+
+        return cbc
+
   where dflags = hsc_dflags hsc_env
 
 -- -----------------------------------------------------------------------------
@@ -303,8 +317,8 @@ collect (_, e) = go [] e
   where
     go xs e | Just e' <- bcView e = go xs e'
     go xs (AnnLam x (_,e))
-      | UbxTupleRep _ <- repType (idType x)
-      = unboxedTupleException
+      | repTypeArgs (idType x) `lengthExceeds` 1
+      = multiValException
       | otherwise
       = go (x:xs) e
     go xs not_lambda = (reverse xs, not_lambda)
@@ -532,8 +546,9 @@ schemeE d s p (AnnCase (_,scrut) _ _ []) = schemeE d s p scrut
         -- no alts: scrut is guaranteed to diverge
 
 schemeE d s p (AnnCase scrut bndr _ [(DataAlt dc, [bind1, bind2], rhs)])
-   | isUnboxedTupleCon dc
-   , UnaryRep rep_ty1 <- repType (idType bind1), UnaryRep rep_ty2 <- repType (idType bind2)
+   | isUnboxedTupleCon dc -- handles pairs with one void argument (e.g. state token)
+   , [rep_ty1] <- repTypeArgs (idType bind1)
+   , [rep_ty2] <- repTypeArgs (idType bind2)
         -- Convert
         --      case .... of x { (# V'd-thing, a #) -> ... }
         -- to
@@ -543,43 +558,25 @@ schemeE d s p (AnnCase scrut bndr _ [(DataAlt dc, [bind1, bind2], rhs)])
         -- Note that it does not matter losing the void-rep thing from the
         -- envt (it won't be bound now) because we never look such things up.
    , Just res <- case () of
-                   _ | VoidRep <- typePrimRep rep_ty1
-                     -> Just $ doCase d s p scrut bind2 [(DEFAULT, [], rhs)] (Just bndr){-unboxed tuple-}
-                     | VoidRep <- typePrimRep rep_ty2
-                     -> Just $ doCase d s p scrut bind1 [(DEFAULT, [], rhs)] (Just bndr){-unboxed tuple-}
+                   _ | isVoidTy rep_ty1 && not (isVoidTy rep_ty2)
+                     -> Just $ doCase d s p scrut bind2 [(DEFAULT, [], rhs)] (Just bndr)
+                     | isVoidTy rep_ty2 && not (isVoidTy rep_ty1)
+                     -> Just $ doCase d s p scrut bind1 [(DEFAULT, [], rhs)] (Just bndr)
                      | otherwise
                      -> Nothing
    = res
 
 schemeE d s p (AnnCase scrut bndr _ [(DataAlt dc, [bind1], rhs)])
-   | isUnboxedTupleCon dc, UnaryRep _ <- repType (idType bind1)
-        -- Similarly, convert
-        --      case .... of x { (# a #) -> ... }
-        -- to
-        --      case .... of a { DEFAULT -> ... }
-   = --trace "automagic mashing of case alts (# a #)"  $
-     doCase d s p scrut bind1 [(DEFAULT, [], rhs)] (Just bndr){-unboxed tuple-}
+   | isUnboxedTupleCon dc
+   , repTypeArgs (idType bndr) `lengthIs` 1 -- handles unit tuples
+   = doCase d s p scrut bind1 [(DEFAULT, [], rhs)] (Just bndr)
 
-schemeE d s p (AnnCase scrut bndr _ [(DEFAULT, [], rhs)])
-   | Just (tc, tys) <- splitTyConApp_maybe (idType bndr)
-   , isUnboxedTupleTyCon tc
-   , Just res <- case tys of
-        [ty]       | UnaryRep _ <- repType ty
-                   , let bind = bndr `setIdType` ty
-                   -> Just $ doCase d s p scrut bind [(DEFAULT, [], rhs)] (Just bndr){-unboxed tuple-}
-        [ty1, ty2] | UnaryRep rep_ty1 <- repType ty1
-                   , UnaryRep rep_ty2 <- repType ty2
-                   -> case () of
-                       _ | VoidRep <- typePrimRep rep_ty1
-                         , let bind2 = bndr `setIdType` ty2
-                         -> Just $ doCase d s p scrut bind2 [(DEFAULT, [], rhs)] (Just bndr){-unboxed tuple-}
-                         | VoidRep <- typePrimRep rep_ty2
-                         , let bind1 = bndr `setIdType` ty1
-                         -> Just $ doCase d s p scrut bind1 [(DEFAULT, [], rhs)] (Just bndr){-unboxed tuple-}
-                         | otherwise
-                         -> Nothing
-        _ -> Nothing
-   = res
+schemeE d s p (AnnCase scrut bndr _ alt@[(DEFAULT, [], _)])
+   | isUnboxedTupleType (idType bndr)
+   , [ty] <- repTypeArgs (idType bndr)
+       -- handles any pattern with a single non-void binder; in particular I/O
+       -- monad returns (# RealWorld#, a #)
+   = doCase d s p scrut (bndr `setIdType` ty) alt (Just bndr)
 
 schemeE d s p (AnnCase scrut bndr _ alts)
    = doCase d s p scrut bndr alts Nothing{-not an unboxed tuple-}
@@ -647,14 +644,14 @@ schemeT d s p app
 
 
    -- Case 2: Constructor application
-   | Just con <- maybe_saturated_dcon,
-     isUnboxedTupleCon con
+   | Just con <- maybe_saturated_dcon
+   , isUnboxedTupleCon con
    = case args_r_to_l of
         [arg1,arg2] | isVAtom arg1 ->
                   unboxedTupleReturn d s p arg2
         [arg1,arg2] | isVAtom arg2 ->
                   unboxedTupleReturn d s p arg1
-        _other -> unboxedTupleException
+        _other -> multiValException
 
    -- Case 3: Ordinary data constructor
    | Just con <- maybe_saturated_dcon
@@ -792,8 +789,8 @@ doCase  :: Word -> Sequel -> BCEnv
         -> Maybe Id  -- Just x <=> is an unboxed tuple case with scrut binder, don't enter the result
         -> BcM BCInstrList
 doCase d s p (_,scrut) bndr alts is_unboxed_tuple
-  | UbxTupleRep _ <- repType (idType bndr)
-  = unboxedTupleException
+  | repTypeArgs (idType bndr) `lengthExceeds` 1
+  = multiValException
   | otherwise
   = do
      dflags <- getDynFlags
@@ -848,8 +845,6 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
            | null real_bndrs = do
                 rhs_code <- schemeE d_alts s p_alts rhs
                 return (my_discr alt, rhs_code)
-           | any (\bndr -> case repType (idType bndr) of UbxTupleRep _ -> True; _ -> False) bndrs
-           = unboxedTupleException
            -- algebraic alt with some binders
            | otherwise =
              let
@@ -872,8 +867,8 @@ doCase d s p (_,scrut) bndr alts is_unboxed_tuple
 
         my_discr (DEFAULT, _, _) = NoDiscr {-shouldn't really happen-}
         my_discr (DataAlt dc, _, _)
-           | isUnboxedTupleCon dc
-           = unboxedTupleException
+           | isUnboxedTupleCon dc || isUnboxedSumCon dc
+           = multiValException
            | otherwise
            = DiscrP (fromIntegral (dataConTag dc - fIRST_TAG))
         my_discr (LitAlt l, _, _)
@@ -971,7 +966,7 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
 
          pargs _ [] = return []
          pargs d (a:az)
-            = let UnaryRep arg_ty = repType (exprType (deAnnotate' a))
+            = let [arg_ty] = repTypeArgs (exprType (deAnnotate' a))
 
               in case tyConAppTyCon_maybe arg_ty of
                     -- Don't push the FO; instead push the Addr# it
@@ -1104,10 +1099,9 @@ generateCCall d0 s p (CCallSpec target cconv safety) fn args_r_to_l
          -- this is a V (tag).
          r_sizeW   = fromIntegral (primRepSizeW dflags r_rep)
          d_after_r = d_after_Addr + fromIntegral r_sizeW
-         r_lit     = mkDummyLiteral r_rep
          push_r    = (if   returns_void
                       then nilOL
-                      else unitOL (PUSH_UBX r_lit r_sizeW))
+                      else unitOL (PUSH_UBX (mkDummyLiteral r_rep) r_sizeW))
 
          -- generate the marshalling code we're going to call
 
@@ -1176,7 +1170,7 @@ mkDummyLiteral pr
         FloatRep  -> MachFloat 0
         Int64Rep  -> MachInt64 0
         Word64Rep -> MachWord64 0
-        _         -> panic "mkDummyLiteral"
+        _         -> pprPanic "mkDummyLiteral" (ppr pr)
 
 
 -- Convert (eg)
@@ -1195,27 +1189,26 @@ mkDummyLiteral pr
 
 maybe_getCCallReturnRep :: Type -> Maybe PrimRep
 maybe_getCCallReturnRep fn_ty
-   = let (_a_tys, r_ty) = splitFunTys (dropForAlls fn_ty)
-         maybe_r_rep_to_go
-            = if isSingleton r_reps then Nothing else Just (r_reps !! 1)
-         r_reps = case repType r_ty of
-                      UbxTupleRep reps -> map typePrimRep reps
-                      UnaryRep _       -> blargh
-         ok = ( ( r_reps `lengthIs` 2 && VoidRep == head r_reps)
-                || r_reps == [VoidRep] )
-              && case maybe_r_rep_to_go of
-                    Nothing    -> True
-                    Just r_rep -> r_rep /= PtrRep
-                                  -- if it was, it would be impossible
-                                  -- to create a valid return value
-                                  -- placeholder on the stack
+   = let
+       (_a_tys, r_ty) = splitFunTys (dropForAlls fn_ty)
+       r_reps = repTypeArgs r_ty
 
-         blargh :: a -- Used at more than one type
-         blargh = pprPanic "maybe_getCCallReturn: can't handle:"
-                           (pprType fn_ty)
+       blargh :: a -- Used at more than one type
+       blargh = pprPanic "maybe_getCCallReturn: can't handle:"
+                         (pprType fn_ty)
      in
-     --trace (showSDoc (ppr (a_reps, r_reps))) $
-     if ok then maybe_r_rep_to_go else blargh
+       case r_reps of
+         [] -> panic "empty repTypeArgs"
+         [ty]
+           | typePrimRep ty == PtrRep
+            -> blargh
+           | isVoidTy ty
+            -> Nothing
+           | otherwise
+            -> Just (typePrimRep ty)
+                 -- if it was, it would be impossible to create a
+                 -- valid return value placeholder on the stack
+         _  -> blargh
 
 maybe_is_tagToEnum_call :: AnnExpr' Id DVarSet -> Maybe (AnnExpr' Id DVarSet, [Name])
 -- Detect and extract relevant info for the tagToEnum kludge.
@@ -1227,14 +1220,14 @@ maybe_is_tagToEnum_call app
   = Nothing
   where
     extract_constr_Names ty
-           | UnaryRep rep_ty <- repType ty
-           , Just tyc <- tyConAppTyCon_maybe rep_ty,
-             isDataTyCon tyc
-             = map (getName . dataConWorkId) (tyConDataCons tyc)
-             -- NOTE: use the worker name, not the source name of
-             -- the DataCon.  See DataCon.hs for details.
+           | [rep_ty] <- repTypeArgs ty
+           , Just tyc <- tyConAppTyCon_maybe rep_ty
+           , isDataTyCon tyc
+           = map (getName . dataConWorkId) (tyConDataCons tyc)
+           -- NOTE: use the worker name, not the source name of
+           -- the DataCon.  See DataCon.hs for details.
            | otherwise
-             = pprPanic "maybe_is_tagToEnum_call.extract_constr_Ids" (ppr ty)
+           = pprPanic "maybe_is_tagToEnum_call.extract_constr_Ids" (ppr ty)
 
 {- -----------------------------------------------------------------------------
 Note [Implementing tagToEnum#]
@@ -1327,8 +1320,14 @@ pushAtom d p e
 pushAtom _ _ (AnnCoercion {})   -- Coercions are zero-width things,
    = return (nilOL, 0)          -- treated just like a variable V
 
+-- See Note [Empty case alternatives] in coreSyn/CoreSyn.hs
+-- and Note [Bottoming expressions] in coreSyn/CoreUtils.hs:
+-- The scrutinee of an empty case evaluates to bottom
+pushAtom d p (AnnCase (_, a) _ _ []) -- trac #12128
+   = pushAtom d p a
+
 pushAtom d p (AnnVar v)
-   | UnaryRep rep_ty <- repType (idType v)
+   | [rep_ty] <- repTypeArgs (idType v)
    , V <- typeArgRep rep_ty
    = return (nilOL, 0)
 
@@ -1388,7 +1387,7 @@ pushAtom _ _ (AnnLit lit) = do
 
 pushAtom _ _ expr
    = pprPanic "ByteCodeGen.pushAtom"
-              (pprCoreExpr (deAnnotate (undefined, expr)))
+              (pprCoreExpr (deAnnotate' expr))
 
 
 -- -----------------------------------------------------------------------------
@@ -1550,18 +1549,14 @@ isVoidArg V = True
 isVoidArg _ = False
 
 bcIdUnaryType :: Id -> UnaryType
-bcIdUnaryType x = case repType (idType x) of
-    UnaryRep rep_ty -> rep_ty
-    UbxTupleRep [rep_ty] -> rep_ty
-    UbxTupleRep [rep_ty1, rep_ty2]
-      | VoidRep <- typePrimRep rep_ty1 -> rep_ty2
-      | VoidRep <- typePrimRep rep_ty2 -> rep_ty1
+bcIdUnaryType x = case repTypeArgs (idType x) of
+    [rep_ty] -> rep_ty
     _ -> pprPanic "bcIdUnaryType" (ppr x $$ ppr (idType x))
 
 -- See bug #1257
-unboxedTupleException :: a
-unboxedTupleException = throwGhcException (ProgramError
-  ("Error: bytecode compiler can't handle unboxed tuples.\n"++
+multiValException :: a
+multiValException = throwGhcException (ProgramError
+  ("Error: bytecode compiler can't handle unboxed tuples and sums.\n"++
    "  Possibly due to foreign import/export decls in source.\n"++
    "  Workaround: use -fobject-code, or compile this module to .o separately."))
 
@@ -1627,8 +1622,13 @@ atomPrimRep :: AnnExpr' Id ann -> PrimRep
 atomPrimRep e | Just e' <- bcView e = atomPrimRep e'
 atomPrimRep (AnnVar v)              = bcIdPrimRep v
 atomPrimRep (AnnLit l)              = typePrimRep (literalType l)
+
+-- Trac #12128:
+-- A case expresssion can be an atom because empty cases evaluate to bottom.
+-- See Note [Empty case alternatives] in coreSyn/CoreSyn.hs
+atomPrimRep (AnnCase _ _ ty _)      = ASSERT(typePrimRep ty == PtrRep) PtrRep
 atomPrimRep (AnnCoercion {})        = VoidRep
-atomPrimRep other = pprPanic "atomPrimRep" (ppr (deAnnotate (undefined,other)))
+atomPrimRep other = pprPanic "atomPrimRep" (ppr (deAnnotate' other))
 
 atomRep :: AnnExpr' Id ann -> ArgRep
 atomRep e = toArgRep (atomPrimRep e)

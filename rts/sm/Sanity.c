@@ -28,6 +28,7 @@
 #include "Printer.h"
 #include "Arena.h"
 #include "RetainerProfile.h"
+#include "CNF.h"
 
 /* -----------------------------------------------------------------------------
    Forward decls.
@@ -429,7 +430,7 @@ checkClosure( const StgClosure* p )
       }
 
     default:
-            barf("checkClosure (closure type %d)", info->type);
+        barf("checkClosure (closure type %d)", info->type);
     }
 }
 
@@ -487,6 +488,37 @@ checkLargeObjects(bdescr *bd)
     }
     bd = bd->link;
   }
+}
+
+static void
+checkCompactObjects(bdescr *bd)
+{
+    // Compact objects are similar to large objects,
+    // but they have a StgCompactNFDataBlock at the beginning,
+    // before the actual closure
+
+    for ( ; bd != NULL; bd = bd->link) {
+        StgCompactNFDataBlock *block, *last;
+        StgCompactNFData *str;
+        StgWord totalW;
+
+        ASSERT (bd->flags & BF_COMPACT);
+
+        block = (StgCompactNFDataBlock*)bd->start;
+        str = block->owner;
+        ASSERT ((W_)str == (W_)block + sizeof(StgCompactNFDataBlock));
+
+        totalW = 0;
+        for ( ; block ; block = block->next) {
+            last = block;
+            ASSERT (block->owner == str);
+
+            totalW += Bdescr((P_)block)->blocks * BLOCK_SIZE_W;
+        }
+
+        ASSERT (str->totalW == totalW);
+        ASSERT (str->last == last);
+    }
 }
 
 static void
@@ -720,6 +752,7 @@ static void checkGeneration (generation *gen,
     }
 
     checkLargeObjects(gen->large_objects);
+    checkCompactObjects(gen->compact_objects);
 }
 
 /* Full heap sanity check. */
@@ -749,6 +782,14 @@ void checkSanity (rtsBool after_gc, rtsBool major_gc)
     }
 }
 
+static void
+markCompactBlocks(bdescr *bd)
+{
+    for (; bd != NULL; bd = bd->link) {
+        compactMarkKnown(((StgCompactNFDataBlock*)bd->start)->owner);
+    }
+}
+
 // If memInventory() calculates that we have a memory leak, this
 // function will try to find the block(s) that are leaking by marking
 // all the ones that we know about, and search through memory to find
@@ -769,6 +810,7 @@ findMemoryLeak (void)
         }
         markBlocks(generations[g].blocks);
         markBlocks(generations[g].large_objects);
+        markCompactBlocks(generations[g].compact_objects);
     }
 
     for (i = 0; i < n_nurseries; i++) {
@@ -802,12 +844,14 @@ checkRunQueue(Capability *cap)
 {
     StgTSO *prev, *tso;
     prev = END_TSO_QUEUE;
-    for (tso = cap->run_queue_hd; tso != END_TSO_QUEUE;
-         prev = tso, tso = tso->_link) {
+    uint32_t n;
+    for (n = 0, tso = cap->run_queue_hd; tso != END_TSO_QUEUE;
+         prev = tso, tso = tso->_link, n++) {
         ASSERT(prev == END_TSO_QUEUE || prev->_link == tso);
         ASSERT(tso->block_info.prev == prev);
     }
     ASSERT(cap->run_queue_tl == prev);
+    ASSERT(cap->n_run_queue == n);
 }
 
 /* -----------------------------------------------------------------------------
@@ -838,8 +882,11 @@ genBlocks (generation *gen)
 {
     ASSERT(countBlocks(gen->blocks) == gen->n_blocks);
     ASSERT(countBlocks(gen->large_objects) == gen->n_large_blocks);
+    ASSERT(countCompactBlocks(gen->compact_objects) == gen->n_compact_blocks);
+    ASSERT(countCompactBlocks(gen->compact_blocks_in_import) == gen->n_compact_blocks_in_import);
     return gen->n_blocks + gen->n_old_blocks +
-            countAllocdBlocks(gen->large_objects);
+        countAllocdBlocks(gen->large_objects) +
+        gen->n_compact_blocks + gen->n_compact_blocks_in_import;
 }
 
 void

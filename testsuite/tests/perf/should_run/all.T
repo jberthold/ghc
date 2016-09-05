@@ -69,7 +69,7 @@ test('lazy-bs-alloc',
             # 2016-04-06: 429760 (x86/Linux) no idea what happened
       only_ways(['normal']),
       extra_run_opts('arith011.stdout'),
-      ignore_output,
+      ignore_stdout,
 
       # Use `+RTS -G1` for more stable residency measurements. Note [residency].
       # Only 64-bit as we don't have a good 32-bit test environment at the moment
@@ -116,8 +116,9 @@ test('T3736',
      ['$MAKE -s --no-print-directory T3736'])
 test('T3738',
      [extra_clean(['T3738a.hi', 'T3738a.o']),
-      stats_num_field('peak_megabytes_allocated', (1, 0)),
-                                 # expected value: 1 (amd64/Linux)
+      stats_num_field('peak_megabytes_allocated', (2, 0)),
+                    # expected value: 1 (amd64/Linux)
+                    # 2016-08-31:     2 (allocation area size bumped to 1MB)
       stats_num_field('bytes allocated',
                       [(wordsize(32), 45648, 5),
                     # expected value: 50520 (x86/Linux)
@@ -132,8 +133,9 @@ test('T3738',
      ['-O'])
 
 test('MethSharing',
-     [stats_num_field('peak_megabytes_allocated', (1, 0)),
-                                 # expected value: 1 (amd64/Linux)
+     [stats_num_field('peak_megabytes_allocated', (2, 0)),
+                    # expected value: 1 (amd64/Linux)
+                    # 2016-08-31:     2 (allocation area size bumped to 1MB)
       stats_num_field('bytes allocated',
                       [(wordsize(32), 360940756, 5),
                     # expected value: 2685858140 (x86/OS X)
@@ -265,7 +267,7 @@ test('T5536',
                    # 17/1/13:         892399040 (x86_64/Linux)
                    #                  (new demand analyser)
      extra_clean(['T5536.data']),
-     ignore_output,
+     ignore_stdout,
      only_ways(['normal'])
      ],
     compile_and_run,

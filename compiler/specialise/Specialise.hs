@@ -748,6 +748,7 @@ wantSpecImport :: DynFlags -> Unfolding -> Bool
 wantSpecImport dflags unf
  = case unf of
      NoUnfolding      -> False
+     BootUnfolding    -> False
      OtherCon {}      -> False
      DFunUnfolding {} -> True
      CoreUnfolding { uf_src = src, uf_guidance = _guidance }
@@ -2307,12 +2308,12 @@ is used:
 
 Now give it to the simplifier and the _Lifting will be optimised away.
 
-The benfit is that we have given the specialised "unboxed" values a
-very simplep lifted semantics and then leave it up to the simplifier to
+The benefit is that we have given the specialised "unboxed" values a
+very simple lifted semantics and then leave it up to the simplifier to
 optimise it --- knowing that the overheads will be removed in nearly
 all cases.
 
-In particular, the value will only be evaluted in the branches of the
+In particular, the value will only be evaluated in the branches of the
 program which use it, rather than being forced at the point where the
 value is bound. For example:
 

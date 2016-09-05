@@ -91,9 +91,9 @@ tcInferPatSynDecl PSB{ psb_id = lname@(L _ name), psb_args = details,
 
        ; traceTc "tcInferPatSynDecl }" $ ppr name
        ; tc_patsyn_finish lname dir is_infix lpat'
-                          (mkTyVarBinders Invisible univ_tvs
+                          (mkTyVarBinders Inferred univ_tvs
                             , req_theta,  ev_binds, req_dicts)
-                          (mkTyVarBinders Invisible ex_tvs
+                          (mkTyVarBinders Inferred ex_tvs
                             , mkTyVarTys ex_tvs, prov_theta, map EvId prov_dicts)
                           (map nlHsVar args, map idType args)
                           pat_ty rec_fields }
@@ -176,8 +176,10 @@ tcCheckPatSynDecl psb@PSB{ psb_id = lname@(L _ name), psb_args = details
 
        -- Solve the constraints now, because we are about to make a PatSyn,
        -- which should not contain unification variables and the like (Trac #10997)
+       ; empty_binds <- simplifyTop (mkImplicWC implics)
+
        -- Since all the inputs are implications the returned bindings will be empty
-       ; _ <- simplifyTop (mkImplicWC implics)
+       ; MASSERT2( isEmptyBag empty_binds, ppr empty_binds )
 
        -- ToDo: in the bidirectional case, check that the ex_tvs' are all distinct
        -- Otherwise we may get a type error when typechecking the builder,
@@ -396,7 +398,7 @@ tcPatSynMatcher (L loc name) lpat
              (cont_args, cont_arg_tys)
                | is_unlifted = ([nlHsVar voidPrimId], [voidPrimTy])
                | otherwise   = (args,                 arg_tys)
-             cont_ty = mkInvSigmaTy ex_tvs prov_theta $
+             cont_ty = mkInfSigmaTy ex_tvs prov_theta $
                        mkFunTys cont_arg_tys res_ty
 
              fail_ty  = mkFunTy voidPrimTy res_ty
@@ -407,7 +409,7 @@ tcPatSynMatcher (L loc name) lpat
        ; fail         <- newSysLocalId (fsLit "fail")  fail_ty
 
        ; let matcher_tau   = mkFunTys [pat_ty, cont_ty, fail_ty] res_ty
-             matcher_sigma = mkInvSigmaTy (rr_tv:res_tv:univ_tvs) req_theta matcher_tau
+             matcher_sigma = mkInfSigmaTy (rr_tv:res_tv:univ_tvs) req_theta matcher_tau
              matcher_id    = mkExportedVanillaId matcher_name matcher_sigma
                              -- See Note [Exported LocalIds] in Id
 
@@ -649,6 +651,9 @@ tcPatToExpr args pat = go pat
     go1 (TuplePat pats box _)       = do { exprs <- mapM go pats
                                          ; return $ ExplicitTuple
                                               (map (noLoc . Present) exprs) box }
+    go1 (SumPat pat alt arity _)    = do { expr <- go1 (unLoc pat)
+                                         ; return $ ExplicitSum alt arity (noLoc expr) PlaceHolder
+                                         }
     go1 (LitPat lit)                = return $ HsLit lit
     go1 (NPat (L _ n) mb_neg _ _)
         | Just neg <- mb_neg        = return $ unLoc $ nlHsSyntaxApps neg [noLoc (HsOverLit n)]
@@ -755,6 +760,7 @@ tcCheckPatSynPat = go
     go1   (PArrPat pats _)    = mapM_ go pats
     go1   (ListPat pats _ _)  = mapM_ go pats
     go1   (TuplePat pats _ _) = mapM_ go pats
+    go1   (SumPat pat _ _ _)  = go pat
     go1   LitPat{}            = return ()
     go1   NPat{}              = return ()
     go1   (SigPatIn pat _)    = go pat
@@ -813,6 +819,7 @@ tcCollectEx pat = let (fv, evs) = go pat in (fvVarListVarSet fv, evs)
     go1 (BangPat p)         = go p
     go1 (ListPat ps _ _)    = mergeMany . map go $ ps
     go1 (TuplePat ps _ _)   = mergeMany . map go $ ps
+    go1 (SumPat p _ _ _)    = go p
     go1 (PArrPat ps _)      = mergeMany . map go $ ps
     go1 (ViewPat _ p _)     = go p
     go1 con@ConPatOut{}     = merge (FV.mkFVs (pat_tvs con), pat_dicts con) $

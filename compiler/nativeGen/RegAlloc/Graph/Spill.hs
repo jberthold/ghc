@@ -24,10 +24,8 @@ import Platform
 
 import Data.List
 import Data.Maybe
-import Data.Map                 (Map)
-import Data.Set                 (Set)
-import qualified Data.Map       as Map
-import qualified Data.Set       as Set
+import Data.IntSet              (IntSet)
+import qualified Data.IntSet    as IntSet
 
 
 -- | Spill all these virtual regs to stack slots.
@@ -62,9 +60,12 @@ regSpill platform code slotsFree regs
         | otherwise
         = do
                 -- Allocate a slot for each of the spilled regs.
-                let slots       = take (sizeUniqSet regs) $ uniqSetToList slotsFree
+                let slots       = take (sizeUniqSet regs) $ nonDetEltsUFM slotsFree
                 let regSlotMap  = listToUFM
-                                $ zip (uniqSetToList regs) slots
+                                $ zip (nonDetEltsUFM regs) slots
+                    -- This is non-deterministic but we do not
+                    -- currently support deterministic code-generation.
+                    -- See Note [Unique Determinism and code generation]
 
                 -- Grab the unique supply from the monad.
                 us      <- getUniqueSupplyM
@@ -107,7 +108,7 @@ regSpill_top platform regSlotMap cmm
                 -- number to the liveSlotsOnEntry set. The spill cleaner needs
                 -- this information to erase unneeded spill and reload instructions
                 -- after we've done a successful allocation.
-                let liveSlotsOnEntry' :: Map BlockId (Set Int)
+                let liveSlotsOnEntry' :: BlockMap IntSet
                     liveSlotsOnEntry'
                         = mapFoldWithKey patchLiveSlot
                                          liveSlotsOnEntry liveVRegsOnEntry
@@ -128,22 +129,23 @@ regSpill_top platform regSlotMap cmm
         -- in the given slotmap.
         patchLiveSlot
                 :: BlockId -> RegSet
-                -> Map BlockId (Set Int) -> Map BlockId (Set Int)
+                -> BlockMap IntSet -> BlockMap IntSet
 
         patchLiveSlot blockId regsLive slotMap
          = let
                 -- Slots that are already recorded as being live.
-                curSlotsLive    = fromMaybe Set.empty
-                                $ Map.lookup blockId slotMap
+                curSlotsLive    = fromMaybe IntSet.empty
+                                $ lookupBlockMap blockId slotMap
 
-                moreSlotsLive   = Set.fromList
+                moreSlotsLive   = IntSet.fromList
                                 $ catMaybes
                                 $ map (lookupUFM regSlotMap)
-                                $ uniqSetToList regsLive
+                                $ nonDetEltsUFM regsLive
+                    -- See Note [Unique Determinism and code generation]
 
                 slotMap'
-                 = Map.insert blockId (Set.union curSlotsLive moreSlotsLive)
-                              slotMap
+                 = insertBlockMap blockId (IntSet.union curSlotsLive moreSlotsLive)
+                                  slotMap
 
            in   slotMap'
 
@@ -372,6 +374,5 @@ makeSpillStats s
 
 instance Outputable SpillStats where
  ppr stats
-        = (vcat $ map (\(r, s, l) -> ppr r <+> int s <+> int l)
-                        $ eltsUFM (spillStoreLoad stats))
-
+        = pprUFM (spillStoreLoad stats)
+                 (vcat . map (\(r, s, l) -> ppr r <+> int s <+> int l))

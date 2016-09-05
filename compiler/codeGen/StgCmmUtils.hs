@@ -38,7 +38,7 @@ module StgCmmUtils (
         addToMem, addToMemE, addToMemLblE, addToMemLbl,
         mkWordCLit,
         newStringCLit, newByteStringCLit,
-        blankWord
+        blankWord,
   ) where
 
 #include "HsVersions.h"
@@ -67,6 +67,7 @@ import UniqSupply (MonadUnique(..))
 import DynFlags
 import FastString
 import Outputable
+import RepType
 
 import qualified Data.ByteString as BS
 import qualified Data.Map as M
@@ -251,7 +252,7 @@ callerSaveVolatileRegs dflags = (caller_save, caller_load)
 
     callerRestoreGlobalReg reg
         = mkAssign (CmmGlobal reg)
-                    (CmmLoad (get_GlobalReg_addr dflags reg) (globalRegType dflags reg))
+                   (CmmLoad (get_GlobalReg_addr dflags reg) (globalRegType dflags reg))
 
 -- -----------------------------------------------------------------------------
 -- Global registers
@@ -361,15 +362,11 @@ newUnboxedTupleRegs res_ty
         ; sequel <- getSequel
         ; regs <- choose_regs dflags sequel
         ; ASSERT( regs `equalLength` reps )
-          return (regs, map primRepForeignHint reps) }
+          return (regs, map slotForeignHint reps) }
   where
-    UbxTupleRep ty_args = repType res_ty
-    reps = [ rep
-           | ty <- ty_args
-           , let rep = typePrimRep ty
-           , not (isVoidRep rep) ]
+    MultiRep reps = repType res_ty
     choose_regs _ (AssignTo regs _) = return regs
-    choose_regs dflags _            = mapM (newTemp . primRepCmmType dflags) reps
+    choose_regs dflags _            = mapM (newTemp . slotCmmType dflags) reps
 
 
 

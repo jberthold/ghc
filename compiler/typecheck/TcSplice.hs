@@ -29,7 +29,7 @@ module TcSplice(
      -- called only in stage2 (ie GHCI is on)
      runMetaE, runMetaP, runMetaT, runMetaD, runQuasi,
      tcTopSpliceExpr, lookupThName_maybe,
-     defaultRunMeta, runMeta',
+     defaultRunMeta, runMeta', runRemoteModFinalizers,
      finishTH
 #endif
       ) where
@@ -446,11 +446,27 @@ tcSpliceExpr splice@(HsTypedSplice name expr) res_ty
     setSrcSpan (getLoc expr)    $ do
     { stage <- getStage
     ; case stage of
-        Splice {}            -> tcTopSplice expr res_ty
-        Comp                 -> tcTopSplice expr res_ty
-        Brack pop_stage pend -> tcNestedSplice pop_stage pend name expr res_ty }
+          Splice {}            -> tcTopSplice expr res_ty
+          Brack pop_stage pend -> tcNestedSplice pop_stage pend name expr res_ty
+          RunSplice _          ->
+            -- See Note [RunSplice ThLevel] in "TcRnTypes".
+            pprPanic ("tcSpliceExpr: attempted to typecheck a splice when " ++
+                      "running another splice") (ppr splice)
+          Comp                 -> tcTopSplice expr res_ty
+    }
 tcSpliceExpr splice _
   = pprPanic "tcSpliceExpr" (ppr splice)
+
+{- Note [Collecting modFinalizers in typed splices]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+'qAddModFinalizer' of the @Quasi TcM@ instance adds finalizers in the local
+environment (see Note [Delaying modFinalizers in untyped splices] in
+"RnSplice"). Thus after executing the splice, we move the finalizers to the
+finalizer list in the global environment and set them to use the current local
+environment (with 'addModFinalizersWithLclEnv').
+
+-}
 
 tcNestedSplice :: ThStage -> PendingStuff -> Name
                 -> LHsExpr Name -> ExpRhoType -> TcM (HsExpr Id)
@@ -482,8 +498,13 @@ tcTopSplice expr res_ty
        ; zonked_q_expr <- tcTopSpliceExpr Typed $
                           tcMonoExpr expr (mkCheckExpType meta_exp_ty)
 
+         -- See Note [Collecting modFinalizers in typed splices].
+       ; modfinalizers_ref <- newTcRef []
          -- Run the expression
-       ; expr2 <- runMetaE zonked_q_expr
+       ; expr2 <- setStage (RunSplice modfinalizers_ref) $
+                    runMetaE zonked_q_expr
+       ; mod_finalizers <- readTcRef modfinalizers_ref
+       ; addModFinalizersWithLclEnv $ ThModFinalizers mod_finalizers
        ; traceSplice (SpliceInfo { spliceDescription = "expression"
                                  , spliceIsDecl      = False
                                  , spliceSource      = Just expr
@@ -617,6 +638,29 @@ seqSerialized (Serialized the_type bytes) = the_type `seq` bytes `seqList` ()
 
 runQuasi :: TH.Q a -> TcM a
 runQuasi act = TH.runQ act
+
+runRemoteModFinalizers :: ThModFinalizers -> TcM ()
+runRemoteModFinalizers (ThModFinalizers finRefs) = do
+  dflags <- getDynFlags
+  let withForeignRefs [] f = f []
+      withForeignRefs (x : xs) f = withForeignRef x $ \r ->
+        withForeignRefs xs $ \rs -> f (r : rs)
+  if gopt Opt_ExternalInterpreter dflags then do
+    hsc_env <- env_top <$> getEnv
+    withIServ hsc_env $ \i -> do
+      tcg <- getGblEnv
+      th_state <- readTcRef (tcg_th_remote_state tcg)
+      case th_state of
+        Nothing -> return () -- TH was not started, nothing to do
+        Just fhv -> do
+          liftIO $ withForeignRef fhv $ \st ->
+            withForeignRefs finRefs $ \qrefs ->
+              writeIServ i (putMessage (RunModFinalizers st qrefs))
+          () <- runRemoteTH i []
+          readQResult i
+  else do
+    qs <- liftIO (withForeignRefs finRefs $ mapM localRef)
+    runQuasi $ sequence_ qs
 
 runQResult
   :: (a -> String)
@@ -884,8 +928,9 @@ instance TH.Quasi TcM where
              2 (text "Probable cause: you used mkName instead of newName to generate a binding.")
 
   qAddModFinalizer fin = do
-      th_modfinalizers_var <- fmap tcg_th_modfinalizers getGblEnv
-      updTcRef th_modfinalizers_var (\fins -> fin:fins)
+      r <- liftIO $ mkRemoteRef fin
+      fref <- liftIO $ mkForeignRef r (freeRemoteRef r)
+      addModFinalizerRef fref
 
   qGetQ :: forall a. Typeable a => TcM (Maybe a)
   qGetQ = do
@@ -904,30 +949,26 @@ instance TH.Quasi TcM where
     dflags <- hsc_dflags <$> getTopEnv
     return $ map toEnum $ IntSet.elems $ extensionFlags dflags
 
+-- | Adds a mod finalizer reference to the local environment.
+addModFinalizerRef :: ForeignRef (TH.Q ()) -> TcM ()
+addModFinalizerRef finRef = do
+    th_stage <- getStage
+    case th_stage of
+      RunSplice th_modfinalizers_var -> updTcRef th_modfinalizers_var (finRef :)
+      -- This case happens only if a splice is executed and the caller does
+      -- not set the 'ThStage' to 'RunSplice' to collect finalizers.
+      -- See Note [Delaying modFinalizers in untyped splices] in RnSplice.
+      _ ->
+        pprPanic "addModFinalizer was called when no finalizers were collected"
+                 (ppr th_stage)
 
--- | Run all module finalizers
+-- | Releases the external interpreter state.
 finishTH :: TcM ()
 finishTH = do
-  hsc_env <- env_top <$> getEnv
   dflags <- getDynFlags
-  if not (gopt Opt_ExternalInterpreter dflags)
-    then do
-      tcg <- getGblEnv
-      let th_modfinalizers_var = tcg_th_modfinalizers tcg
-      modfinalizers <- readTcRef th_modfinalizers_var
-      writeTcRef th_modfinalizers_var []
-      mapM_ runQuasi modfinalizers
-    else withIServ hsc_env $ \i -> do
-      tcg <- getGblEnv
-      th_state <- readTcRef (tcg_th_remote_state tcg)
-      case th_state of
-        Nothing -> return () -- TH was not started, nothing to do
-        Just fhv -> do
-          liftIO $ withForeignRef fhv $ \rhv ->
-            writeIServ i (putMessage (FinishTH rhv))
-          () <- runRemoteTH i []
-          () <- readQResult i
-          writeTcRef (tcg_th_remote_state tcg) Nothing
+  when (gopt Opt_ExternalInterpreter dflags) $ do
+    tcg <- getGblEnv
+    writeTcRef (tcg_th_remote_state tcg) Nothing
 
 runTHExp :: ForeignHValue -> TcM TH.Exp
 runTHExp = runTH THExp
@@ -1073,6 +1114,9 @@ handleTHMessage msg = case msg of
   ReifyModule m -> wrapTHResult $ TH.qReifyModule m
   ReifyConStrictness nm -> wrapTHResult $ TH.qReifyConStrictness nm
   AddDependentFile f -> wrapTHResult $ TH.qAddDependentFile f
+  AddModFinalizer r -> do
+    hsc_env <- env_top <$> getEnv
+    wrapTHResult $ liftIO (mkFinalizedHValue hsc_env r) >>= addModFinalizerRef
   AddTopDecls decs -> wrapTHResult $ TH.qAddTopDecls decs
   IsExtEnabled ext -> wrapTHResult $ TH.qIsExtEnabled ext
   ExtsEnabled -> wrapTHResult $ TH.qExtsEnabled
@@ -1214,7 +1258,7 @@ lookupThName_maybe th_name
         ; return (listToMaybe names) }
   where
     lookup rdr_name
-        = do {  -- Repeat much of lookupOccRn, becase we want
+        = do {  -- Repeat much of lookupOccRn, because we want
                 -- to report errors in a TH-relevant way
              ; rdr_env <- getLocalRdrEnv
              ; case lookupLocalRdrEnv rdr_env rdr_name of
@@ -1771,7 +1815,10 @@ reify_tc_app tc tys
     tc_binders  = tyConBinders tc
     tc_res_kind = tyConResKind tc
 
-    r_tc | isTupleTyCon tc                = if isPromotedDataCon tc
+    r_tc | isUnboxedSumTyCon tc           = TH.UnboxedSumT (arity `div` 2)
+         | isUnboxedTupleTyCon tc         = TH.UnboxedTupleT (arity `div` 2)
+             -- See Note [Unboxed tuple RuntimeRep vars] in TyCon
+         | isTupleTyCon tc                = if isPromotedDataCon tc
                                             then TH.PromotedTupleT arity
                                             else TH.TupleT arity
          | tc `hasKey` listTyConKey       = TH.ListT

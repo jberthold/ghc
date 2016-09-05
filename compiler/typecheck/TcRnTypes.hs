@@ -142,7 +142,7 @@ import Coercion ( Coercion, mkHoleCo )
 import ConLike  ( ConLike(..) )
 import DataCon  ( DataCon, dataConUserType, dataConOrigArgTys )
 import PatSyn   ( PatSyn, pprPatSynType )
-import Id       ( idType )
+import Id       ( idType, idName )
 import FieldLabel ( FieldLabel )
 import TcType
 import Annotations
@@ -262,6 +262,7 @@ data IfGblEnv
         -- was originally a hi-boot file.
         -- We need the module name so we can test when it's appropriate
         -- to look in this env.
+        -- See Note [Tying the knot] in TcIface
         if_rec_types :: Maybe (Module, IfG TypeEnv)
                 -- Allows a read effect, so it can be in a mutable
                 -- variable; c.f. handling the external package type env
@@ -274,6 +275,11 @@ data IfLclEnv
         -- So if we see   f = \x -> x
         -- it means M.f = \x -> x, where M is the if_mod
         if_mod :: Module,
+
+        -- Whether or not the IfaceDecl came from a boot
+        -- file or not; we'll use this to choose between
+        -- NoUnfolding and BootUnfolding
+        if_boot :: Bool,
 
         -- The field is used only for error reporting
         -- if (say) there's a Lint error in it
@@ -502,8 +508,11 @@ data TcGblEnv
         tcg_th_topnames :: TcRef NameSet,
         -- ^ Exact names bound in top-level declarations in tcg_th_topdecls
 
-        tcg_th_modfinalizers :: TcRef [TH.Q ()],
-        -- ^ Template Haskell module finalizers
+        tcg_th_modfinalizers :: TcRef [TcM ()],
+        -- ^ Template Haskell module finalizers.
+        --
+        -- They are computations in the @TcM@ monad rather than @Q@ because we
+        -- set them to use particular local environments.
 
         tcg_th_state :: TcRef (Map TypeRep Dynamic),
         tcg_th_remote_state :: TcRef (Maybe (ForeignRef (IORef QState))),
@@ -621,10 +630,10 @@ data SelfBootInfo
   = NoSelfBoot    -- No corresponding hi-boot file
   | SelfBoot
        { sb_mds :: ModDetails   -- There was a hi-boot file,
-       , sb_tcs :: NameSet      -- defining these TyCons,
-       , sb_ids :: NameSet }    -- and these Ids
-  -- We need this info to compute a safe approximation to
-  -- recursive loops, to avoid infinite inlinings
+       , sb_tcs :: NameSet }    -- defining these TyCons,
+-- What is sb_tcs used for?  See Note [Extra dependencies from .hs-boot files]
+-- in RnSource
+
 
 {- Note [Tracking unused binding and imports]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -776,6 +785,10 @@ instance Outputable TcIdBinder where
    ppr (TcIdBndr id top_lvl)           = ppr id <> brackets (ppr top_lvl)
    ppr (TcIdBndr_ExpType id _ top_lvl) = ppr id <> brackets (ppr top_lvl)
 
+instance HasOccName TcIdBinder where
+    occName (TcIdBndr id _) = (occName (idName id))
+    occName (TcIdBndr_ExpType name _ _) = (occName name)
+
 ---------------------------
 -- Template Haskell stages and levels
 ---------------------------
@@ -787,6 +800,25 @@ data ThStage    -- See Note [Template Haskell state diagram] in TcSplice
                       -- This code will be run *at compile time*;
                       --   the result replaces the splice
                       -- Binding level = 0
+
+#ifdef GHCI
+  | RunSplice (TcRef [ForeignRef (TH.Q ())])
+      -- Set when running a splice, i.e. NOT when renaming or typechecking the
+      -- Haskell code for the splice. See Note [RunSplice ThLevel].
+      --
+      -- Contains a list of mod finalizers collected while executing the splice.
+      --
+      -- 'addModFinalizer' inserts finalizers here, and from here they are taken
+      -- to construct an @HsSpliced@ annotation for untyped splices. See Note
+      -- [Delaying modFinalizers in untyped splices] in "RnSplice".
+      --
+      -- For typed splices, the typechecker takes finalizers from here and
+      -- inserts them in the list of finalizers in the global environment.
+      --
+      -- See Note [Collecting modFinalizers in typed splices] in "TcSplice".
+#else
+  | RunSplice ()
+#endif
 
   | Comp        -- Ordinary Haskell code
                 -- Binding level = 1
@@ -811,9 +843,10 @@ topAnnStage    = Splice Untyped
 topSpliceStage = Splice Untyped
 
 instance Outputable ThStage where
-   ppr (Splice _)  = text "Splice"
-   ppr Comp        = text "Comp"
-   ppr (Brack s _) = text "Brack" <> parens (ppr s)
+   ppr (Splice _)    = text "Splice"
+   ppr (RunSplice _) = text "RunSplice"
+   ppr Comp          = text "Comp"
+   ppr (Brack s _)   = text "Brack" <> parens (ppr s)
 
 type ThLevel = Int
     -- NB: see Note [Template Haskell levels] in TcSplice
@@ -827,9 +860,25 @@ impLevel = 0    -- Imported things; they can be used inside a top level splice
 outerLevel = 1  -- Things defined outside brackets
 
 thLevel :: ThStage -> ThLevel
-thLevel (Splice _)  = 0
-thLevel Comp        = 1
-thLevel (Brack s _) = thLevel s + 1
+thLevel (Splice _)    = 0
+thLevel (RunSplice _) =
+    -- See Note [RunSplice ThLevel].
+    panic "thLevel: called when running a splice"
+thLevel Comp          = 1
+thLevel (Brack s _)   = thLevel s + 1
+
+{- Node [RunSplice ThLevel]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The 'RunSplice' stage is set when executing a splice, and only when running a
+splice. In particular it is not set when the splice is renamed or typechecked.
+
+'RunSplice' is needed to provide a reference where 'addModFinalizer' can insert
+the finalizer (see Note [Delaying modFinalizers in untyped splices]), and
+'addModFinalizer' runs when doing Q things. Therefore, It doesn't make sense to
+set 'RunSplice' when renaming or typechecking the splice, where 'Splice', 'Brak'
+or 'Comp' are used instead.
+
+-}
 
 ---------------------------
 -- Arrow-notation context
@@ -1304,7 +1353,7 @@ Here we get
 data TcPatSynInfo
   = TPSI {
         patsig_name           :: Name,
-        patsig_implicit_bndrs :: [TyVarBinder], -- Implicitly-bound kind vars (Invisible) and
+        patsig_implicit_bndrs :: [TyVarBinder], -- Implicitly-bound kind vars (Inferred) and
                                                 -- implicitly-bound type vars (Specified)
           -- See Note [The pattern-synonym signature splitting rule] in TcPatSyn
         patsig_univ_bndrs     :: [TyVar],       -- Bound by explicit user forall
@@ -2887,6 +2936,7 @@ exprCtOrigin (HsPar (L _ e))    = exprCtOrigin e
 exprCtOrigin (SectionL _ _)     = SectionOrigin
 exprCtOrigin (SectionR _ _)     = SectionOrigin
 exprCtOrigin (ExplicitTuple {}) = Shouldn'tHappenOrigin "explicit tuple"
+exprCtOrigin ExplicitSum{}      = Shouldn'tHappenOrigin "explicit sum"
 exprCtOrigin (HsCase _ matches) = matchesCtOrigin matches
 exprCtOrigin (HsIf (Just syn) _ _ _) = exprCtOrigin (syn_expr syn)
 exprCtOrigin (HsIf {})          = Shouldn'tHappenOrigin "if expression"
@@ -3119,7 +3169,7 @@ data TcPluginResult
   = TcPluginContradiction [Ct]
     -- ^ The plugin found a contradiction.
     -- The returned constraints are removed from the inert set,
-    -- and recorded as insoluable.
+    -- and recorded as insoluble.
 
   | TcPluginOk [(EvTerm,Ct)] [Ct]
     -- ^ The first field is for constraints that were solved.

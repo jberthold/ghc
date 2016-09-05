@@ -267,7 +267,7 @@ performance.
 
 .. rts-flag:: -A ⟨size⟩
 
-    :default: 512k
+    :default: 1MB
 
     .. index::
        single: allocation area, size
@@ -449,7 +449,7 @@ performance.
 
 .. rts-flag:: -qb <gen>
 
-    :default: 1
+    :default: 1 for ``-A`` < 32M, 0 otherwise
     :since: 6.12.1
 
     Use load-balancing in the parallel GC in generation ⟨gen⟩ and higher.

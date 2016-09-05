@@ -50,23 +50,23 @@ enum CapsetType { CapsetTypeCustom = CAPSET_TYPE_CUSTOM,
 // Message classes
 // -----------------------------------------------------------------------------
 
-// debugging flags, set with +RTS -D<something>
-extern int DEBUG_sched;
-extern int DEBUG_interp;
-extern int DEBUG_weak;
-extern int DEBUG_gccafs;
-extern int DEBUG_gc;
-extern int DEBUG_block_alloc;
-extern int DEBUG_sanity;
-extern int DEBUG_stable;
-extern int DEBUG_stm;
-extern int DEBUG_prof;
-extern int DEBUG_gran;
-extern int DEBUG_par;
-extern int DEBUG_linker;
-extern int DEBUG_squeeze;
-extern int DEBUG_hpc;
-extern int DEBUG_sparks;
+// shorthand for RtsFlags.DebugFlags.<blah>, useful with debugTrace()
+#define DEBUG_sched       RtsFlags.DebugFlags.scheduler
+#define DEBUG_interp      RtsFlags.DebugFlags.interp
+#define DEBUG_weak        RtsFlags.DebugFlags.weak
+#define DEBUG_gccafs      RtsFlags.DebugFlags.gccafs
+#define DEBUG_gc          RtsFlags.DebugFlags.gc
+#define DEBUG_block_alloc RtsFlags.DebugFlags.alloc
+#define DEBUG_sanity      RtsFlags.DebugFlags.sanity
+#define DEBUG_stable      RtsFlags.DebugFlags.stable
+#define DEBUG_stm         RtsFlags.DebugFlags.stm
+#define DEBUG_prof        RtsFlags.DebugFlags.prof
+#define DEBUG_gran        RtsFlags.DebugFlags.gran
+#define DEBUG_par         RtsFlags.DebugFlags.par
+#define DEBUG_linker      RtsFlags.DebugFlags.linker
+#define DEBUG_squeeze     RtsFlags.DebugFlags.squeeze
+#define DEBUG_hpc         RtsFlags.DebugFlags.hpc
+#define DEBUG_sparks      RtsFlags.DebugFlags.sparks
 
 // events
 extern int TRACE_sched;
@@ -74,6 +74,7 @@ extern int TRACE_gc;
 extern int TRACE_spark_sampled;
 extern int TRACE_spark_full;
 /* extern int TRACE_user; */  // only used in Trace.c
+extern int TRACE_cap;
 
 // -----------------------------------------------------------------------------
 // Posting events
@@ -249,19 +250,23 @@ void traceThreadStatus_ (StgTSO *tso);
 
 /*
  * Events for describing capabilities and capability sets in the eventlog
- *
- * Note: unlike other events, these are not conditional on TRACE_sched or
- * similar because capabilities and capability sets are important
- * context for other events. Since other events depend on these events
- * then for simplicity we always emit them, rather than working out if
- * they're necessary . They should be very low volume.
  */
-void traceCapEvent (Capability   *cap,
+#define traceCapEvent(cap, tag)                 \
+    if (RTS_UNLIKELY(TRACE_cap)) {              \
+        traceCapEvent_(cap, tag);               \
+    }
+
+void traceCapEvent_ (Capability   *cap,
                     EventTypeNum  tag);
 
-void traceCapsetEvent (EventTypeNum tag,
-                       CapsetID     capset,
-                       StgWord      info);
+#define traceCapsetEvent(cap, capset, info)     \
+    if (RTS_UNLIKELY(TRACE_cap)) {              \
+        traceCapsetEvent_(cap, capset, info);   \
+    }
+
+void traceCapsetEvent_ (EventTypeNum tag,
+                        CapsetID     capset,
+                        StgWord      info);
 
 void traceWallClockTime_(void);
 
@@ -383,6 +388,20 @@ void traceTaskMigrate_ (Task       *task,
 
 void traceTaskDelete_ (Task       *task);
 
+void traceHeapProfBegin(StgWord8 profile_id);
+void traceHeapProfSampleBegin(StgInt era);
+void traceHeapProfSampleString(StgWord8 profile_id,
+                               const char *label, StgWord residency);
+#ifdef PROFILING
+void traceHeapProfCostCentre(StgWord32 ccID,
+                             const char *label,
+                             const char *module,
+                             const char *srcloc,
+                             StgBool is_caf);
+void traceHeapProfSampleCostCentre(StgWord8 profile_id,
+                                   CostCentreStack *stack, StgWord residency);
+#endif /* PROFILING */
+
 #else /* !TRACING */
 
 #define traceSchedEvent(cap, tag, tso, other) /* nothing */
@@ -412,6 +431,11 @@ void traceTaskDelete_ (Task       *task);
 #define traceTaskCreate_(taskID, cap) /* nothing */
 #define traceTaskMigrate_(taskID, cap, new_cap) /* nothing */
 #define traceTaskDelete_(taskID) /* nothing */
+#define traceHeapProfBegin(profile_id) /* nothing */
+#define traceHeapProfCostCentre(ccID, label, module, srcloc, is_caf) /* nothing */
+#define traceHeapProfSampleBegin(era) /* nothing */
+#define traceHeapProfSampleCostCentre(profile_id, stack, residency) /* nothing */
+#define traceHeapProfSampleString(profile_id, label, residency) /* nothing */
 
 #define traceVersion(version) /* nothing */
 #define traceProgramInvocation(commandline) /* nothing */

@@ -295,15 +295,19 @@ data DumpFlag
 
    -- debugging flags
    = Opt_D_dump_cmm
+   | Opt_D_dump_cmm_from_stg
    | Opt_D_dump_cmm_raw
-   -- All of the cmm subflags (there are a lot!)  Automatically
-   -- enabled if you run -ddump-cmm
+   | Opt_D_dump_cmm_verbose
+   -- All of the cmm subflags (there are a lot!) automatically
+   -- enabled if you run -ddump-cmm-verbose
+   -- Each flag corresponds to exact stage of Cmm pipeline.
    | Opt_D_dump_cmm_cfg
    | Opt_D_dump_cmm_cbe
    | Opt_D_dump_cmm_switch
    | Opt_D_dump_cmm_proc
-   | Opt_D_dump_cmm_sink
    | Opt_D_dump_cmm_sp
+   | Opt_D_dump_cmm_sink
+   | Opt_D_dump_cmm_caf
    | Opt_D_dump_cmm_procmap
    | Opt_D_dump_cmm_split
    | Opt_D_dump_cmm_info
@@ -472,9 +476,11 @@ data GeneralFlag
    | Opt_IgnoreDotGhci
    | Opt_GhciSandbox
    | Opt_GhciHistory
+   | Opt_LocalGhciHistory
    | Opt_HelpfulErrors
    | Opt_DeferTypeErrors
    | Opt_DeferTypedHoles
+   | Opt_DeferOutOfScopeVariables
    | Opt_PIC
    | Opt_SccProfilingOn
    | Opt_Ticky
@@ -603,6 +609,7 @@ data WarningFlag =
    | Opt_WarnUntickedPromotedConstructors
    | Opt_WarnDerivingTypeable
    | Opt_WarnDeferredTypeErrors
+   | Opt_WarnDeferredOutOfScopeVariables
    | Opt_WarnNonCanonicalMonadInstances   -- since 8.0
    | Opt_WarnNonCanonicalMonadFailInstances -- since 8.0
    | Opt_WarnNonCanonicalMonoidInstances  -- since 8.0
@@ -1268,6 +1275,7 @@ allowed_combination way = and [ x `allowedWith` y
         (WayCustom {}) `allowedWith` _          = True
         WayThreaded `allowedWith` WayProf       = True
         WayThreaded `allowedWith` WayEventLog   = True
+        WayProf     `allowedWith` WayEventLog   = True
         WayEventLog `allowedWith` WayParPvm     = True
         WayEventLog `allowedWith` WayParMPI     = True
         WayEventLog `allowedWith` WayParCp      = True
@@ -2385,8 +2393,17 @@ dynamic_flags_deps = [
                   "deprecated: They no longer have any effect"))))
   , make_ord_flag defFlag "v"        (OptIntSuffix setVerbosity)
 
-  , make_ord_flag defGhcFlag "j"     (OptIntSuffix (\n ->
-                                            upd (\d -> d {parMakeCount = n})))
+  , make_ord_flag defGhcFlag "j"     (OptIntSuffix
+        (\n -> case n of
+                 Just n
+                     | n > 0     -> upd (\d -> d { parMakeCount = Just n })
+                     | otherwise -> addErr "Syntax: -j[n] where n > 0"
+                 Nothing -> upd (\d -> d { parMakeCount = Nothing })))
+                 -- When the number of parallel builds
+                 -- is omitted, it is the same
+                 -- as specifing that the number of
+                 -- parallel builds is equal to the
+                 -- result of getNumProcessors
   , make_ord_flag defFlag "sig-of"   (sepArg setSigOf)
 
     -- RTS options -------------------------------------------------------------
@@ -2657,8 +2674,12 @@ dynamic_flags_deps = [
 
   , make_ord_flag defGhcFlag "ddump-cmm"
         (setDumpFlag Opt_D_dump_cmm)
+  , make_ord_flag defGhcFlag "ddump-cmm-from-stg"
+        (setDumpFlag Opt_D_dump_cmm_from_stg)
   , make_ord_flag defGhcFlag "ddump-cmm-raw"
         (setDumpFlag Opt_D_dump_cmm_raw)
+  , make_ord_flag defGhcFlag "ddump-cmm-verbose"
+        (setDumpFlag Opt_D_dump_cmm_verbose)
   , make_ord_flag defGhcFlag "ddump-cmm-cfg"
         (setDumpFlag Opt_D_dump_cmm_cfg)
   , make_ord_flag defGhcFlag "ddump-cmm-cbe"
@@ -2667,10 +2688,12 @@ dynamic_flags_deps = [
         (setDumpFlag Opt_D_dump_cmm_switch)
   , make_ord_flag defGhcFlag "ddump-cmm-proc"
         (setDumpFlag Opt_D_dump_cmm_proc)
-  , make_ord_flag defGhcFlag "ddump-cmm-sink"
-        (setDumpFlag Opt_D_dump_cmm_sink)
   , make_ord_flag defGhcFlag "ddump-cmm-sp"
         (setDumpFlag Opt_D_dump_cmm_sp)
+  , make_ord_flag defGhcFlag "ddump-cmm-sink"
+        (setDumpFlag Opt_D_dump_cmm_sink)
+  , make_ord_flag defGhcFlag "ddump-cmm-caf"
+        (setDumpFlag Opt_D_dump_cmm_caf)
   , make_ord_flag defGhcFlag "ddump-cmm-procmap"
         (setDumpFlag Opt_D_dump_cmm_procmap)
   , make_ord_flag defGhcFlag "ddump-cmm-split"
@@ -3279,6 +3302,8 @@ wWarningFlagsDeps = [
   depFlagSpec "auto-orphans"             Opt_WarnAutoOrphans
     "it has no effect",
   flagSpec "deferred-type-errors"        Opt_WarnDeferredTypeErrors,
+  flagSpec "deferred-out-of-scope-variables"
+                                         Opt_WarnDeferredOutOfScopeVariables,
   flagSpec "deprecations"                Opt_WarnWarningsDeprecations,
   flagSpec "deprecated-flags"            Opt_WarnDeprecatedFlags,
   flagSpec "deriving-typeable"           Opt_WarnDerivingTypeable,
@@ -3394,6 +3419,7 @@ fFlagsDeps = [
   flagSpec "cpr-anal"                         Opt_CprAnal,
   flagSpec "defer-type-errors"                Opt_DeferTypeErrors,
   flagSpec "defer-typed-holes"                Opt_DeferTypedHoles,
+  flagSpec "defer-out-of-scope-variables"     Opt_DeferOutOfScopeVariables,
   flagSpec "dicts-cheap"                      Opt_DictsCheap,
   flagSpec "dicts-strict"                     Opt_DictsStrict,
   flagSpec "dmd-tx-dict-sel"                  Opt_DmdTxDictSel,
@@ -3413,6 +3439,7 @@ fFlagsDeps = [
   flagSpec "fun-to-thunk"                     Opt_FunToThunk,
   flagSpec "gen-manifest"                     Opt_GenManifest,
   flagSpec "ghci-history"                     Opt_GhciHistory,
+  flagGhciSpec "local-ghci-history"           Opt_LocalGhciHistory,
   flagSpec "ghci-sandbox"                     Opt_GhciSandbox,
   flagSpec "helpful-errors"                   Opt_HelpfulErrors,
   flagSpec "hpc"                              Opt_Hpc,
@@ -3684,6 +3711,7 @@ xFlagsDeps = [
   flagSpec "TypeOperators"                    LangExt.TypeOperators,
   flagSpec "TypeSynonymInstances"             LangExt.TypeSynonymInstances,
   flagSpec "UnboxedTuples"                    LangExt.UnboxedTuples,
+  flagSpec "UnboxedSums"                      LangExt.UnboxedSums,
   flagSpec "UndecidableInstances"             LangExt.UndecidableInstances,
   flagSpec "UndecidableSuperClasses"          LangExt.UndecidableSuperClasses,
   flagSpec "UnicodeSyntax"                    LangExt.UnicodeSyntax,
@@ -3699,6 +3727,7 @@ defaultFlags settings
       Opt_FlatCache,
       Opt_GenManifest,
       Opt_GhciHistory,
+      Opt_LocalGhciHistory,
       Opt_GhciSandbox,
       Opt_HelpfulErrors,
       Opt_KeepHiFiles,
@@ -3737,6 +3766,7 @@ default_PIC platform =
 -- on
 impliedGFlags :: [(GeneralFlag, TurnOnFlag, GeneralFlag)]
 impliedGFlags = [(Opt_DeferTypeErrors, turnOn, Opt_DeferTypedHoles)
+                ,(Opt_DeferTypeErrors, turnOn, Opt_DeferOutOfScopeVariables)
                 ,(Opt_Strictness, turnOn, Opt_WorkerWrapper)
                 ]
 
@@ -3934,6 +3964,7 @@ standardWarnings -- see Note [Documenting warning flags]
         Opt_WarnDeprecatedFlags,
         Opt_WarnDeferredTypeErrors,
         Opt_WarnTypedHoles,
+        Opt_WarnDeferredOutOfScopeVariables,
         Opt_WarnPartialTypeSignatures,
         Opt_WarnUnrecognisedPragmas,
         Opt_WarnDuplicateExports,
@@ -3979,8 +4010,7 @@ minusWallOpts
         Opt_WarnUnusedDoBind,
         Opt_WarnTrustworthySafe,
         Opt_WarnUntickedPromotedConstructors,
-        Opt_WarnMissingPatternSynonymSignatures,
-        Opt_WarnRedundantConstraints
+        Opt_WarnMissingPatternSynonymSignatures
       ]
 
 -- | Things you get with -Weverything, i.e. *all* known warnings flags
@@ -4441,13 +4471,15 @@ interpretPackageEnv dflags = do
     parseEnvFile envfile = mapM_ parseEntry . lines
       where
         parseEntry str = case words str of
-          ["package-db", db]    -> addPkgConfRef (PkgConfFile (envdir </> db))
+          ("package-db": _)     -> addPkgConfRef (PkgConfFile (envdir </> db))
             -- relative package dbs are interpreted relative to the env file
             where envdir = takeDirectory envfile
+                  db     = drop 11 str
           ["clear-package-db"]  -> clearPkgConf
           ["global-package-db"] -> addPkgConfRef GlobalPkgConf
           ["user-package-db"]   -> addPkgConfRef UserPkgConf
           ["package-id", pkgid] -> exposePackageId pkgid
+          (('-':'-':_):_)       -> return () -- comments
           -- and the original syntax introduced in 7.10:
           [pkgid]               -> exposePackageId pkgid
           []                    -> return ()

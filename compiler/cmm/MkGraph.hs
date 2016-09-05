@@ -7,7 +7,8 @@ module MkGraph
   , lgraphOfAGraph, labelAGraph
 
   , stackStubExpr
-  , mkNop, mkAssign, mkStore, mkUnsafeCall, mkFinalCall, mkCallReturnsTo
+  , mkNop, mkAssign, mkStore
+  , mkUnsafeCall, mkFinalCall, mkCallReturnsTo
   , mkJumpReturnsTo
   , mkJump, mkJumpExtra
   , mkRawJump
@@ -28,9 +29,9 @@ import Compiler.Hoopl hiding (Unique, (<*>), mkFirst, mkMiddle, mkLast, mkLabel,
 import DynFlags
 import FastString
 import ForeignCall
+import OrdList
 import SMRep (ByteOff)
 import UniqSupply
-import OrdList
 
 import Control.Monad
 import Data.List
@@ -198,7 +199,7 @@ mkStore  l r  = mkMiddle $ CmmStore  l r
 
 ---------- Control transfer
 mkJump          :: DynFlags -> Convention -> CmmExpr
-                -> [CmmActual]
+                -> [CmmExpr]
                 -> UpdFrameOffset
                 -> CmmAGraph
 mkJump dflags conv e actuals updfr_off =
@@ -214,8 +215,8 @@ mkRawJump dflags e updfr_off vols =
     \arg_space _  -> toCall e Nothing updfr_off 0 arg_space vols
 
 
-mkJumpExtra :: DynFlags -> Convention -> CmmExpr -> [CmmActual]
-                -> UpdFrameOffset -> [CmmActual]
+mkJumpExtra :: DynFlags -> Convention -> CmmExpr -> [CmmExpr]
+                -> UpdFrameOffset -> [CmmExpr]
                 -> CmmAGraph
 mkJumpExtra dflags conv e actuals updfr_off extra_stack =
   lastWithArgsAndExtraStack dflags Jump Old conv actuals updfr_off extra_stack $
@@ -228,7 +229,7 @@ mkCbranch pred ifso ifnot likely =
 mkSwitch        :: CmmExpr -> SwitchTargets -> CmmAGraph
 mkSwitch e tbl   = mkLast $ CmmSwitch e tbl
 
-mkReturn        :: DynFlags -> CmmExpr -> [CmmActual] -> UpdFrameOffset
+mkReturn        :: DynFlags -> CmmExpr -> [CmmExpr] -> UpdFrameOffset
                 -> CmmAGraph
 mkReturn dflags e actuals updfr_off =
   lastWithArgs dflags Ret  Old NativeReturn actuals updfr_off $
@@ -238,17 +239,17 @@ mkBranch        :: BlockId -> CmmAGraph
 mkBranch bid     = mkLast (CmmBranch bid)
 
 mkFinalCall   :: DynFlags
-              -> CmmExpr -> CCallConv -> [CmmActual] -> UpdFrameOffset
+              -> CmmExpr -> CCallConv -> [CmmExpr] -> UpdFrameOffset
               -> CmmAGraph
 mkFinalCall dflags f _ actuals updfr_off =
   lastWithArgs dflags Call Old NativeDirectCall actuals updfr_off $
     toCall f Nothing updfr_off 0
 
-mkCallReturnsTo :: DynFlags -> CmmExpr -> Convention -> [CmmActual]
+mkCallReturnsTo :: DynFlags -> CmmExpr -> Convention -> [CmmExpr]
                 -> BlockId
                 -> ByteOff
                 -> UpdFrameOffset
-                -> [CmmActual]
+                -> [CmmExpr]
                 -> CmmAGraph
 mkCallReturnsTo dflags f callConv actuals ret_lbl ret_off updfr_off extra_stack = do
   lastWithArgsAndExtraStack dflags Call (Young ret_lbl) callConv actuals
@@ -257,7 +258,7 @@ mkCallReturnsTo dflags f callConv actuals ret_lbl ret_off updfr_off extra_stack 
 
 -- Like mkCallReturnsTo, but does not push the return address (it is assumed to be
 -- already on the stack).
-mkJumpReturnsTo :: DynFlags -> CmmExpr -> Convention -> [CmmActual]
+mkJumpReturnsTo :: DynFlags -> CmmExpr -> Convention -> [CmmExpr]
                 -> BlockId
                 -> ByteOff
                 -> UpdFrameOffset
@@ -325,9 +326,9 @@ copyIn dflags conv area formals extra_stk
 
 data Transfer = Call | JumpRet | Jump | Ret deriving Eq
 
-copyOutOflow :: DynFlags -> Convention -> Transfer -> Area -> [CmmActual]
+copyOutOflow :: DynFlags -> Convention -> Transfer -> Area -> [CmmExpr]
              -> UpdFrameOffset
-             -> [CmmActual] -- extra stack args
+             -> [CmmExpr] -- extra stack args
              -> (Int, [GlobalReg], CmmAGraph)
 
 -- Generate code to move the actual parameters into the locations
@@ -378,7 +379,7 @@ mkCallEntry :: DynFlags -> Convention -> [CmmFormal] -> [CmmFormal]
 mkCallEntry dflags conv formals extra_stk
   = copyInOflow dflags conv Old formals extra_stk
 
-lastWithArgs :: DynFlags -> Transfer -> Area -> Convention -> [CmmActual]
+lastWithArgs :: DynFlags -> Transfer -> Area -> Convention -> [CmmExpr]
              -> UpdFrameOffset
              -> (ByteOff -> [GlobalReg] -> CmmAGraph)
              -> CmmAGraph
@@ -387,8 +388,8 @@ lastWithArgs dflags transfer area conv actuals updfr_off last =
                             updfr_off noExtraStack last
 
 lastWithArgsAndExtraStack :: DynFlags
-             -> Transfer -> Area -> Convention -> [CmmActual]
-             -> UpdFrameOffset -> [CmmActual]
+             -> Transfer -> Area -> Convention -> [CmmExpr]
+             -> UpdFrameOffset -> [CmmExpr]
              -> (ByteOff -> [GlobalReg] -> CmmAGraph)
              -> CmmAGraph
 lastWithArgsAndExtraStack dflags transfer area conv actuals updfr_off
@@ -399,7 +400,7 @@ lastWithArgsAndExtraStack dflags transfer area conv actuals updfr_off
                                updfr_off extra_stack
 
 
-noExtraStack :: [CmmActual]
+noExtraStack :: [CmmExpr]
 noExtraStack = []
 
 toCall :: CmmExpr -> Maybe BlockId -> UpdFrameOffset -> ByteOff
