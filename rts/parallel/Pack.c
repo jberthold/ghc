@@ -612,6 +612,11 @@ getClosureInfo(StgClosure* node, StgInfoTable* info,
     case RET_BCO:
         barf("getClosureInfo: stack frame!");
         break;
+#if __GLASGOW_HASKELL__ > 801
+    case COMPACT_NFDATA:
+        barf("compact nfdata not supported");
+        break;
+#endif
 
     default:
         // this works for all pointers-first layouts
@@ -1133,6 +1138,16 @@ loop:
         //                 +------------------------------+
         // No problem with using PackGeneric and vhs=1 in getClosureInfo
         return PackGeneric(p, closure);
+#endif
+
+#if __GLASGOW_HASKELL__ >= 801
+    case COMPACT_NFDATA:
+        // a chain of blocks full of self-contained NFData. We could
+        // choose to serialise the entire chain of blocks, but would
+        // then have to fix all included intra-region pointers. There
+        // is support for doing this in CNF.[ch], but using CNF here
+        // would be like a bus pulling a passenger train.
+        goto unsupported;
 #endif
 
 unsupported:
@@ -2283,6 +2298,7 @@ StgClosure* createListNode(Capability *cap, StgClosure *head, StgClosure *tail) 
  * 7.08.x - start state
  * 7.09   - addition of small array closures (61-64)
  * 8.01   - removal of IND_PERM (was 30), subsequent numbers shifting up
+ * 8.01   - addition of COMPACT_NFDATA (65). Prior 801 cannot be supported.
  */
 #if __GLASGOW_HASKELL__ == 708
 # if !(N_CLOSURE_TYPES == 61 )
@@ -2293,7 +2309,8 @@ StgClosure* createListNode(Capability *cap, StgClosure *head, StgClosure *tail) 
 # error Wrong closure type count in fingerprint array. Check code.
 # endif
 #elif __GLASGOW_HASKELL__ >= 801
-# if !(N_CLOSURE_TYPES == 64 )
+     // same count as 8.00 but different closures
+# if !(N_CLOSURE_TYPES == 65 )
 # error Wrong closure type count in fingerprint array. Check code.
 # endif
 #endif
@@ -2313,6 +2330,9 @@ static char* fingerPrintChar =
     "&FFFW"        // TREC (STM-)FRAMEs(3) WHITEHOLE
 #if __GLASGOW_HASKELL__ >= 708
     "ZZZZ"         // SmallArr(4)
+#endif
+#if __GLASGOW_HASKELL__ >= 801
+    "Ø"            // Compact NF block
 #endif
   ;
 
@@ -2358,7 +2378,7 @@ static void graphFingerPrint_(char* fp, HashTable* visited, StgClosure *p) {
         return;
     /* at most 7 chars added immediately (unchecked) for this node */
     if (len+7 >= MAX_FINGER_PRINT_LEN) {
-        strcat(fp, "--end");
+        strcat(fp, "--");
         return;
     }
     /* check whether we have met this node already to break cycles */
@@ -2666,7 +2686,11 @@ print:
                 break;
             }
 #endif
-
+#if __GLASGOW_HASKELL__ >= 801
+        case COMPACT_NFDATA:
+            // an opaque block of NF data, nothing to follow
+            break;
+#endif
         default:
             barf("graphFingerPrint_: unknown closure %d",
                  info -> type);
