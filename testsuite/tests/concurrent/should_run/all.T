@@ -208,7 +208,7 @@ test('conc038', only_ways(['threaded1','threaded2']), compile_and_run, [''])
 # Omit for GHCi, uses foreign export
 # Omit for the threaded ways, because in this case the main thread is allowed to 
 # complete, which causes the child thread to be interrupted.
-test('conc039', omit_ways(['ghci','threaded1','threaded2','profthreaded']), compile_and_run, [''])
+test('conc039', omit_ways(['ghci'] + threaded_ways), compile_and_run, [''])
 
 # Omit for GHCi, uses foreign export
 test('conc040', [exit_code(1), omit_ways(['ghci'])], compile_and_run, [''])
@@ -244,14 +244,11 @@ test('conc067', ignore_output, compile_and_run, [''])
 # than one CPU.
 test('conc068', [ omit_ways('threaded2'), exit_code(1) ], compile_and_run, [''])
 
-# Commented out, instead of marked expect_broken, because it fails only
-# sometimes. See #10860.
-#test('setnumcapabilities001',
-#     [ only_ways(['threaded1','threaded2']),
-#       extra_run_opts('4 12 2000'),
-#       reqlib('parallel'),
-#       req_smp ],
-#     compile_and_run, [''])
+test('setnumcapabilities001',
+     [ only_ways(['threaded1','threaded2']),
+       extra_run_opts('4 12 2000'),
+       req_smp ],
+     compile_and_run, [''])
 
 # omit ghci, which can't handle unboxed tuples:
 test('compareAndSwap', [omit_ways(['ghci','hpc']), reqlib('primitive')], compile_and_run, [''])

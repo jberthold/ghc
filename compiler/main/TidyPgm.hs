@@ -486,11 +486,12 @@ tidyVectInfo (_, var_env) info@(VectInfo { vectInfoVar          = vars
                          , isDataConWorkId var || not (isImplicitId var)
                          ]
 
-    tidy_parallelVars = mkVarSet [ tidy_var
-                                 | var <- varSetElems parallelVars
-                                 , let tidy_var = lookup_var var
-                                 , isExternalId tidy_var && isExportedId tidy_var
-                                 ]
+    tidy_parallelVars = mkDVarSet
+                          [ tidy_var
+                          | var <- dVarSetElems parallelVars
+                          , let tidy_var = lookup_var var
+                          , isExternalId tidy_var && isExportedId tidy_var
+                          ]
 
     lookup_var var = lookupWithDefaultVarEnv var_env var var
 
@@ -542,7 +543,7 @@ constructed in an optimised form.  E.g. record selector for
 Then the unfolding looks like
         x = \t. case t of MkT x1 -> let x = I# x1 in x
 This generates bad code unless it's first simplified a bit.  That is
-why CoreUnfold.mkImplicitUnfolding uses simleExprOpt to do a bit of
+why CoreUnfold.mkImplicitUnfolding uses simpleOptExpr to do a bit of
 optimisation first.  (Only matters when the selector is used curried;
 eg map x ys.)  See Trac #2070.
 
@@ -567,7 +568,7 @@ Oh: two other reasons for injecting them late:
     the sense of chooseExternalIds); else the Ids mentioned in *their*
     RHSs will be treated as external and you get an interface file
     saying      a18 = <blah>
-    but nothing refererring to a18 (because the implicit Id is the
+    but nothing referring to a18 (because the implicit Id is the
     one that does, and implicit Ids don't appear in interface files).
 
   - More seriously, the tidied type-envt will include the implicit
@@ -950,7 +951,7 @@ findExternalRules omit_prags binds imp_id_rules unfold_env
 
     expose_rule rule
         | omit_prags = False
-        | otherwise  = all is_external_id (varSetElems (ruleLhsFreeIds rule))
+        | otherwise  = all is_external_id (ruleLhsFreeIdsList rule)
                 -- Don't expose a rule whose LHS mentions a locally-defined
                 -- Id that is completely internal (i.e. not visible to an
                 -- importing module).  NB: ruleLhsFreeIds only returns LocalIds.

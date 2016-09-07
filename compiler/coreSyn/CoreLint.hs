@@ -339,7 +339,7 @@ interactiveInScope :: HscEnv -> [Var]
 --
 -- See Trac #8215 for an example
 interactiveInScope hsc_env
-  = varSetElems tyvars ++ ids
+  = tyvars ++ ids
   where
     -- C.f. TcRnDriver.setInteractiveContext, Desugar.deSugarExpr
     ictxt                   = hsc_IC hsc_env
@@ -347,7 +347,7 @@ interactiveInScope hsc_env
     te1    = mkTypeEnvWithImplicits (ic_tythings ictxt)
     te     = extendTypeEnvWithIds te1 (map instanceDFunId cls_insts)
     ids    = typeEnvIds te
-    tyvars = mapUnionVarSet (tyCoVarsOfType . idType) ids
+    tyvars = tyCoVarsOfTypesList $ map idType ids
               -- Why the type variables?  How can the top level envt have free tyvars?
               -- I think it's because of the GHCi debugger, which can bind variables
               --   f :: [t] -> [t]
@@ -417,7 +417,7 @@ We use this to check all unfoldings that come in from interfaces
 
 lintUnfolding :: DynFlags
               -> SrcLoc
-              -> [Var]          -- Treat these as in scope
+              -> VarSet         -- Treat these as in scope
               -> CoreExpr
               -> Maybe MsgDoc   -- Nothing => OK
 
@@ -427,7 +427,7 @@ lintUnfolding dflags locn vars expr
   where
     (_warns, errs) = initL dflags defaultLintFlags linter
     linter = addLoc (ImportedUnfolding locn) $
-             addInScopeVars vars             $
+             addInScopeVarSet vars           $
              lintCoreExpr expr
 
 lintExpr :: DynFlags
@@ -1676,6 +1676,12 @@ addInScopeVars :: [Var] -> LintM a -> LintM a
 addInScopeVars vars m
   = LintM $ \ env errs ->
     unLintM m (env { le_subst = extendTCvInScopeList (le_subst env) vars })
+              errs
+
+addInScopeVarSet :: VarSet -> LintM a -> LintM a
+addInScopeVarSet vars m
+  = LintM $ \ env errs ->
+    unLintM m (env { le_subst = extendTCvInScopeSet (le_subst env) vars })
               errs
 
 addInScopeVar :: Var -> LintM a -> LintM a

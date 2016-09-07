@@ -229,6 +229,10 @@ typedef struct _PAR_FLAGS {
                                   * non-load-balancing parallel GC.
                                   * (zero disables) */
 
+  nat            parGcThreads;
+                                 /* Use this many threads for parallel
+                                  * GC (default: use all nNodes). */
+
   rtsBool        setAffinity;    /* force thread affinity with CPUs */
 #endif /* THREADED_RTS */
 } PAR_FLAGS;

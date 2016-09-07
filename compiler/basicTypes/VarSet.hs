@@ -21,6 +21,7 @@ module VarSet (
         lookupVarSet, lookupVarSetByName,
         mapVarSet, sizeVarSet, seqVarSet,
         elemVarSetByKey, partitionVarSet,
+        pluralVarSet, pprVarSet,
 
         -- * Deterministic Var set types
         DVarSet, DIdSet, DTyVarSet, DTyCoVarSet,
@@ -33,9 +34,11 @@ module VarSet (
         intersectDVarSet, intersectsDVarSet, disjointDVarSet,
         isEmptyDVarSet, delDVarSet, delDVarSetList,
         minusDVarSet, foldDVarSet, filterDVarSet,
+        dVarSetMinusVarSet,
         transCloDVarSet,
         sizeDVarSet, seqDVarSet,
         partitionDVarSet,
+        dVarSetToVarSet,
     ) where
 
 #include "HsVersions.h"
@@ -45,8 +48,9 @@ import Unique
 import Name     ( Name )
 import UniqSet
 import UniqDSet
-import UniqFM( disjointUFM )
-import UniqDFM( disjointUDFM )
+import UniqFM( disjointUFM, pluralUFM, pprUFM )
+import UniqDFM( disjointUDFM, udfmToUfm )
+import Outputable (SDoc)
 
 -- | A non-deterministic set of variables.
 -- See Note [Deterministic UniqFM] in UniqDFM for explanation why it's not
@@ -169,6 +173,23 @@ transCloVarSet fn seeds
 seqVarSet :: VarSet -> ()
 seqVarSet s = sizeVarSet s `seq` ()
 
+-- | Determines the pluralisation suffix appropriate for the length of a set
+-- in the same way that plural from Outputable does for lists.
+pluralVarSet :: VarSet -> SDoc
+pluralVarSet = pluralUFM
+
+-- | Pretty-print a non-deterministic set.
+-- The order of variables is non-deterministic and for pretty-printing that
+-- shouldn't be a problem.
+-- Having this function helps contain the non-determinism created with
+-- varSetElems.
+pprVarSet :: ([Var] -> SDoc) -- ^ The pretty printing function to use on the
+                             -- elements
+          -> VarSet          -- ^ The things to be pretty printed
+          -> SDoc            -- ^ 'SDoc' where the things have been pretty
+                             -- printed
+pprVarSet = pprUFM
+
 -- Deterministic VarSet
 -- See Note [Deterministic UniqFM] in UniqDFM for explanation why we need
 -- DVarSet.
@@ -229,6 +250,9 @@ delDVarSet = delOneFromUniqDSet
 minusDVarSet :: DVarSet -> DVarSet -> DVarSet
 minusDVarSet = minusUniqDSet
 
+dVarSetMinusVarSet :: DVarSet -> VarSet -> DVarSet
+dVarSetMinusVarSet = uniqDSetMinusUniqSet
+
 foldDVarSet :: (Var -> a -> a) -> a -> DVarSet -> a
 foldDVarSet = foldUniqDSet
 
@@ -252,6 +276,10 @@ seqDVarSet s = sizeDVarSet s `seq` ()
 -- | Add a list of variables to DVarSet
 extendDVarSetList :: DVarSet -> [Var] -> DVarSet
 extendDVarSetList = addListToUniqDSet
+
+-- | Convert a DVarSet to a VarSet by forgeting the order of insertion
+dVarSetToVarSet :: DVarSet -> VarSet
+dVarSetToVarSet = udfmToUfm
 
 -- | transCloVarSet for DVarSet
 transCloDVarSet :: (DVarSet -> DVarSet)

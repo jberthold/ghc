@@ -63,6 +63,7 @@ import Outputable
 import FastString
 import Bag
 import Pair
+import FV (fvVarList, unionFV, mkFVs)
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
@@ -403,7 +404,7 @@ tcDeriving deriv_infos deriv_decls
 
         ; gbl_env <- tcExtendLocalFamInstEnv (bagToList famInsts) $
                      tcExtendLocalInstEnv (map iSpec (bagToList inst_info)) getGblEnv
-        ; let all_dus = rn_dus `plusDU` usesOnly (mkFVs $ catMaybes maybe_fvs)
+        ; let all_dus = rn_dus `plusDU` usesOnly (NameSet.mkFVs $ catMaybes maybe_fvs)
         ; return (addTcgDUs gbl_env all_dus, inst_info, rn_binds) }
   where
     ddump_deriving :: Bag (InstInfo Name) -> HsValBinds Name
@@ -615,7 +616,7 @@ deriveTyData :: [TyVar] -> TyCon -> [Type]   -- LHS of data or data instance
 -- I.e. not standalone deriving
 deriveTyData tvs tc tc_args deriv_pred
   = setSrcSpan (getLoc (hsSigType deriv_pred)) $  -- Use loc of the 'deriving' item
-    do  { (deriv_tvs, cls, cls_tys, cls_arg_kind)
+    do  { (deriv_tvs, cls, cls_tys, cls_arg_kinds)
                 <- tcExtendTyVarEnv tvs $
                    tcHsDeriv deriv_pred
                 -- Deriving preds may (now) mention
@@ -626,6 +627,9 @@ deriveTyData tvs tc tc_args deriv_pred
                 -- Typeable is special, because Typeable :: forall k. k -> Constraint
                 -- so the argument kind 'k' is not decomposable by splitKindFunTys
                 -- as is the case for all other derivable type classes
+        ; when (length cls_arg_kinds /= 1) $
+            failWithTc (nonUnaryErr deriv_pred)
+        ; let [cls_arg_kind] = cls_arg_kinds
         ; if className cls == typeableClassName
           then do warnUselessTypeable
                   return []
@@ -650,15 +654,23 @@ deriveTyData tvs tc tc_args deriv_pred
               -- We are assuming the tycon tyvars and the class tyvars are distinct
               mb_match        = tcUnifyTy inst_ty_kind cls_arg_kind
               Just kind_subst = mb_match
+              ki_subst_range  = getTCvSubstRangeFVs kind_subst
 
-              all_tkvs        = varSetElemsWellScoped $
-                                mkVarSet deriv_tvs `unionVarSet`
-                                tyCoVarsOfTypes tc_args_to_keep
-              unmapped_tkvs   = filter (`notElemTCvSubst` kind_subst) all_tkvs
-              (subst, tkvs)   = mapAccumL substTyVarBndr
+              all_tkvs        = toposortTyVars $
+                                fvVarList $ unionFV
+                                  (tyCoFVsOfTypes tc_args_to_keep)
+                                  (FV.mkFVs deriv_tvs)
+
+              -- See Note [Unification of two kind variables in deriving]
+              unmapped_tkvs   = filter (\v -> v `notElemTCvSubst` kind_subst
+                                      && not (v `elemVarSet` ki_subst_range))
+                                       all_tkvs
+              (subst, _)      = mapAccumL substTyVarBndr
                                           kind_subst unmapped_tkvs
               final_tc_args   = substTys subst tc_args_to_keep
               final_cls_tys   = substTys subst cls_tys
+              tkvs            = tyCoVarsOfTypesWellScoped $
+                                final_cls_tys ++ final_tc_args
 
         ; traceTc "derivTyData1" (vcat [ pprTvBndrs tvs, ppr tc, ppr tc_args, ppr deriv_pred
                                        , pprTvBndrs (tyCoVarsOfTypesList tc_args)
@@ -796,6 +808,46 @@ kind parameters. Consider this code (also from Trac #11732):
 Even though we requested an derived instance of the form (Cat k Fun), the
 kind unification will actually generate (Cat * Fun) (i.e., the same thing as if
 the user wrote deriving (Cat *)).
+
+Note [Unification of two kind variables in deriving]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+As a special case of the Note above, it is possible to derive an instance of
+a poly-kinded typeclass for a poly-kinded datatype. For example:
+
+    class Category (cat :: k -> k -> *) where
+    newtype T (c :: k -> k -> *) a b = MkT (c a b) deriving Category
+
+This case is suprisingly tricky. To see why, let's write out what instance GHC
+will attempt to derive (using -fprint-explicit-kinds syntax):
+
+    instance Category k1 (T k2 c) where ...
+
+GHC will attempt to unify k1 and k2, which produces a substitution (kind_subst)
+that looks like [k2 :-> k1]. Importantly, we need to apply this substitution to
+the type variable binder for c, since its kind is (k2 -> k2 -> *).
+
+We used to accomplish this by doing the following:
+
+    unmapped_tkvs = filter (`notElemTCvSubst` kind_subst) all_tkvs
+    (subst, _)    = mapAccumL substTyVarBndr kind_subst unmapped_tkvs
+
+Where all_tkvs contains all kind variables in the class and instance types (in
+this case, all_tkvs = [k1,k2]). But since kind_subst only has one mapping,
+this results in unmapped_tkvs being [k1], and as a consequence, k1 gets mapped
+to another kind variable in subst! That is, subst = [k2 :-> k1, k1 :-> k_new].
+This is bad, because applying that substitution yields the following instance:
+
+   instance Category k_new (T k1 c) where ...
+
+In other words, keeping k1 in unmapped_tvks taints the substitution, resulting
+in an ill-kinded instance (this caused Trac #11837).
+
+To prevent this, we need to filter out any variable from all_tkvs which either
+
+1. Appears in the domain of kind_subst. notElemTCvSubst checks this.
+2. Appears in the range of kind_subst. To do this, we compute the free
+   variable set of the range of kind_subst with getTCvSubstRangeFVs, and check
+   if a kind variable appears in that set.
 
 Note [Eta-reducing type synonyms]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1067,11 +1119,15 @@ inferConstraints tvs main_cls cls_tys inst_ty rep_tc rep_tc_args mkTheta
             -- (which is the case for functor-like constraints), then we
             -- explicitly unify the subtype's kinds with (* -> *).
             -- See Note [Inferring the instance context]
-            subst = foldl' composeTCvSubst emptyTCvSubst (catMaybes mbSubsts)
-            unmapped_tvs   = filter (`notElemTCvSubst` subst) tvs
-            (subst', tvs') = mapAccumL substTyVarBndr subst unmapped_tvs
+            subst          = foldl' composeTCvSubst
+                                    emptyTCvSubst (catMaybes mbSubsts)
+            subst_range    = getTCvSubstRangeFVs subst
+            unmapped_tvs   = filter (\v -> v `notElemTCvSubst` subst
+                                   && not (v `elemVarSet` subst_range)) tvs
+            (subst', _)    = mapAccumL substTyVarBndr subst unmapped_tvs
             preds'         = substThetaOrigin subst' preds
             inst_tys'      = substTys subst' inst_tys
+            tvs'           = tyCoVarsOfTypesWellScoped inst_tys'
         in mkTheta preds' tvs' inst_tys'
 
     -- is_functor_like: see Note [Inferring the instance context]
@@ -1241,6 +1297,10 @@ checkSideConditions dflags mtheta cls cls_tys rep_tc
 
 classArgsErr :: Class -> [Type] -> SDoc
 classArgsErr cls cls_tys = quotes (ppr (mkClassPred cls cls_tys)) <+> text "is not a class"
+
+nonUnaryErr :: LHsSigType Name -> SDoc
+nonUnaryErr ct = quotes (ppr ct)
+  <+> text "is not a unary constraint, as expected by a deriving clause"
 
 nonStdErr :: Class -> SDoc
 nonStdErr cls =
@@ -1586,7 +1646,7 @@ mkNewTypeEqn dflags overlap_mode tvs
        case mtheta of
         Just theta -> return $ GivenTheta $ DS
             { ds_loc = loc
-            , ds_name = dfun_name, ds_tvs = varSetElemsWellScoped dfun_tvs
+            , ds_name = dfun_name, ds_tvs = dfun_tvs
             , ds_cls = cls, ds_tys = inst_tys
             , ds_tc = rep_tycon
             , ds_theta = theta
@@ -1594,7 +1654,7 @@ mkNewTypeEqn dflags overlap_mode tvs
             , ds_newtype = Just rep_inst_ty }
         Nothing -> return $ InferTheta $ DS
             { ds_loc = loc
-            , ds_name = dfun_name, ds_tvs = varSetElemsWellScoped dfun_tvs
+            , ds_name = dfun_name, ds_tvs = dfun_tvs
             , ds_cls = cls, ds_tys = inst_tys
             , ds_tc = rep_tycon
             , ds_theta = all_preds
@@ -1689,7 +1749,7 @@ mkNewTypeEqn dflags overlap_mode tvs
         -- Next we figure out what superclass dictionaries to use
         -- See Note [Newtype deriving superclasses] above
         cls_tyvars = classTyVars cls
-        dfun_tvs   = tyCoVarsOfTypes inst_tys
+        dfun_tvs   = tyCoVarsOfTypesWellScoped inst_tys
         inst_ty    = mkTyConApp tycon tc_args
         inst_tys   = cls_tys ++ [inst_ty]
         sc_theta   = mkThetaOrigin DerivOrigin TypeLevel $
@@ -1701,7 +1761,7 @@ mkNewTypeEqn dflags overlap_mode tvs
         -- newtype type; precisely the constraints required for the
         -- calls to coercible that we are going to generate.
         coercible_constraints =
-            [ let (Pair t1 t2) = mkCoerceClassMethEqn cls (varSetElemsWellScoped dfun_tvs) inst_tys rep_inst_ty meth
+            [ let (Pair t1 t2) = mkCoerceClassMethEqn cls dfun_tvs inst_tys rep_inst_ty meth
               in mkPredOrigin (DerivOriginCoerce meth t1 t2) TypeLevel
                               (mkReprPrimEqPred t1 t2)
             | meth <- classMethods cls ]
@@ -1859,6 +1919,29 @@ this by simplifying the RHS to a form in which
         - the list is sorted by tyvar (major key) and then class (minor key)
         - no duplicates, of course
 
+Note [Deterministic simplifyInstanceContexts]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Canonicalisation uses cmpType which is nondeterministic. Sorting
+with cmpType puts the returned lists in a nondeterministic order.
+If we were to return them, we'd get class constraints in
+nondeterministic order.
+
+Consider:
+
+  data ADT a b = Z a b deriving Eq
+
+The generated code could be either:
+
+  instance (Eq a, Eq b) => Eq (Z a b) where
+
+Or:
+
+  instance (Eq b, Eq a) => Eq (Z a b) where
+
+To prevent the order from being nondeterministic we only
+canonicalize when comparing and return them in the same order as
+simplifyDeriv returned them.
+See also Note [cmpType nondeterminism]
 -}
 
 
@@ -1906,8 +1989,10 @@ simplifyInstanceContexts infer_specs
              else
                 iterate_deriv (n+1) new_solns }
 
-    eqSolution = eqListBy (eqListBy eqType)
-
+    eqSolution a b = eqListBy (eqListBy eqType) (canSolution a) (canSolution b)
+       -- Canonicalise for comparison
+       -- See Note [Deterministic simplifyInstanceContexts]
+    canSolution = map (sortBy cmpType)
     ------------------------------------------------------------------
     gen_soln :: DerivSpec ThetaOrigin -> TcM ThetaType
     gen_soln (DS { ds_loc = loc, ds_tvs = tyvars
@@ -1922,7 +2007,7 @@ simplifyInstanceContexts infer_specs
                 -- Claim: the result instance declaration is guaranteed valid
                 -- Hence no need to call:
                 --   checkValidInstance tyvars theta clas inst_tys
-           ; return (sortBy cmpType theta) }    -- Canonicalise before returning the solution
+           ; return theta }
       where
         the_pred = mkClassPred clas inst_tys
 

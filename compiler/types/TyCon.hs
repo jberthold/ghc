@@ -82,9 +82,11 @@ module TyCon(
         algTyConRhs,
         newTyConRhs, newTyConEtadArity, newTyConEtadRhs,
         unwrapNewTyCon_maybe, unwrapNewTyConEtad_maybe,
+        newTyConDataCon_maybe,
         algTcFields,
         tyConRuntimeRepInfo,
         tyConBinders, tyConResKind,
+        tcTyConScopedTyVars,
 
         -- ** Manipulating TyCons
         expandSynTyCon_maybe,
@@ -639,17 +641,19 @@ data TyCon
 
   -- | These exist only during a recursive type/class type-checking knot.
   | TcTyCon {
-      tyConUnique :: Unique,
-      tyConName   :: Name,
-      tyConUnsat  :: Bool,  -- ^ can this tycon be unsaturated?
-      tyConArity  :: Arity,
-      tyConBinders :: [TyBinder],   -- ^ The TyBinders for this TyCon's kind.
-                                    -- length tyConBinders == tyConArity.
-                                    -- This is a cached value and is redundant with
-                                    -- the tyConKind.
-      tyConResKind :: Kind,          -- ^ Cached result kind
+        tyConUnique :: Unique,
+        tyConName   :: Name,
+        tyConUnsat  :: Bool,  -- ^ can this tycon be unsaturated?
 
-      tyConKind   :: Kind
+        -- See Note [The binders/kind/arity fields of a TyCon]
+        tyConTyVars  :: [TyVar],    -- ^ The TyCon's parameterised tyvars
+        tyConBinders :: [TyBinder], -- ^ The TyBinders for this TyCon's kind.
+        tyConResKind :: Kind,       -- ^ Result kind
+        tyConKind    :: Kind,       -- ^ Kind of this TyCon
+        tyConArity   :: Arity,      -- ^ Arity
+
+        tcTyConScopedTyVars :: [TyVar] -- ^ Scoped tyvars over the
+                                       -- tycon's body. See Note [TcTyCon]
       }
   deriving Typeable
 
@@ -957,6 +961,45 @@ we get:
 so the coercion tycon CoT must have
         kind:    T ~ []
  and    arity:   0
+
+Note [TcTyCon]
+~~~~~~~~~~~~~~
+When checking a type/class declaration (in module TcTyClsDecls), we come
+upon knowledge of the eventual tycon in bits and pieces. First, we use
+getInitialKinds to look over the user-provided kind signature of a tycon
+(including, for example, the number of parameters written to the tycon)
+to get an initial shape of the tycon's kind. Then, using these initial
+kinds, we kind-check the body of the tycon (class methods, data constructors,
+etc.), filling in the metavariables in the tycon's initial kind.
+We then generalize to get the tycon's final, fixed kind. Finally, once
+this has happened for all tycons in a mutually recursive group, we
+can desugar the lot.
+
+For convenience, we store partially-known tycons in TcTyCons, which
+might store meta-variables. These TcTyCons are stored in the local
+environment in TcTyClsDecls, until the real full TyCons can be created
+during desugaring. A desugared program should never have a TcTyCon.
+
+A challenging piece in all of this is that we end up taking three separate
+passes over every declaration: one in getInitialKind (this pass look only
+at the head, not the body), one in kcTyClDecls (to kind-check the body),
+and a final one in tcTyClDecls (to desugar). In the latter two passes,
+we need to connect the user-written type variables in an LHsQTyVars
+with the variables in the tycon's inferred kind. Because the tycon might
+not have a CUSK, this matching up is, in general, quite hard to do.
+(Look through the git history between Dec 2015 and Apr 2016 for
+TcHsType.splitTelescopeTvs!) Instead of trying, we just store the list
+of type variables to bring into scope in the later passes when we create
+a TcTyCon in getInitialKinds. Much easier this way! These tyvars are
+brought into scope in kcTyClTyVars and tcTyClTyVars, both in TcHsType.
+
+It is important that the scoped type variables not be zonked, as some
+scoped type variables come into existence as SigTvs. If we zonk, the
+Unique will change and the user-written occurrences won't match up with
+what we expect.
+
+In a TcTyCon, everything is zonked (except the scoped vars) after
+the kind-checking pass.
 
 ************************************************************************
 *                                                                      *
@@ -1289,17 +1332,21 @@ mkTupleTyCon name binders res_kind arity tyvars con sort parent
 -- TcErrors sometimes calls typeKind.
 -- See also Note [Kind checking recursive type and class declarations]
 -- in TcTyClsDecls.
-mkTcTyCon :: Name -> [TyBinder] -> Kind  -- ^ /result/ kind only
-          -> Bool  -- ^ Can this be unsaturated?
+mkTcTyCon :: Name -> [TyVar]
+          -> [TyBinder] -> Kind  -- ^ /result/ kind only
+          -> Bool                -- ^ Can this be unsaturated?
+          -> [TyVar]             -- ^ Scoped type variables, see Note [TcTyCon]
           -> TyCon
-mkTcTyCon name binders res_kind unsat
+mkTcTyCon name tvs binders res_kind unsat scoped_tvs
   = TcTyCon { tyConUnique  = getUnique name
             , tyConName    = name
+            , tyConTyVars  = tvs
             , tyConBinders = binders
             , tyConResKind = res_kind
             , tyConKind    = mkForAllTys binders res_kind
             , tyConUnsat   = unsat
-            , tyConArity   = length binders }
+            , tyConArity   = length binders
+            , tcTyConScopedTyVars = scoped_tvs }
 
 -- | Create an unlifted primitive 'TyCon', such as @Int#@
 mkPrimTyCon :: Name -> [TyBinder]
@@ -1322,7 +1369,8 @@ mkLiftedPrimTyCon :: Name -> [TyBinder]
                   -> Kind   -- ^ /result/ kind
                   -> [Role] -> TyCon
 mkLiftedPrimTyCon name binders res_kind roles
-  = mkPrimTyCon' name binders res_kind roles False Nothing
+  = mkPrimTyCon' name binders res_kind roles False (Just rep_nm)
+  where rep_nm = mkPrelTyConRepName name
 
 mkPrimTyCon' :: Name -> [TyBinder]
              -> Kind    -- ^ /result/ kind
@@ -1412,8 +1460,9 @@ isAbstractTyCon _ = False
 -- Used when recovering from errors
 makeTyConAbstract :: TyCon -> TyCon
 makeTyConAbstract tc
-  = mkTcTyCon (tyConName tc) (tyConBinders tc) (tyConResKind tc)
-              (mightBeUnsaturatedTyCon tc)
+  = mkTcTyCon (tyConName tc) (tyConTyVars tc)
+              (tyConBinders tc) (tyConResKind tc)
+              (mightBeUnsaturatedTyCon tc) [{- no scoped vars -}]
 
 -- | Does this 'TyCon' represent something that cannot be defined in Haskell?
 isPrimTyCon :: TyCon -> Bool
@@ -1943,6 +1992,10 @@ newTyConCo :: TyCon -> CoAxiom Unbranched
 newTyConCo tc = case newTyConCo_maybe tc of
                  Just co -> co
                  Nothing -> pprPanic "newTyConCo" (ppr tc)
+
+newTyConDataCon_maybe :: TyCon -> Maybe DataCon
+newTyConDataCon_maybe (AlgTyCon {algTcRhs = NewTyCon { data_con = con }}) = Just con
+newTyConDataCon_maybe _ = Nothing
 
 -- | Find the \"stupid theta\" of the 'TyCon'. A \"stupid theta\" is the context
 -- to the left of an algebraic type declaration, e.g. @Eq a@ in the declaration

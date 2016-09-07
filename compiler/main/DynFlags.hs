@@ -164,6 +164,7 @@ import CmdLineParser
 import Constants
 import Panic
 import Util
+import UniqFM
 import Maybes
 import MonadUtils
 import qualified Pretty
@@ -476,6 +477,7 @@ data GeneralFlag
    | Opt_HelpfulErrors
    | Opt_DeferTypeErrors
    | Opt_DeferTypedHoles
+   | Opt_DeferOutOfScopeVariables
    | Opt_PIC
    | Opt_SccProfilingOn
    | Opt_Ticky
@@ -488,6 +490,7 @@ data GeneralFlag
    | Opt_FlatCache
    | Opt_ExternalInterpreter
    | Opt_VersionMacros
+   | Opt_OptimalApplicativeDo
 
    -- PreInlining is on by default. The option is there just to see how
    -- bad things get if you turn it off!
@@ -601,6 +604,7 @@ data WarningFlag =
    | Opt_WarnUntickedPromotedConstructors
    | Opt_WarnDerivingTypeable
    | Opt_WarnDeferredTypeErrors
+   | Opt_WarnDeferredOutOfScopeVariables
    | Opt_WarnNonCanonicalMonadInstances   -- since 8.0
    | Opt_WarnNonCanonicalMonadFailInstances -- since 8.0
    | Opt_WarnNonCanonicalMonoidInstances  -- since 8.0
@@ -628,10 +632,10 @@ instance Show SafeHaskellMode where
 instance Outputable SafeHaskellMode where
     ppr = text . show
 
-type SigOf = Map ModuleName Module
+type SigOf = ModuleNameEnv Module
 
 getSigOf :: DynFlags -> ModuleName -> Maybe Module
-getSigOf dflags n = Map.lookup n (sigOf dflags)
+getSigOf dflags n = lookupUFM (sigOf dflags) n
 
 -- | Contains not only a collection of 'GeneralFlag's but also a plethora of
 -- information relating to the compilation of a single file or GHC session
@@ -1484,7 +1488,7 @@ defaultDynFlags mySettings =
         ghcMode                 = CompManager,
         ghcLink                 = LinkBinary,
         hscTarget               = defaultHscTarget (sTargetPlatform mySettings),
-        sigOf                   = Map.empty,
+        sigOf                   = emptyUFM,
         verbosity               = 0,
         optLevel                = 0,
         debugLevel              = 0,
@@ -2027,7 +2031,7 @@ parseSigOf :: String -> SigOf
 parseSigOf str = case filter ((=="").snd) (readP_to_S parse str) of
     [(r, "")] -> r
     _ -> throwGhcException $ CmdLineError ("Can't parse -sig-of: " ++ str)
-  where parse = Map.fromList <$> sepBy parseEntry (R.char ',')
+  where parse = listToUFM <$> sepBy parseEntry (R.char ',')
         parseEntry = do
             n <- tok $ parseModuleName
             -- ToDo: deprecate this 'is' syntax?
@@ -2373,8 +2377,17 @@ dynamic_flags_deps = [
                   "deprecated: They no longer have any effect"))))
   , make_ord_flag defFlag "v"        (OptIntSuffix setVerbosity)
 
-  , make_ord_flag defGhcFlag "j"     (OptIntSuffix (\n ->
-                                            upd (\d -> d {parMakeCount = n})))
+  , make_ord_flag defGhcFlag "j"     (OptIntSuffix
+        (\n -> case n of
+                 Just n
+                     | n > 0     -> upd (\d -> d { parMakeCount = Just n })
+                     | otherwise -> addErr "Syntax: -j[n] where n > 0"
+                 Nothing -> upd (\d -> d { parMakeCount = Nothing })))
+                 -- When the number of parallel builds
+                 -- is omitted, it is the same
+                 -- as specifing that the number of
+                 -- parallel builds is equal to the
+                 -- result of getNumProcessors
   , make_ord_flag defFlag "sig-of"   (sepArg setSigOf)
 
     -- RTS options -------------------------------------------------------------
@@ -3243,6 +3256,8 @@ wWarningFlagsDeps = [
   depFlagSpec "auto-orphans"             Opt_WarnAutoOrphans
     "it has no effect",
   flagSpec "deferred-type-errors"        Opt_WarnDeferredTypeErrors,
+  flagSpec "deferred-out-of-scope-variables"
+                                         Opt_WarnDeferredOutOfScopeVariables,
   flagSpec "deprecations"                Opt_WarnWarningsDeprecations,
   flagSpec "deprecated-flags"            Opt_WarnDeprecatedFlags,
   flagSpec "deriving-typeable"           Opt_WarnDerivingTypeable,
@@ -3357,6 +3372,7 @@ fFlagsDeps = [
   flagSpec "cpr-anal"                         Opt_CprAnal,
   flagSpec "defer-type-errors"                Opt_DeferTypeErrors,
   flagSpec "defer-typed-holes"                Opt_DeferTypedHoles,
+  flagSpec "defer-out-of-scope-variables"     Opt_DeferOutOfScopeVariables,
   flagSpec "dicts-cheap"                      Opt_DictsCheap,
   flagSpec "dicts-strict"                     Opt_DictsStrict,
   flagSpec "dmd-tx-dict-sel"                  Opt_DmdTxDictSel,
@@ -3392,6 +3408,7 @@ fFlagsDeps = [
   flagSpec "loopification"                    Opt_Loopification,
   flagSpec "omit-interface-pragmas"           Opt_OmitInterfacePragmas,
   flagSpec "omit-yields"                      Opt_OmitYields,
+  flagSpec "optimal-applicative-do"           Opt_OptimalApplicativeDo,
   flagSpec "pedantic-bottoms"                 Opt_PedanticBottoms,
   flagSpec "pre-inlining"                     Opt_SimplPreInlining,
   flagGhciSpec "print-bind-contents"          Opt_PrintBindContents,
@@ -3696,6 +3713,7 @@ default_PIC platform =
 -- on
 impliedGFlags :: [(GeneralFlag, TurnOnFlag, GeneralFlag)]
 impliedGFlags = [(Opt_DeferTypeErrors, turnOn, Opt_DeferTypedHoles)
+                ,(Opt_DeferTypeErrors, turnOn, Opt_DeferOutOfScopeVariables)
                 ,(Opt_Strictness, turnOn, Opt_WorkerWrapper)
                 ]
 
@@ -3893,6 +3911,7 @@ standardWarnings -- see Note [Documenting warning flags]
         Opt_WarnDeprecatedFlags,
         Opt_WarnDeferredTypeErrors,
         Opt_WarnTypedHoles,
+        Opt_WarnDeferredOutOfScopeVariables,
         Opt_WarnPartialTypeSignatures,
         Opt_WarnUnrecognisedPragmas,
         Opt_WarnDuplicateExports,
@@ -3937,8 +3956,7 @@ minusWallOpts
         Opt_WarnUnusedDoBind,
         Opt_WarnTrustworthySafe,
         Opt_WarnUntickedPromotedConstructors,
-        Opt_WarnMissingPatternSynonymSignatures,
-        Opt_WarnRedundantConstraints
+        Opt_WarnMissingPatternSynonymSignatures
       ]
 
 -- | Things you get with -Weverything, i.e. *all* known warnings flags
@@ -4399,13 +4417,15 @@ interpretPackageEnv dflags = do
     parseEnvFile envfile = mapM_ parseEntry . lines
       where
         parseEntry str = case words str of
-          ["package-db", db]    -> addPkgConfRef (PkgConfFile (envdir </> db))
+          ("package-db": _)     -> addPkgConfRef (PkgConfFile (envdir </> db))
             -- relative package dbs are interpreted relative to the env file
             where envdir = takeDirectory envfile
+                  db     = drop 11 str
           ["clear-package-db"]  -> clearPkgConf
           ["global-package-db"] -> addPkgConfRef GlobalPkgConf
           ["user-package-db"]   -> addPkgConfRef UserPkgConf
           ["package-id", pkgid] -> exposePackageId pkgid
+          (('-':'-':_):_)       -> return () -- comments
           -- and the original syntax introduced in 7.10:
           [pkgid]               -> exposePackageId pkgid
           []                    -> return ()

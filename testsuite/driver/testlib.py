@@ -1045,7 +1045,7 @@ def do_compile( name, way, should_fail, top_mod, extra_mods, extra_hc_opts, over
     # of whether we expected the compilation to fail or not (successful
     # compilations may generate warnings).
 
-    (_, expected_stderr_file) = find_expected_file(name, 'stderr')
+    expected_stderr_file = find_expected_file(name, 'stderr')
     actual_stderr_file = add_suffix(name, 'comp.stderr')
 
     if not compare_outputs(way, 'stderr',
@@ -1070,7 +1070,7 @@ def compile_cmp_asm( name, way, extra_hc_opts ):
     # of whether we expected the compilation to fail or not (successful
     # compilations may generate warnings).
 
-    (_, expected_asm_file) = find_expected_file(name, 'asm')
+    expected_asm_file = find_expected_file(name, 'asm')
     actual_asm_file = add_suffix(name, 's')
 
     if not compare_outputs(way, 'asm',
@@ -1514,15 +1514,9 @@ def get_compiler_flags(override_flags, noforce):
 
 def check_stdout_ok(name, way):
    actual_stdout_file = add_suffix(name, 'run.stdout')
-   (platform_specific, expected_stdout_file) = find_expected_file(name, 'stdout')
+   expected_stdout_file = find_expected_file(name, 'stdout')
 
-   def norm(str):
-      if platform_specific:
-         return str
-      else:
-         return normalise_output(str)
-
-   extra_norm = join_normalisers(norm, getTestOpts().extra_normaliser)
+   extra_norm = join_normalisers(normalise_output, getTestOpts().extra_normaliser)
 
    check_stdout = getTestOpts().check_stdout
    if check_stdout:
@@ -1538,16 +1532,10 @@ def dump_stdout( name ):
 
 def check_stderr_ok(name, way):
    actual_stderr_file = add_suffix(name, 'run.stderr')
-   (platform_specific, expected_stderr_file) = find_expected_file(name, 'stderr')
-
-   def norm(str):
-      if platform_specific:
-         return str
-      else:
-         return normalise_errmsg(str)
+   expected_stderr_file = find_expected_file(name, 'stderr')
 
    return compare_outputs(way, 'stderr',
-                          join_normalisers(norm, getTestOpts().extra_errmsg_normaliser), \
+                          join_normalisers(normalise_errmsg, getTestOpts().extra_errmsg_normaliser), \
                           expected_stderr_file, actual_stderr_file,
                           whitespace_normaliser=normalise_whitespace)
 
@@ -1598,6 +1586,14 @@ def check_hp_ok(name):
         return(False)
 
 def check_prof_ok(name, way):
+    expected_prof_file = find_expected_file(name, 'prof.sample')
+    expected_prof_path = in_testdir(expected_prof_file)
+
+    # Check actual prof file only if we have an expected prof file to
+    # compare it with.
+    if not os.path.exists(expected_prof_path):
+        return True
+
     actual_prof_file = add_suffix(name, 'prof')
     actual_prof_path = in_testdir(actual_prof_file)
 
@@ -1609,16 +1605,9 @@ def check_prof_ok(name, way):
         print(actual_prof_path + " is empty")
         return(False)
 
-    (_, expected_prof_file) = find_expected_file(name, 'prof.sample')
-    expected_prof_path = in_testdir(expected_prof_file)
-
-    # sample prof file is not required
-    if not os.path.exists(expected_prof_path):
-        return True
-    else:
-        return compare_outputs(way, 'prof', normalise_prof,
-                               expected_prof_file, actual_prof_file,
-                               whitespace_normaliser=normalise_whitespace)
+    return compare_outputs(way, 'prof', normalise_prof,
+                            expected_prof_file, actual_prof_file,
+                            whitespace_normaliser=normalise_whitespace)
 
 # Compare expected output to actual output, and optionally accept the
 # new output. Returns true if output matched or was accepted, false
@@ -1766,21 +1755,38 @@ def normalise_prof (str):
     str = re.sub('[ \t]*main[ \t]+Main.*\n','',str)
 
     # We have somthing like this:
+    #
+    # MAIN         MAIN  <built-in>                 53  0  0.0   0.2  0.0  100.0
+    #  CAF         Main  <entire-module>           105  0  0.0   0.3  0.0   62.5
+    #   readPrec   Main  Main_1.hs:7:13-16         109  1  0.0   0.6  0.0    0.6
+    #   readPrec   Main  Main_1.hs:4:13-16         107  1  0.0   0.6  0.0    0.6
+    #   main       Main  Main_1.hs:(10,1)-(20,20)  106  1  0.0  20.2  0.0   61.0
+    #    ==        Main  Main_1.hs:7:25-26         114  1  0.0   0.0  0.0    0.0
+    #    ==        Main  Main_1.hs:4:25-26         113  1  0.0   0.0  0.0    0.0
+    #    showsPrec Main  Main_1.hs:7:19-22         112  2  0.0   1.2  0.0    1.2
+    #    showsPrec Main  Main_1.hs:4:19-22         111  2  0.0   0.9  0.0    0.9
+    #    readPrec  Main  Main_1.hs:7:13-16         110  0  0.0  18.8  0.0   18.8
+    #    readPrec  Main  Main_1.hs:4:13-16         108  0  0.0  19.9  0.0   19.9
+    #
+    # then we remove all the specific profiling data, leaving only the cost
+    # centre name, module, src, and entries, to end up with this: (modulo
+    # whitespace between columns)
+    #
+    # MAIN      MAIN <built-in>         0
+    # readPrec  Main Main_1.hs:7:13-16  1
+    # readPrec  Main Main_1.hs:4:13-16  1
+    # ==        Main Main_1.hs:7:25-26  1
+    # ==        Main Main_1.hs:4:25-26  1
+    # showsPrec Main Main_1.hs:7:19-22  2
+    # showsPrec Main Main_1.hs:4:19-22  2
+    # readPrec  Main Main_1.hs:7:13-16  0
+    # readPrec  Main Main_1.hs:4:13-16  0
 
-    # MAIN      MAIN                 101      0    0.0    0.0   100.0  100.0
-    # k         Main                 204      1    0.0    0.0     0.0    0.0
-    #  foo      Main                 205      1    0.0    0.0     0.0    0.0
-    #   foo.bar Main                 207      1    0.0    0.0     0.0    0.0
-
-    # then we remove all the specific profiling data, leaving only the
-    # cost centre name, module, and entries, to end up with this:
-
-    # MAIN                MAIN            0
-    #   k                 Main            1
-    #    foo              Main            1
-    #     foo.bar         Main            1
-
-    str = re.sub('\n([ \t]*[^ \t]+)([ \t]+[^ \t]+)([ \t]+\\d+)([ \t]+\\d+)[ \t]+([\\d\\.]+)[ \t]+([\\d\\.]+)[ \t]+([\\d\\.]+)[ \t]+([\\d\\.]+)','\n\\1 \\2 \\4',str)
+    # Split 9 whitespace-separated groups, take columns 1 (cost-centre), 2
+    # (module), 3 (src), and 5 (entries). SCC names can't have whitespace, so
+    # this works fine.
+    str = re.sub(r'\s*(\S+)\s*(\S+)\s*(\S+)\s*(\S+)\s*(\S+)\s*(\S+)\s*(\S+)\s*(\S+)\s*(\S+)\s*',
+            '\\1 \\2 \\3 \\5\n', str)
     return str
 
 def normalise_slashes_( str ):
@@ -2176,20 +2182,18 @@ def find_expected_file(name, suff):
     basename = add_suffix(name, suff)
     basepath = in_testdir(basename)
 
-    files = [(platformSpecific, basename + ws + plat)
-             for (platformSpecific, plat) in [(1, '-' + config.platform),
-                                              (1, '-' + config.os),
-                                              (0, '')]
+    files = [basename + ws + plat
+             for plat in ['-' + config.platform, '-' + config.os, '']
              for ws in ['-ws-' + config.wordsize, '']]
 
     dir = glob.glob(basepath + '*')
     dir = [normalise_slashes_(d) for d in dir]
 
-    for (platformSpecific, f) in files:
+    for f in files:
        if in_testdir(f) in dir:
-            return (platformSpecific,f)
+            return f
 
-    return (0, basename)
+    return basename
 
 # Clean up prior to the test, so that we can't spuriously conclude
 # that it passed on the basis of old run outputs.

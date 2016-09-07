@@ -91,6 +91,7 @@ import DynFlags
 import FastString
 import Outputable
 
+import Control.DeepSeq
 import Data.Data
 
 {-
@@ -132,6 +133,18 @@ instance Outputable NameSort where
   ppr (WiredIn _ _ _) = text "wired-in"
   ppr  Internal       = text "internal"
   ppr  System         = text "system"
+
+instance NFData Name where
+  rnf Name{..} = rnf n_sort
+
+instance NFData NameSort where
+  rnf (External m) = rnf m
+  rnf (WiredIn m t b) = rnf m `seq` t `seq` b `seq` ()
+    -- XXX this is a *lie*, we're not going to rnf the TyThing, but
+    -- since the TyThings for WiredIn Names are all static they can't
+    -- be hiding space leaks or errors.
+  rnf Internal = ()
+  rnf System = ()
 
 -- | BuiltInSyntax is for things like @(:)@, @[]@ and tuples,
 -- which have special syntactic forms.  They aren't in scope
@@ -412,8 +425,10 @@ mkLocalisedOccName this_mod mk_occ name = mk_occ origin (nameOccName name)
 cmpName :: Name -> Name -> Ordering
 cmpName n1 n2 = n_uniq n1 `compare` n_uniq n2
 
+-- | Compare Names lexicographically
+-- This only works for Names that originate in the source code or have been
+-- tidied.
 stableNameCmp :: Name -> Name -> Ordering
--- Compare lexicographically
 stableNameCmp (Name { n_sort = s1, n_occ = occ1 })
               (Name { n_sort = s2, n_occ = occ2 })
   = (s1 `sort_cmp` s2) `thenCmp` (occ1 `compare` occ2)

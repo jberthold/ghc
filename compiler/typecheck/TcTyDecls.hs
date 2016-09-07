@@ -20,7 +20,7 @@ module TcTyDecls(
         RoleAnnots, extractRoleAnnots, emptyRoleAnnots, lookupRoleAnnots,
 
         -- * Implicits
-        tcAddImplicits,
+        tcAddImplicits, mkDefaultMethodType,
 
         -- * Record selectors
         mkRecSelBinds, mkOneRecordSelector
@@ -31,7 +31,7 @@ module TcTyDecls(
 import TcRnMonad
 import TcEnv
 import TcBinds( tcRecSelBinds )
-import TyCoRep( Type(..), TyBinder(..), delBinderVar )
+import TyCoRep( Type(..), TyBinder(..), delBinderVarFV )
 import TcType
 import TysWiredIn( unitTy )
 import MkCore( rEC_SEL_ERROR_ID )
@@ -61,6 +61,7 @@ import Maybes
 import Data.List
 import Bag
 import FastString
+import FV
 
 import Control.Monad
 
@@ -672,8 +673,8 @@ irClass cls
     cls_tv_set = mkVarSet cls_tvs
 
     ir_at at_tc
-      = mapM_ (updateRole Nominal) (varSetElems nvars)
-      where nvars = (mkVarSet $ tyConTyVars at_tc) `intersectVarSet` cls_tv_set
+      = mapM_ (updateRole Nominal) nvars
+      where nvars = filter (`elemVarSet` cls_tv_set) $ tyConTyVars at_tc
 
 -- See Note [Role inference]
 irDataCon :: DataCon -> RoleM ()
@@ -726,21 +727,21 @@ irExTyVars orig_tvs thing = go emptyVarSet orig_tvs
 
 markNominal :: TyVarSet   -- local variables
             -> Type -> RoleM ()
-markNominal lcls ty = let nvars = get_ty_vars ty `minusVarSet` lcls in
-                      mapM_ (updateRole Nominal) (varSetElems nvars)
+markNominal lcls ty = let nvars = fvVarList (FV.delFVs lcls $ get_ty_vars ty) in
+                      mapM_ (updateRole Nominal) nvars
   where
      -- get_ty_vars gets all the tyvars (no covars!) from a type *without*
      -- recurring into coercions. Recall: coercions are totally ignored during
      -- role inference. See [Coercions in role inference]
-    get_ty_vars (TyVarTy tv)     = unitVarSet tv
-    get_ty_vars (AppTy t1 t2)    = get_ty_vars t1 `unionVarSet` get_ty_vars t2
-    get_ty_vars (TyConApp _ tys) = foldr (unionVarSet . get_ty_vars) emptyVarSet tys
+    get_ty_vars (TyVarTy tv)     = FV.unitFV tv
+    get_ty_vars (AppTy t1 t2)    = get_ty_vars t1 `unionFV` get_ty_vars t2
+    get_ty_vars (TyConApp _ tys) = mapUnionFV get_ty_vars tys
     get_ty_vars (ForAllTy bndr ty)
-      = get_ty_vars ty `delBinderVar` bndr
-        `unionVarSet` (tyCoVarsOfType $ binderType bndr)
-    get_ty_vars (LitTy {})       = emptyVarSet
+      = delBinderVarFV bndr (get_ty_vars ty)
+        `unionFV` (tyCoFVsOfType $ binderType bndr)
+    get_ty_vars (LitTy {})       = emptyFV
     get_ty_vars (CastTy ty _)    = get_ty_vars ty
-    get_ty_vars (CoercionTy _)   = emptyVarSet
+    get_ty_vars (CoercionTy _)   = emptyFV
 
 -- like lookupRoles, but with Nominal tags at the end for oversaturated TyConApps
 lookupRolesX :: TyCon -> RoleM [Role]
@@ -874,17 +875,18 @@ mkDefaultMethodIds :: [TyCon] -> [Id]
 -- the filled-in default methods of each instance declaration
 -- See Note [Default method Ids and Template Haskell]
 mkDefaultMethodIds tycons
-  = [ mkExportedVanillaId dm_name (mk_dm_ty cls sel_id dm_spec)
+  = [ mkExportedVanillaId dm_name (mkDefaultMethodType cls sel_id dm_spec)
     | tc <- tycons
     , Just cls <- [tyConClass_maybe tc]
     , (sel_id, Just (dm_name, dm_spec)) <- classOpItems cls ]
-  where
-    mk_dm_ty :: Class -> Id -> DefMethSpec Type -> Type
-    mk_dm_ty _ sel_id VanillaDM        = idType sel_id
-    mk_dm_ty cls _   (GenericDM dm_ty) = mkSpecSigmaTy cls_tvs [pred] dm_ty
-       where
-         cls_tvs = classTyVars cls
-         pred    = mkClassPred cls (mkTyVarTys cls_tvs)
+
+mkDefaultMethodType :: Class -> Id -> DefMethSpec Type -> Type
+-- Returns the top-level type of the default method
+mkDefaultMethodType _ sel_id VanillaDM        = idType sel_id
+mkDefaultMethodType cls _   (GenericDM dm_ty) = mkSpecSigmaTy cls_tvs [pred] dm_ty
+   where
+     cls_tvs = classTyVars cls
+     pred    = mkClassPred cls (mkTyVarTys cls_tvs)
 
 {-
 ************************************************************************
@@ -947,7 +949,12 @@ mkOneRecordSelector all_cons idDetails fl
     lbl      = flLabel fl
     sel_name = flSelector fl
 
-    sel_id = mkExportedLocalId rec_details sel_name sel_ty
+    sel_id =
+      -- Do not mark record selectors as exported to avoid keeping these Ids
+      -- alive unnecessarily. See #12125. Selectors are now marked as exported
+      -- when necessary by desugarer ('Desugar.addExportFlagsAndRules', also see
+      -- uses of 'availsToNameSetWithSelectors' in 'Desugar.hs').
+      mkNonExportedLocalId rec_details sel_name sel_ty
     rec_details = RecSelId { sel_tycon = idDetails, sel_naughty = is_naughty }
 
     -- Find a representative constructor, con1

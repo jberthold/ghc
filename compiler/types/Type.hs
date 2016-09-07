@@ -117,17 +117,16 @@ module Type (
         liftedTypeKind,
 
         -- * Type free variables
-        tyCoVarsOfType, tyCoVarsOfTypes, tyCoVarsOfTypeAcc,
+        tyCoVarsOfType, tyCoVarsOfTypes, tyCoFVsOfType,
         tyCoVarsOfTypeDSet,
         coVarsOfType,
-        coVarsOfTypes, closeOverKinds,
-        splitDepVarsOfType, splitDepVarsOfTypes,
+        coVarsOfTypes, closeOverKinds, closeOverKindsList,
         splitVisVarsOfType, splitVisVarsOfTypes,
         expandTypeSynonyms,
         typeSize,
 
         -- * Well-scoped lists of variables
-        varSetElemsWellScoped, toposortTyVars, tyCoVarsOfTypeWellScoped,
+        dVarSetElemsWellScoped, toposortTyVars, tyCoVarsOfTypeWellScoped,
         tyCoVarsOfTypesWellScoped,
 
         -- * Type comparison
@@ -144,7 +143,7 @@ module Type (
         tyConsOfType,
 
         -- * Type representation for the code generator
-        typePrimRep, typeRepArity, kindPrimRep, tyConPrimRep,
+        typePrimRep, typeRepArity, tyConPrimRep,
 
         -- * Main type substitution data types
         TvSubstEnv,     -- Representation widely visible
@@ -156,7 +155,7 @@ module Type (
         mkTCvSubst, zipTvSubst, mkTvSubstPrs,
         notElemTCvSubst,
         getTvSubstEnv, setTvSubstEnv,
-        zapTCvSubst, getTCvInScope,
+        zapTCvSubst, getTCvInScope, getTCvSubstRangeFVs,
         extendTCvInScope, extendTCvInScopeList, extendTCvInScopeSet,
         extendTCvSubst, extendCvSubst,
         extendTvSubst, extendTvSubstList, extendTvSubstAndInScope,
@@ -224,6 +223,7 @@ import FastString
 import Pair
 import ListSetOps
 import Digraph
+import Unique ( nonDetCmpUnique )
 
 import Maybes           ( orElse )
 import Data.Maybe       ( isJust, mapMaybe )
@@ -1179,129 +1179,6 @@ The reason is that we then get better (shorter) type signatures in
 interfaces.  Notably this plays a role in tcTySigs in TcBinds.hs.
 
 
-                Representation types
-                ~~~~~~~~~~~~~~~~~~~~
-
-Note [Nullary unboxed tuple]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We represent the nullary unboxed tuple as the unary (but void) type
-Void#.  The reason for this is that the ReprArity is never
-less than the Arity (as it would otherwise be for a function type like
-(# #) -> Int).
-
-As a result, ReprArity is always strictly positive if Arity is. This
-is important because it allows us to distinguish at runtime between a
-thunk and a function takes a nullary unboxed tuple as an argument!
--}
-
-type UnaryType = Type
-
-data RepType = UbxTupleRep [UnaryType] -- INVARIANT: never an empty list (see Note [Nullary unboxed tuple])
-             | UnaryRep UnaryType
-
-instance Outputable RepType where
-  ppr (UbxTupleRep tys) = text "UbxTupleRep" <+> ppr tys
-  ppr (UnaryRep ty)     = text "UnaryRep"    <+> ppr ty
-
-flattenRepType :: RepType -> [UnaryType]
-flattenRepType (UbxTupleRep tys) = tys
-flattenRepType (UnaryRep ty)     = [ty]
-
--- | Looks through:
---
---      1. For-alls
---      2. Synonyms
---      3. Predicates
---      4. All newtypes, including recursive ones, but not newtype families
---      5. Casts
---
--- It's useful in the back end of the compiler.
-repType :: Type -> RepType
-repType ty
-  = go initRecTc ty
-  where
-    go :: RecTcChecker -> Type -> RepType
-    go rec_nts ty                       -- Expand predicates and synonyms
-      | Just ty' <- coreView ty
-      = go rec_nts ty'
-
-    go rec_nts (ForAllTy (Named {}) ty2)  -- Drop type foralls
-      = go rec_nts ty2
-
-    go rec_nts (TyConApp tc tys)        -- Expand newtypes
-      | isNewTyCon tc
-      , tys `lengthAtLeast` tyConArity tc
-      , Just rec_nts' <- checkRecTc rec_nts tc   -- See Note [Expanding newtypes] in TyCon
-      = go rec_nts' (newTyConInstRhs tc tys)
-
-      | isUnboxedTupleTyCon tc
-      = if null tys
-         then UnaryRep voidPrimTy -- See Note [Nullary unboxed tuple]
-         else UbxTupleRep (concatMap (flattenRepType . go rec_nts) non_rr_tys)
-      where
-          -- See Note [Unboxed tuple RuntimeRep vars] in TyCon
-        non_rr_tys = dropRuntimeRepArgs tys
-
-    go rec_nts (CastTy ty _)
-      = go rec_nts ty
-
-    go _ ty@(CoercionTy _)
-      = pprPanic "repType" (ppr ty)
-
-    go _ ty = UnaryRep ty
-
--- ToDo: this could be moved to the code generator, using splitTyConApp instead
--- of inspecting the type directly.
-
--- | Discovers the primitive representation of a more abstract 'UnaryType'
-typePrimRep :: UnaryType -> PrimRep
-typePrimRep ty = kindPrimRep (typeKind ty)
-
--- | Find the primitive representation of a 'TyCon'. Defined here to
--- avoid module loops. Call this only on unlifted tycons.
-tyConPrimRep :: TyCon -> PrimRep
-tyConPrimRep tc = kindPrimRep res_kind
-  where
-    res_kind = tyConResKind tc
-
--- | Take a kind (of shape @TYPE rr@) and produce the 'PrimRep' of values
--- of types of this kind.
-kindPrimRep :: Kind -> PrimRep
-kindPrimRep ki | Just ki' <- coreViewOneStarKind ki = kindPrimRep ki'
-kindPrimRep (TyConApp typ [runtime_rep])
-  = ASSERT( typ `hasKey` tYPETyConKey )
-    go runtime_rep
-  where
-    go rr | Just rr' <- coreView rr = go rr'
-    go (TyConApp rr_dc args)
-      | RuntimeRep fun <- tyConRuntimeRepInfo rr_dc
-      = fun args
-    go rr = pprPanic "kindPrimRep.go" (ppr rr)
-kindPrimRep ki = WARN( True
-                     , text "kindPrimRep defaulting to PtrRep on" <+> ppr ki )
-                 PtrRep  -- this can happen legitimately for, e.g., Any
-
-typeRepArity :: Arity -> Type -> RepArity
-typeRepArity 0 _ = 0
-typeRepArity n ty = case repType ty of
-  UnaryRep (ForAllTy bndr ty) -> length (flattenRepType (repType (binderType bndr))) + typeRepArity (n - 1) ty
-  _                           -> pprPanic "typeRepArity: arity greater than type can handle" (ppr (n, ty, repType ty))
-
-isVoidTy :: Type -> Bool
--- True if the type has zero width
-isVoidTy ty = case repType ty of
-                UnaryRep (TyConApp tc _) -> isUnliftedTyCon tc &&
-                                            isVoidRep (tyConPrimRep tc)
-                _                        -> False
-
-{-
-Note [AppTy rep]
-~~~~~~~~~~~~~~~~
-Types of the form 'f a' must be of kind *, not #, so we are guaranteed
-that they are represented by pointers.  The reason is that f must have
-kind (kk -> kk) and kk cannot be unlifted; see Note [The kind invariant]
-in TyCoRep.
-
 ---------------------------------------------------------------------
                                 ForAllTy
                                 ~~~~~~~~
@@ -1856,6 +1733,137 @@ typeSize (TyConApp _ ts)  = 1 + sum (map typeSize ts)
 typeSize (CastTy ty co)   = typeSize ty + coercionSize co
 typeSize (CoercionTy co)  = coercionSize co
 
+
+{- **********************************************************************
+*                                                                       *
+                Representation types
+*                                                                       *
+********************************************************************** -}
+
+{- Note [Nullary unboxed tuple]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+At runtime we represent the nullary unboxed tuple as the type Void#.
+To see why, consider
+    f2 :: (# Int, Int #) -> Int
+    f1 :: (# Int #) -> Int
+    f0 :: (# #) -> Int
+
+When we "unarise" to eliminate unboxed tuples (this is done at the STG level),
+we'll transform to
+    f2 :: Int -> Int -> Int
+    f1 :: Int -> Int
+    f0 :: ??
+
+We do not want to give f0 zero arguments, otherwise a lambda will
+turn into a thunk! So we want to get
+    f0 :: Void# -> Int
+
+See Note [Unarisation and nullary tuples] in UnariseStg for more detail.
+-}
+
+type UnaryType = Type
+
+data RepType
+  = UbxTupleRep [UnaryType] -- Represented by multiple values
+                            -- INVARIANT: never an empty list
+                            -- (see Note [Nullary unboxed tuple])
+  | UnaryRep UnaryType      -- Represented by a single value
+
+instance Outputable RepType where
+  ppr (UbxTupleRep tys) = text "UbxTupleRep" <+> ppr tys
+  ppr (UnaryRep ty)     = text "UnaryRep"    <+> ppr ty
+
+flattenRepType :: RepType -> [UnaryType]
+flattenRepType (UbxTupleRep tys) = tys
+flattenRepType (UnaryRep ty)     = [ty]
+
+-- | 'repType' figure out how a type will be represented
+--   at runtime.  It looks through
+--
+--      1. For-alls
+--      2. Synonyms
+--      3. Predicates
+--      4. All newtypes, including recursive ones, but not newtype families
+--      5. Casts
+--
+repType :: Type -> RepType
+repType ty
+  = go initRecTc ty
+  where
+    go :: RecTcChecker -> Type -> RepType
+    go rec_nts ty                       -- Expand predicates and synonyms
+      | Just ty' <- coreView ty
+      = go rec_nts ty'
+
+    go rec_nts (ForAllTy (Named {}) ty2)  -- Drop type foralls
+      = go rec_nts ty2
+
+    go rec_nts (TyConApp tc tys)        -- Expand newtypes
+      | isNewTyCon tc
+      , tys `lengthAtLeast` tyConArity tc
+      , Just rec_nts' <- checkRecTc rec_nts tc   -- See Note [Expanding newtypes] in TyCon
+      = go rec_nts' (newTyConInstRhs tc tys)
+
+      | isUnboxedTupleTyCon tc
+      = UbxTupleRep (concatMap (flattenRepType . go rec_nts) non_rr_tys)
+      where
+          -- See Note [Unboxed tuple RuntimeRep vars] in TyCon
+        non_rr_tys = dropRuntimeRepArgs tys
+
+    go rec_nts (CastTy ty _)
+      = go rec_nts ty
+
+    go _ ty@(CoercionTy _)
+      = pprPanic "repType" (ppr ty)
+
+    go _ ty = UnaryRep ty
+
+-- ToDo: this could be moved to the code generator, using splitTyConApp instead
+-- of inspecting the type directly.
+
+-- | Discovers the primitive representation of a more abstract 'UnaryType'
+typePrimRep :: UnaryType -> PrimRep
+typePrimRep ty = kindPrimRep (typeKind ty)
+
+-- | Find the primitive representation of a 'TyCon'. Defined here to
+-- avoid module loops. Call this only on unlifted tycons.
+tyConPrimRep :: TyCon -> PrimRep
+tyConPrimRep tc = kindPrimRep res_kind
+  where
+    res_kind = tyConResKind tc
+
+-- | Take a kind (of shape @TYPE rr@) and produce the 'PrimRep' of values
+-- of types of this kind.
+kindPrimRep :: Kind -> PrimRep
+kindPrimRep ki | Just ki' <- coreViewOneStarKind ki = kindPrimRep ki'
+kindPrimRep (TyConApp typ [runtime_rep])
+  = ASSERT( typ `hasKey` tYPETyConKey )
+    go runtime_rep
+  where
+    go rr | Just rr' <- coreView rr = go rr'
+    go (TyConApp rr_dc args)
+      | RuntimeRep fun <- tyConRuntimeRepInfo rr_dc
+      = fun args
+    go rr = pprPanic "kindPrimRep.go" (ppr rr)
+kindPrimRep ki = WARN( True
+                     , text "kindPrimRep defaulting to PtrRep on" <+> ppr ki )
+                 PtrRep  -- this can happen legitimately for, e.g., Any
+
+typeRepArity :: Arity -> Type -> RepArity
+typeRepArity 0 _ = 0
+typeRepArity n ty = case repType ty of
+  UnaryRep (ForAllTy bndr ty) -> length (flattenRepType (repType (binderType bndr)))
+                                 + typeRepArity (n - 1) ty
+  _ -> pprPanic "typeRepArity: arity greater than type can handle" (ppr (n, ty, repType ty))
+
+isVoidTy :: Type -> Bool
+-- True if the type has zero width
+isVoidTy ty = case repType ty of
+                UnaryRep (TyConApp tc _) -> isUnliftedTyCon tc &&
+                                            isVoidRep (tyConPrimRep tc)
+                _                        -> False
+
+
 {-
 %************************************************************************
 %*                                                                      *
@@ -1880,9 +1888,14 @@ toposortTyVars tvs = reverse $
                          (tyCoVarsOfTypeList (tyVarKind tv)) )
             | tv <- tvs ]
 
--- | Extract a well-scoped list of variables from a set of variables.
-varSetElemsWellScoped :: VarSet -> [Var]
-varSetElemsWellScoped = toposortTyVars . varSetElems
+-- | Extract a well-scoped list of variables from a deterministic set of
+-- variables. The result is deterministic.
+-- NB: There used to exist varSetElemsWellScoped :: VarSet -> [Var] which
+-- took a non-deterministic set and produced a non-deterministic
+-- well-scoped list. If you care about the list being well-scoped you also
+-- most likely care about it being in deterministic order.
+dVarSetElemsWellScoped :: DVarSet -> [Var]
+dVarSetElemsWellScoped = toposortTyVars . dVarSetElems
 
 -- | Get the free vars of a type in scoped order
 tyCoVarsOfTypeWellScoped :: Type -> [TyVar]
@@ -2094,6 +2107,16 @@ eqVarBndrs _ _ _= Nothing
 
 -- Now here comes the real worker
 
+{-
+Note [cmpType nondeterminism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cmpType is implemented in terms of cmpTypeX. cmpTypeX uses cmpTc which
+compares TyCons by their Unique value. Using Uniques for ordering leads
+to nondeterminism. We hit the same problem in the TyVarTy case, comparing
+type variables is nondeterministic, note the call to nonDetCmpVar in cmpTypeX.
+See Note [Unique Determinism] for more details.
+-}
+
 cmpType :: Type -> Type -> Ordering
 cmpType t1 t2
   -- we know k1 and k2 have the same kind, because they both have kind *.
@@ -2156,7 +2179,7 @@ cmpTypeX env orig_t1 orig_t2 =
       | Just t2' <- coreViewOneStarKind t2 = go env t1 t2'
 
     go env (TyVarTy tv1)       (TyVarTy tv2)
-      = liftOrdering $ rnOccL env tv1 `compare` rnOccR env tv2
+      = liftOrdering $ rnOccL env tv1 `nonDetCmpVar` rnOccR env tv2
     go env (ForAllTy (Named tv1 _) t1) (ForAllTy (Named tv2 _) t2)
       = go env (tyVarKind tv1) (tyVarKind tv2)
         `thenCmpTy` go (rnBndr2 env tv1 tv2) t1 t2
@@ -2207,10 +2230,11 @@ cmpTypesX _   _         []        = GT
 -- | Compare two 'TyCon's. NB: This should /never/ see the "star synonyms",
 -- as recognized by Kind.isStarKindSynonymTyCon. See Note
 -- [Kind Constraint and kind *] in Kind.
+-- See Note [cmpType nondeterminism]
 cmpTc :: TyCon -> TyCon -> Ordering
 cmpTc tc1 tc2
   = ASSERT( not (isStarKindSynonymTyCon tc1) && not (isStarKindSynonymTyCon tc2) )
-    u1 `compare` u2
+    u1 `nonDetCmpUnique` u2
   where
     u1  = tyConUnique tc1
     u2  = tyConUnique tc2
@@ -2306,47 +2330,6 @@ tyConsOfType ty
 -- but they'd always return '*', so we never need to ask
 synTyConResKind :: TyCon -> Kind
 synTyConResKind tycon = piResultTys (tyConKind tycon) (mkTyVarTys (tyConTyVars tycon))
-
--- | Retrieve the free variables in this type, splitting them based
--- on whether the variable was used in a dependent context.
--- (This isn't the most precise analysis, because
--- it's used in the typechecking knot. It might list some dependent
--- variables as also non-dependent.)
-splitDepVarsOfType :: Type -> Pair TyCoVarSet
-splitDepVarsOfType ty = Pair dep_vars final_nondep_vars
-  where
-    Pair dep_vars nondep_vars = split_dep_vars ty
-    final_nondep_vars = nondep_vars `minusVarSet` dep_vars
-
--- | Like 'splitDepVarsOfType', but over a list of types
-splitDepVarsOfTypes :: [Type] -> Pair TyCoVarSet
-splitDepVarsOfTypes tys = Pair dep_vars final_nondep_vars
-  where
-    Pair dep_vars nondep_vars = foldMap split_dep_vars tys
-    final_nondep_vars = nondep_vars `minusVarSet` dep_vars
-
--- | Worker for 'splitDepVarsOfType'. This might output the same var
--- in both sets, if it's used in both a type and a kind.
-split_dep_vars :: Type -> Pair TyCoVarSet
-split_dep_vars = go
-  where
-    go (TyVarTy tv)              = Pair (tyCoVarsOfType $ tyVarKind tv)
-                                        (unitVarSet tv)
-    go (AppTy t1 t2)             = go t1 `mappend` go t2
-    go (TyConApp _ tys)          = foldMap go tys
-    go (ForAllTy (Anon arg) res) = go arg `mappend` go res
-    go (ForAllTy (Named tv _) ty)
-      = let Pair kvs tvs = go ty in
-        Pair (kvs `delVarSet` tv `unionVarSet` tyCoVarsOfType (tyVarKind tv))
-             (tvs `delVarSet` tv)
-    go (LitTy {})                = mempty
-    go (CastTy ty co)            = go ty `mappend` Pair (tyCoVarsOfCo co)
-                                                        emptyVarSet
-    go (CoercionTy co)           = go_co co
-
-    go_co co = let Pair ty1 ty2 = coercionKind co in
-               go ty1 `mappend` go ty2  -- NB: the Pairs separate along different
-                                        -- dimensions here. Be careful!
 
 -- | Retrieve the free variables in this type, splitting them based
 -- on whether they are used visibly or invisibly. Invisible ones come

@@ -166,7 +166,7 @@ test('T7796',
      extra_clean(['T7796.prep']),
      run_command,
      ['$MAKE -s --no-print-directory T7796'])
-test('T5550', normal, compile, [''])
+test('T5550', omit_ways(prof_ways), compile, [''])
 test('T7865', normal, run_command, ['$MAKE -s --no-print-directory T7865'])
 test('T7785', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T7702', 
@@ -232,3 +232,8 @@ test('T11232', normal, compile, ['-O2'])
 test('T11562', normal, compile, ['-O2'])
 test('T11644', normal, compile, ['-O2'])
 test('T11742', normal, compile, ['-O2'])
+test('T12212', normal, compile, ['-O'])
+test('T12076', extra_clean(['T12076a.hi', 'T12076a.o']), multimod_compile, ['T12076', '-v0'])
+test('T12076lit', normal, compile, ['-O'])
+test('T12076sat', normal, compile, ['-O'])
+test('par01', only_ways(['optasm']), compile, ['-ddump-prep -dsuppress-uniques -O2'])

@@ -91,7 +91,7 @@ test('T1969',
              # 2014-06-29 303300692 (x86/Linux)
              # 2015-07-11 288699104 (x86/Linux, 64-bit machine) use +RTS -G1
              # 2016-04-06 344730660 (x86/Linux, 64-bit machine)
-           (wordsize(64), 695430728, 5)]),
+           (wordsize(64), 736973272, 5)]),
              # 17/11/2009 434845560 (amd64/Linux)
              # 08/12/2009 459776680 (amd64/Linux)
              # 17/05/2010 519377728 (amd64/Linux)
@@ -111,6 +111,7 @@ test('T1969',
              # 10/09/2014 630299456 (x86_64/Linux) post-AMP-cleanup
              # 03/06/2015 581460896 (x86_64/Linux) use +RTS -G1
              # 28/10/2015 695430728 (x86_64/Linux) emit Typeable at definition site
+             # 25/08/2016 736973272 (x86_64/Linux) unknown
       only_ways(['normal']),
 
       extra_hc_opts('-dcore-lint -static'),
@@ -149,7 +150,7 @@ test('T3294',
              # 2015-07-11 43196344 (x86/Linux, 64-bit machine) use +RTS -G1
              # 2016-04-06 28686588 (x86/Linux, 64-bit machine)
 
-           (wordsize(64), 50367248, 20)]),
+           (wordsize(64), 52992688, 20)]),
              # prev:           25753192 (amd64/Linux)
              # 29/08/2012:     37724352 (amd64/Linux)
              #  (increase due to new codegen, see #7198)
@@ -165,6 +166,8 @@ test('T3294',
              #  varies between 40959592 and 52914488... increasing to +-20%
              # 2015-10-28:     50367248  (amd64/Linux)
              #  D757: emit Typeable instances at site of type definition
+             # 2016-07-11:     54609256  (Windows) before fix for #12227
+             # 2016-07-11:     52992688  (Windows) after fix for #12227
 
       compiler_stats_num_field('bytes allocated',
           [(wordsize(32), 1377050640, 5),
@@ -174,7 +177,7 @@ test('T3294',
            # 2013-11-13: 1478325844  (x86/Windows, 64bit machine)
            # 2014-01-12: 1565185140  (x86/Linux)
            # 2013-04-04: 1377050640  (x86/Windows, 64bit machine)
-           (wordsize(64), 2709595808, 5)]),
+           (wordsize(64), 2739731144, 5)]),
             # old:        1357587088 (amd64/Linux)
             # 29/08/2012: 2961778696 (amd64/Linux)
             # (^ increase due to new codegen, see #7198)
@@ -185,6 +188,8 @@ test('T3294',
             # 12/03/2014: 2705289664 (amd64/Linux) (more call arity improvements)
             # 2014-17-07: 2671595512 (amd64/Linux) (round-about update)
             # 2014-09-10: 2709595808 (amd64/Linux) post-AMP cleanup
+            # 2016-07-11: 2664479936 (Windows) before fix for #12227
+            # 2016-07-11: 2739731144 (Windows) after fix for #12227 (ignoring)
       conf_3294,
 
       # Use `+RTS -G1` for more stable residency measurements. Note [residency].
@@ -543,7 +548,7 @@ test('T5642',
             # 2014-12-10:  641085256 Improvements in constraints solver
             # 2016-04-06:  462677300
 
-            (wordsize(64), 950004816, 10)])
+            (wordsize(64), 708378624, 10)])
             # prev:        1300000000
             # 2014-07-17:  1358833928 (general round of updates)
             # 2014-08-07:  1402242360 (caused by 1fc60ea)
@@ -557,6 +562,7 @@ test('T5642',
             # 2015-10-28:  1412808976 Emit Typeable at definition site
             # 2015-11-22:  1071915072 Use TypeLits in the metadata encoding
             # 2016-02-08:  950004816  Pattern match checker re-rework
+            # 2016-06-05:  708378624  Refactor derived Generic instances to reduce allocations
       ],
       compile,['-O'])
 
@@ -797,3 +803,25 @@ test('T10370',
      ],
      compile,
      [''])
+
+test('T10547',
+     [ compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 39165544, 20),
+          ]),
+     ],
+     compile_fail,
+     ['-fprint-expanded-synonyms'])
+
+test('T12227',
+     [ only_ways(['normal']),
+       compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 1822822016, 5),
+          # 2016-07-11    5650186880 (Windows) before fix for #12227 
+          # 2016-07-11    1822822016 (Windows) after fix for #12227
+          ]),
+     ],
+     compile,
+     # Use `-M1G` to prevent memory thrashing with ghc-8.0.1.
+     ['-O2 -ddump-hi -ddump-to-file +RTS -M1G'])
+
+

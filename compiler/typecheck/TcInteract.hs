@@ -392,7 +392,7 @@ runSolverPipeline pipeline workItem
            ContinueWith ct -> do { traceFireTcS (ctEvidence ct) (text "Kept as inert")
                                  ; traceTcS "End solver pipeline (kept as inert) }" $
                                        vcat [ text "final_item =" <+> ppr ct
-                                            , pprTvBndrs (varSetElems $ tyCoVarsOfCt ct)
+                                            , pprTvBndrs $ tyCoVarsOfCtList ct
                                             , text "inerts     =" <+> ppr final_is]
                                  ; addInertCan ct }
        }
@@ -923,7 +923,7 @@ improveLocalFunEqs loc inerts fam_tc args fsk
 lookupFlattenTyVar :: InertModel -> TcTyVar -> TcType
 -- See Note [lookupFlattenTyVar]
 lookupFlattenTyVar model ftv
-  = case lookupVarEnv model ftv of
+  = case lookupDVarEnv model ftv of
       Just (CTyEqCan { cc_rhs = rhs, cc_eq_rel = NomEq }) -> rhs
       _                                                   -> mkTyVarTy ftv
 
@@ -1491,7 +1491,7 @@ improve_top_fun_eqs fam_envs fam_tc args rhs_ty
           -> (a -> [Type])           -- get LHS of an axiom
           -> (a -> Type)             -- get RHS of an axiom
           -> (a -> Maybe CoAxBranch) -- Just => apartness check required
-          -> [( [Type], TCvSubst, TyVarSet, Maybe CoAxBranch )]
+          -> [( [Type], TCvSubst, [TyVar], Maybe CoAxBranch )]
              -- Result:
              -- ( [arguments of a matching axiom]
              -- , RHS-unifying substitution
@@ -1503,15 +1503,20 @@ improve_top_fun_eqs fam_envs fam_tc args rhs_ty
           , let ax_args = axiomLHS axiom
           , let ax_rhs  = axiomRHS axiom
           , Just subst <- [tcUnifyTyWithTFs False ax_rhs rhs_ty]
-          , let tvs           = tyCoVarsOfTypes ax_args
+          , let tvs           = tyCoVarsOfTypesList ax_args
                 notInSubst tv = not (tv `elemVarEnv` getTvSubstEnv subst)
-                unsubstTvs    = filterVarSet (notInSubst <&&> isTyVar) tvs ]
+                unsubstTvs    = filter (notInSubst <&&> isTyVar) tvs ]
 
       injImproveEqns :: [Bool]
-                     -> ([Type], TCvSubst, TyCoVarSet, Maybe CoAxBranch)
+                     -> ([Type], TCvSubst, [TyCoVar], Maybe CoAxBranch)
                      -> TcS [Eqn]
       injImproveEqns inj_args (ax_args, theta, unsubstTvs, cabr) = do
-        (theta', _) <- instFlexiTcS (varSetElems unsubstTvs)
+        (theta', _) <- instFlexiTcS unsubstTvs
+        -- The use of deterministically ordered list for `unsubstTvs`
+        -- is not strictly necessary here, we only use the substitution
+        -- part of the result of instFlexiTcS. If we used the second
+        -- part of the tuple, which is the range of the substitution then
+        -- the order could be important.
         let subst = theta `unionTCvSubst` theta'
         return [ Pair arg (substTyUnchecked subst ax_arg)
                | case cabr of
@@ -1811,21 +1816,22 @@ Example, from the OutsideIn(X) paper:
        g :: forall a. Q [a] => [a] -> Int
        g x = wob x
 
-This will generate the impliation constraint:
-            Q [a] => (Q [beta], R beta [a])
+From 'g' we get the impliation constraint:
+            forall a. Q [a] => (Q [beta], R beta [a])
 If we react (Q [beta]) with its top-level axiom, we end up with a
 (P beta), which we have no way of discharging. On the other hand,
 if we react R beta [a] with the top-level we get  (beta ~ a), which
 is solvable and can help us rewrite (Q [beta]) to (Q [a]) which is
 now solvable by the given Q [a].
 
-The solution is that:
+The partial solution is that:
   In matchClassInst (and thus in topReact), we return a matching
   instance only when there is no Given in the inerts which is
   unifiable to this particular dictionary.
 
   We treat any meta-tyvar as "unifiable" for this purpose,
-  *including* untouchable ones
+  *including* untouchable ones.  But not skolems like 'a' in
+  the implication constraint above.
 
 The end effect is that, much as we do for overlapping instances, we
 delay choosing a class instance if there is a possibility of another
@@ -1861,6 +1867,19 @@ Other notes:
 
   But for the Given Overlap check our goal is just related to completeness of
   constraint solving.
+
+* The solution is only a partial one.  Consider the above example with
+       g :: forall a. Q [a] => [a] -> Int
+       g x = let v = wob x
+             in v
+  and suppose we have -XNoMonoLocalBinds, so that we attempt to find the most
+  general type for 'v'.  When generalising v's type we'll simplify its
+  Q [alpha] constraint, but we don't have Q [a] in the 'givens', so we
+  will use the instance declaration after all. Trac #11948 was a case in point
+
+All of this is disgustingly delicate, so to discourage people from writing
+simplifiable class givens, we warn about signatures that contain them;#
+see TcValidity Note [Simplifiable given constraints].
 -}
 
 

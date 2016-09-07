@@ -55,10 +55,9 @@ Capability *last_free_capability = NULL;
 
 /*
  * Indicates that the RTS wants to synchronise all the Capabilities
- * for some reason.  All Capabilities should stop and return to the
- * scheduler.
+ * for some reason.  All Capabilities should yieldCapability().
  */
-volatile StgWord pending_sync = 0;
+PendingSync * volatile pending_sync = 0;
 
 /* Let foreign code get the current Capability -- assuming there is one!
  * This is useful for unsafe foreign calls because they are called with
@@ -93,7 +92,7 @@ findSpark (Capability *cap)
   rtsBool retry;
   nat i = 0;
 
-  if (!emptyRunQueue(cap) || cap->returning_tasks_hd != NULL) {
+  if (!emptyRunQueue(cap) || cap->n_returning_tasks != 0) {
       // If there are other threads, don't try to run any new
       // sparks: sparks might be speculative, we don't want to take
       // resources away from the main computation.
@@ -206,6 +205,7 @@ newReturningTask (Capability *cap, Task *task)
         cap->returning_tasks_hd = task;
     }
     cap->returning_tasks_tl = task;
+    cap->n_returning_tasks++;
 }
 
 STATIC_INLINE Task *
@@ -220,6 +220,7 @@ popReturningTask (Capability *cap)
         cap->returning_tasks_tl = NULL;
     }
     task->next = NULL;
+    cap->n_returning_tasks--;
     return task;
 }
 #endif
@@ -242,6 +243,7 @@ initCapability( Capability *cap, nat i )
 
     cap->run_queue_hd      = END_TSO_QUEUE;
     cap->run_queue_tl      = END_TSO_QUEUE;
+    cap->n_run_queue       = 0;
 
 #if defined(THREADED_RTS)
     initMutex(&cap->lock);
@@ -249,8 +251,10 @@ initCapability( Capability *cap, nat i )
     cap->spare_workers     = NULL;
     cap->n_spare_workers   = 0;
     cap->suspended_ccalls  = NULL;
+    cap->n_suspended_ccalls = 0;
     cap->returning_tasks_hd = NULL;
     cap->returning_tasks_tl = NULL;
+    cap->n_returning_tasks  = 0;
     cap->inbox              = (Message*)END_TSO_QUEUE;
     cap->sparks             = allocSparkPool();
     cap->spark_stats.created    = 0;
@@ -471,19 +475,25 @@ releaseCapability_ (Capability* cap,
 
     // Check to see whether a worker thread can be given
     // the go-ahead to return the result of an external call..
-    if (cap->returning_tasks_hd != NULL) {
+    if (cap->n_returning_tasks != 0) {
         giveCapabilityToTask(cap,cap->returning_tasks_hd);
         // The Task pops itself from the queue (see waitForCapability())
         return;
     }
 
-    // If there is a pending sync, then we should just leave the
-    // Capability free.  The thread trying to sync will be about to
-    // call waitForCapability().
-    if (pending_sync != 0 && pending_sync != SYNC_GC_PAR) {
-      last_free_capability = cap; // needed?
-      debugTrace(DEBUG_sched, "sync pending, set capability %d free", cap->no);
-      return;
+    // If there is a pending sync, then we should just leave the Capability
+    // free.  The thread trying to sync will be about to call
+    // waitForCapability().
+    //
+    // Note: this is *after* we check for a returning task above,
+    // because the task attempting to acquire all the capabilities may
+    // be currently in waitForCapability() waiting for this
+    // capability, in which case simply setting it as free would not
+    // wake up the waiting task.
+    PendingSync *sync = pending_sync;
+    if (sync && (sync->type != SYNC_GC_PAR || sync->idle[cap->no])) {
+        debugTrace(DEBUG_sched, "sync pending, freeing capability %d", cap->no);
+        return;
     }
 
     // If the next thread on the run queue is a bound thread,
@@ -790,14 +800,21 @@ yieldCapability (Capability** pCap, Task *task, rtsBool gcAllowed)
 {
     Capability *cap = *pCap;
 
-    if ((pending_sync == SYNC_GC_PAR) && gcAllowed) {
-        traceEventGcStart(cap);
-        gcWorkerThread(cap);
-        traceEventGcEnd(cap);
-        traceSparkCounters(cap);
-        // See Note [migrated bound threads 2]
-        if (task->cap == cap) {
-            return rtsTrue;
+    if (gcAllowed)
+    {
+        PendingSync *sync = pending_sync;
+
+        if (sync && sync->type == SYNC_GC_PAR) {
+            if (! sync->idle[cap->no]) {
+                traceEventGcStart(cap);
+                gcWorkerThread(cap);
+                traceEventGcEnd(cap);
+                traceSparkCounters(cap);
+                // See Note [migrated bound threads 2]
+                if (task->cap == cap) {
+                    return rtsTrue;
+                }
+            }
         }
     }
 

@@ -742,8 +742,15 @@ The situation is made more complicated by associated types. E.g.
      instance C Bool where { data T Int = T3 }
 Then M's export_avails are (recall the AvailTC invariant from Avails.hs)
   C(C,T), T(T,T1,T2,T3)
-Notice that T appears *twice*, once as a child and once as a parent.
-From this we construct the imp_occ_env
+Notice that T appears *twice*, once as a child and once as a parent. From
+this list we construt a raw list including
+   T -> (T, T( T1, T2, T3 ), Nothing)
+   T -> (C, C( C, T ),       Nothing)
+and we combine these (in function 'combine' in 'imp_occ_env' in
+'filterImports') to get
+   T  -> (T,  T(T,T1,T2,T3), Just C)
+
+So the overall imp_occ_env is
    C  -> (C,  C(C,T),        Nothing)
    T  -> (T,  T(T,T1,T2,T3), Just C)
    T1 -> (T1, T(T1,T2,T3),   Nothing)   -- similarly T2,T3
@@ -796,12 +803,13 @@ filterImports iface decl_spec (Just (want_hiding, L l import_items))
     imp_occ_env = mkOccEnv_C combine [ (nameOccName n, (n, a, Nothing))
                                      | a <- all_avails, n <- availNames a]
       where
-        -- See example in Note [Dealing with imports]
-        -- 'combine' is only called for associated types which appear twice
-        -- in the all_avails. In the example, we combine
+        -- See Note [Dealing with imports]
+        -- 'combine' is only called for associated data types which appear
+        -- twice in the all_avails. In the example, we combine
         --    T(T,T1,T2,T3) and C(C,T)  to give   (T, T(T,T1,T2,T3), Just C)
-        combine (name1, a1@(AvailTC p1 _ []), mp1)
-                (name2, a2@(AvailTC p2 _ []), mp2)
+        -- NB: the AvailTC can have fields as well as data constructors (Trac #12127)
+        combine (name1, a1@(AvailTC p1 _ _), mp1)
+                (name2, a2@(AvailTC p2 _ _), mp2)
           = ASSERT( name1 == name2 && isNothing mp1 && isNothing mp2 )
             if p1 == name1 then (name1, a1, Just p2)
                            else (name1, a2, Just p1)
@@ -1598,26 +1606,28 @@ warnMissingSignatures gbl_env
                        (mapM_ add_bind_warn binds)
                 where
                   add_pat_syn_warn p
-                    = add_warn (patSynName p) (pprPatSynType p)
+                    = add_warn name $
+                      hang (text "Pattern synonym with no type signature:")
+                         2 (text "pattern" <+> pprPrefixName name <+> dcolon <+> pp_ty)
+                    where
+                      name  = patSynName p
+                      pp_ty = pprPatSynType p
 
                   add_bind_warn id
                     = do { env <- tcInitTidyEnv     -- Why not use emptyTidyEnv?
                          ; let name    = idName id
                                (_, ty) = tidyOpenType env (idType id)
                                ty_msg  = ppr ty
-                         ; add_warn name ty_msg }
+                         ; add_warn name $
+                           hang (text "Top-level binding with no type signature:")
+                              2 (pprPrefixName name <+> dcolon <+> ty_msg) }
 
-                  add_warn name ty_msg
+                  add_warn name msg
                     = when (name `elemNameSet` sig_ns && export_check name)
-                           (addWarnAt (Reason flag) (getSrcSpan name)
-                                                    (get_msg name ty_msg))
+                           (addWarnAt (Reason flag) (getSrcSpan name) msg)
 
                   export_check name
                     = not warn_only_exported || name `elemNameSet` exports
-
-                  get_msg name ty_msg
-                    = sep [ text "Top-level binding with no type signature:",
-                            nest 2 $ pprPrefixName name <+> dcolon <+> ty_msg ]
 
        ; add_sig_warns }
 

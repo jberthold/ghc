@@ -30,7 +30,7 @@ import InstEnv
 import Class
 import Avail
 import CoreSyn
-import CoreFVs( exprsSomeFreeVars )
+import CoreFVs( exprsSomeFreeVarsList )
 import CoreSubst
 import PprCore
 import DsMonad
@@ -295,7 +295,10 @@ deSugar hsc_env
                      (text "Desugar"<+>brackets (ppr mod))
                      (const ()) $
      do { -- Desugar the program
-        ; let export_set = availsToNameSet exports
+        ; let export_set =
+                -- Used to be 'availsToNameSet', but we now export selectors
+                -- only when necessary. See #12125.
+                availsToNameSetWithSelectors exports
               target     = hscTarget dflags
               hpcInfo    = emptyHpcInfo other_hpc_info
 
@@ -574,7 +577,9 @@ dsRule (L loc (HsRule name rule_act vars lhs _tv_lhs rhs _fv_rhs))
               fn_name   = idName fn_id
               final_rhs = simpleOptExpr rhs''    -- De-crap it
               rule_name = snd (unLoc name)
-              arg_ids = varSetElems (exprsSomeFreeVars isId args `delVarSetList` final_bndrs)
+              final_bndrs_set = mkVarSet final_bndrs
+              arg_ids = filterOut (`elemVarSet` final_bndrs_set) $
+                        exprsSomeFreeVarsList isId args
 
         ; dflags <- getDynFlags
         ; rule <- dsMkUserRule this_mod is_local

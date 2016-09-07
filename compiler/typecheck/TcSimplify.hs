@@ -25,13 +25,12 @@ import ListSetOps
 import Maybes
 import Name
 import Outputable
-import Pair
 import PrelInfo
 import PrelNames
 import TcErrors
 import TcEvidence
 import TcInteract
-import TcCanonical   ( makeSuperClasses, mkGivensWithSuperClasses )
+import TcCanonical   ( makeSuperClasses )
 import TcMType   as TcM
 import TcRnMonad as TcM
 import TcSMonad  as TcS
@@ -49,7 +48,6 @@ import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad ( when, unless )
 import Data.List     ( partition )
-import Data.Foldable    ( fold )
 
 #if __GLASGOW_HASKELL__ < 709
 import Data.Traversable ( traverse )
@@ -132,9 +130,8 @@ simpl_top wanteds
       | isEmptyWC wc
       = return wc
       | otherwise
-      = do { free_tvs <- TcS.zonkTyCoVarsAndFV (tyCoVarsOfWC wc)
-           ; let meta_tvs = varSetElems $
-                            filterVarSet (isTyVar <&&> isMetaTyVar) free_tvs
+      = do { free_tvs <- TcS.zonkTyCoVarsAndFVList (tyCoVarsOfWCList wc)
+           ; let meta_tvs = filter (isTyVar <&&> isMetaTyVar) free_tvs
                    -- zonkTyCoVarsAndFV: the wc_first_go is not yet zonked
                    -- filter isMetaTyVar: we might have runtime-skolems in GHCi,
                    -- and we definitely don't want to try to assign to those!
@@ -180,9 +177,12 @@ defaultCallStacks wanteds
   handle_simples simples
     = catBagMaybes <$> mapBagM defaultCallStack simples
 
-  handle_implic implic = do
-    wanteds <- defaultCallStacks (ic_wanted implic)
-    return (implic { ic_wanted = wanteds })
+  handle_implic implic
+    = do { wanteds <- setEvBindsTcS (ic_binds implic) $
+                      -- defaultCallStack sets a binding, so
+                      -- we must set the correct binding group
+                      defaultCallStacks (ic_wanted implic)
+         ; return (implic { ic_wanted = wanteds }) }
 
   defaultCallStack ct
     | Just _ <- isCallStackPred (ctPred ct)
@@ -396,13 +396,25 @@ How is this implemented? It's complicated! So we'll step through it all:
  9) `HscMain.tcRnModule'` -- Reads `tcg_safeInfer` after type-checking, calling
  `HscMain.markUnsafeInfer` (passing the reason along) when safe-inferrence
  failed.
+
+Note [No defaulting in the ambiguity check]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When simplifying constraints for the ambiguity check, we use
+solveWantedsAndDrop, not simpl_top, so that we do no defaulting.
+Trac #11947 was an example:
+   f :: Num a => Int -> Int
+This is ambiguous of course, but we don't want to default the
+(Num alpha) constraint to (Num Int)!  Doing so gives a defaulting
+warning, but no error.
 -}
 
 ------------------
 simplifyAmbiguityCheck :: Type -> WantedConstraints -> TcM ()
 simplifyAmbiguityCheck ty wanteds
   = do { traceTc "simplifyAmbiguityCheck {" (text "type = " <+> ppr ty $$ text "wanted = " <+> ppr wanteds)
-       ; ((final_wc, _), _) <- runTcS $ simpl_top wanteds
+       ; (final_wc, _) <- runTcS $ solveWantedsAndDrop wanteds
+             -- NB: no defaulting!  See Note [No defaulting in the ambiguity check]
+
        ; traceTc "End simplifyAmbiguityCheck }" empty
 
        -- Normally report all errors; but with -XAllowAmbiguousTypes
@@ -427,7 +439,7 @@ simplifyInteractive wanteds
 simplifyDefault :: ThetaType    -- Wanted; has no type variables in it
                 -> TcM ()       -- Succeeds if the constraint is soluble
 simplifyDefault theta
-  = do { traceTc "simplifyInteractive" empty
+  = do { traceTc "simplifyDefault" empty
        ; wanted <- newWanteds DefaultOrigin theta
        ; unsolved <- simplifyWantedsTcM wanted
 
@@ -446,8 +458,8 @@ tcCheckSatisfiability given_ids
        ; let given_loc = mkGivenLoc topTcLevel UnkSkol lcl_env
        ; (res, _ev_binds) <- runTcS $
              do { traceTcS "checkSatisfiability {" (ppr given_ids)
-                ; given_cts <- mkGivensWithSuperClasses given_loc (bagToList given_ids)
-                     -- See Note [Superclases and satisfiability]
+                ; let given_cts = mkGivens given_loc (bagToList given_ids)
+                     -- See Note [Superclasses and satisfiability]
                 ; insols <- solveSimpleGivens given_cts
                 ; insols <- try_harder insols
                 ; traceTcS "checkSatisfiability }" (ppr insols)
@@ -570,7 +582,8 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
                                --     hence "incl_derivs"
 
               else do { let quant_cand = approximateWC wanted_transformed
-                            meta_tvs   = filter isMetaTyVar (varSetElems (tyCoVarsOfCts quant_cand))
+                            meta_tvs   = filter isMetaTyVar $
+                                         tyCoVarsOfCtsList quant_cand
 
                       ; gbl_tvs <- tcGetGlobalTyCoVars
                             -- Miminise quant_cand.  We are not interested in any evidence
@@ -605,10 +618,10 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
 
        -- Decide what type variables and constraints to quantify
        ; zonked_taus <- mapM (TcM.zonkTcType . snd) name_taus
-       ; let zonked_tau_tkvs = splitDepVarsOfTypes zonked_taus
+       ; let zonked_tau_dvs = splitDepVarsOfTypes zonked_taus
        ; (qtvs, bound_theta)
            <- decideQuantification apply_mr sigs name_taus
-                                   quant_pred_candidates zonked_tau_tkvs
+                                   quant_pred_candidates zonked_tau_dvs
 
          -- Promote any type variables that are free in the inferred type
          -- of the function:
@@ -622,25 +635,27 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
          -- we don't quantify over beta (since it is fixed by envt)
          -- so we must promote it!  The inferred type is just
          --   f :: beta -> beta
-       ; outer_tclvl    <- TcM.getTcLevel
-       ; zonked_tau_tvs <- fold <$>
-                           traverse TcM.zonkTyCoVarsAndFV zonked_tau_tkvs
+       ; zonked_tau_tkvs <- TcM.zonkTyCoVarsAndFV $
+                            dVarSetToVarSet (dv_kvs zonked_tau_dvs)
+                            `unionVarSet`
+                            dVarSetToVarSet (dv_tvs zonked_tau_dvs)
               -- decideQuantification turned some meta tyvars into
               -- quantified skolems, so we have to zonk again
 
-       ; let phi_tvs     = tyCoVarsOfTypes bound_theta
-                           `unionVarSet` zonked_tau_tvs
+       ; let phi_tkvs = tyCoVarsOfTypes bound_theta  -- Already zonked
+                        `unionVarSet` zonked_tau_tkvs
+             promote_tkvs = closeOverKinds phi_tkvs `delVarSetList` qtvs
 
-             promote_tvs = closeOverKinds phi_tvs `delVarSetList` qtvs
-       ; MASSERT2( closeOverKinds promote_tvs `subVarSet` promote_tvs
-                 , ppr phi_tvs $$
-                   ppr (closeOverKinds phi_tvs) $$
-                   ppr promote_tvs $$
-                   ppr (closeOverKinds promote_tvs) )
+       ; MASSERT2( closeOverKinds promote_tkvs `subVarSet` promote_tkvs
+                 , ppr phi_tkvs $$
+                   ppr (closeOverKinds phi_tkvs) $$
+                   ppr promote_tkvs $$
+                   ppr (closeOverKinds promote_tkvs) )
            -- we really don't want a type to be promoted when its kind isn't!
 
            -- promoteTyVar ignores coercion variables
-       ; mapM_ (promoteTyVar outer_tclvl) (varSetElems promote_tvs)
+       ; outer_tclvl <- TcM.getTcLevel
+       ; mapM_ (promoteTyVar outer_tclvl) (varSetElems promote_tkvs)
 
            -- Emit an implication constraint for the
            -- remaining constraints from the RHS
@@ -666,8 +681,8 @@ simplifyInfer rhs_tclvl apply_mr sigs name_taus wanteds
        ; traceTc "} simplifyInfer/produced residual implication for quantification" $
          vcat [ text "quant_pred_candidates =" <+> ppr quant_pred_candidates
               , text "zonked_taus" <+> ppr zonked_taus
-              , text "zonked_tau_tvs=" <+> ppr zonked_tau_tvs
-              , text "promote_tvs=" <+> ppr promote_tvs
+              , text "zonked_tau_dvs=" <+> ppr zonked_tau_dvs
+              , text "promote_tvs=" <+> ppr promote_tkvs
               , text "bound_theta =" <+> ppr bound_theta
               , text "qtvs =" <+> ppr qtvs
               , text "implic =" <+> ppr implic ]
@@ -738,18 +753,20 @@ decideQuantification
   -> [TcIdSigInfo]
   -> [(Name, TcTauType)]   -- variables to be generalised (for errors only)
   -> [PredType]            -- candidate theta
-  -> Pair TcTyCoVarSet     -- dependent (kind) variables & type variables
+  -> TcDepVars
   -> TcM ( [TcTyVar]       -- Quantify over these (skolems)
          , [PredType] )    -- and this context (fully zonked)
 -- See Note [Deciding quantification]
 decideQuantification apply_mr sigs name_taus constraints
-                     zonked_pair@(Pair zonked_tau_kvs zonked_tau_tvs)
+                     zonked_dvs@(DV { dv_kvs = zonked_tau_kvs, dv_tvs = zonked_tau_tvs })
   | apply_mr     -- Apply the Monomorphism restriction
   = do { gbl_tvs <- tcGetGlobalTyCoVars
-       ; let constrained_tvs = tyCoVarsOfTypes constraints `unionVarSet`
+       ; let zonked_tkvs = dVarSetToVarSet zonked_tau_kvs `unionVarSet`
+                           dVarSetToVarSet zonked_tau_tvs
+             constrained_tvs = tyCoVarsOfTypes constraints `unionVarSet`
                                filterVarSet isCoVar zonked_tkvs
              mono_tvs = gbl_tvs `unionVarSet` constrained_tvs
-       ; qtvs <- quantify_tvs sigs mono_tvs zonked_pair
+       ; qtvs <- quantify_tvs sigs mono_tvs zonked_dvs
 
            -- Warn about the monomorphism restriction
        ; warn_mono <- woptM Opt_WarnMonomorphism
@@ -769,8 +786,9 @@ decideQuantification apply_mr sigs name_taus constraints
   | otherwise
   = do { gbl_tvs <- tcGetGlobalTyCoVars
        ; let mono_tvs     = growThetaTyVars equality_constraints gbl_tvs
-             tau_tvs_plus = growThetaTyVars constraints zonked_tau_tvs
-       ; qtvs <- quantify_tvs sigs mono_tvs (Pair zonked_tau_kvs tau_tvs_plus)
+             tau_tvs_plus = growThetaTyVarsDSet constraints zonked_tau_tvs
+             dvs_plus     = DV { dv_kvs = zonked_tau_kvs, dv_tvs = tau_tvs_plus }
+       ; qtvs <- quantify_tvs sigs mono_tvs dvs_plus
           -- We don't grow the kvs, as there's no real need to. Recall
           -- that quantifyTyVars uses the separation between kvs and tvs
           -- only for defaulting, and we don't want (ever) to default a tv
@@ -795,23 +813,21 @@ decideQuantification apply_mr sigs name_taus constraints
                  , text "min_theta:"    <+> ppr min_theta ])
        ; return (qtvs, min_theta) }
   where
-    zonked_tkvs = zonked_tau_kvs `unionVarSet` zonked_tau_tvs
     bndrs    = map fst name_taus
     pp_bndrs = pprWithCommas (quotes . ppr) bndrs
     equality_constraints = filter isEqPred constraints
 
 quantify_tvs :: [TcIdSigInfo]
              -> TcTyVarSet   -- the monomorphic tvs
-             -> Pair TcTyVarSet   -- kvs, tvs to quantify
+             -> TcDepVars
              -> TcM [TcTyVar]
 -- See Note [Which type variables to quantify]
-quantify_tvs sigs mono_tvs (Pair tau_kvs tau_tvs)
+quantify_tvs sigs mono_tvs dep_tvs@(DV { dv_tvs = tau_tvs })
    -- NB: don't use quantifyZonkedTyVars because the sig stuff might
    -- be unzonked
   = quantifyTyVars (mono_tvs `delVarSetList` sig_qtvs)
-                   (Pair tau_kvs
-                         (tau_tvs `extendVarSetList` sig_qtvs
-                                  `extendVarSetList` sig_wcs))
+                   (dep_tvs { dv_tvs = tau_tvs `extendDVarSetList` sig_qtvs
+                                               `extendDVarSetList` sig_wcs })
                    -- NB: quantifyTyVars zonks its arguments
   where
     sig_qtvs = [ skol | sig <- sigs, (_, skol) <- sig_skols sig ]
@@ -840,6 +856,32 @@ growThetaTyVars theta tvs
        | otherwise                          = tvs
        where
          pred_tvs = tyCoVarsOfType pred
+
+------------------
+growThetaTyVarsDSet :: ThetaType -> DTyCoVarSet -> DTyVarSet
+-- See Note [Growing the tau-tvs using constraints]
+-- NB: only returns tyvars, never covars
+-- It takes a deterministic set of TyCoVars and returns a deterministic set
+-- of TyVars.
+-- The implementation mirrors growThetaTyVars, the only difference is that
+-- it avoids unionDVarSet and uses more efficient extendDVarSetList.
+growThetaTyVarsDSet theta tvs
+  | null theta = tvs_only
+  | otherwise  = filterDVarSet isTyVar $
+                 transCloDVarSet mk_next seed_tvs
+  where
+    tvs_only = filterDVarSet isTyVar tvs
+    seed_tvs = tvs `extendDVarSetList` tyCoVarsOfTypesList ips
+    (ips, non_ips) = partition isIPPred theta
+                         -- See Note [Inheriting implicit parameters] in TcType
+
+    mk_next :: DVarSet -> DVarSet -- Maps current set to newly-grown ones
+    mk_next so_far = foldr (grow_one so_far) emptyDVarSet non_ips
+    grow_one so_far pred tvs
+       | any (`elemDVarSet` so_far) pred_tvs = tvs `extendDVarSetList` pred_tvs
+       | otherwise                           = tvs
+       where
+         pred_tvs = tyCoVarsOfTypeList pred
 
 {- Note [Which type variables to quantify]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1175,9 +1217,9 @@ solveImplication imp@(Implic { ic_tclvl  = tclvl
          -- Solve the nested constraints
        ; ((no_given_eqs, given_insols, residual_wanted), used_tcvs)
              <- nestImplicTcS m_ev_binds (mkVarSet (skols ++ given_ids)) tclvl $
-               do { let loc = mkGivenLoc tclvl info env
-                  ; givens_w_scs <- mkGivensWithSuperClasses loc given_ids
-                  ; given_insols <- solveSimpleGivens givens_w_scs
+               do { let loc    = mkGivenLoc tclvl info env
+                        givens = mkGivens loc given_ids
+                  ; given_insols <- solveSimpleGivens givens
 
                   ; residual_wanted <- solveWanteds wanteds
                         -- solveWanteds, *not* solveWantedsAndDrop, because
@@ -1785,7 +1827,7 @@ floatEqualities skols no_given_eqs
   | otherwise
   = do { outer_tclvl <- TcS.getTcLevel
        ; mapM_ (promoteTyVarTcS outer_tclvl)
-               (varSetElems (tyCoVarsOfCts float_eqs))
+               (tyCoVarsOfCtsList float_eqs)
            -- See Note [Promoting unification variables]
 
        ; traceTcS "floatEqualities" (vcat [ text "Skols =" <+> ppr skols

@@ -73,7 +73,7 @@ module TcRnTypes(
         isUserTypeErrorCt, getUserTypeErrorMsg,
         ctEvidence, ctLoc, setCtLoc, ctPred, ctFlavour, ctEqRel, ctOrigin,
         mkTcEqPredLikeEv,
-        mkNonCanonical, mkNonCanonicalCt,
+        mkNonCanonical, mkNonCanonicalCt, mkGivens,
         ctEvPred, ctEvLoc, ctEvOrigin, ctEvEqRel,
         ctEvTerm, ctEvCoercion, ctEvId,
         tyCoVarsOfCt, tyCoVarsOfCts,
@@ -85,6 +85,7 @@ module TcRnTypes(
         andWC, unionsWC, mkSimpleWC, mkImplicWC,
         addInsols, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
+        tyCoVarsOfWCList,
         isDroppableDerivedLoc, insolubleImplic,
         arisesFromGivens,
 
@@ -254,6 +255,9 @@ instance ContainsModule gbl => ContainsModule (Env gbl lcl) where
 
 data IfGblEnv
   = IfGblEnv {
+        -- Some information about where this environment came from;
+        -- useful for debugging.
+        if_doc :: SDoc,
         -- The type environment for the module being compiled,
         -- in case the interface refers back to it via a reference that
         -- was originally a hi-boot file.
@@ -279,8 +283,8 @@ data IfLclEnv
                 --      .hi file, or GHCi state, or ext core
                 -- plus which bit is currently being examined
 
-        if_tv_env  :: UniqFM TyVar,     -- Nested tyvar bindings
-        if_id_env  :: UniqFM Id         -- Nested id binding
+        if_tv_env  :: FastStringEnv TyVar,     -- Nested tyvar bindings
+        if_id_env  :: FastStringEnv Id         -- Nested id binding
     }
 
 {-
@@ -501,8 +505,11 @@ data TcGblEnv
         tcg_th_topnames :: TcRef NameSet,
         -- ^ Exact names bound in top-level declarations in tcg_th_topdecls
 
-        tcg_th_modfinalizers :: TcRef [TH.Q ()],
-        -- ^ Template Haskell module finalizers
+        tcg_th_modfinalizers :: TcRef [TcM ()],
+        -- ^ Template Haskell module finalizers.
+        --
+        -- They are computations in the @TcM@ monad rather than @Q@ because we
+        -- set them to use particular local environments.
 
         tcg_th_state :: TcRef (Map TypeRep Dynamic),
         tcg_th_remote_state :: TcRef (Maybe (ForeignRef (IORef QState))),
@@ -773,6 +780,10 @@ instance Outputable TcIdBinder where
    ppr (TcIdBndr id top_lvl)           = ppr id <> brackets (ppr top_lvl)
    ppr (TcIdBndr_ExpType id _ top_lvl) = ppr id <> brackets (ppr top_lvl)
 
+instance HasOccName TcIdBinder where
+    occName (TcIdBndr id _) = (occName (idName id))
+    occName (TcIdBndr_ExpType name _ _) = (occName name)
+
 ---------------------------
 -- Template Haskell stages and levels
 ---------------------------
@@ -784,6 +795,25 @@ data ThStage    -- See Note [Template Haskell state diagram] in TcSplice
                       -- This code will be run *at compile time*;
                       --   the result replaces the splice
                       -- Binding level = 0
+
+#ifdef GHCI
+  | RunSplice (TcRef [ForeignRef (TH.Q ())])
+      -- Set when running a splice, i.e. NOT when renaming or typechecking the
+      -- Haskell code for the splice. See Note [RunSplice ThLevel].
+      --
+      -- Contains a list of mod finalizers collected while executing the splice.
+      --
+      -- 'addModFinalizer' inserts finalizers here, and from here they are taken
+      -- to construct an @HsSpliced@ annotation for untyped splices. See Note
+      -- [Delaying modFinalizers in untyped splices] in "RnSplice".
+      --
+      -- For typed splices, the typechecker takes finalizers from here and
+      -- inserts them in the list of finalizers in the global environment.
+      --
+      -- See Note [Collecting modFinalizers in typed splices] in "TcSplice".
+#else
+  | RunSplice ()
+#endif
 
   | Comp        -- Ordinary Haskell code
                 -- Binding level = 1
@@ -808,9 +838,10 @@ topAnnStage    = Splice Untyped
 topSpliceStage = Splice Untyped
 
 instance Outputable ThStage where
-   ppr (Splice _)  = text "Splice"
-   ppr Comp        = text "Comp"
-   ppr (Brack s _) = text "Brack" <> parens (ppr s)
+   ppr (Splice _)    = text "Splice"
+   ppr (RunSplice _) = text "RunSplice"
+   ppr Comp          = text "Comp"
+   ppr (Brack s _)   = text "Brack" <> parens (ppr s)
 
 type ThLevel = Int
     -- NB: see Note [Template Haskell levels] in TcSplice
@@ -824,9 +855,25 @@ impLevel = 0    -- Imported things; they can be used inside a top level splice
 outerLevel = 1  -- Things defined outside brackets
 
 thLevel :: ThStage -> ThLevel
-thLevel (Splice _)  = 0
-thLevel Comp        = 1
-thLevel (Brack s _) = thLevel s + 1
+thLevel (Splice _)    = 0
+thLevel (RunSplice _) =
+    -- See Note [RunSplice ThLevel].
+    panic "thLevel: called when running a splice"
+thLevel Comp          = 1
+thLevel (Brack s _)   = thLevel s + 1
+
+{- Node [RunSplice ThLevel]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The 'RunSplice' stage is set when executing a splice, and only when running a
+splice. In particular it is not set when the splice is renamed or typechecked.
+
+'RunSplice' is needed to provide a reference where 'addModFinalizer' can insert
+the finalizer (see Note [Delaying modFinalizers in untyped splices]), and
+'addModFinalizer' runs when doing Q things. Therefore, It doesn't make sense to
+set 'RunSplice' when renaming or typechecking the splice, where 'Splice', 'Brak'
+or 'Comp' are used instead.
+
+-}
 
 ---------------------------
 -- Arrow-notation context
@@ -1503,6 +1550,14 @@ mkNonCanonical ev = CNonCanonical { cc_ev = ev }
 mkNonCanonicalCt :: Ct -> Ct
 mkNonCanonicalCt ct = CNonCanonical { cc_ev = cc_ev ct }
 
+mkGivens :: CtLoc -> [EvId] -> [Ct]
+mkGivens loc ev_ids
+  = map mk ev_ids
+  where
+    mk ev_id = mkNonCanonical (CtGiven { ctev_evar = ev_id
+                                       , ctev_pred = evVarPred ev_id
+                                       , ctev_loc = loc })
+
 ctEvidence :: Ct -> CtEvidence
 ctEvidence = cc_ev
 
@@ -1572,56 +1627,74 @@ instance Outputable Ct where
 
 -- | Returns free variables of constraints as a non-deterministic set
 tyCoVarsOfCt :: Ct -> TcTyCoVarSet
-tyCoVarsOfCt = runFVSet . tyCoVarsOfCtAcc
+tyCoVarsOfCt = fvVarSet . tyCoFVsOfCt
 
 -- | Returns free variables of constraints as a deterministically ordered.
 -- list. See Note [Deterministic FV] in FV.
 tyCoVarsOfCtList :: Ct -> [TcTyCoVar]
-tyCoVarsOfCtList = runFVList . tyCoVarsOfCtAcc
+tyCoVarsOfCtList = fvVarList . tyCoFVsOfCt
 
 -- | Returns free variables of constraints as a composable FV computation.
 -- See Note [Deterministic FV] in FV.
-tyCoVarsOfCtAcc :: Ct -> FV
-tyCoVarsOfCtAcc (CTyEqCan { cc_tyvar = tv, cc_rhs = xi })
-  = tyCoVarsOfTypeAcc xi `unionFV` oneVar tv `unionFV` tyCoVarsOfTypeAcc (tyVarKind tv)
-tyCoVarsOfCtAcc (CFunEqCan { cc_tyargs = tys, cc_fsk = fsk })
-  = tyCoVarsOfTypesAcc tys `unionFV` oneVar fsk `unionFV` tyCoVarsOfTypeAcc (tyVarKind fsk)
-tyCoVarsOfCtAcc (CDictCan { cc_tyargs = tys }) = tyCoVarsOfTypesAcc tys
-tyCoVarsOfCtAcc (CIrredEvCan { cc_ev = ev }) = tyCoVarsOfTypeAcc (ctEvPred ev)
-tyCoVarsOfCtAcc (CHoleCan { cc_ev = ev }) = tyCoVarsOfTypeAcc (ctEvPred ev)
-tyCoVarsOfCtAcc (CNonCanonical { cc_ev = ev }) = tyCoVarsOfTypeAcc (ctEvPred ev)
+tyCoFVsOfCt :: Ct -> FV
+tyCoFVsOfCt (CTyEqCan { cc_tyvar = tv, cc_rhs = xi })
+  = tyCoFVsOfType xi `unionFV` FV.unitFV tv
+                     `unionFV` tyCoFVsOfType (tyVarKind tv)
+tyCoFVsOfCt (CFunEqCan { cc_tyargs = tys, cc_fsk = fsk })
+  = tyCoFVsOfTypes tys `unionFV` FV.unitFV fsk
+                       `unionFV` tyCoFVsOfType (tyVarKind fsk)
+tyCoFVsOfCt (CDictCan { cc_tyargs = tys }) = tyCoFVsOfTypes tys
+tyCoFVsOfCt (CIrredEvCan { cc_ev = ev }) = tyCoFVsOfType (ctEvPred ev)
+tyCoFVsOfCt (CHoleCan { cc_ev = ev }) = tyCoFVsOfType (ctEvPred ev)
+tyCoFVsOfCt (CNonCanonical { cc_ev = ev }) = tyCoFVsOfType (ctEvPred ev)
 
 -- | Returns free variables of a bag of constraints as a non-deterministic
 -- set. See Note [Deterministic FV] in FV.
 tyCoVarsOfCts :: Cts -> TcTyCoVarSet
-tyCoVarsOfCts = runFVSet . tyCoVarsOfCtsAcc
+tyCoVarsOfCts = fvVarSet . tyCoFVsOfCts
 
 -- | Returns free variables of a bag of constraints as a deterministically
 -- odered list. See Note [Deterministic FV] in FV.
 tyCoVarsOfCtsList :: Cts -> [TcTyCoVar]
-tyCoVarsOfCtsList = runFVList . tyCoVarsOfCtsAcc
+tyCoVarsOfCtsList = fvVarList . tyCoFVsOfCts
 
 -- | Returns free variables of a bag of constraints as a composable FV
 -- computation. See Note [Deterministic FV] in FV.
-tyCoVarsOfCtsAcc :: Cts -> FV
-tyCoVarsOfCtsAcc = foldrBag (unionFV . tyCoVarsOfCtAcc) noVars
+tyCoFVsOfCts :: Cts -> FV
+tyCoFVsOfCts = foldrBag (unionFV . tyCoFVsOfCt) emptyFV
 
+-- | Returns free variables of WantedConstraints as a non-deterministic
+-- set. See Note [Deterministic FV] in FV.
 tyCoVarsOfWC :: WantedConstraints -> TyCoVarSet
 -- Only called on *zonked* things, hence no need to worry about flatten-skolems
-tyCoVarsOfWC (WC { wc_simple = simple, wc_impl = implic, wc_insol = insol })
-  = tyCoVarsOfCts simple `unionVarSet`
-    tyCoVarsOfBag tyCoVarsOfImplic implic `unionVarSet`
-    tyCoVarsOfCts insol
+tyCoVarsOfWC = fvVarSet . tyCoFVsOfWC
 
-tyCoVarsOfImplic :: Implication -> TyCoVarSet
+-- | Returns free variables of WantedConstraints as a deterministically
+-- ordered list. See Note [Deterministic FV] in FV.
+tyCoVarsOfWCList :: WantedConstraints -> [TyCoVar]
 -- Only called on *zonked* things, hence no need to worry about flatten-skolems
-tyCoVarsOfImplic (Implic { ic_skols = skols
-                         , ic_given = givens, ic_wanted = wanted })
-  = (tyCoVarsOfWC wanted `unionVarSet` tyCoVarsOfTypes (map evVarPred givens))
-    `delVarSetList` skols
+tyCoVarsOfWCList = fvVarList . tyCoFVsOfWC
 
-tyCoVarsOfBag :: (a -> TyCoVarSet) -> Bag a -> TyCoVarSet
-tyCoVarsOfBag tvs_of = foldrBag (unionVarSet . tvs_of) emptyVarSet
+-- | Returns free variables of WantedConstraints as a composable FV
+-- computation. See Note [Deterministic FV] in FV.
+tyCoFVsOfWC :: WantedConstraints -> FV
+-- Only called on *zonked* things, hence no need to worry about flatten-skolems
+tyCoFVsOfWC (WC { wc_simple = simple, wc_impl = implic, wc_insol = insol })
+  = tyCoFVsOfCts simple `unionFV`
+    tyCoFVsOfBag tyCoFVsOfImplic implic `unionFV`
+    tyCoFVsOfCts insol
+
+-- | Returns free variables of Implication as a composable FV computation.
+-- See Note [Deterministic FV] in FV.
+tyCoFVsOfImplic :: Implication -> FV
+-- Only called on *zonked* things, hence no need to worry about flatten-skolems
+tyCoFVsOfImplic (Implic { ic_skols = skols
+                         , ic_given = givens, ic_wanted = wanted })
+  = FV.delFVs (mkVarSet skols)
+      (tyCoFVsOfWC wanted `unionFV` tyCoFVsOfTypes (map evVarPred givens))
+
+tyCoFVsOfBag :: (a -> FV) -> Bag a -> FV
+tyCoFVsOfBag tvs_of = foldrBag (unionFV . tvs_of) emptyFV
 
 --------------------------
 dropDerivedSimples :: Cts -> Cts
@@ -1762,18 +1835,53 @@ isTypeHoleCt :: Ct -> Bool
 isTypeHoleCt (CHoleCan { cc_hole = TypeHole {} }) = True
 isTypeHoleCt _ = False
 
--- | The following constraints are considered to be a custom type error:
---    1. TypeError msg a b c
---    2. TypeError msg a b c ~ Something (and the other way around)
---    4. C (TypeError msg a b c)         (for any parameter of class constraint)
+
+{- Note [Custom type errors in constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When GHC reports a type-error about an unsolved-constraint, we check
+to see if the constraint contains any custom-type errors, and if so
+we report them.  Here are some examples of constraints containing type
+errors:
+
+TypeError msg           -- The actual constraint is a type error
+
+TypError msg ~ Int      -- Some type was supposed to be Int, but ended up
+                        -- being a type error instead
+
+Eq (TypeError msg)      -- A class constraint is stuck due to a type error
+
+F (TypeError msg) ~ a   -- A type function failed to evaluate due to a type err
+
+It is also possible to have constraints where the type error is nested deeper,
+for example see #11990, and also:
+
+Eq (F (TypeError msg))  -- Here the type error is nested under a type-function
+                        -- call, which failed to evaluate because of it,
+                        -- and so the `Eq` constraint was unsolved.
+                        -- This may happen when one function calls another
+                        -- and the called function produced a custom type error.
+-}
+
+-- | A constraint is considered to be a custom type error, if it contains
+-- custom type errors anywhere in it.
+-- See Note [Custom type errors in constraints]
 getUserTypeErrorMsg :: Ct -> Maybe Type
-getUserTypeErrorMsg ct
-  | Just (_,t1,t2) <- getEqPredTys_maybe ctT    = oneOf [t1,t2]
-  | Just (_,ts)    <- getClassPredTys_maybe ctT = oneOf ts
-  | otherwise                                   = userTypeError_maybe ctT
+getUserTypeErrorMsg ct = findUserTypeError (ctPred ct)
   where
-  ctT       = ctPred ct
-  oneOf xs  = msum (map userTypeError_maybe xs)
+  findUserTypeError t = msum ( userTypeError_maybe t
+                             : map findUserTypeError (subTys t)
+                             )
+
+  subTys t            = case splitAppTys t of
+                          (t,[]) ->
+                            case splitTyConApp_maybe t of
+                              Nothing     -> []
+                              Just (_,ts) -> ts
+                          (t,ts) -> t : ts
+
+
+
 
 isUserTypeErrorCt :: Ct -> Bool
 isUserTypeErrorCt ct = case getUserTypeErrorMsg ct of

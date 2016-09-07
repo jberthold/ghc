@@ -100,6 +100,7 @@ module TcType (
 
   -- * Finding "exact" (non-dead) type variables
   exactTyCoVarsOfType, exactTyCoVarsOfTypes,
+  splitDepVarsOfType, splitDepVarsOfTypes, TcDepVars(..), depVarsTyVars,
 
   -- * Extracting bound variables
   allBoundVariables, allBoundVariabless,
@@ -168,7 +169,7 @@ module TcType (
 
   tyCoVarsOfType, tyCoVarsOfTypes, closeOverKinds,
   tyCoVarsOfTelescope,
-  tyCoVarsOfTypeAcc, tyCoVarsOfTypesAcc,
+  tyCoFVsOfType, tyCoFVsOfTypes,
   tyCoVarsOfTypeDSet, tyCoVarsOfTypesDSet, closeOverKindsDSet,
   tyCoVarsOfTypeList, tyCoVarsOfTypesList,
 
@@ -223,6 +224,8 @@ import qualified GHC.LanguageExtensions as LangExt
 import Data.IORef
 import Control.Monad (liftM, ap)
 #if __GLASGOW_HASKELL__ < 709
+import Data.Monoid (mempty, mappend)
+import Data.Foldable (foldMap)
 import Control.Applicative (Applicative(..), (<$>) )
 #endif
 import Data.Functor.Identity
@@ -815,18 +818,18 @@ exactTyCoVarsOfTypes tys = mapUnionVarSet exactTyCoVarsOfType tys
 -- | Find all variables bound anywhere in a type.
 -- See also Note [Scope-check inferred kinds] in TcHsType
 allBoundVariables :: Type -> TyVarSet
-allBoundVariables ty = runFVSet $ go ty
+allBoundVariables ty = fvVarSet $ go ty
   where
     go :: Type -> FV
     go (TyVarTy tv)     = go (tyVarKind tv)
     go (TyConApp _ tys) = mapUnionFV go tys
     go (AppTy t1 t2)    = go t1 `unionFV` go t2
     go (ForAllTy (Anon t1) t2) = go t1 `unionFV` go t2
-    go (ForAllTy (Named tv _) t2) = oneVar tv `unionFV`
+    go (ForAllTy (Named tv _) t2) = FV.unitFV tv `unionFV`
                                     go (tyVarKind tv) `unionFV` go t2
-    go (LitTy {})       = noVars
+    go (LitTy {})       = emptyFV
     go (CastTy ty _)    = go ty
-    go (CoercionTy {})  = noVars
+    go (CoercionTy {})  = emptyFV
       -- any types mentioned in a coercion should also be mentioned in
       -- a type.
 
@@ -842,6 +845,110 @@ allBoundVariabless = mapUnionVarSet allBoundVariables
 -}
 
 isTouchableOrFmv :: TcLevel -> TcTyVar -> Bool
+{- *********************************************************************
+*                                                                      *
+          Type and kind variables in a type
+*                                                                      *
+********************************************************************* -}
+
+data TcDepVars  -- See Note [Dependent type variables]
+                -- See Note [TcDepVars determinism]
+  = DV { dv_kvs :: DTyCoVarSet  -- "kind" variables (dependent)
+       , dv_tvs :: DTyVarSet    -- "type" variables (non-dependent)
+                                -- The two are disjoint sets
+    }
+
+depVarsTyVars :: TcDepVars -> DTyVarSet
+depVarsTyVars = dv_tvs
+
+instance Outputable TcDepVars where
+  ppr (DV {dv_kvs = kvs, dv_tvs = tvs })
+    = text "DV" <+> braces (sep [ text "dv_kvs =" <+> ppr kvs
+                                , text "dv_tvs =" <+> ppr tvs ])
+
+{- Note [Dependent type variables]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In Haskell type inference we quantify over type variables; but we only
+quantify over /kind/ variables when -XPolyKinds is on. So when
+collecting the free vars of a type, prior to quantifying, we must keep
+the type and kind veraibles separate.  But what does that mean in a
+system where kind variables /are/ type variables? It's a fairly
+arbitrary distinction based on how the variables appear:
+
+  - "Kind variables" appear in the kind of some other free variable
+     PLUS any free coercion variables
+
+  - "Type variables" are all free vars that are not kind variables
+
+E.g.  In the type    T k (a::k)
+      'k' is a kind variable, because it occurs in the kind of 'a',
+          even though it also appears at "top level" of the type
+      'a' is a type variable, becuase it doesn't
+
+Note that
+
+* We include any coercion variables in the "dependent",
+  "kind-variable" set because we never quantify over them.
+
+* Both sets are un-ordered, of course.
+
+* The "kind variables" might depend on each other; e.g
+     (k1 :: k2), (k2 :: *)
+  The "type variables" do not depend on each other; if
+  one did, it'd be classified as a kind variable!
+
+Note [TcDepVars determinism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we quantify over type variables we decide the order in which they
+appear in the final type. Because the order of type variables in the type
+can end up in the interface file and affects some optimizations like
+worker-wrapper we want this order to be deterministic.
+
+To achieve that we use deterministic sets of variables that can be converted to
+lists in a deterministic order.
+
+For more information about deterministic sets see
+Note [Deterministic UniqFM] in UniqDFM.
+-}
+
+splitDepVarsOfType :: Type -> TcDepVars
+-- See Note [Dependent type variables]
+splitDepVarsOfType ty
+  = DV { dv_kvs = dep_vars
+       , dv_tvs = nondep_vars `minusDVarSet` dep_vars }
+  where
+    Pair dep_vars nondep_vars = split_dep_vars ty
+
+-- | Like 'splitDepVarsOfType', but over a list of types
+splitDepVarsOfTypes :: [Type] -> TcDepVars
+-- See Note [Dependent type variables]
+splitDepVarsOfTypes tys
+  = DV { dv_kvs = dep_vars
+       , dv_tvs = nondep_vars `minusDVarSet` dep_vars }
+  where
+    Pair dep_vars nondep_vars = foldMap split_dep_vars tys
+
+-- | Worker for 'splitDepVarsOfType'. This might output the same var
+-- in both sets, if it's used in both a type and a kind.
+-- See Note [TcDepVars determinism]
+split_dep_vars :: Type -> Pair DTyCoVarSet   -- Pair kvs tvs
+split_dep_vars = go
+  where
+    go (TyVarTy tv)              = Pair (tyCoVarsOfTypeDSet $ tyVarKind tv)
+                                        (unitDVarSet tv)
+    go (AppTy t1 t2)             = go t1 `mappend` go t2
+    go (TyConApp _ tys)          = foldMap go tys
+    go (ForAllTy (Anon arg) res) = go arg `mappend` go res
+    go (ForAllTy (Named tv _) ty)
+      = let Pair kvs tvs = go ty in
+        Pair (kvs `delDVarSet` tv
+                  `extendDVarSetList` tyCoVarsOfTypeList (tyVarKind tv))
+             (tvs `delDVarSet` tv)
+    go (LitTy {})                = mempty
+    go (CastTy ty co)            = go ty `mappend` Pair (tyCoVarsOfCoDSet co)
+                                                        emptyDVarSet
+    go (CoercionTy co)           = Pair (tyCoVarsOfCoDSet co) emptyDVarSet
+
 isTouchableOrFmv ctxt_tclvl tv
   = ASSERT2( isTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of

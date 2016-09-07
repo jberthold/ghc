@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP, MagicHash, RecordWildCards #-}
+{-# OPTIONS_GHC -fprof-auto-top #-}
 --
 --  (c) The University of Glasgow 2002-2006
 --
@@ -31,6 +32,7 @@ import Literal
 import PrimOp
 import CoreFVs
 import Type
+import Kind            ( isLiftedTypeKind )
 import DataCon
 import TyCon
 import Util
@@ -59,6 +61,7 @@ import UniqSupply
 import Module
 import Control.Arrow ( second )
 
+import Control.Exception
 import Data.Array
 import Data.Map (Map)
 import Data.IntMap (IntMap)
@@ -95,10 +98,21 @@ byteCodeGen hsc_env this_mod binds tycs mb_modBreaks
         dumpIfSet_dyn dflags Opt_D_dump_BCOs
            "Proto-BCOs" (vcat (intersperse (char ' ') (map ppr proto_bcos)))
 
-        assembleBCOs hsc_env proto_bcos tycs
+        cbc <- assembleBCOs hsc_env proto_bcos tycs
           (case modBreaks of
              Nothing -> Nothing
              Just mb -> Just mb{ modBreaks_breakInfo = breakInfo })
+
+        -- Squash space leaks in the CompiledByteCode.  This is really
+        -- important, because when loading a set of modules into GHCi
+        -- we don't touch the CompiledByteCode until the end when we
+        -- do linking.  Forcing out the thunks here reduces space
+        -- usage by more than 50% when loading a large number of
+        -- modules.
+        evaluate (seqCompiledByteCode cbc)
+
+        return cbc
+
   where dflags = hsc_dflags hsc_env
 
 -- -----------------------------------------------------------------------------
@@ -486,35 +500,47 @@ schemeE d s p (AnnLet binds (_,body)) = do
      thunk_codes <- sequence compile_binds
      return (alloc_code `appOL` concatOL thunk_codes `appOL` body_code)
 
--- introduce a let binding for a ticked case expression. This rule
+-- Introduce a let binding for a ticked case expression. This rule
 -- *should* only fire when the expression was not already let-bound
 -- (the code gen for let bindings should take care of that).  Todo: we
 -- call exprFreeVars on a deAnnotated expression, this may not be the
 -- best way to calculate the free vars but it seemed like the least
 -- intrusive thing to do
 schemeE d s p exp@(AnnTick (Breakpoint _id _fvs) _rhs)
-   = if isUnliftedType ty
-        then do
-          -- If the result type is unlifted, then we must generate
+   | isLiftedTypeKind (typeKind ty)
+   = do   id <- newId ty
+          -- Todo: is emptyVarSet correct on the next line?
+          let letExp = AnnLet (AnnNonRec id (fvs, exp)) (emptyDVarSet, AnnVar id)
+          schemeE d s p letExp
+
+   | otherwise
+   = do   -- If the result type is not definitely lifted, then we must generate
           --   let f = \s . tick<n> e
           --   in  f realWorld#
           -- When we stop at the breakpoint, _result will have an unlifted
           -- type and hence won't be bound in the environment, but the
           -- breakpoint will otherwise work fine.
+          --
+          -- NB (Trac #12007) this /also/ applies for if (ty :: TYPE r), where
+          --    r :: RuntimeRep is a variable. This can happen in the
+          --    continuations for a pattern-synonym matcher
+          --    match = /\(r::RuntimeRep) /\(a::TYPE r).
+          --            \(k :: Int -> a) \(v::T).
+          --            case v of MkV n -> k n
+          -- Here (k n) :: a :: Type r, so we don't know if it's lifted
+          -- or not; but that should be fine provided we add that void arg.
+
           id <- newId (mkFunTy realWorldStatePrimTy ty)
           st <- newId realWorldStatePrimTy
           let letExp = AnnLet (AnnNonRec id (fvs, AnnLam st (emptyDVarSet, exp)))
                               (emptyDVarSet, (AnnApp (emptyDVarSet, AnnVar id)
                                                     (emptyDVarSet, AnnVar realWorldPrimId)))
           schemeE d s p letExp
-        else do
-          id <- newId ty
-          -- Todo: is emptyVarSet correct on the next line?
-          let letExp = AnnLet (AnnNonRec id (fvs, exp)) (emptyDVarSet, AnnVar id)
-          schemeE d s p letExp
-   where exp' = deAnnotate' exp
-         fvs  = exprFreeVarsDSet exp'
-         ty   = exprType exp'
+
+   where
+     exp' = deAnnotate' exp
+     fvs  = exprFreeVarsDSet exp'
+     ty   = exprType exp'
 
 -- ignore other kinds of tick
 schemeE d s p (AnnTick _ (_, rhs)) = schemeE d s p rhs
@@ -1318,6 +1344,12 @@ pushAtom d p e
 pushAtom _ _ (AnnCoercion {})   -- Coercions are zero-width things,
    = return (nilOL, 0)          -- treated just like a variable V
 
+-- See Note [Empty case alternatives] in coreSyn/CoreSyn.hs
+-- and Note [Bottoming expressions] in coreSyn/CoreUtils.hs:
+-- The scrutinee of an empty case evaluates to bottom
+pushAtom d p (AnnCase (_, a) _ _ []) -- trac #12128
+   = pushAtom d p a
+
 pushAtom d p (AnnVar v)
    | UnaryRep rep_ty <- repType (idType v)
    , V <- typeArgRep rep_ty
@@ -1618,6 +1650,11 @@ atomPrimRep :: AnnExpr' Id ann -> PrimRep
 atomPrimRep e | Just e' <- bcView e = atomPrimRep e'
 atomPrimRep (AnnVar v)              = bcIdPrimRep v
 atomPrimRep (AnnLit l)              = typePrimRep (literalType l)
+
+-- Trac #12128:
+-- A case expresssion can be an atom because empty cases evaluate to bottom.
+-- See Note [Empty case alternatives] in coreSyn/CoreSyn.hs
+atomPrimRep (AnnCase _ _ ty _)      = ASSERT(typePrimRep ty == PtrRep) PtrRep
 atomPrimRep (AnnCoercion {})        = VoidRep
 atomPrimRep other = pprPanic "atomPrimRep" (ppr (deAnnotate (undefined,other)))
 

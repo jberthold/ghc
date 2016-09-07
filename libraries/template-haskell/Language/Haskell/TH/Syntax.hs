@@ -471,14 +471,20 @@ addTopDecls ds = Q (qAddTopDecls ds)
 
 -- | Add a finalizer that will run in the Q monad after the current module has
 -- been type checked. This only makes sense when run within a top-level splice.
+--
+-- The finalizer is given the local type environment at the splice point. Thus
+-- 'reify' is able to find the local definitions when executed inside the
+-- finalizer.
 addModFinalizer :: Q () -> Q ()
 addModFinalizer act = Q (qAddModFinalizer (unQ act))
 
--- | Get state from the 'Q' monad.
+-- | Get state from the 'Q' monad. Note that the state is local to the
+-- Haskell module in which the Template Haskell expression is executed.
 getQ :: Typeable a => Q (Maybe a)
 getQ = Q qGetQ
 
--- | Replace the state in the 'Q' monad.
+-- | Replace the state in the 'Q' monad. Note that the state is local to the
+-- Haskell module in which the Template Haskell expression is executed.
 putQ :: Typeable a => a -> Q ()
 putQ x = Q (qPutQ x)
 

@@ -64,10 +64,10 @@ module UniqFM (
         isNullUFM,
         lookupUFM, lookupUFM_Directly,
         lookupWithDefaultUFM, lookupWithDefaultUFM_Directly,
-        eltsUFM, keysUFM, splitUFM,
+        eltsUFM, keysUFM, splitUFM, nonDetEltsUFM,
         ufmToSet_Directly,
-        ufmToList,
-        joinUFM, pprUniqFM
+        ufmToList, ufmToIntMap,
+        joinUFM, pprUniqFM, pprUFM, pluralUFM
     ) where
 
 import Unique           ( Uniquable(..), Unique, getKey )
@@ -301,6 +301,13 @@ eltsUFM (UFM m) = M.elems m
 ufmToSet_Directly (UFM m) = M.keysSet m
 ufmToList (UFM m) = map (\(k, v) -> (getUnique k, v)) $ M.toList m
 
+ufmToIntMap :: UniqFM elt -> M.IntMap elt
+ufmToIntMap (UFM m) = m
+
+-- See Note [Deterministic UniqFM] to learn about nondeterminism
+nonDetEltsUFM :: UniqFM elt -> [elt]
+nonDetEltsUFM (UFM m) = M.elems m
+
 -- Hoopl
 joinUFM :: JoinFun v -> JoinFun (UniqFM v)
 joinUFM eltJoin l (OldFact old) (NewFact new) = foldUFM_Directly add (NoChange, old) new
@@ -327,3 +334,21 @@ pprUniqFM ppr_elt ufm
   = brackets $ fsep $ punctuate comma $
     [ ppr uq <+> text ":->" <+> ppr_elt elt
     | (uq, elt) <- ufmToList ufm ]
+
+-- | Pretty-print a non-deterministic set.
+-- The order of variables is non-deterministic and for pretty-printing that
+-- shouldn't be a problem.
+-- Having this function helps contain the non-determinism created with
+-- eltsUFM.
+pprUFM :: ([a] -> SDoc) -- ^ The pretty printing function to use on the elements
+       -> UniqFM a      -- ^ The things to be pretty printed
+       -> SDoc          -- ^ 'SDoc' where the things have been pretty
+                        -- printed
+pprUFM pp ufm = pp (eltsUFM ufm)
+
+-- | Determines the pluralisation suffix appropriate for the length of a set
+-- in the same way that plural from Outputable does for lists.
+pluralUFM :: UniqFM a -> SDoc
+pluralUFM ufm
+  | sizeUFM ufm == 1 = empty
+  | otherwise = char 's'

@@ -52,9 +52,10 @@ import StaticFlags      ( opt_PprStyle_Debug )
 import ListSetOps       ( equivClasses )
 import Maybes
 import qualified GHC.LanguageExtensions as LangExt
+import FV ( fvVarList, unionFV )
 
 import Control.Monad    ( when )
-import Data.List        ( partition, mapAccumL, nub, sortBy )
+import Data.List        ( partition, mapAccumL, nub, sortBy, unfoldr )
 import qualified Data.Set as Set
 
 #if __GLASGOW_HASKELL__ < 709
@@ -138,21 +139,28 @@ reportUnsolved wanted
                         | warn_partial_sigs = HoleWarn
                         | otherwise         = HoleDefer
 
-       ; report_unsolved (Just binds_var) False type_errors expr_holes type_holes wanted
+       ; defer_out_of_scope <- goptM Opt_DeferOutOfScopeVariables
+       ; warn_out_of_scope <- woptM Opt_WarnDeferredOutOfScopeVariables
+       ; let out_of_scope_holes | not defer_out_of_scope = HoleError
+                                | warn_out_of_scope      = HoleWarn
+                                | otherwise              = HoleDefer
+
+       ; report_unsolved (Just binds_var) False type_errors expr_holes
+          type_holes out_of_scope_holes wanted
        ; getTcEvBinds binds_var }
 
 -- | Report *all* unsolved goals as errors, even if -fdefer-type-errors is on
 -- See Note [Deferring coercion errors to runtime]
 reportAllUnsolved :: WantedConstraints -> TcM ()
 reportAllUnsolved wanted
-  = report_unsolved Nothing False TypeError HoleError HoleError wanted
+  = report_unsolved Nothing False TypeError HoleError HoleError HoleError wanted
 
 -- | Report all unsolved goals as warnings (but without deferring any errors to
 -- run-time). See Note [Safe Haskell Overlapping Instances Implementation] in
 -- TcSimplify
 warnAllUnsolved :: WantedConstraints -> TcM ()
 warnAllUnsolved wanted
-  = report_unsolved Nothing True TypeWarn HoleWarn HoleWarn wanted
+  = report_unsolved Nothing True TypeWarn HoleWarn HoleWarn HoleWarn wanted
 
 -- | Report unsolved goals as errors or warnings.
 report_unsolved :: Maybe EvBindsVar  -- cec_binds
@@ -160,8 +168,10 @@ report_unsolved :: Maybe EvBindsVar  -- cec_binds
                 -> TypeErrorChoice   -- Deferred type errors
                 -> HoleChoice        -- Expression holes
                 -> HoleChoice        -- Type holes
+                -> HoleChoice        -- Out of scope holes
                 -> WantedConstraints -> TcM ()
-report_unsolved mb_binds_var err_as_warn type_errors expr_holes type_holes wanted
+report_unsolved mb_binds_var err_as_warn type_errors expr_holes
+    type_holes out_of_scope_holes wanted
   | isEmptyWC wanted
   = return ()
   | otherwise
@@ -172,10 +182,10 @@ report_unsolved mb_binds_var err_as_warn type_errors expr_holes type_holes wante
             -- If we are deferring we are going to need /all/ evidence around,
             -- including the evidence produced by unflattening (zonkWC)
        ; let tidy_env = tidyFreeTyCoVars env0 free_tvs
-             free_tvs = tyCoVarsOfWC wanted
+             free_tvs = tyCoVarsOfWCList wanted
 
        ; traceTc "reportUnsolved (after zonking and tidying):" $
-         vcat [ pprTvBndrs (varSetElems free_tvs)
+         vcat [ pprTvBndrs free_tvs
               , ppr wanted ]
 
        ; warn_redundant <- woptM Opt_WarnRedundantConstraints
@@ -185,6 +195,7 @@ report_unsolved mb_binds_var err_as_warn type_errors expr_holes type_holes wante
                             , cec_errors_as_warns = err_as_warn
                             , cec_expr_holes = expr_holes
                             , cec_type_holes = type_holes
+                            , cec_out_of_scope_holes = out_of_scope_holes
                             , cec_suppress = False -- See Note [Suppressing error messages]
                             , cec_warn_redundant = warn_redundant
                             , cec_binds    = mb_binds_var }
@@ -243,6 +254,16 @@ data HoleChoice
   | HoleWarn      -- Defer to runtime, emit a compile-time warning
   | HoleDefer     -- Defer to runtime, no warning
 
+instance Outputable HoleChoice where
+  ppr HoleError = text "HoleError"
+  ppr HoleWarn  = text "HoleWarn"
+  ppr HoleDefer = text "HoleDefer"
+
+instance Outputable TypeErrorChoice  where
+  ppr TypeError = text "TypeError"
+  ppr TypeWarn  = text "TypeWarn"
+  ppr TypeDefer = text "TypeDefer"
+
 data ReportErrCtxt
     = CEC { cec_encl :: [Implication]  -- Enclosing implications
                                        --   (innermost first)
@@ -261,8 +282,13 @@ data ReportErrCtxt
           , cec_defer_type_errors :: TypeErrorChoice -- Defer type errors until runtime
                                                      -- Irrelevant if cec_binds = Nothing
 
-          , cec_expr_holes :: HoleChoice  -- Holes in expressions
-          , cec_type_holes :: HoleChoice  -- Holes in types
+          -- cec_expr_holes is a union of:
+          --   cec_type_holes - a set of typed holes: '_', '_a', '_foo'
+          --   cec_out_of_scope_holes - a set of variables which are
+          --                            out of scope: 'x', 'y', 'bar'
+          , cec_expr_holes :: HoleChoice           -- Holes in expressions
+          , cec_type_holes :: HoleChoice           -- Holes in types
+          , cec_out_of_scope_holes :: HoleChoice   -- Out of scope holes
 
           , cec_warn_redundant :: Bool    -- True <=> -Wredundant-constraints
 
@@ -420,7 +446,7 @@ reportWanteds ctxt tc_lvl (WC { wc_simple = simples, wc_insol = insols, wc_impl 
               , ("skolem eq1",   very_wrong,      True, mkSkolReporter)
               , ("skolem eq2",   skolem_eq,       True, mkSkolReporter)
               , ("non-tv eq",    non_tv_eq,       True, mkSkolReporter)
-              , ("Out of scope", is_out_of_scope, True,  mkHoleReporter)
+              , ("Out of scope", is_out_of_scope, True, mkHoleReporter)
               , ("Holes",        is_hole,         False, mkHoleReporter)
 
                   -- The only remaining equalities are alpha ~ ty,
@@ -527,14 +553,14 @@ mkSkolReporter ctxt cts
 mkHoleReporter :: Reporter
 -- Reports errors one at a time
 mkHoleReporter ctxt
-  = mapM_ $ \ct ->
-    do { err <- mkHoleError ctxt ct
-       ; maybeReportHoleError ctxt ct err
-       ; maybeAddDeferredHoleBinding ctxt err ct }
+  = mapM_ $ \ct -> do { err <- mkHoleError ctxt ct
+                      ; maybeReportHoleError ctxt ct err
+                      ; maybeAddDeferredHoleBinding ctxt err ct }
 
 mkUserTypeErrorReporter :: Reporter
 mkUserTypeErrorReporter ctxt
-  = mapM_ $ \ct -> maybeReportError ctxt =<< mkUserTypeError ctxt ct
+  = mapM_ $ \ct -> do { err <- mkUserTypeError ctxt ct
+                      ; maybeReportError ctxt err }
 
 mkUserTypeError :: ReportErrCtxt -> Ct -> TcM ErrMsg
 mkUserTypeError ctxt ct = mkErrorMsgFromCt ctxt ct
@@ -552,7 +578,6 @@ mkGroupReporter :: (ReportErrCtxt -> [Ct] -> TcM ErrMsg)
 -- and report only the first (to avoid a cascade)
 mkGroupReporter mk_err ctxt cts
   = mapM_ (reportGroup mk_err ctxt) (equivClasses cmp_loc cts)
-  where
 
 cmp_lhs_type :: Ct -> Ct -> Ordering
 cmp_lhs_type ct1 ct2
@@ -576,9 +601,13 @@ reportGroup mk_err ctxt cts =
 
         (_, cts') -> do { err <- mk_err ctxt cts'
                         ; maybeReportError ctxt err
-                        ; mapM_ (maybeAddDeferredBinding ctxt err) cts' }
-                                -- Add deferred bindings for all
-                                -- But see Note [Always warn with -fdefer-type-errors]
+                            -- But see Note [Always warn with -fdefer-type-errors]
+                        ; traceTc "reportGroup" (ppr cts')
+                        ; mapM_ (addDeferredBinding ctxt err) cts' }
+                            -- Add deferred bindings for all
+                            -- Redundant if we are going to abort compilation,
+                            -- but that's hard to know for sure, and if we don't
+                            -- abort, we need bindings for all (e.g. Trac #12156)
   where
     isMonadFailInstanceMissing ct =
         case ctLocOrigin (ctLoc ct) of
@@ -599,9 +628,22 @@ maybeReportHoleError ctxt ct err
        HoleWarn  -> reportWarning (Reason Opt_WarnPartialTypeSignatures) err
        HoleDefer -> return ()
 
-  -- Otherwise this is a typed hole in an expression
+  -- Always report an error for out-of-scope variables
+  -- Unless -fdefer-out-of-scope-variables is on,
+  -- in which case the messages are discarded.
+  -- See Trac #12170, #12406
+  | isOutOfScopeCt ct
+  = -- If deferring, report a warning only if -Wout-of-scope-variables is on
+    case cec_out_of_scope_holes ctxt of
+      HoleError -> reportError err
+      HoleWarn  ->
+        reportWarning (Reason Opt_WarnDeferredOutOfScopeVariables) err
+      HoleDefer -> return ()
+
+  -- Otherwise this is a typed hole in an expression,
+  -- but not for an out-of-scope variable
   | otherwise
-  = -- If deferring, report a warning only if -Wtyped-holds is on
+  = -- If deferring, report a warning only if -Wtyped-holes is on
     case cec_expr_holes ctxt of
        HoleError -> reportError err
        HoleWarn  -> reportWarning (Reason Opt_WarnTypedHoles) err
@@ -648,23 +690,10 @@ addDeferredBinding ctxt err ct
 
 maybeAddDeferredHoleBinding :: ReportErrCtxt -> ErrMsg -> Ct -> TcM ()
 maybeAddDeferredHoleBinding ctxt err ct
-    | isExprHoleCt ct
-    , case cec_expr_holes ctxt of
-        HoleDefer -> True
-        HoleWarn  -> True
-        HoleError -> False
-    = addDeferredBinding ctxt err ct  -- Only add bindings for holes in expressions
-    | otherwise                       -- not for holes in partial type signatures
-    = return ()
-
-maybeAddDeferredBinding :: ReportErrCtxt -> ErrMsg -> Ct -> TcM ()
-maybeAddDeferredBinding ctxt err ct =
-  case cec_defer_type_errors ctxt of
-        TypeDefer -> deferred
-        TypeWarn -> deferred
-        TypeError -> return ()
-  where
-    deferred = addDeferredBinding ctxt err ct
+  | isExprHoleCt ct
+  = addDeferredBinding ctxt err ct  -- Only add bindings for holes in expressions
+  | otherwise                       -- not for holes in partial type signatures
+  = return ()
 
 tryReporters :: ReportErrCtxt -> [ReporterSpec] -> [Ct] -> TcM (ReportErrCtxt, [Ct])
 -- Use the first reporter in the list whose predicate says True
@@ -687,9 +716,10 @@ tryReporters ctxt reporters cts
 tryReporter :: ReportErrCtxt -> ReporterSpec -> [Ct] -> TcM (ReportErrCtxt, [Ct])
 tryReporter ctxt (str, keep_me,  suppress_after, reporter) cts
   | null yeses = return (ctxt, cts)
-  | otherwise  = do { traceTc "tryReporter:" (text str <+> ppr yeses)
+  | otherwise  = do { traceTc "tryReporter{ " (text str <+> ppr yeses)
                     ; reporter ctxt yeses
                     ; let ctxt' = ctxt { cec_suppress = suppress_after || cec_suppress ctxt }
+                    ; traceTc "tryReporter end }" (text str <+> ppr (cec_suppress ctxt) <+> ppr suppress_after)
                     ; return (ctxt', nos) }
   where
     (yeses, nos) = partition (\ct -> keep_me ct (classifyPredType (ctPred ct))) cts
@@ -1333,8 +1363,8 @@ mkTyVarEqErr dflags ctxt report ct oriented tv1 ty2
              interesting_tyvars
                = filter (not . isEmptyVarSet . tyCoVarsOfType . tyVarKind) $
                  filter isTyVar $
-                 varSetElems $
-                 tyCoVarsOfType ty1 `unionVarSet` tyCoVarsOfType ty2
+                 fvVarList $
+                 tyCoFVsOfType ty1 `unionFV` tyCoFVsOfType ty2
              extra3 = relevant_bindings $
                       ppWhen (not (null interesting_tyvars)) $
                       hang (text "Type variable kinds:") 2 $
@@ -1732,108 +1762,146 @@ harder to understand. The whole point here is to make the difference in expected
 and found types clearer.
 
 `expandSynonymsToMatch` does this, it takes two types, and expands type synonyms
-only as much as necessary. It should work like this:
+only as much as necessary. Given two types t1 and t2:
 
-Given two types t1 and t2:
-
-  * If they're already same, it shouldn't expand any type synonyms and
-    just return.
+  * If they're already same, it just returns the types.
 
   * If they're in form `C1 t1_1 .. t1_n` and `C2 t2_1 .. t2_m` (C1 and C2 are
-    type constructors), it should expand C1 and C2 if they're different type
-    synonyms. Then it should continue doing same thing on expanded types. If C1
-    and C2 are same, then we should apply same procedure to arguments of C1
-    and argument of C2 to make them as similar as possible.
+    type constructors), it expands C1 and C2 if they're different type synonyms.
+    Then it recursively does the same thing on expanded types. If C1 and C2 are
+    same, then it applies the same procedure to arguments of C1 and arguments of
+    C2 to make them as similar as possible.
 
     Most important thing here is to keep number of synonym expansions at
-    minimum. For example, if t1 is `T (T3, T5, Int)` and t2 is
-    `T (T5, T3, Bool)` where T5 = T4, T4 = T3, ..., T1 = X, we should return
-    `T (T3, T3, Int)` and `T (T3, T3, Bool)`.
+    minimum. For example, if t1 is `T (T3, T5, Int)` and t2 is `T (T5, T3,
+    Bool)` where T5 = T4, T4 = T3, ..., T1 = X, it returns `T (T3, T3, Int)` and
+    `T (T3, T3, Bool)`.
 
-In the implementation, we just search in all possible solutions for a solution
-that does minimum amount of expansions. This leads to a complex algorithm: If
-we have two synonyms like X_m = X_{m-1} = .. X and Y_n = Y_{n-1} = .. Y, where
-X and Y are rigid types, we expand m * n times. But in practice it's not a
-problem because deeply nested synonyms with no intervening rigid type
-constructors are vanishingly rare.
+  * Otherwise types don't have same shapes and so the difference is clearly
+    visible. It doesn't do any expansions and show these types.
 
+Note that we only expand top-layer type synonyms. Only when top-layer
+constructors are the same we start expanding inner type synonyms.
+
+Suppose top-layer type synonyms of t1 and t2 can expand N and M times,
+respectively. If their type-synonym-expanded forms will meet at some point (i.e.
+will have same shapes according to `sameShapes` function), it's possible to find
+where they meet in O(N+M) top-layer type synonym expansions and O(min(N,M))
+comparisons. We first collect all the top-layer expansions of t1 and t2 in two
+lists, then drop the prefix of the longer list so that they have same lengths.
+Then we search through both lists in parallel, and return the first pair of
+types that have same shapes. Inner types of these two types with same shapes
+are then expanded using the same algorithm.
+
+In case they don't meet, we return the last pair of types in the lists, which
+has top-layer type synonyms completely expanded. (in this case the inner types
+are not expanded at all, as the current form already shows the type error)
 -}
 
--- | Expand type synonyms in given types only enough to make them as equal as
+-- | Expand type synonyms in given types only enough to make them as similar as
 -- possible. Returned types are the same in terms of used type synonyms.
 --
 -- To expand all synonyms, see 'Type.expandTypeSynonyms'.
+--
+-- See `ExpandSynsFail` tests in tests testsuite/tests/typecheck/should_fail for
+-- some examples of how this should work.
 expandSynonymsToMatch :: Type -> Type -> (Type, Type)
 expandSynonymsToMatch ty1 ty2 = (ty1_ret, ty2_ret)
   where
-    (_, ty1_ret, ty2_ret) = go 0 ty1 ty2
+    (ty1_ret, ty2_ret) = go ty1 ty2
 
-    -- | Returns (number of synonym expansions done to make types similar,
-    --            type synonym expanded version of first type,
+    -- | Returns (type synonym expanded version of first type,
     --            type synonym expanded version of second type)
-    --
-    -- Int argument is number of synonym expansions done so far.
-    go :: Int -> Type -> Type -> (Int, Type, Type)
-    go exps t1 t2
+    go :: Type -> Type -> (Type, Type)
+    go t1 t2
       | t1 `pickyEqType` t2 =
         -- Types are same, nothing to do
-        (exps, t1, t2)
+        (t1, t2)
 
-    go exps t1@(TyConApp tc1 tys1) t2@(TyConApp tc2 tys2)
+    go (TyConApp tc1 tys1) (TyConApp tc2 tys2)
       | tc1 == tc2 =
         -- Type constructors are same. They may be synonyms, but we don't
         -- expand further.
-        let (exps', tys1', tys2') = unzip3 $ zipWith (go 0) tys1 tys2
-         in (exps + sum exps', TyConApp tc1 tys1', TyConApp tc2 tys2')
-      | otherwise =
-        -- Try to expand type constructors
-        case (coreView t1, coreView t2) of
-          -- When only one of the constructors is a synonym, we just
-          -- expand it and continue search
-          (Just t1', Nothing) ->
-            go (exps + 1) t1' t2
-          (Nothing, Just t2') ->
-            go (exps + 1) t1 t2'
-          (Just t1', Just t2') ->
-            -- Both constructors are synonyms, but they may be synonyms of
-            -- each other. We just search for minimally expanded solution.
-            -- See Note [Expanding type synonyms to make types similar].
-            let sol1@(exp1, _, _) = go (exps + 1) t1' t2
-                sol2@(exp2, _, _) = go (exps + 1) t1 t2'
-             in if exp1 < exp2 then sol1 else sol2
-          (Nothing, Nothing) ->
-            -- None of the constructors are synonyms, nothing to do
-            (exps, t1, t2)
+        let (tys1', tys2') =
+              unzip (zipWith (\ty1 ty2 -> go ty1 ty2) tys1 tys2)
+         in (TyConApp tc1 tys1', TyConApp tc2 tys2')
 
-    go exps t1@TyConApp{} t2
-      | Just t1' <- coreView t1 = go (exps + 1) t1' t2
-      | otherwise               = (exps, t1, t2)
+    go (AppTy t1_1 t1_2) (AppTy t2_1 t2_2) =
+      let (t1_1', t2_1') = go t1_1 t2_1
+          (t1_2', t2_2') = go t1_2 t2_2
+       in (mkAppTy t1_1' t1_2', mkAppTy t2_1' t2_2')
 
-    go exps t1 t2@TyConApp{}
-      | Just t2' <- coreView t2 = go (exps + 1) t1 t2'
-      | otherwise               = (exps, t1, t2)
+    go (ForAllTy (Anon t1_1) t1_2) (ForAllTy (Anon t2_1) t2_2) =
+      let (t1_1', t2_1') = go t1_1 t2_1
+          (t1_2', t2_2') = go t1_2 t2_2
+       in (mkFunTy t1_1' t1_2', mkFunTy t2_1' t2_2')
 
-    go exps (AppTy t1_1 t1_2) (AppTy t2_1 t2_2) =
-      let (exps1, t1_1', t2_1') = go 0 t1_1 t2_1
-          (exps2, t1_2', t2_2') = go 0 t1_2 t2_2
-       in (exps + exps1 + exps2, mkAppTy t1_1' t1_2', mkAppTy t2_1' t2_2')
-
-    go exps (ForAllTy (Anon t1_1) t1_2) (ForAllTy (Anon t2_1) t2_2) =
-      let (exps1, t1_1', t2_1') = go 0 t1_1 t2_1
-          (exps2, t1_2', t2_2') = go 0 t1_2 t2_2
-       in (exps + exps1 + exps2, mkFunTy t1_1' t1_2', mkFunTy t2_1' t2_2')
-
-    go exps (ForAllTy (Named tv1 vis1) t1) (ForAllTy (Named tv2 vis2) t2) =
+    go (ForAllTy (Named tv1 vis1) t1) (ForAllTy (Named tv2 vis2) t2) =
       -- NOTE: We may have a bug here, but we just can't reproduce it easily.
       -- See D1016 comments for details and our attempts at producing a test
       -- case. Short version: We probably need RnEnv2 to really get this right.
-      let (exps1, t1', t2') = go exps t1 t2
-       in (exps1, ForAllTy (Named tv1 vis1) t1', ForAllTy (Named tv2 vis2) t2')
+      let (t1', t2') = go t1 t2
+       in (ForAllTy (Named tv1 vis1) t1', ForAllTy (Named tv2 vis2) t2')
 
-    go exps (CastTy ty1 _) ty2 = go exps ty1 ty2
-    go exps ty1 (CastTy ty2 _) = go exps ty1 ty2
+    go (CastTy ty1 _) ty2 = go ty1 ty2
+    go ty1 (CastTy ty2 _) = go ty1 ty2
 
-    go exps t1 t2 = (exps, t1, t2)
+    go t1 t2 =
+      -- See Note [Expanding type synonyms to make types similar] for how this
+      -- works
+      let
+        t1_exp_tys = t1 : tyExpansions t1
+        t2_exp_tys = t2 : tyExpansions t2
+        t1_exps    = length t1_exp_tys
+        t2_exps    = length t2_exp_tys
+        dif        = abs (t1_exps - t2_exps)
+      in
+        followExpansions $
+          zipEqual "expandSynonymsToMatch.go"
+            (if t1_exps > t2_exps then drop dif t1_exp_tys else t1_exp_tys)
+            (if t2_exps > t1_exps then drop dif t2_exp_tys else t2_exp_tys)
+
+    -- | Expand the top layer type synonyms repeatedly, collect expansions in a
+    -- list. The list does not include the original type.
+    --
+    -- Example, if you have:
+    --
+    --   type T10 = T9
+    --   type T9  = T8
+    --   ...
+    --   type T0  = Int
+    --
+    -- `tyExpansions T10` returns [T9, T8, T7, ... Int]
+    --
+    -- This only expands the top layer, so if you have:
+    --
+    --   type M a = Maybe a
+    --
+    -- `tyExpansions (M T10)` returns [Maybe T10] (T10 is not expanded)
+    tyExpansions :: Type -> [Type]
+    tyExpansions = unfoldr (\t -> (\x -> (x, x)) `fmap` coreView t)
+
+    -- | Drop the type pairs until types in a pair look alike (i.e. the outer
+    -- constructors are the same).
+    followExpansions :: [(Type, Type)] -> (Type, Type)
+    followExpansions [] = pprPanic "followExpansions" empty
+    followExpansions [(t1, t2)]
+      | sameShapes t1 t2 = go t1 t2 -- expand subtrees
+      | otherwise        = (t1, t2) -- the difference is already visible
+    followExpansions ((t1, t2) : tss)
+      -- Traverse subtrees when the outer shapes are the same
+      | sameShapes t1 t2 = go t1 t2
+      -- Otherwise follow the expansions until they look alike
+      | otherwise = followExpansions tss
+
+    sameShapes :: Type -> Type -> Bool
+    sameShapes AppTy{}              AppTy{}              = True
+    sameShapes (TyConApp tc1 _)     (TyConApp tc2 _)     = tc1 == tc2
+    sameShapes (ForAllTy Anon{} _)  (ForAllTy Anon{} _)  = True
+    sameShapes (ForAllTy Named{} _) (ForAllTy Named{} _) = True
+    sameShapes (CastTy ty1 _)       ty2                  = sameShapes ty1 ty2
+    sameShapes ty1                  (CastTy ty2 _)       = sameShapes ty1 ty2
+    sameShapes _                    _                    = False
 
 sameOccExtra :: TcType -> TcType -> SDoc
 -- See Note [Disambiguating (X ~ X) errors]
@@ -1945,7 +2013,7 @@ mkDictErr ctxt cts
     is_no_inst (ct, (matches, unifiers, _))
       =  no_givens
       && null matches
-      && (null unifiers || all (not . isAmbiguousTyVar) (varSetElems (tyCoVarsOfCt ct)))
+      && (null unifiers || all (not . isAmbiguousTyVar) (tyCoVarsOfCtList ct))
 
     lookup_cls_inst inst_envs ct
                 -- Note [Flattening in error message generation]
@@ -2419,10 +2487,9 @@ getAmbigTkvs :: Ct -> ([Var],[Var])
 getAmbigTkvs ct
   = partition (`elemVarSet` dep_tkv_set) ambig_tkvs
   where
-    tkv_set       = tyCoVarsOfCt ct
-    ambig_tkv_set = filterVarSet isAmbiguousTyVar tkv_set
-    dep_tkv_set   = tyCoVarsOfTypes (map tyVarKind (varSetElems tkv_set))
-    ambig_tkvs    = varSetElems ambig_tkv_set
+    tkvs       = tyCoVarsOfCtList ct
+    ambig_tkvs = filter isAmbiguousTyVar tkvs
+    dep_tkv_set = tyCoVarsOfTypes (map tyVarKind tkvs)
 
 getSkolemInfo :: [Implication] -> TcTyVar -> ([TcTyVar], SkolemInfo)
 -- Get the skolem info for a type variable
@@ -2472,7 +2539,7 @@ relevantBindings want_filtering ctxt ct
        ; (tidy_env', docs, discards)
               <- go env1 ct_tvs (maxRelevantBinds dflags)
                     emptyVarSet [] False
-                    (tcl_bndrs lcl_env)
+                    (remove_shadowing $ tcl_bndrs lcl_env)
          -- tcl_bndrs has the innermost bindings first,
          -- which are probably the most relevant ones
 
@@ -2497,6 +2564,16 @@ relevantBindings want_filtering ctxt ct
 
     dec_max :: Maybe Int -> Maybe Int
     dec_max = fmap (\n -> n - 1)
+
+    ---- fixes #12177
+    ---- builds up a list of bindings whose OccName has not been seen before
+    remove_shadowing :: [TcIdBinder] -> [TcIdBinder]
+    remove_shadowing bindings = reverse $ fst $ foldl
+      (\(bindingAcc, seenNames) binding ->
+        if (occName binding) `elemOccSet` seenNames -- if we've seen it
+          then (bindingAcc, seenNames)              -- skip it
+          else (binding:bindingAcc, extendOccSet seenNames (occName binding)))
+      ([], emptyOccSet) bindings
 
     go :: TidyEnv -> TcTyVarSet -> Maybe Int -> TcTyVarSet -> [SDoc]
        -> Bool                          -- True <=> some filtered out due to lack of fuel
@@ -2558,7 +2635,7 @@ warnDefaulting wanteds default_ty
   = do { warn_default <- woptM Opt_WarnTypeDefaults
        ; env0 <- tcInitTidyEnv
        ; let tidy_env = tidyFreeTyCoVars env0 $
-                        foldr (unionVarSet . tyCoVarsOfCt) emptyVarSet wanteds
+                        tyCoVarsOfCtsList (listToBag wanteds)
              tidy_wanteds = map (tidyCt tidy_env) wanteds
              (loc, ppr_wanteds) = pprWithArising tidy_wanteds
              warn_msg =
@@ -2590,7 +2667,7 @@ solverDepthErrorTcS loc ty
   = setCtLocM loc $
     do { ty <- zonkTcType ty
        ; env0 <- tcInitTidyEnv
-       ; let tidy_env     = tidyFreeTyCoVars env0 (tyCoVarsOfType ty)
+       ; let tidy_env     = tidyFreeTyCoVars env0 (tyCoVarsOfTypeList ty)
              tidy_ty      = tidyType tidy_env ty
              msg
                = vcat [ text "Reduction stack overflow; size =" <+> ppr depth

@@ -51,8 +51,8 @@ test('TypeFamilyInstanceLHS', normal, compile, ['-ddump-types -fno-warn-partial-
 test('Uncurry', normal, compile, ['-ddump-types -fno-warn-partial-type-signatures'])
 test('UncurryNamed', normal, compile, ['-ddump-types -fno-warn-partial-type-signatures'])
 test('WarningWildcardInstantiations', normal, compile, ['-ddump-types'])
-test('SplicesUsed', [req_interp, only_compiler_types(['ghc']),
-                     extra_clean(['Splices.o', 'Splices.hi'])],
+test('SplicesUsed',
+     [req_interp, extra_clean(['Splices.o', 'Splices.hi']), omit_ways(prof_ways)],
      multimod_compile, ['SplicesUsed', config.ghc_th_way_flags])
 test('TypedSplice', [req_interp, normal], compile, [''])
 test('T10403', normal, compile, [''])
@@ -62,3 +62,5 @@ test('T10463', normal, compile, [''])
 test('ExprSigLocal', normal, compile, [''])
 test('T11016', normal, compile, [''])
 test('T11192', normal, compile, [''])
+test('T12156', normal, compile_fail, ['-fdefer-typed-holes'])
+test('T12531', normal, compile, ['-fdefer-typed-holes'])

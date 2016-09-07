@@ -1140,7 +1140,13 @@ genCCall'
 
     PowerPC 64 Linux uses the System V Release 4 Calling Convention for
     64-bit PowerPC. It is specified in
-    "64-bit PowerPC ELF Application Binary Interface Supplement 1.9".
+    "64-bit PowerPC ELF Application Binary Interface Supplement 1.9"
+    (PPC64 ELF v1.9).
+    PowerPC 64 Linux in little endian mode uses the "Power Architecture 64-Bit
+    ELF V2 ABI Specification -- OpenPOWER ABI for Linux Supplement"
+    (PPC64 ELF v2).
+    AIX follows the "PowerOpen ABI: Application Binary Interface Big-Endian
+    32-Bit Hardware Implementation"
 
     According to all conventions, the parameter area should be part of the
     caller's stack frame, allocated in the caller's prologue code (large enough
@@ -1181,41 +1187,46 @@ genCCall' dflags gcp target dest_regs args
             PrimTarget mop -> outOfLineMachOp mop
 
         let codeBefore = move_sp_down finalStack `appOL` passArgumentsCode
-                         `appOL` toc_before
-            codeAfter = toc_after labelOrExpr `appOL` move_sp_up finalStack
-                        `appOL` moveResult reduceToFF32
+            codeAfter = move_sp_up finalStack `appOL` moveResult reduceToFF32
 
         case labelOrExpr of
             Left lbl -> do -- the linker does all the work for us
                 return (         codeBefore
                         `snocOL` BL lbl usedRegs
+                        `appOL`  maybeNOP -- some ABI require a NOP after BL
                         `appOL`  codeAfter)
             Right dyn -> do -- implement call through function pointer
                 (dynReg, dynCode) <- getSomeReg dyn
                 case gcp of
                      GCPLinux64ELF 1 -> return ( dynCode
                        `appOL`  codeBefore
+                       `snocOL` ST spFormat toc (AddrRegImm sp (ImmInt 40))
                        `snocOL` LD II64 r11 (AddrRegImm dynReg (ImmInt 0))
                        `snocOL` LD II64 toc (AddrRegImm dynReg (ImmInt 8))
                        `snocOL` MTCTR r11
                        `snocOL` LD II64 r11 (AddrRegImm dynReg (ImmInt 16))
                        `snocOL` BCTRL usedRegs
+                       `snocOL` LD spFormat toc (AddrRegImm sp (ImmInt 40))
                        `appOL`  codeAfter)
                      GCPLinux64ELF 2 -> return ( dynCode
                        `appOL`  codeBefore
+                       `snocOL` ST spFormat toc (AddrRegImm sp (ImmInt 24))
                        `snocOL` MR r12 dynReg
                        `snocOL` MTCTR r12
                        `snocOL` BCTRL usedRegs
+                       `snocOL` LD spFormat toc (AddrRegImm sp (ImmInt 24))
                        `appOL`  codeAfter)
                      GCPAIX          -> return ( dynCode
                        -- AIX/XCOFF follows the PowerOPEN ABI
                        -- which is quite similiar to LinuxPPC64/ELFv1
                        `appOL`  codeBefore
+                       `snocOL` ST spFormat toc (AddrRegImm sp (ImmInt 20))
                        `snocOL` LD II32 r11 (AddrRegImm dynReg (ImmInt 0))
                        `snocOL` LD II32 toc (AddrRegImm dynReg (ImmInt 4))
                        `snocOL` MTCTR r11
                        `snocOL` LD II32 r11 (AddrRegImm dynReg (ImmInt 8))
                        `snocOL` BCTRL usedRegs
+                       `snocOL` LD spFormat toc (AddrRegImm sp (ImmInt 20))
                        `appOL`  codeAfter)
                      _              -> return ( dynCode
                        `snocOL` MTCTR dynReg
@@ -1250,10 +1261,12 @@ genCCall' dflags gcp target dest_regs args
                                 GCPLinux -> roundTo 16 finalStack
                                 GCPLinux64ELF 1 ->
                                     roundTo 16 $ (48 +) $ max 64 $ sum $
-                                    map (widthInBytes . typeWidth) argReps
+                                    map (roundTo 8 . widthInBytes . typeWidth)
+                                        argReps
                                 GCPLinux64ELF 2 ->
                                     roundTo 16 $ (32 +) $ max 64 $ sum $
-                                    map (widthInBytes . typeWidth) argReps
+                                    map (roundTo 8 . widthInBytes . typeWidth)
+                                        argReps
                                 _ -> panic "genCall': unknown calling conv."
 
         argReps = map (cmmExprType dflags) args
@@ -1263,43 +1276,33 @@ genCCall' dflags gcp target dest_regs args
 
         spFormat = if target32Bit platform then II32 else II64
 
+        -- TODO: Do not create a new stack frame if delta is too large.
         move_sp_down finalStack
-               | delta > 64 =
+               | delta > stackFrameHeaderSize dflags =
                         toOL [STU spFormat sp (AddrRegImm sp (ImmInt (-delta))),
                               DELTA (-delta)]
                | otherwise = nilOL
                where delta = stackDelta finalStack
-        toc_before = case gcp of
-           GCPLinux64ELF 1 -> unitOL $ ST spFormat toc (AddrRegImm sp (ImmInt 40))
-           GCPLinux64ELF 2 -> unitOL $ ST spFormat toc (AddrRegImm sp (ImmInt 24))
-           GCPAIX          -> unitOL $ ST spFormat toc (AddrRegImm sp (ImmInt 20))
-           _               -> nilOL
-        toc_after labelOrExpr = case gcp of
-           GCPLinux64ELF 1 -> case labelOrExpr of
-                                Left _  -> toOL [ NOP ]
-                                Right _ -> toOL [ LD spFormat toc
-                                                     (AddrRegImm sp
-                                                      (ImmInt 40))
-                                                ]
-           GCPLinux64ELF 2 -> case labelOrExpr of
-                                Left _  -> toOL [ NOP ]
-                                Right _ -> toOL [ LD spFormat toc
-                                                     (AddrRegImm sp
-                                                      (ImmInt 24))
-                                                ]
-           GCPAIX          -> case labelOrExpr of
-                                Left _  -> unitOL NOP
-                                Right _ -> unitOL (LD spFormat toc
-                                                      (AddrRegImm sp
-                                                       (ImmInt 20)))
-           _               -> nilOL
         move_sp_up finalStack
-               | delta > 64 =  -- TODO: fix-up stack back-chain
+               | delta > stackFrameHeaderSize dflags =
                         toOL [ADD sp sp (RIImm (ImmInt delta)),
                               DELTA 0]
                | otherwise = nilOL
                where delta = stackDelta finalStack
 
+        -- A NOP instruction is required after a call (bl instruction)
+        -- on AIX and 64-Bit Linux.
+        -- If the call is to a function with a different TOC (r2) the
+        -- link editor replaces the NOP instruction with a load of the TOC
+        -- from the stack to restore the TOC.
+        maybeNOP = case gcp of
+           -- See Section 3.9.4 of OpenPower ABI
+           GCPAIX          -> unitOL NOP
+           -- See Section 3.5.11 of PPC64 ELF v1.9
+           GCPLinux64ELF 1 -> unitOL NOP
+           -- See Section 2.3.6 of PPC64 ELF v2
+           GCPLinux64ELF 2 -> unitOL NOP
+           _               -> nilOL
 
         passArguments [] _ _ stackOffset accumCode accumUsed = return (stackOffset, accumCode, accumUsed)
         passArguments ((arg,arg_ty):args) gprs fprs stackOffset
@@ -1404,11 +1407,21 @@ genCCall' dflags gcp target dest_regs args
                                 | otherwise ->
                                    stackOffset
                                GCPLinux64ELF _ ->
-                                   -- everything on the stack is 8-byte
-                                   -- aligned on a 64 bit system
-                                   -- (except vector status, not used now)
+                                   -- Everything on the stack is mapped to
+                                   -- 8-byte aligned doublewords
                                    stackOffset
-                stackSlot = AddrRegImm sp (ImmInt stackOffset')
+                stackOffset''
+                     | isFloatType rep && typeWidth rep == W32 =
+                         case gcp of
+                         -- The ELF v1 ABI Section 3.2.3 requires:
+                         -- "Single precision floating point values
+                         -- are mapped to the second word in a single
+                         -- doubleword"
+                         GCPLinux64ELF 1 -> stackOffset' + 4
+                         _               -> stackOffset'
+                     | otherwise = stackOffset'
+
+                stackSlot = AddrRegImm sp (ImmInt stackOffset'')
                 (nGprs, nFprs, stackBytes, regs)
                     = case gcp of
                       GCPAIX ->

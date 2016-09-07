@@ -67,7 +67,9 @@ module TcMType (
   mkTypeErrorThing, mkTypeErrorThingArgs,
   tidyEvVar, tidyCt, tidySkolemInfo,
   skolemiseUnboundMetaTyVar,
-  zonkTcTyVar, zonkTcTyVars, zonkTyCoVarsAndFV, zonkTcTypeAndFV,
+  zonkTcTyVar, zonkTcTyVars, zonkTcTyVarToTyVar,
+  zonkTyCoVarsAndFV, zonkTcTypeAndFV,
+  zonkTyCoVarsAndFVList,
   zonkTcTypeAndSplitDepVars, zonkTcTypesAndSplitDepVars,
   zonkQuantifiedTyVar, zonkQuantifiedTyVarOrType,
   quantifyTyVars, quantifyZonkedTyVars,
@@ -821,19 +823,31 @@ has free vars {k,a}.  But the type (see Trac #7916)
     (f::k->*) (a::k)
 has free vars {f,a}, but we must add 'k' as well! Hence step (3).
 
-This function bothers to distinguish between dependent and non-dependent
-variables only to keep correct defaulting behavior with -XNoPolyKinds.
-With -XPolyKinds, it treats both classes of variables identically.
+* This function distinguishes between dependent and non-dependent
+  variables only to keep correct defaulting behavior with -XNoPolyKinds.
+  With -XPolyKinds, it treats both classes of variables identically.
 
-Note that this function can accept covars, but will never return them.
-This is because we never want to infer a quantified covar!
+* quantifyTyVars never quantifies over
+    - a coercion variable
+    - a runtime-rep variable
+
+Note [quantifyTyVars determinism]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The results of quantifyTyVars are wrapped in a forall and can end up in the
+interface file. One such example is inferred type signatures. They also affect
+the results of optimizations, for example worker-wrapper. This means that to
+get deterministic builds quantifyTyVars needs to be deterministic.
+
+To achieve this TcDepVars is backed by deterministic sets which allows them
+to be later converted to a list in a deterministic order.
+
+For more information about deterministic sets see
+Note [Deterministic UniqFM] in UniqDFM.
 -}
 
 quantifyTyVars, quantifyZonkedTyVars
   :: TcTyCoVarSet   -- global tvs
-  -> Pair TcTyCoVarSet    -- dependent tvs       We only distinguish
-                          -- nondependent tvs    between these for
-                          --                     -XNoPolyKinds
+  -> TcDepVars      -- See Note [Dependent type variables] in TcType
   -> TcM [TcTyVar]
 -- See Note [quantifyTyVars]
 -- Can be given a mixture of TcTyVars and TyVars, in the case of
@@ -841,27 +855,32 @@ quantifyTyVars, quantifyZonkedTyVars
 
 -- The zonked variant assumes everything is already zonked.
 
-quantifyTyVars gbl_tvs (Pair dep_tkvs nondep_tkvs)
-  = do { dep_tkvs    <- zonkTyCoVarsAndFV dep_tkvs
-       ; nondep_tkvs <- (`minusVarSet` dep_tkvs) <$>
-                        zonkTyCoVarsAndFV nondep_tkvs
+quantifyTyVars gbl_tvs (DV { dv_kvs = dep_tkvs, dv_tvs = nondep_tkvs })
+  = do { dep_tkvs    <- zonkTyCoVarsAndFVDSet dep_tkvs
+       ; nondep_tkvs <- (`minusDVarSet` dep_tkvs) <$>
+                        zonkTyCoVarsAndFVDSet nondep_tkvs
        ; gbl_tvs     <- zonkTyCoVarsAndFV gbl_tvs
-       ; quantifyZonkedTyVars gbl_tvs (Pair dep_tkvs nondep_tkvs) }
+       ; quantifyZonkedTyVars gbl_tvs (DV { dv_kvs = dep_tkvs, dv_tvs = nondep_tkvs }) }
 
-quantifyZonkedTyVars gbl_tvs (Pair dep_tkvs nondep_tkvs)
-  = do { let all_cvs    = filterVarSet isCoVar $
-                          dep_tkvs `unionVarSet` nondep_tkvs `minusVarSet` gbl_tvs
-             dep_kvs    = varSetElemsWellScoped $
-                          dep_tkvs `minusVarSet` gbl_tvs
-                                   `minusVarSet` (closeOverKinds all_cvs)
-                             -- remove any tvs that a covar depends on
+quantifyZonkedTyVars gbl_tvs (DV{ dv_kvs = dep_tkvs, dv_tvs = nondep_tkvs })
+  = do { let all_cvs = filterVarSet isCoVar $ dVarSetToVarSet dep_tkvs
+             dep_kvs = dVarSetElemsWellScoped $
+                       dep_tkvs `dVarSetMinusVarSet` gbl_tvs
+                                `dVarSetMinusVarSet` closeOverKinds all_cvs
+                 -- dVarSetElemsWellScoped: put the kind variables into
+                 --    well-scoped order.
+                 --    E.g.  [k, (a::k)] not the other way roud
+                 -- closeOverKinds all_cvs: do not quantify over coercion
+                 --    variables, or any any tvs that a covar depends on
 
-             nondep_tvs = varSetElemsWellScoped $
-                          nondep_tkvs `minusVarSet` gbl_tvs
-                           -- no worry about dependent cvs here, as these vars
-                           -- are non-dependent
-
-                          -- NB kinds of tvs are zonked by zonkTyCoVarsAndFV
+             nondep_tvs = dVarSetElems $
+                          nondep_tkvs `dVarSetMinusVarSet` gbl_tvs
+                 -- No worry about dependent covars here; they are
+                 --    all in dep_tkvs
+                 -- No worry about scoping, becuase these are all
+                 --    type variables
+                 --    See Note [Dependent type variables] in TcType
+                 -- NB kinds of tvs are zonked by zonkTyCoVarsAndFV
 
              -- In the non-PolyKinds case, default the kind variables
              -- to *, and zonk the tyvars as usual.  Notice that this
@@ -1149,7 +1168,7 @@ tcGetGlobalTyCoVars
 zonkTcTypeInKnot :: TcType -> TcM TcType
 zonkTcTypeInKnot = mapType (zonkTcTypeMapper { tcm_smart = False }) ()
 
-zonkTcTypeAndFV :: TcType -> TcM TyCoVarSet
+zonkTcTypeAndFV :: TcType -> TcM DTyCoVarSet
 -- Zonk a type and take its free variables
 -- With kind polymorphism it can be essential to zonk *first*
 -- so that we find the right set of free variables.  Eg
@@ -1159,15 +1178,15 @@ zonkTcTypeAndFV :: TcType -> TcM TyCoVarSet
 -- NB: This might be called from within the knot, so don't use
 -- smart constructors. See Note [Zonking within the knot] in TcHsType
 zonkTcTypeAndFV ty
-  = tyCoVarsOfType <$> zonkTcTypeInKnot ty
+  = tyCoVarsOfTypeDSet <$> zonkTcTypeInKnot ty
 
 -- | Zonk a type and call 'splitDepVarsOfType' on it.
 -- Works within the knot.
-zonkTcTypeAndSplitDepVars :: TcType -> TcM (Pair TyCoVarSet)
+zonkTcTypeAndSplitDepVars :: TcType -> TcM TcDepVars
 zonkTcTypeAndSplitDepVars ty
   = splitDepVarsOfType <$> zonkTcTypeInKnot ty
 
-zonkTcTypesAndSplitDepVars :: [TcType] -> TcM (Pair TyCoVarSet)
+zonkTcTypesAndSplitDepVars :: [TcType] -> TcM TcDepVars
 zonkTcTypesAndSplitDepVars tys
   = splitDepVarsOfTypes <$> mapM zonkTcTypeInKnot tys
 
@@ -1184,6 +1203,19 @@ zonkTyCoVar tv | isTcTyVar tv = zonkTcTyVar tv
 
 zonkTyCoVarsAndFV :: TyCoVarSet -> TcM TyCoVarSet
 zonkTyCoVarsAndFV tycovars = tyCoVarsOfTypes <$> mapM zonkTyCoVar (varSetElems tycovars)
+
+-- Takes a list of TyCoVars, zonks them and returns a
+-- deterministically ordered list of their free variables.
+zonkTyCoVarsAndFVList :: [TyCoVar] -> TcM [TyCoVar]
+zonkTyCoVarsAndFVList tycovars =
+  tyCoVarsOfTypesList <$> mapM zonkTyCoVar tycovars
+
+-- Takes a deterministic set of TyCoVars, zonks them and returns a
+-- deterministic set of their free variables.
+-- See Note [quantifyTyVars determinism].
+zonkTyCoVarsAndFVDSet :: DTyCoVarSet -> TcM DTyCoVarSet
+zonkTyCoVarsAndFVDSet tycovars =
+  tyCoVarsOfTypesDSet <$> mapM zonkTyCoVar (dVarSetElems tycovars)
 
 zonkTcTyVars :: [TcTyVar] -> TcM [TcType]
 zonkTcTyVars tyvars = mapM zonkTcTyVar tyvars
@@ -1358,6 +1390,13 @@ zonkTcTyVar tv
   where
     zonk_kind_and_return = do { z_tv <- zonkTyCoVarKind tv
                               ; return (mkTyVarTy z_tv) }
+
+-- Variant that assumes that any result of zonking is still a TyVar.
+-- Should be used only on skolems and SigTvs
+zonkTcTyVarToTyVar :: TcTyVar -> TcM TcTyVar
+zonkTcTyVarToTyVar tv
+  = do { ty <- zonkTcTyVar tv
+       ; return (tcGetTyVar "zonkTcTyVarToVar" ty) }
 
 {-
 %************************************************************************
