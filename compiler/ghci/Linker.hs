@@ -1180,7 +1180,8 @@ linkPackage hsc_env pkg
    = do
         let dflags    = hsc_dflags hsc_env
             platform  = targetPlatform dflags
-            dirs      = Packages.libraryDirs pkg
+            dirs | interpreterDynamic dflags = Packages.libraryDynDirs pkg
+                 | otherwise                 = Packages.libraryDirs pkg
 
         let hs_libs   =  Packages.hsLibraries pkg
             -- The FFI GHCi import lib isn't needed as
@@ -1278,7 +1279,8 @@ loadFrameworks hsc_env platform pkg
 -- If it isn't present, we assume that addDLL in the RTS can find it,
 -- which generally means that it should be a dynamic library in the
 -- standard system search path.
-
+-- For GHCi we tend to prefer dynamic libraries over static ones as
+-- they are easier to load and manage, have less overhead.
 locateLib :: HscEnv -> Bool -> [FilePath] -> String -> IO LibrarySpec
 locateLib hsc_env is_hs dirs lib
   | not is_hs
@@ -1287,16 +1289,16 @@ locateLib hsc_env is_hs dirs lib
     --   then  look in library-dirs for a static library (libfoo.a)
     --   then look in library-dirs and inplace GCC for a dynamic library (libfoo.so)
     --   then  check for system dynamic libraries (e.g. kernel32.dll on windows)
-    --   then  try "gcc --print-file-name" to search gcc's search path
     --   then  try looking for import libraries on Windows (.dll.a, .lib)
+    --   then  try "gcc --print-file-name" to search gcc's search path
     --   then  look in library-dirs and inplace GCC for a static library (libfoo.a)
     --       for a dynamic library (#5289)
     --   otherwise, assume loadDLL can find it
     --
   = findDll     `orElse`
     findSysDll  `orElse`
-    tryGcc      `orElse`
     tryImpLib   `orElse`
+    tryGcc      `orElse`
     findArchive `orElse`
     assumeDll
 

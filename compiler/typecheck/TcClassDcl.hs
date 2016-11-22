@@ -11,7 +11,7 @@ Typechecking class declarations
 module TcClassDcl ( tcClassSigs, tcClassDecl2,
                     findMethodBind, instantiateMethod,
                     tcClassMinimalDef,
-                    HsSigFun, mkHsSigFun, lookupHsSig, emptyHsSigs,
+                    HsSigFun, mkHsSigFun,
                     tcMkDeclCtxt, tcAddDeclCtxt, badMethodErr,
                     tcATDefault
                   ) where
@@ -134,8 +134,8 @@ tcClassSigs clas sigs def_methods
            ; return [ (op_name, op_ty, f op_name) | L _ op_name <- op_names ] }
            where
              f nm | Just lty <- lookupNameEnv gen_dm_env nm = Just (GenericDM lty)
-                  | nm `elem` dm_bind_names                = Just VanillaDM
-                  | otherwise                              = Nothing
+                  | nm `elem` dm_bind_names                 = Just VanillaDM
+                  | otherwise                               = Nothing
 
     tc_gen_sig (op_names, gen_hs_ty)
       = do { gen_op_ty <- tcClassSigType op_names gen_hs_ty
@@ -199,8 +199,18 @@ tcDefMeth _ _ _ _ _ prag_fn (sel_id, Nothing)
 
 tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
           (sel_id, Just (dm_name, dm_spec))
-  | Just (L bind_loc dm_bind, bndr_loc) <- findMethodBind sel_name binds_in
-  = do { -- First look up the default method -- It should be there!
+  | Just (L bind_loc dm_bind, bndr_loc, prags) <- findMethodBind sel_name binds_in prag_fn
+  = do { -- First look up the default method; it should be there!
+         -- It can be the orinary default method
+         -- or the generic-default method.  E.g of the latter
+         --      class C a where
+         --        op :: a -> a -> Bool
+         --        default op :: Eq a => a -> a -> Bool
+         --        op x y = x==y
+         -- The default method we generate is
+         --    $gm :: (C a, Eq a) => a -> a -> Bool
+         --    $gm x y = x==y
+
          global_dm_id  <- tcLookupId dm_name
        ; global_dm_id  <- addInlinePrags global_dm_id prags
        ; local_dm_name <- setSrcSpan bndr_loc (newLocalName sel_name)
@@ -214,7 +224,7 @@ tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
                 (text "Ignoring SPECIALISE pragmas on default method"
                  <+> quotes (ppr sel_name))
 
-       ; let hs_ty = lookupHsSig hs_sig_fn sel_name
+       ; let hs_ty = hs_sig_fn sel_name
                      `orElse` pprPanic "tc_dm" (ppr sel_name)
              -- We need the HsType so that we can bring the right
              -- type variables into scope
@@ -265,7 +275,6 @@ tcDefMeth clas tyvars this_dict binds_in hs_sig_fn prag_fn
   | otherwise = pprPanic "tcDefMeth" (ppr sel_id)
   where
     sel_name = idName sel_id
-    prags    = lookupPragEnv prag_fn sel_name
     no_prag_fn = emptyPragEnv   -- No pragmas for local_meth_id;
                                 -- they are all for meth_id
 
@@ -311,31 +320,33 @@ instantiateMethod clas sel_id inst_tys
 
 
 ---------------------------
-type HsSigFun = NameEnv (LHsSigType Name)
-
-emptyHsSigs :: HsSigFun
-emptyHsSigs = emptyNameEnv
+type HsSigFun = Name -> Maybe (LHsSigType Name)
 
 mkHsSigFun :: [LSig Name] -> HsSigFun
-mkHsSigFun sigs = mkNameEnv [(n, hs_ty)
-                            | L _ (ClassOpSig False ns hs_ty) <- sigs
-                            , L _ n <- ns ]
+mkHsSigFun sigs = lookupNameEnv env
+  where
+    env = mkHsSigEnv get_classop_sig sigs
 
-lookupHsSig :: HsSigFun -> Name -> Maybe (LHsSigType Name)
-lookupHsSig = lookupNameEnv
+    get_classop_sig :: LSig Name -> Maybe ([Located Name], LHsSigType Name)
+    get_classop_sig  (L _ (ClassOpSig _ ns hs_ty)) = Just (ns, hs_ty)
+    get_classop_sig  _                             = Nothing
 
 ---------------------------
-findMethodBind  :: Name                 -- Selector name
+findMethodBind  :: Name                 -- Selector
                 -> LHsBinds Name        -- A group of bindings
-                -> Maybe (LHsBind Name, SrcSpan)
-                -- Returns the binding, and the binding
-                -- site of the method binder
-findMethodBind sel_name binds
+                -> TcPragEnv
+                -> Maybe (LHsBind Name, SrcSpan, [LSig Name])
+                -- Returns the binding, the binding
+                -- site of the method binder, and any inline or
+                -- specialisation pragmas
+findMethodBind sel_name binds prag_fn
   = foldlBag mplus Nothing (mapBag f binds)
   where
+    prags    = lookupPragEnv prag_fn sel_name
+
     f bind@(L _ (FunBind { fun_id = L bndr_loc op_name }))
       | op_name == sel_name
-             = Just (bind, bndr_loc)
+             = Just (bind, bndr_loc, prags)
     f _other = Nothing
 
 ---------------------------

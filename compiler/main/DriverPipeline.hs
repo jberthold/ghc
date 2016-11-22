@@ -419,7 +419,7 @@ linkingNeeded dflags staticLink linkables pkg_deps = do
 
         -- next, check libraries. XXX this only checks Haskell libraries,
         -- not extra_libraries or -l things from the command line.
-        let pkg_hslibs  = [ (libraryDirs c, lib)
+        let pkg_hslibs  = [ (collectLibraryPaths dflags [c], lib)
                           | Just c <- map (lookupPackage dflags) pkg_deps,
                             lib <- packageHsLibs dflags c ]
 
@@ -2085,6 +2085,11 @@ linkBinary' staticLink dflags o_files dep_packages = do
                       ++ map SysTools.Option (
                          []
 
+                      -- See Note [No PIE eating when linking]
+                      ++ (if sGccSupportsNoPie mySettings
+                             then ["-no-pie"]
+                             else [])
+
                       -- Permit the linker to auto link _symbol to _imp_symbol.
                       -- This lets us link against DLLs without needing an "import library".
                       ++ (if platformOS platform == OSMinGW32
@@ -2353,8 +2358,12 @@ getBackendDefs :: DynFlags -> IO [String]
 getBackendDefs dflags | hscTarget dflags == HscLlvm = do
     llvmVer <- figureLlvmVersion dflags
     return $ case llvmVer of
-               Just n -> [ "-D__GLASGOW_HASKELL_LLVM__="++show n ]
+               Just n -> [ "-D__GLASGOW_HASKELL_LLVM__=" ++ format n ]
                _      -> []
+  where
+    format (major, minor)
+      | minor >= 100 = error "getBackendDefs: Unsupported minor version"
+      | otherwise = show $ (100 * major + minor :: Int) -- Contract is Int
 
 getBackendDefs _ =
     return []
@@ -2400,6 +2409,11 @@ joinObjectFiles dflags o_files output_fn = do
                        SysTools.Option "-nostdlib",
                        SysTools.Option "-Wl,-r"
                      ]
+                        -- See Note [No PIE eating while linking] in SysTools
+                     ++ (if sGccSupportsNoPie mySettings
+                          then [SysTools.Option "-no-pie"]
+                          else [])
+
                      ++ (if any (cc ==) [Clang, AppleClang, AppleClang51]
                           then []
                           else [SysTools.Option "-nodefaultlibs"])

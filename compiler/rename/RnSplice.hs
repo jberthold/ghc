@@ -593,8 +593,11 @@ rnSpliceDecl (SpliceDecl (L loc splice) flg)
 rnTopSpliceDecls :: HsSplice RdrName -> RnM ([LHsDecl RdrName], FreeVars)
 -- Declaration splice at the very top level of the module
 rnTopSpliceDecls splice
-   = do  { (rn_splice, fvs) <- setStage (Splice Untyped) $
+   = do  { (rn_splice, fvs) <- checkNoErrs $
+                               setStage (Splice Untyped) $
                                rnSplice splice
+           -- As always, be sure to checkNoErrs above lest we end up with
+           -- holes making it to typechecking, hence #12584.
          ; traceRn (text "rnTopSpliceDecls: untyped declaration splice")
          ; (decls, mod_finalizers) <-
               runRnSplice UntypedDeclSplice runMetaD ppr_decls rn_splice
@@ -612,6 +615,7 @@ rnTopSpliceDecls splice
      --
      -- See Note [Delaying modFinalizers in untyped splices].
      add_mod_finalizers_now :: [ForeignRef (TH.Q ())] -> TcRn ()
+     add_mod_finalizers_now []             = return ()
      add_mod_finalizers_now mod_finalizers = do
        th_modfinalizers_var <- fmap tcg_th_modfinalizers getGblEnv
        updTcRef th_modfinalizers_var $ \fins ->

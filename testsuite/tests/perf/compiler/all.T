@@ -91,7 +91,7 @@ test('T1969',
              # 2014-06-29 303300692 (x86/Linux)
              # 2015-07-11 288699104 (x86/Linux, 64-bit machine) use +RTS -G1
              # 2016-04-06 344730660 (x86/Linux, 64-bit machine)
-           (wordsize(64), 736973272, 5)]),
+           (wordsize(64), 770088104, 5)]),
              # 17/11/2009 434845560 (amd64/Linux)
              # 08/12/2009 459776680 (amd64/Linux)
              # 17/05/2010 519377728 (amd64/Linux)
@@ -111,7 +111,7 @@ test('T1969',
              # 10/09/2014 630299456 (x86_64/Linux) post-AMP-cleanup
              # 03/06/2015 581460896 (x86_64/Linux) use +RTS -G1
              # 28/10/2015 695430728 (x86_64/Linux) emit Typeable at definition site
-             # 25/08/2016 736973272 (x86_64/Linux) unknown
+             # 12/10/2016 770088104 (x86_64/Linux) Likely creep
       only_ways(['normal']),
 
       extra_hc_opts('-dcore-lint -static'),
@@ -280,7 +280,7 @@ test('T3064',
             # 2014-01-22:     23 (x86/Linux)
             # 2014-12-22:     23 (x86/Linux) death to silent superclasses
             # 2015-07-11      28 (x86/Linux, 64-bit machine) use +RTS -G1
-           (wordsize(64), 54, 20)]),
+           (wordsize(64), 66, 20)]),
             # (amd64/Linux):            18
             # (amd64/Linux) 2012-02-07: 26
             # (amd64/Linux) 2013-02-12: 23; increased range to 10%
@@ -294,6 +294,7 @@ test('T3064',
             # (amd64/Linux) 2014-12-22: 27: death to silent superclasses
             # (amd64/Linux) 2015-01-22: 32: Varies from 30 to 34, at least here.
             # (amd64/Linux) 2015-06-03: 54: use +RTS -G1
+            # (amd64/Linux) 2016-11-03: 66: Parenthesis reading for Read
 
       compiler_stats_num_field('bytes allocated',
           [(wordsize(32), 153261024, 10),
@@ -815,9 +816,10 @@ test('T10547',
 test('T12227',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 1822822016, 5),
+          [(wordsize(64), 9257533640, 5),
           # 2016-07-11    5650186880 (Windows) before fix for #12227 
           # 2016-07-11    1822822016 (Windows) after fix for #12227
+          # 2016-11-11    9257533640 Pretty: remove a harmful $!
           ]),
      ],
      compile,

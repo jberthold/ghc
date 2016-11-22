@@ -251,6 +251,7 @@ initSysTools mbMinusB
        -- to make that possible, so for now you can't.
        gcc_prog <- getSetting "C compiler command"
        gcc_args_str <- getSetting "C compiler flags"
+       gccSupportsNoPie <- getBooleanSetting "C compiler supports -no-pie"
        cpp_prog <- getSetting "Haskell CPP command"
        cpp_args_str <- getSetting "Haskell CPP flags"
        let unreg_gcc_args = if targetUnregisterised
@@ -343,6 +344,7 @@ initSysTools mbMinusB
                     sLdSupportsBuildId       = ldSupportsBuildId,
                     sLdSupportsFilelist      = ldSupportsFilelist,
                     sLdIsGnuLd               = ldIsGnuLd,
+                    sGccSupportsNoPie        = gccSupportsNoPie,
                     sProgramName             = "ghc",
                     sProjectVersion          = cProjectVersion,
                     sPgm_L   = unlit_path,
@@ -858,7 +860,7 @@ getLinkerInfo' dflags = do
                      -- Note [Windows stack usage]
                      -- Force static linking of libGCC
                      -- Note [Windows static libGCC]
-                   , "-Xlinker", "--stack=0x800000,0x800000", "-static-libgcc" ]
+                   , "-static-libgcc" ]
                _ -> do
                  -- In practice, we use the compiler as the linker here. Pass
                  -- -Wl,--version to get linker version info.
@@ -942,24 +944,9 @@ runLink dflags args = do
   let (p,args0) = pgm_l dflags
       args1     = map Option (getOpts dflags opt_l)
       args2     = args0 ++ linkargs ++ args1 ++ args
-      args3     = argFixup args2 []
-  mb_env <- getGccEnv args3
-  runSomethingResponseFile dflags ld_filter "Linker" p args3 mb_env
+  mb_env <- getGccEnv args2
+  runSomethingResponseFile dflags ld_filter "Linker" p args2 mb_env
   where
-    testLib lib = "-l" `isPrefixOf` lib || ".a" `isSuffixOf` lib
-    {- GHC is just blindly appending linker arguments from libraries and
-       the commandline together. This results in very problematic link orders
-       which will cause incorrect linking. Since we're changing the link
-       arguments anyway, let's just make sure libraries are last.
-       This functions moves libraries on the link all the way back
-       but keeps the order amongst them the same. -}
-    argFixup []                        r = [] ++ r
-    argFixup (o@(Option       opt):xs) r = if testLib opt
-                                              then argFixup xs (r ++ [o])
-                                              else o:argFixup xs r
-    argFixup (o@(FileOption _ opt):xs) r = if testLib opt
-                                              then argFixup xs (r ++ [o])
-                                              else o:argFixup xs r
     ld_filter = case (platformOS (targetPlatform dflags)) of
                   OSSolaris2 -> sunos_ld_filter
                   _ -> id
@@ -1593,6 +1580,15 @@ linesPlatform xs =
 
 #endif
 
+{-
+Note [No PIE eating while linking]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+As of 2016 some Linux distributions (e.g. Debian) have started enabling -pie by
+default in their gcc builds. This is incompatible with -r as it implies that we
+are producing an executable. Consequently, we must manually pass -no-pie to gcc
+when joining object files or linking dynamic libraries. See #12759.
+-}
+
 linkDynLib :: DynFlags -> [String] -> [UnitId] -> IO ()
 linkDynLib dflags0 o_files dep_packages
  = do
@@ -1613,7 +1609,7 @@ linkDynLib dflags0 o_files dep_packages
 
     pkgs <- getPreloadPackagesAnd dflags dep_packages
 
-    let pkg_lib_paths = collectLibraryPaths pkgs
+    let pkg_lib_paths = collectLibraryPaths dflags pkgs
     let pkg_lib_path_opts = concatMap get_pkg_lib_path_opts pkg_lib_paths
         get_pkg_lib_path_opts l
          | ( osElfTarget (platformOS (targetPlatform dflags)) ||
@@ -1758,6 +1754,10 @@ linkDynLib dflags0 o_files dep_packages
                  ++ [ Option "-o"
                     , FileOption "" output_fn
                     ]
+                    -- See Note [No PIE eating when linking]
+                 ++ (if sGccSupportsNoPie (settings dflags)
+                     then [Option "-no-pie"]
+                     else [])
                  ++ map Option o_files
                  ++ [ Option "-shared" ]
                  ++ map Option bsymbolicFlag

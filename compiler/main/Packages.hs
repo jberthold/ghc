@@ -421,7 +421,8 @@ readPackageConfig dflags conf_file = do
   let
       top_dir = topDir dflags
       pkgroot = takeDirectory conf_file
-      pkg_configs1 = map (mungePackagePaths top_dir pkgroot) proto_pkg_configs
+      pkg_configs1 = map (mungePackageConfig top_dir pkgroot)
+                         proto_pkg_configs
       pkg_configs2 = setBatchPackageFlags dflags pkg_configs1
   --
   return (conf_file, pkg_configs2)
@@ -460,6 +461,22 @@ setBatchPackageFlags dflags pkgs = maybeDistrustAll pkgs
 
     distrust pkg = pkg{ trusted = False }
 
+mungePackageConfig :: FilePath -> FilePath
+                   -> PackageConfig -> PackageConfig
+mungePackageConfig top_dir pkgroot =
+    mungeDynLibFields
+  . mungePackagePaths top_dir pkgroot
+
+mungeDynLibFields :: PackageConfig -> PackageConfig
+mungeDynLibFields pkg =
+    pkg {
+      libraryDynDirs     = libraryDynDirs pkg
+                `orIfNull` libraryDirs pkg
+    }
+  where
+    orIfNull [] flags = flags
+    orIfNull flags _  = flags
+
 -- TODO: This code is duplicated in utils/ghc-pkg/Main.hs
 mungePackagePaths :: FilePath -> FilePath -> PackageConfig -> PackageConfig
 -- Perform path/URL variable substitution as per the Cabal ${pkgroot} spec
@@ -475,6 +492,7 @@ mungePackagePaths top_dir pkgroot pkg =
       importDirs  = munge_paths (importDirs pkg),
       includeDirs = munge_paths (includeDirs pkg),
       libraryDirs = munge_paths (libraryDirs pkg),
+      libraryDynDirs = munge_paths (libraryDynDirs pkg),
       frameworkDirs = munge_paths (frameworkDirs pkg),
       haddockInterfaces = munge_paths (haddockInterfaces pkg),
       haddockHTMLs = munge_urls (haddockHTMLs pkg)
@@ -798,10 +816,9 @@ updateVisibilityMap wiredInMap vis_map = foldl' f vis_map (Map.toList wiredInMap
 
 -- ----------------------------------------------------------------------------
 
-type IsShadowed = Bool
 data UnusablePackageReason
   = IgnoredWithFlag
-  | MissingDependencies IsShadowed [UnitId]
+  | MissingDependencies [UnitId]
 
 type UnusablePackages = Map UnitId
                             (PackageConfig, UnusablePackageReason)
@@ -810,11 +827,8 @@ pprReason :: SDoc -> UnusablePackageReason -> SDoc
 pprReason pref reason = case reason of
   IgnoredWithFlag ->
       pref <+> text "ignored due to an -ignore-package flag"
-  MissingDependencies is_shadowed deps ->
-      pref <+> text "unusable due to"
-           <+> (if is_shadowed then text "shadowed"
-                               else text "missing or recursive")
-           <+> text "dependencies:" $$
+  MissingDependencies deps ->
+      pref <+> text "unusable due to missing or recursive dependencies:" $$
         nest 2 (hsep (map ppr deps))
 
 reportUnusable :: DynFlags -> UnusablePackages -> IO ()
@@ -833,16 +847,15 @@ reportUnusable dflags pkgs = mapM_ report (Map.toList pkgs)
 -- dependency graph, repeatedly adding packages whose dependencies are
 -- satisfied until no more can be added.
 --
-findBroken :: IsShadowed
-           -> [PackageConfig]
+findBroken :: [PackageConfig]
            -> Map UnitId PackageConfig
            -> UnusablePackages
-findBroken is_shadowed pkgs pkg_map0 = go [] pkg_map0 pkgs
+findBroken pkgs pkg_map0 = go [] pkg_map0 pkgs
  where
    go avail pkg_map not_avail =
      case partitionWith (depsAvailable pkg_map) not_avail of
         ([], not_avail) ->
-            Map.fromList [ (unitId p, (p, MissingDependencies is_shadowed deps))
+            Map.fromList [ (unitId p, (p, MissingDependencies deps))
                          | (p,deps) <- not_avail ]
         (new_avail, not_avail) ->
             go (new_avail ++ avail) pkg_map' (map fst not_avail)
@@ -944,71 +957,53 @@ mkPackageState dflags dbs preload0 = do
   let other_flags = reverse (packageFlags dflags)
       ignore_flags = reverse (ignorePackageFlags dflags)
 
-  let merge (pkg_map, prev_unusable) (db_path, db) = do
+  let merge pkg_map (db_path, db) = do
+        debugTraceMsg dflags 2 $
+            text "loading package database" <+> text db_path
+        forM_ (Set.toList override_set) $ \pkg ->
             debugTraceMsg dflags 2 $
-                text "loading package database" <+> text db_path
-            forM_ (Set.toList shadow_set) $ \pkg ->
-                debugTraceMsg dflags 2 $
-                    text "package" <+> ppr pkg <+>
-                    text "shadows a previously defined package"
-            reportUnusable dflags unusable
-            -- NB: an unusable unit ID can become usable again
-            -- if it's validly specified in a later package stack.
-            -- Keep unusable up-to-date!
-            return (pkg_map', (prev_unusable `Map.difference` pkg_map')
-                                    `Map.union` unusable)
-        where -- The set of UnitIds which appear in both
-              -- db and pkgs (to be shadowed from pkgs)
-              shadow_set :: Set UnitId
-              shadow_set = foldr ins Set.empty db
-                where ins pkg s
-                        -- If the package from the upper database is
-                        -- in the lower database, and the ABIs don't
-                        -- match...
-                        | Just old_pkg <- Map.lookup (unitId pkg) pkg_map
-                        , abiHash old_pkg /= abiHash pkg
-                        -- ...add this unit ID to the set of unit IDs
-                        -- which (transitively) should be shadowed from
-                        -- the lower database.
-                        = Set.insert (unitId pkg) s
-                        | otherwise
-                        = s
-              -- Remove shadow_set from pkg_map...
-              shadowed_pkgs0 :: [PackageConfig]
-              shadowed_pkgs0 = filter (not . (`Set.member` shadow_set) . unitId)
-                                      (Map.elems pkg_map)
-              -- ...and then remove anything transitively broken
-              -- this way.
-              shadowed = findBroken True shadowed_pkgs0 Map.empty
-              shadowed_pkgs :: [PackageConfig]
-              shadowed_pkgs = filter (not . (`Map.member` shadowed) . unitId)
-                                     shadowed_pkgs0
+                text "package" <+> ppr pkg <+>
+                text "overrides a previously defined package"
+        return pkg_map'
+       where
+        db_map = mk_pkg_map db
+        mk_pkg_map = Map.fromList . map (\p -> (unitId p, p))
 
-              -- Apply ignore flags to db (TODO: could extend command line
-              -- flag format to support per-database ignore now!  More useful
-              -- than what we have now.)
-              ignored = ignorePackages ignore_flags db
-              db2 = filter (not . (`Map.member` ignored) . unitId) db
+        -- The set of UnitIds which appear in both db and pkgs.  These are the
+        -- ones that get overridden.  Compute this just to give some
+        -- helpful debug messages at -v2
+        override_set :: Set UnitId
+        override_set = Set.intersection (Map.keysSet db_map)
+                                        (Map.keysSet pkg_map)
 
-              -- Look for broken packages (either from ignore, or possibly
-              -- because the db was broken to begin with)
-              mk_pkg_map = Map.fromList . map (\p -> (unitId p, p))
-              broken = findBroken False db2 (mk_pkg_map shadowed_pkgs)
-              db3 = filter (not . (`Map.member` broken) . unitId) db2
+        -- Now merge the sets together (NB: in case of duplicate,
+        -- first argument preferred)
+        pkg_map' :: Map UnitId PackageConfig
+        pkg_map' = Map.union db_map pkg_map
 
-              unusable = shadowed `Map.union` ignored
-                                  `Map.union` broken
+  pkg_map1 <- foldM merge Map.empty dbs
 
-              -- Now merge the sets together (NB: later overrides
-              -- earlier!)
-              pkg_map' :: Map UnitId PackageConfig
-              pkg_map' = mk_pkg_map (shadowed_pkgs ++ db3)
+  -- Now that we've merged everything together, prune out unusable
+  -- packages.
+  let pkgs01 = Map.elems pkg_map1
 
-  (pkg_map1, unusable) <- foldM merge (Map.empty, Map.empty) dbs
+      -- First, apply ignore flags to db
+      ignored = ignorePackages ignore_flags pkgs01
+      pkgs02 = filter (not . (`Map.member` ignored) . unitId) pkgs01
+
+      -- Look for broken packages (either from ignore, or possibly
+      -- because the db was broken to begin with)
+      broken = findBroken pkgs02 Map.empty
+      pkgs03 = filter (not . (`Map.member` broken) . unitId) pkgs02
+
+      unusable = ignored `Map.union` broken
+
+  reportUnusable dflags unusable
+
   -- Apply trust flags (these flags apply regardless of whether
   -- or not packages are visible or not)
   pkgs1 <- foldM (applyTrustFlag dflags unusable)
-                 (Map.elems pkg_map1) (reverse (trustFlags dflags))
+                 pkgs03 (reverse (trustFlags dflags))
 
   --
   -- Calculate the initial set of packages, prior to any package flags.
@@ -1209,10 +1204,11 @@ collectIncludeDirs ps = nub (filter notNull (concatMap includeDirs ps))
 -- | Find all the library paths in these and the preload packages
 getPackageLibraryPath :: DynFlags -> [UnitId] -> IO [String]
 getPackageLibraryPath dflags pkgs =
-  collectLibraryPaths `fmap` getPreloadPackagesAnd dflags pkgs
+  collectLibraryPaths dflags `fmap` getPreloadPackagesAnd dflags pkgs
 
-collectLibraryPaths :: [PackageConfig] -> [FilePath]
-collectLibraryPaths ps = nub (filter notNull (concatMap libraryDirs ps))
+collectLibraryPaths :: DynFlags -> [PackageConfig] -> [FilePath]
+collectLibraryPaths dflags = nub . filter notNull
+                           . concatMap (libraryDirsForWay dflags)
 
 -- | Find all the link options in these and the preload packages,
 -- returning (package hs lib options, extra library options, other flags)
@@ -1263,6 +1259,12 @@ packageHsLibs dflags p = map (mkDynName . addSuffix) (hsLibraries p)
 
         expandTag t | null t = ""
                     | otherwise = '_':t
+
+-- | Either the 'libraryDirs' or 'libraryDynDirs' as appropriate for the way.
+libraryDirsForWay :: DynFlags -> PackageConfig -> [String]
+libraryDirsForWay dflags
+  | WayDyn `elem` ways dflags = libraryDynDirs
+  | otherwise                 = libraryDirs
 
 -- | Find all the C-compiler options in these and the preload packages
 getPackageExtraCcOpts :: DynFlags -> [UnitId] -> IO [String]

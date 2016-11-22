@@ -1718,9 +1718,11 @@ extendTvSubst (TCvSubst in_scope tenv cenv) tv ty
 extendTvSubstWithClone :: TCvSubst -> TyVar -> TyVar -> TCvSubst
 -- Adds a new tv -> tv mapping, /and/ extends the in-scope set
 extendTvSubstWithClone (TCvSubst in_scope tenv cenv) tv tv'
-  = TCvSubst (extendInScopeSet in_scope tv')
+  = TCvSubst (extendInScopeSetSet in_scope new_in_scope)
              (extendVarEnv tenv tv (mkTyVarTy tv'))
              cenv
+  where
+    new_in_scope = tyCoVarsOfType (tyVarKind tv') `extendVarSet` tv'
 
 extendCvSubst :: TCvSubst -> CoVar -> Coercion -> TCvSubst
 extendCvSubst (TCvSubst in_scope tenv cenv) v co
@@ -1728,9 +1730,11 @@ extendCvSubst (TCvSubst in_scope tenv cenv) v co
 
 extendCvSubstWithClone :: TCvSubst -> CoVar -> CoVar -> TCvSubst
 extendCvSubstWithClone (TCvSubst in_scope tenv cenv) cv cv'
-  = TCvSubst (extendInScopeSet in_scope cv')
+  = TCvSubst (extendInScopeSetSet in_scope new_in_scope)
              tenv
              (extendVarEnv cenv cv (mkCoVarCo cv'))
+  where
+    new_in_scope = tyCoVarsOfType (varType cv') `extendVarSet` cv'
 
 extendTvSubstAndInScope :: TCvSubst -> TyVar -> Type -> TCvSubst
 -- Also extends the in-scope set
@@ -2652,6 +2656,8 @@ ppr_fun_tail (ForAllTy (Anon ty1) ty2)
 ppr_fun_tail other_ty = [ppr_type TopPrec other_ty]
 
 pprSigmaType :: Type -> SDoc
+-- Prints a top-level type for the user; in particular
+-- top-level foralls are omitted unless you use -fprint-explicit-foralls
 pprSigmaType ty = sdocWithDynFlags $ \dflags ->
     eliminateRuntimeRep (ppr_sigma_type dflags False) ty
 
