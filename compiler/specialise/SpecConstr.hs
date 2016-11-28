@@ -421,7 +421,7 @@ This seeding is done in the binding for seed_calls in specRec.
 
 Actually in case (2), instead of using the calls from the RHS, it
 would be better to specialise in the importing module.  We'd need to
-add an INLINEABLE pragma to the function, and then it can be
+add an INLINABLE pragma to the function, and then it can be
 specialised in the importing scope, just as is done for type classes
 in Specialise.specImports. This remains to be done (#10346).
 
@@ -1539,7 +1539,7 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
               is_small_enough vars = isWorkerSmallEnough (sc_dflags env) vars
                   -- We are about to construct w/w pair in 'spec_one'.
                   -- Omit specialisation leading to high arity workers.
-                  -- See Note [Limit w/w arity]
+                  -- See Note [Limit w/w arity] in WwLib
               n_pats      = length pats
               spec_count' = n_pats + spec_count
         ; case sc_count env of

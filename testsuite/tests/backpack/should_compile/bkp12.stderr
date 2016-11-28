@@ -1,0 +1,18 @@
+[1 of 4] Processing p
+  [1 of 1] Compiling H[sig]          (.hsig -> nothing)
+[2 of 4] Processing r
+  [1 of 2] Compiling H[sig]          (.hsig -> nothing)
+  [2 of 2] Compiling M               (.hs -> nothing)
+[3 of 4] Processing h-impl
+  Instantiating h-impl
+  [1 of 1] Compiling H               (.hs -> .o)
+[4 of 4] Processing s
+  Instantiating s
+  [1 of 2] Including h-impl
+  [2 of 2] Including r[H=h-impl:H]
+    Instantiating r[H=h-impl:H]
+    [1 of 1] Including p[H=h-impl:H]
+      Instantiating p[H=h-impl:H]
+      [1 of 1] Compiling H[sig]          (.hsig -> .o)
+    [1 of 2] Compiling H[sig]          (.hsig -> .o)
+    [2 of 2] Compiling M               (.hs -> .o)

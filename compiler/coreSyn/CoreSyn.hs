@@ -980,8 +980,8 @@ data Unfolding
 
   | BootUnfolding      -- ^ We have no information about the unfolding, because
                        -- this 'Id' came from an @hi-boot@ file.
-                       -- See Note [Inlining and hs-boot files] for what
-                       -- this is used for.
+                       -- See Note [Inlining and hs-boot files] in ToIface
+                       -- for what this is used for.
 
   | OtherCon [AltCon]  -- ^ It ain't one of these constructors.
                        -- @OtherCon xs@ also indicates that something has been evaluated
@@ -1243,7 +1243,7 @@ expandUnfolding_maybe _                                                       = 
 
 hasStableCoreUnfolding_maybe :: Unfolding -> Maybe Bool
 -- Just True  <=> has stable inlining, very keen to inline (eg. INLINE pragma)
--- Just False <=> has stable inlining, open to inlining it (eg. INLINEABLE pragma)
+-- Just False <=> has stable inlining, open to inlining it (eg. INLINABLE pragma)
 -- Nothing    <=> not stable, or cannot inline it anyway
 hasStableCoreUnfolding_maybe (CoreUnfolding { uf_src = src, uf_guidance = guide })
    | isStableSource src

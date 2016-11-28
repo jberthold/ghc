@@ -1,0 +1,12 @@
+first run
+[1 of 5] Compiling A                (.hs -> .o)
+[2 of 5] Compiling B                (.hs -> .o)
+[3 of 5] Compiling C                (.hs -> .o)
+[4 of 5] Compiling D                (.hs -> .o)
+[5 of 5] Compiling E                (.hs -> .o)
+second run
+[1 of 5] Compiling A2               (.hs -> .o)
+[2 of 5] Compiling B                (.hs -> .o)
+[3 of 5] Compiling C                (.hs -> .o) [B changed]
+[4 of 5] Compiling D                (.hs -> .o) [C changed]
+[5 of 5] Compiling E                (.hs -> .o) [B changed]

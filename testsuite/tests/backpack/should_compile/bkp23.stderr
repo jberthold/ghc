@@ -1,0 +1,24 @@
+[1 of 6] Processing p
+  [1 of 3] Compiling A[sig]          (.hsig -> nothing)
+  [2 of 3] Compiling B[sig]          (.hsig -> nothing)
+  [3 of 3] Compiling M               (.hs -> nothing)
+[2 of 6] Processing q1
+  [1 of 3] Compiling A[sig]          (.hsig -> nothing)
+  [2 of 3] Compiling B[sig]          (.hsig -> nothing)
+  [3 of 3] Compiling Q               (.hs -> nothing)
+[3 of 6] Processing q2
+  [1 of 3] Compiling A[sig]          (.hsig -> nothing)
+  [2 of 3] Compiling B[sig]          (.hsig -> nothing)
+  [3 of 3] Compiling Q               (.hs -> nothing)
+[4 of 6] Processing q3
+  [1 of 3] Compiling A[sig]          (.hsig -> nothing)
+  [2 of 3] Compiling B[sig]          (.hsig -> nothing)
+  [3 of 3] Compiling Q               (.hs -> nothing)
+[5 of 6] Processing q4
+  [1 of 3] Compiling A[sig]          (.hsig -> nothing)
+  [2 of 3] Compiling B[sig]          (.hsig -> nothing)
+  [3 of 3] Compiling Q               (.hs -> nothing)
+[6 of 6] Processing q5
+  [1 of 3] Compiling A[sig]          (.hsig -> nothing)
+  [2 of 3] Compiling B[sig]          (.hsig -> nothing)
+  [3 of 3] Compiling Q               (.hs -> nothing)

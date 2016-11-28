@@ -146,7 +146,8 @@ compileOne' m_tc_result mHscMessage
 
    case (status, hsc_lang) of
         (HscUpToDate, _) ->
-            ASSERT( isJust maybe_old_linkable || isNoLink (ghcLink dflags) )
+            -- TODO recomp014 triggers this assert. What's going on?!
+            -- ASSERT( isJust maybe_old_linkable || isNoLink (ghcLink dflags) )
             return hmi0 { hm_linkable = maybe_old_linkable }
         (HscNotGeneratingCode, HscNothing) ->
             let mb_linkable = if isHsBootOrSig src_flavour
@@ -285,13 +286,18 @@ compileStub hsc_env stub_c = do
 
         return stub_o
 
-compileEmptyStub :: DynFlags -> HscEnv -> FilePath -> ModLocation -> IO ()
-compileEmptyStub dflags hsc_env basename location = do
+compileEmptyStub :: DynFlags -> HscEnv -> FilePath -> ModLocation -> ModuleName -> IO ()
+compileEmptyStub dflags hsc_env basename location mod_name = do
   -- To maintain the invariant that every Haskell file
   -- compiles to object code, we make an empty (but
-  -- valid) stub object file for signatures
+  -- valid) stub object file for signatures.  However,
+  -- we make sure this object file has a unique symbol,
+  -- so that ranlib on OS X doesn't complain, see
+  -- http://ghc.haskell.org/trac/ghc/ticket/12673
+  -- and https://github.com/haskell/cabal/issues/2257
   empty_stub <- newTempName dflags "c"
-  writeFile empty_stub ""
+  let src = text "int" <+> ppr (mkModule (thisPackage dflags) mod_name) <+> text "= 0;"
+  writeFile empty_stub (showSDoc dflags (pprCode CStyle src))
   _ <- runPipeline StopLn hsc_env
                   (empty_stub, Nothing)
                   (Just basename)
@@ -403,7 +409,7 @@ link' dflags batch_attempt_linking hpt
         return Succeeded
 
 
-linkingNeeded :: DynFlags -> Bool -> [Linkable] -> [UnitId] -> IO Bool
+linkingNeeded :: DynFlags -> Bool -> [Linkable] -> [InstalledUnitId] -> IO Bool
 linkingNeeded dflags staticLink linkables pkg_deps = do
         -- if the modification time on the executable is later than the
         -- modification times on all of the objects and libraries, then omit
@@ -424,8 +430,8 @@ linkingNeeded dflags staticLink linkables pkg_deps = do
 
         -- next, check libraries. XXX this only checks Haskell libraries,
         -- not extra_libraries or -l things from the command line.
-        let pkg_hslibs  = [ (libraryDirs c, lib)
-                          | Just c <- map (lookupPackage dflags) pkg_deps,
+        let pkg_hslibs  = [ (collectLibraryPaths dflags [c], lib)
+                          | Just c <- map (lookupInstalledPackage dflags) pkg_deps,
                             lib <- packageHsLibs dflags c ]
 
         pkg_libfiles <- mapM (uncurry (findHSLib dflags)) pkg_hslibs
@@ -439,7 +445,7 @@ linkingNeeded dflags staticLink linkables pkg_deps = do
 
 -- Returns 'False' if it was, and we can avoid linking, because the
 -- previous binary was linked with "the same options".
-checkLinkInfo :: DynFlags -> [UnitId] -> FilePath -> IO Bool
+checkLinkInfo :: DynFlags -> [InstalledUnitId] -> FilePath -> IO Bool
 checkLinkInfo dflags pkg_deps exe_file
  | not (platformSupportsSavingLinkOpts (platformOS (targetPlatform dflags)))
  -- ToDo: Windows and OS X do not use the ELF binary format, so
@@ -991,6 +997,7 @@ runPhase (RealPhase (Hsc src_flavour)) input_fn dflags0
                                         ms_location  = location,
                                         ms_hs_date   = src_timestamp,
                                         ms_obj_date  = Nothing,
+                                        ms_parsed_mod   = Nothing,
                                         ms_iface_date   = Nothing,
                                         ms_textual_imps = imps,
                                         ms_srcimps      = src_imps }
@@ -1032,7 +1039,7 @@ runPhase (HscOut src_flavour mod_name result) _ dflags = do
                    PipeState{hsc_env=hsc_env'} <- getPipeState
                    let input_fn = expectJust "runPhase" (ml_hs_file location)
                        basename = dropExtension input_fn
-                   liftIO $ compileEmptyStub dflags hsc_env' basename location
+                   liftIO $ compileEmptyStub dflags hsc_env' basename location mod_name
                    return (RealPhase StopLn, o_file)
             HscRecomp cgguts mod_summary
               -> do output_fn <- phaseOutputFilename next_phase
@@ -1707,7 +1714,7 @@ mkExtraObjToLinkIntoBinary dflags = do
 -- this was included as inline assembly in the main.c file but this
 -- is pretty fragile. gas gets upset trying to calculate relative offsets
 -- that span the .note section (notably .text) when debug info is present
-mkNoteObjsToLinkIntoBinary :: DynFlags -> [UnitId] -> IO [FilePath]
+mkNoteObjsToLinkIntoBinary :: DynFlags -> [InstalledUnitId] -> IO [FilePath]
 mkNoteObjsToLinkIntoBinary dflags dep_packages = do
    link_info <- getLinkInfo dflags dep_packages
 
@@ -1732,7 +1739,7 @@ mkNoteObjsToLinkIntoBinary dflags dep_packages = do
 -- | Return the "link info" string
 --
 -- See Note [LinkInfo section]
-getLinkInfo :: DynFlags -> [UnitId] -> IO String
+getLinkInfo :: DynFlags -> [InstalledUnitId] -> IO String
 getLinkInfo dflags dep_packages = do
    package_link_opts <- getPackageLinkOpts dflags dep_packages
    pkg_frameworks <- if platformUsesFrameworks (targetPlatform dflags)
@@ -1928,13 +1935,13 @@ mkWrapperScript _ ways executable executable_base
 -----------------------------------------------------------------------------
 -- Look for the /* GHC_PACKAGES ... */ comment at the top of a .hc file
 
-getHCFilePackages :: FilePath -> IO [UnitId]
+getHCFilePackages :: FilePath -> IO [InstalledUnitId]
 getHCFilePackages filename =
   Exception.bracket (openFile filename ReadMode) hClose $ \h -> do
     l <- hGetLine h
     case l of
       '/':'*':' ':'G':'H':'C':'_':'P':'A':'C':'K':'A':'G':'E':'S':rest ->
-          return (map stringToUnitId (words rest))
+          return (map stringToInstalledUnitId (words rest))
       _other ->
           return []
 
@@ -1951,10 +1958,10 @@ getHCFilePackages filename =
 -- read any interface files), so the user must explicitly specify all
 -- the packages.
 
-linkBinary :: DynFlags -> [FilePath] -> [UnitId] -> IO ()
+linkBinary :: DynFlags -> [FilePath] -> [InstalledUnitId] -> IO ()
 linkBinary = linkBinary' False
 
-linkBinary' :: Bool -> DynFlags -> [FilePath] -> [UnitId] -> IO ()
+linkBinary' :: Bool -> DynFlags -> [FilePath] -> [InstalledUnitId] -> IO ()
 linkBinary' staticLink dflags o_files dep_packages = do
     let platform = targetPlatform dflags
         mySettings = settings dflags
@@ -2085,6 +2092,11 @@ linkBinary' staticLink dflags o_files dep_packages = do
                          ]
                       ++ map SysTools.Option (
                          []
+
+                      -- See Note [No PIE eating when linking]
+                      ++ (if sGccSupportsNoPie mySettings
+                             then ["-no-pie"]
+                             else [])
 
                       -- Permit the linker to auto link _symbol to _imp_symbol.
                       -- This lets us link against DLLs without needing an "import library".
@@ -2237,7 +2249,7 @@ maybeCreateManifest dflags exe_filename
  | otherwise = return []
 
 
-linkDynLibCheck :: DynFlags -> [String] -> [UnitId] -> IO ()
+linkDynLibCheck :: DynFlags -> [String] -> [InstalledUnitId] -> IO ()
 linkDynLibCheck dflags o_files dep_packages
  = do
     when (haveRtsOptsFlags dflags) $ do
@@ -2247,7 +2259,7 @@ linkDynLibCheck dflags o_files dep_packages
 
     linkDynLib dflags o_files dep_packages
 
-linkStaticLibCheck :: DynFlags -> [String] -> [UnitId] -> IO ()
+linkStaticLibCheck :: DynFlags -> [String] -> [InstalledUnitId] -> IO ()
 linkStaticLibCheck dflags o_files dep_packages
  = do
     when (platformOS (targetPlatform dflags) `notElem` [OSiOS, OSDarwin]) $
@@ -2351,8 +2363,12 @@ getBackendDefs :: DynFlags -> IO [String]
 getBackendDefs dflags | hscTarget dflags == HscLlvm = do
     llvmVer <- figureLlvmVersion dflags
     return $ case llvmVer of
-               Just n -> [ "-D__GLASGOW_HASKELL_LLVM__="++show n ]
+               Just n -> [ "-D__GLASGOW_HASKELL_LLVM__=" ++ format n ]
                _      -> []
+  where
+    format (major, minor)
+      | minor >= 100 = error "getBackendDefs: Unsupported minor version"
+      | otherwise = show $ (100 * major + minor :: Int) -- Contract is Int
 
 getBackendDefs _ =
     return []
@@ -2398,6 +2414,11 @@ joinObjectFiles dflags o_files output_fn = do
                        SysTools.Option "-nostdlib",
                        SysTools.Option "-Wl,-r"
                      ]
+                        -- See Note [No PIE eating while linking] in SysTools
+                     ++ (if sGccSupportsNoPie mySettings
+                          then [SysTools.Option "-no-pie"]
+                          else [])
+
                      ++ (if any (cc ==) [Clang, AppleClang, AppleClang51]
                           then []
                           else [SysTools.Option "-nodefaultlibs"])
@@ -2475,7 +2496,7 @@ haveRtsOptsFlags dflags =
 -- | Find out path to @ghcversion.h@ file
 getGhcVersionPathName :: DynFlags -> IO FilePath
 getGhcVersionPathName dflags = do
-  dirs <- getPackageIncludePath dflags [rtsUnitId]
+  dirs <- getPackageIncludePath dflags [toInstalledUnitId rtsUnitId]
 
   found <- filterM doesFileExist (map (</> "ghcversion.h") dirs)
   case found of

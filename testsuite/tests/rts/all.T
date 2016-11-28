@@ -25,8 +25,10 @@ test('derefnull',
       # the right exit code we're OK.
       when(opsys('linux'), ignore_stderr),
       # SIGBUS on OX X (PPC and x86 only; amd64 gives SEGV)
-      when(platform('i386-apple-darwin'), exit_code(138)),
-      when(platform('powerpc-apple-darwin'), exit_code(138)),
+      # The output under OS X is too unstable to readily compare
+      when(platform('i386-apple-darwin'), [ignore_stderr, exit_code(139)]),
+      when(platform('x86_64-apple-darwin'), [ignore_stderr, exit_code(139)]),
+      when(platform('powerpc-apple-darwin'), [ignore_stderr, exit_code(139)]),
       when(opsys('mingw32'), exit_code(1)),
       # since these test are supposed to crash the
       # profile report will be empty always.
@@ -47,6 +49,10 @@ test('divbyzero',
       when(platform('powerpc64-unknown-linux'), exit_code(0)),
       when(platform('powerpc64le-unknown-linux'), exit_code(0)),
       when(opsys('mingw32'), exit_code(1)),
+      # The output under OS X is too unstable to readily compare
+      when(platform('i386-apple-darwin'), [ignore_stderr, exit_code(136)]),
+      when(platform('x86_64-apple-darwin'), [ignore_stderr, exit_code(136)]),
+      when(platform('powerpc-apple-darwin'), [ignore_stderr, exit_code(136)]),
       # since these test are supposed to crash the
       # profile report will be empty always.
       # so disable the check for profiling
@@ -193,7 +199,8 @@ test('T6006', [ omit_ways(prof_ways + ['ghci']),
                compile_and_run, ['T6006_c.c -no-hs-main'])
 
 test('T7037',
-     [ extra_clean(['T7037_main.o','T7037_main']) ],
+     [ extra_clean(['T7037_main.o','T7037_main']),
+       when(opsys("mingw32"), expect_broken(12725))],
      run_command,
      ['$MAKE -s --no-print-directory T7037'])
 
@@ -351,7 +358,7 @@ test('T10904', [ omit_ways(['ghci']), extra_run_opts('20000') ],
 test('T10728', [extra_run_opts('+RTS -maxN3 -RTS'), only_ways(['threaded2'])],
                compile_and_run, [''])
 
-test('T9405', [extra_clean(['T9405.ticky'])],
+test('T9405', [extra_clean(['T9405.ticky']), when(msys(), expect_broken(12714))],
               run_command, ['$MAKE -s --no-print-directory T9405'])
 
 test('T11788', when(ghc_dynamic(), skip),

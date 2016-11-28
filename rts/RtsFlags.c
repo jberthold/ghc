@@ -304,6 +304,9 @@ usage_text[] = {
 "  -O<size>  Sets the minimum size of the old generation (default 1M)",
 "  -M<size>  Sets the maximum heap size (default unlimited)  Egs: -M256k -M1G",
 "  -H<size>  Sets the minimum heap size (default 0M)   Egs: -H24m  -H1G",
+"  -xb<addr> Sets the address from which a suitable start for the heap memory",
+"            will be searched from. This is useful if the default address",
+"            clashes with some third-party library.",
 "  -m<n>     Minimum % of heap which must be available (default 3%)",
 "  -G<n>     Number of generations (default: 2)",
 "  -c<n>     Use in-place compaction instead of copying in the oldest generation",
@@ -1400,7 +1403,7 @@ error = rtsTrue;
                     OPTION_UNSAFE;
                     if (rts_argv[arg][3] != '\0') {
                         RtsFlags.GcFlags.heapBase
-                            = strtol(rts_argv[arg]+3, (char **) NULL, 16);
+                            = strToStgWord(rts_argv[arg]+3, (char **) NULL, 0);
                     } else {
                         errorBelch("-xb: requires argument");
                         error = rtsTrue;
@@ -1558,6 +1561,24 @@ static void normaliseRtsOpts (void)
         errorUsage();
     }
 
+    if (RtsFlags.GcFlags.maxHeapSize != 0 &&
+        RtsFlags.GcFlags.heapSizeSuggestion >
+        RtsFlags.GcFlags.maxHeapSize) {
+        RtsFlags.GcFlags.maxHeapSize = RtsFlags.GcFlags.heapSizeSuggestion;
+    }
+
+    if (RtsFlags.GcFlags.maxHeapSize != 0 &&
+        RtsFlags.GcFlags.minAllocAreaSize >
+        RtsFlags.GcFlags.maxHeapSize) {
+        errorBelch("maximum heap size (-M) is smaller than minimum alloc area size (-A)");
+        RtsFlags.GcFlags.minAllocAreaSize = RtsFlags.GcFlags.maxHeapSize;
+    }
+
+    // If we have -A16m or larger, use -n4m.
+    if (RtsFlags.GcFlags.minAllocAreaSize >= (16*1024*1024) / BLOCK_SIZE) {
+        RtsFlags.GcFlags.nurseryChunkSize = (4*1024*1024) / BLOCK_SIZE;
+    }
+
     if (RtsFlags.ParFlags.parGcLoadBalancingGen == ~0u) {
         StgWord alloc_area_bytes
             = RtsFlags.GcFlags.minAllocAreaSize * BLOCK_SIZE;
@@ -1573,13 +1594,6 @@ static void normaliseRtsOpts (void)
             RtsFlags.ParFlags.parGcLoadBalancingGen = 1;
         }
     }
-
-#ifdef THREADED_RTS
-    if (RtsFlags.ParFlags.parGcThreads > RtsFlags.ParFlags.nCapabilities) {
-        errorBelch("GC threads (-qn) must be between 1 and the value of -N");
-        errorUsage();
-    }
-#endif
 }
 
 static void errorUsage (void)
@@ -2257,6 +2271,7 @@ getProgArgv(int *argc, char **argv[])
 void
 setProgArgv(int argc, char *argv[])
 {
+    freeArgv(prog_argc,prog_argv);
     prog_argc = argc;
     prog_argv = copyArgv(argc,argv);
     setProgName(prog_argv);

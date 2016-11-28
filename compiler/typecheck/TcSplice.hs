@@ -879,7 +879,7 @@ instance TH.Quasi TcM where
 
         -- For qRecover, discard error messages if
         -- the recovery action is chosen.  Otherwise
-        -- we'll only fail higher up.  c.f. tryTcLIE_
+        -- we'll only fail higher up.
   qRecover recover main = do { (msgs, mb_res) <- tryTcErrs main
                              ; case mb_res of
                                  Just val -> do { addMessages msgs      -- There might be warnings
@@ -1279,7 +1279,8 @@ tcLookupTh name
                 Just thing -> return (AGlobal thing);
                 Nothing    ->
 
-          if nameIsLocalOrFrom (tcg_mod gbl_env) name
+          -- EZY: I don't think this choice matters, no TH in signatures!
+          if nameIsLocalOrFrom (tcg_semantic_mod gbl_env) name
           then  -- It's defined in this module
                 failWithTc (notInEnv name)
 
@@ -1817,6 +1818,7 @@ reify_tc_app tc tys
 
     r_tc | isUnboxedSumTyCon tc           = TH.UnboxedSumT (arity `div` 2)
          | isUnboxedTupleTyCon tc         = TH.UnboxedTupleT (arity `div` 2)
+         | isPromotedTupleTyCon tc        = TH.PromotedTupleT (arity `div` 2)
              -- See Note [Unboxed tuple RuntimeRep vars] in TyCon
          | isTupleTyCon tc                = if isPromotedDataCon tc
                                             then TH.PromotedTupleT arity
@@ -1827,6 +1829,7 @@ reify_tc_app tc tys
          | tc `hasKey` heqTyConKey        = TH.EqualityT
          | tc `hasKey` eqPrimTyConKey     = TH.EqualityT
          | tc `hasKey` eqReprPrimTyConKey = TH.ConT (reifyName coercibleTyCon)
+         | isPromotedDataCon tc           = TH.PromotedT (reifyName tc)
          | otherwise                      = TH.ConT (reifyName tc)
 
     -- See Note [Kind annotations on TyConApps]
@@ -1840,18 +1843,16 @@ reify_tc_app tc tys
 
     needs_kind_sig
       | GT <- compareLength tys tc_binders
-      , tcIsTyVarTy tc_res_kind
-      = True
+      = tcIsTyVarTy tc_res_kind
       | otherwise
-      = not $
-        isEmptyVarSet $
+      = not . isEmptyVarSet $
         filterVarSet isTyVar $
         tyCoVarsOfType $
         mkTyConKind (dropList tys tc_binders) tc_res_kind
 
 reifyPred :: TyCoRep.PredType -> TcM TH.Pred
 reifyPred ty
-  -- We could reify the invisible paramter as a class but it seems
+  -- We could reify the invisible parameter as a class but it seems
   -- nicer to support them properly...
   | isIPPred ty = noTH (sLit "implicit parameters") (ppr ty)
   | otherwise   = reifyType ty
@@ -1968,6 +1969,7 @@ reifyModule (TH.Module (TH.PkgName pkgString) (TH.ModName mString)) = do
       usageToModule _ (UsageFile {}) = Nothing
       usageToModule this_pkg (UsageHomeModule { usg_mod_name = mn }) = Just $ mkModule this_pkg mn
       usageToModule _ (UsagePackageModule { usg_mod = m }) = Just m
+      usageToModule _ (UsageMergedRequirement { usg_mod = m }) = Just m
 
 ------------------------------
 mkThAppTs :: TH.Type -> [TH.Type] -> TH.Type

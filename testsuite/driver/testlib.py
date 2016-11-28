@@ -677,7 +677,7 @@ def get_package_cache_timestamp():
         except:
             return 0.0
 
-do_not_copy = ('.hi', '.o', '.dyn_hi', '.dyn_o') # 12112
+do_not_copy = ('.hi', '.o', '.dyn_hi', '.dyn_o', '.out') # 12112
 
 def test_common_work (name, opts, func, args):
     try:
@@ -826,9 +826,9 @@ def do_test(name, way, func, args, files):
         src_makefile = in_srcdir('Makefile')
         dst_makefile = in_testdir('Makefile')
         if os.path.exists(src_makefile):
-            with open(src_makefile, 'r') as src:
+            with io.open(src_makefile, 'r', encoding='utf8') as src:
                 makefile = re.sub('TOP=.*', 'TOP=' + config.top, src.read(), 1)
-                with open(dst_makefile, 'w') as dst:
+                with io.open(dst_makefile, 'w', encoding='utf8') as dst:
                     dst.write(makefile)
 
     if config.use_threads:
@@ -938,6 +938,21 @@ def compile( name, way, extra_hc_opts ):
 def compile_fail( name, way, extra_hc_opts ):
     return do_compile( name, way, 1, '', [], extra_hc_opts )
 
+def backpack_typecheck( name, way, extra_hc_opts ):
+    return do_compile( name, way, 0, '', [], "-fno-code -fwrite-interface " + extra_hc_opts, backpack=1 )
+
+def backpack_typecheck_fail( name, way, extra_hc_opts ):
+    return do_compile( name, way, 1, '', [], "-fno-code -fwrite-interface " + extra_hc_opts, backpack=1 )
+
+def backpack_compile( name, way, extra_hc_opts ):
+    return do_compile( name, way, 0, '', [], extra_hc_opts, backpack=1 )
+
+def backpack_compile_fail( name, way, extra_hc_opts ):
+    return do_compile( name, way, 1, '', [], extra_hc_opts, backpack=1 )
+
+def backpack_run( name, way, extra_hc_opts ):
+    return compile_and_run__( name, way, '', [], extra_hc_opts, backpack=1 )
+
 def multimod_compile( name, way, top_mod, extra_hc_opts ):
     return do_compile( name, way, 0, top_mod, [], extra_hc_opts )
 
@@ -950,7 +965,7 @@ def multi_compile( name, way, top_mod, extra_mods, extra_hc_opts ):
 def multi_compile_fail( name, way, top_mod, extra_mods, extra_hc_opts ):
     return do_compile( name, way, 1, top_mod, extra_mods, extra_hc_opts)
 
-def do_compile(name, way, should_fail, top_mod, extra_mods, extra_hc_opts):
+def do_compile(name, way, should_fail, top_mod, extra_mods, extra_hc_opts, **kwargs):
     # print 'Compile only, extra args = ', extra_hc_opts
 
     result = extras_build( way, extra_mods, extra_hc_opts )
@@ -958,7 +973,7 @@ def do_compile(name, way, should_fail, top_mod, extra_mods, extra_hc_opts):
        return result
     extra_hc_opts = result['hc_opts']
 
-    result = simple_build(name, way, extra_hc_opts, should_fail, top_mod, 0, 1)
+    result = simple_build(name, way, extra_hc_opts, should_fail, top_mod, 0, 1, **kwargs)
 
     if badResult(result):
         return result
@@ -1005,7 +1020,7 @@ def compile_cmp_asm( name, way, extra_hc_opts ):
 # -----------------------------------------------------------------------------
 # Compile-and-run tests
 
-def compile_and_run__( name, way, top_mod, extra_mods, extra_hc_opts ):
+def compile_and_run__( name, way, top_mod, extra_mods, extra_hc_opts, backpack=0 ):
     # print 'Compile and run, extra args = ', extra_hc_opts
 
     result = extras_build( way, extra_mods, extra_hc_opts )
@@ -1016,7 +1031,7 @@ def compile_and_run__( name, way, top_mod, extra_mods, extra_hc_opts ):
     if way.startswith('ghci'): # interpreted...
         return interpreter_run(name, way, extra_hc_opts, top_mod)
     else: # compiled...
-        result = simple_build(name, way, extra_hc_opts, 0, top_mod, 1, 1)
+        result = simple_build(name, way, extra_hc_opts, 0, top_mod, 1, 1, backpack = backpack)
         if badResult(result):
             return result
 
@@ -1102,7 +1117,7 @@ def extras_build( way, extra_mods, extra_hc_opts ):
 
     return {'passFail' : 'pass', 'hc_opts' : extra_hc_opts}
 
-def simple_build(name, way, extra_hc_opts, should_fail, top_mod, link, addsuf):
+def simple_build(name, way, extra_hc_opts, should_fail, top_mod, link, addsuf, backpack = False):
     opts = getTestOpts()
 
     # Redirect stdout and stderr to the same file
@@ -1112,7 +1127,10 @@ def simple_build(name, way, extra_hc_opts, should_fail, top_mod, link, addsuf):
     if top_mod != '':
         srcname = top_mod
     elif addsuf:
-        srcname = add_hs_lhs_suffix(name)
+        if backpack:
+            srcname = add_suffix(name, 'bkp')
+        else:
+            srcname = add_hs_lhs_suffix(name)
     else:
         srcname = name
 
@@ -1120,6 +1138,12 @@ def simple_build(name, way, extra_hc_opts, should_fail, top_mod, link, addsuf):
         to_do = '--make '
         if link:
             to_do = to_do + '-o ' + name
+    elif backpack:
+        if link:
+            to_do = '-o ' + name + ' '
+        else:
+            to_do = ''
+        to_do = to_do + '--backpack '
     elif link:
         to_do = '-o ' + name
     else:
@@ -1128,6 +1152,8 @@ def simple_build(name, way, extra_hc_opts, should_fail, top_mod, link, addsuf):
     stats_file = name + '.comp.stats'
     if opts.compiler_stats_range_fields:
         extra_hc_opts += ' +RTS -V0 -t' + stats_file + ' --machine-readable -RTS'
+    if backpack:
+        extra_hc_opts += ' -outputdir ' + name + '.out'
 
     # Required by GHC 7.3+, harmless for earlier versions:
     if (getTestOpts().c_src or
@@ -1263,20 +1289,20 @@ def interpreter_run(name, way, extra_hc_opts, top_mod):
 
     delimiter = '===== program output begins here\n'
 
-    with open(script, 'w') as f:
+    with io.open(script, 'w', encoding='utf8') as f:
         # set the prog name and command-line args to match the compiled
         # environment.
-        f.write(':set prog ' + name + '\n')
-        f.write(':set args ' + opts.extra_run_opts + '\n')
+        f.write(u':set prog ' + name + u'\n')
+        f.write(u':set args ' + opts.extra_run_opts + u'\n')
         # Add marker lines to the stdout and stderr output files, so we
         # can separate GHCi's output from the program's.
-        f.write(':! echo ' + delimiter)
-        f.write(':! echo 1>&2 ' + delimiter)
+        f.write(u':! echo ' + delimiter)
+        f.write(u':! echo 1>&2 ' + delimiter)
         # Set stdout to be line-buffered to match the compiled environment.
-        f.write('System.IO.hSetBuffering System.IO.stdout System.IO.LineBuffering\n')
+        f.write(u'System.IO.hSetBuffering System.IO.stdout System.IO.LineBuffering\n')
         # wrapping in GHC.TopHandler.runIO ensures we get the same output
         # in the event of an exception as for the compiled program.
-        f.write('GHC.TopHandler.runIOFastExit Main.main Prelude.>> Prelude.return ()\n')
+        f.write(u'GHC.TopHandler.runIOFastExit Main.main Prelude.>> Prelude.return ()\n')
 
     stdin = in_testdir(opts.stdin if opts.stdin else add_suffix(name, 'stdin'))
     if os.path.exists(stdin):
@@ -1625,7 +1651,7 @@ def normalise_prof (str):
     # sometimes under MAIN.
     str = re.sub('[ \t]*main[ \t]+Main.*\n','',str)
 
-    # We have somthing like this:
+    # We have something like this:
     #
     # MAIN         MAIN  <built-in>                 53  0  0.0   0.2  0.0  100.0
     #  CAF         Main  <entire-module>           105  0  0.0   0.3  0.0   62.5
@@ -1824,8 +1850,25 @@ def find_expected_file(name, suff):
 
     return basename
 
-def cleanup():
-    shutil.rmtree(getTestOpts().testdir, ignore_errors=True)
+if config.msys:
+    import stat
+    def cleanup():
+        def on_error(function, path, excinfo):
+            # At least one test (T11489) removes the write bit from a file it
+            # produces. Windows refuses to delete read-only files with a
+            # permission error. Try setting the write bit and try again.
+            if excinfo[1].errno == 13:
+                os.chmod(path, stat.S_IWRITE)
+                os.unlink(path)
+
+        testdir = getTestOpts().testdir
+        shutil.rmtree(testdir, ignore_errors=False, onerror=on_error)
+else:
+    def cleanup():
+        testdir = getTestOpts().testdir
+        if os.path.exists(testdir):
+            shutil.rmtree(testdir, ignore_errors=False)
+
 
 # -----------------------------------------------------------------------------
 # Return a list of all the files ending in '.T' below directories roots.

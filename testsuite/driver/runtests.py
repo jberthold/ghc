@@ -139,9 +139,6 @@ if config.use_threads == 1:
         print("Warning: Ignoring request to use threads as python version is 2.7.2")
         print("See http://bugs.python.org/issue13817 for details.")
         config.use_threads = 0
-    if windows: # See Trac ticket #10510.
-        print("Warning: Ignoring request to use threads as running on Windows")
-        config.use_threads = 0
 
 config.cygwin = False
 config.msys = False
@@ -163,17 +160,18 @@ if windows:
 if windows:
     import ctypes
     # Windows and mingw* Python provide windll, msys2 python provides cdll.
-    if hasattr(ctypes, 'windll'):
-        mydll = ctypes.windll
+    if hasattr(ctypes, 'WinDLL'):
+        mydll = ctypes.WinDLL
     else:
-        mydll = ctypes.cdll
+        mydll = ctypes.CDLL
 
     # This actually leaves the terminal in codepage 65001 (UTF8) even
     # after python terminates. We ought really remember the old codepage
     # and set it back.
-    if mydll.kernel32.SetConsoleCP(65001) == 0:
+    kernel32 = mydll('kernel32.dll')
+    if kernel32.SetConsoleCP(65001) == 0:
         raise Exception("Failure calling SetConsoleCP(65001)")
-    if mydll.kernel32.SetConsoleOutputCP(65001) == 0:
+    if kernel32.SetConsoleOutputCP(65001) == 0:
         raise Exception("Failure calling SetConsoleOutputCP(65001)")
 else:
     # Try and find a utf8 locale to use
@@ -208,7 +206,7 @@ from testlib import *
 # On Windows we need to set $PATH to include the paths to all the DLLs
 # in order for the dynamic library tests to work.
 if windows or darwin:
-    pkginfo = getStdout([config.ghc_pkg, 'dump'])
+    pkginfo = str(getStdout([config.ghc_pkg, 'dump']))
     topdir = config.libdir
     if windows:
         mingw = os.path.join(topdir, '../mingw/bin')
@@ -303,7 +301,12 @@ for file in t_files:
     if_verbose(2, '====> Scanning %s' % file)
     newTestDir(tempdir, os.path.dirname(file))
     try:
-        exec(open(file).read())
+        if PYTHON3:
+            src = io.open(file, encoding='utf8').read()
+        else:
+            src = open(file).read()
+
+        exec(src)
     except Exception as e:
         traceback.print_exc()
         framework_fail(file, '', str(e))

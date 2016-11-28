@@ -266,6 +266,7 @@ initCapability (Capability *cap, uint32_t i)
     cap->returning_tasks_tl = NULL;
     cap->n_returning_tasks  = 0;
     cap->inbox              = (Message*)END_TSO_QUEUE;
+    cap->putMVars           = NULL;
     cap->sparks             = allocSparkPool();
     cap->spark_stats.created    = 0;
     cap->spark_stats.dud        = 0;
@@ -972,8 +973,10 @@ prodCapability (Capability *cap, Task *task)
 rtsBool
 tryGrabCapability (Capability *cap, Task *task)
 {
+    int r;
     if (cap->running_task != NULL) return rtsFalse;
-    ACQUIRE_LOCK(&cap->lock);
+    r = TRY_ACQUIRE_LOCK(&cap->lock);
+    if (r != 0) return rtsFalse;
     if (cap->running_task != NULL) {
         RELEASE_LOCK(&cap->lock);
         return rtsFalse;

@@ -803,10 +803,10 @@ exprIsTrivial (Type _)         = True
 exprIsTrivial (Coercion _)     = True
 exprIsTrivial (Lit lit)        = litIsTrivial lit
 exprIsTrivial (App e arg)      = not (isRuntimeArg arg) && exprIsTrivial e
+exprIsTrivial (Lam b e)        = not (isRuntimeVar b) && exprIsTrivial e
 exprIsTrivial (Tick t e)       = not (tickishIsCode t) && exprIsTrivial e
                                  -- See Note [Tick trivial]
 exprIsTrivial (Cast e _)       = exprIsTrivial e
-exprIsTrivial (Lam b body)     = not (isRuntimeVar b) && exprIsTrivial body
 exprIsTrivial (Case e _ _ [])  = exprIsTrivial e  -- See Note [Empty case is trivial]
 exprIsTrivial _                = False
 
@@ -2091,7 +2091,7 @@ rhsIsStatic :: Platform
 --
 -- (ii) We treat partial applications as redexes, because in fact we
 --      make a thunk for them that runs and builds a PAP
---      at run-time.  The only appliations that are treated as
+--      at run-time.  The only applications that are treated as
 --      static are *saturated* applications of constructors.
 
 -- We used to try to be clever with nested structures like this:

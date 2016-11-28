@@ -28,7 +28,7 @@ setTestOpts(no_lint)
 #    really changed, then you know there's an issue.
 
 test('T1969',
-     [expect_broken(12437),
+     [# expect_broken(12437),
       compiler_stats_num_field('peak_megabytes_allocated', # Note [residency]
           [(wordsize(32), 30, 15),
              # 2010-05-17 14 (x86/Windows)
@@ -65,7 +65,7 @@ test('T1969',
              # 2014-06-29 5949188 (x86/Linux)
              # 2015-07-11 6241108 (x86/Linux, 64bit machine) use +RTS -G1
              # 2016-04-06 9093608 (x86/Linux, 64bit machine)
-           (wordsize(64), 15017528, 15)]),
+           (wordsize(64), 17285216, 15)]),
              # 2014-09-10 10463640, 10  # post-AMP-update (somewhat stabelish)
                # looks like the peak is around ~10M, but we're
                # unlikely to GC exactly on the peak.
@@ -76,6 +76,7 @@ test('T1969',
              # 2014-11-03 10584344,    # ghcspeed reports higher numbers consistently
              # 2015-07-11 11670120 (amd64/Linux)
              # 2015-10-28 15017528 (amd64/Linux) emit typeable at definition site
+             # 2016-10-12 17285216 (amd64/Linux) it's not entirely clear why
       compiler_stats_num_field('bytes allocated',
           [(platform('i386-unknown-mingw32'), 301784492, 5),
                                  #            215582916 (x86/Windows)
@@ -232,13 +233,14 @@ test('T4801',
            # 2014-09-03:  185242032 (Windows laptop)
            # 2014-12-01:  203962148 (Windows laptop)
            # 2016-04-06:  239556572 (x86/Linux)
-           (wordsize(64), 434278248, 10)]),
+           (wordsize(64), 388898280, 10)]),
             # prev:       360243576 (amd64/Linux)
             # 19/10/2012: 447190832 (amd64/Linux) (-fPIC turned on)
             # 19/10/2012: 392409984 (amd64/Linux) (-fPIC turned off)
             # 2014-04-08: 362939272 (amd64/Linux) cumulation of various smaller improvements over recent commits
             # 2014-10-08: 382056344 (amd64/Linux) stricter foldr2 488e95b
             # 2015-10-28: 434278248 (amd64/Linux) emit Typeable at definition site
+            # 2016-10-19: 388898280 (amd64/Linux) Refactor traceRn interface (#12617)
 
 ###################################
 # deactivated for now, as this metric became too volatile recently
@@ -281,7 +283,7 @@ test('T3064',
             # 2014-01-22:     23 (x86/Linux)
             # 2014-12-22:     23 (x86/Linux) death to silent superclasses
             # 2015-07-11      28 (x86/Linux, 64-bit machine) use +RTS -G1
-           (wordsize(64), 54, 20)]),
+           (wordsize(64), 66, 20)]),
             # (amd64/Linux):            18
             # (amd64/Linux) 2012-02-07: 26
             # (amd64/Linux) 2013-02-12: 23; increased range to 10%
@@ -295,6 +297,7 @@ test('T3064',
             # (amd64/Linux) 2014-12-22: 27: death to silent superclasses
             # (amd64/Linux) 2015-01-22: 32: Varies from 30 to 34, at least here.
             # (amd64/Linux) 2015-06-03: 54: use +RTS -G1
+            # (amd64/Linux) 2016-10-25: 66: Presumably creep
 
       compiler_stats_num_field('bytes allocated',
           [(wordsize(32), 153261024, 10),
@@ -379,7 +382,7 @@ test('T5030',
            # 2015-07-11:  201882912 reason unknown
            # 2016-04-06:  345668088 likely TypeInType
 
-           (wordsize(64), 653710960, 10)]),
+           (wordsize(64), 794426536, 10)]),
              # Previously 530000000 (+/- 10%)
              # 17/1/13:   602993184  (x86_64/Linux)
              #            (new demand analyser)
@@ -397,6 +400,9 @@ test('T5030',
              #                          of family-applications leads to less sharing, I think
              # 2015-03-17 403932600  tweak to solver algorithm
              # 2015-12-11 653710960  TypeInType (see #11196)
+             # 2016-10-17 794426536  20% big increase following
+             #                       31621b12 * A collection of type-inference refactorings.
+             #                       See ticket for more info
 
        only_ways(['normal'])
       ],
@@ -410,7 +416,7 @@ test('T5631',
         # 2014-04-04:     346389856 (x86 Windows, 64 bit machine)
         # 2014-12-01:     390199244 (Windows laptop)
         # 2016-04-06:     570137436 (amd64/Linux) many reasons
-           (wordsize(64), 1124068664, 5)]),
+           (wordsize(64), 1077429456, 5)]),
         # expected value: 774595008 (amd64/Linux):
         # expected value: 735486328 (amd64/Linux) 2012/12/12:
         # expected value: 690742040 (amd64/Linux) Call Arity improvements
@@ -420,6 +426,9 @@ test('T5631',
         # 2015-12-11:     1128828928 (amd64/Linux) TypeInType (see #11196)
         # 2015-12-21:     1198327544 (Mac) TypeApplications (will fix with #11196)
         # 2015-03-18:     1124068664 (Mac) optimize Unify & zonking
+        # 2016-10-19:     1024926024 (amd64/Linux) Refactor traceRn interface (#12617)
+        # 2016-11-10:     1077429456 (amd64/Linux) Stop -dno-debug-output supressing -ddump-tc-trace
+
        only_ways(['normal'])
       ],
      compile,
@@ -585,7 +594,7 @@ test('T5837',
              # 2014-12-08: 115905208  Constraint solver perf improvements (esp kick-out)
              # 2016-04-06: 24199320  (x86/Linux, 64-bit machine) TypeInType
 
-           (wordsize(64), 48507272, 10)])
+           (wordsize(64), 52597024, 10)])
              # sample: 3926235424 (amd64/Linux, 15/2/2012)
              # 2012-10-02 81879216
              # 2012-09-20 87254264 amd64/Linux
@@ -604,8 +613,13 @@ test('T5837',
              # 2015-12-11 43877520  amd64/Linux, TypeInType (see #11196)
              # 2016-03-18 48507272  Mac, accept small regression in exchange
              #                           for other optimisations
+             # 2016-09-15 42445672  Linux; fixing #12422
+             # 2016-09-25 41832056  amd64/Linux, Rework handling of names (D2469)
+             # 2016-10-25 52597024  amd64/Linux, the test now passes (hooray), and so
+             #                          allocates more because it goes right down the
+             #                          compilation pipeline
       ],
-      compile_fail,['-freduction-depth=50'])
+      compile, ['-freduction-depth=50'])
 
 test('T6048',
      [ only_ways(['optasm']),
@@ -614,11 +628,11 @@ test('T6048',
             # prev:       38000000 (x86/Linux)
             # 2012-10-08: 48887164 (x86/Linux)
             # 2014-04-04: 62618072 (x86 Windows, 64 bit machine)
-            # 2014-09-03: 56315812 (x86 Windows, w/w for INLINEABLE)
+            # 2014-09-03: 56315812 (x86 Windows, w/w for INLINABLE)
             # 2014-12-01: 49987836 (x86 Windows)
             # 2016-04-06: 55701280 (x86/Linux, 64-bit machine)
 
-           (wordsize(64),  108225624, 12)])
+           (wordsize(64),  94327392, 10)])
              # 18/09/2012  97247032 amd64/Linux
              # 16/01/2014 108578664 amd64/Linux (unknown, likely foldl-via-foldr)
              # 18/01/2014  95960720 amd64/Linux Call Arity improvements
@@ -629,6 +643,7 @@ test('T6048',
              # 14/09/2014  88186056 amd64/Linux BPP part1 change (more NoImplicitPreludes in base)
              # 08/01/2014  95946688 amd64/Linux Mostly 4c834fd. Occasional spikes to 103822120!
              # 11/03/2016 108225624 amd64/Linux unknown reason sadly; likely gradual creep.
+             # 25/11/2016  94327392 amd64/Linux Back down again hooray; still not sure why
       ],
       compile,[''])
 
@@ -698,12 +713,13 @@ test('T9675',
 test('T9872a',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 3352882080, 5),
+          [(wordsize(64), 3134866040    , 5),
           # 2014-12-10    5521332656    Initally created
           # 2014-12-16    5848657456    Flattener parameterized over roles
           # 2014-12-18    2680733672    Reduce type families even more eagerly
           # 2015-12-11    3581500440    TypeInType (see #11196)
           # 2016-04-07    3352882080    CSE improvements
+          # 2016-10-19    3134866040    Refactor traceRn interface (#12617)
            (wordsize(32), 1740903516, 5)
           # was           1325592896
           # 2016-04-06    1740903516    x86/Linux
@@ -715,13 +731,14 @@ test('T9872a',
 test('T9872b',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 4600233488, 5),
+          [(wordsize(64), 4069522928, 5),
           # 2014-12-10    6483306280    Initally created
           # 2014-12-16    6892251912    Flattener parameterized over roles
           # 2014-12-18    3480212048    Reduce type families even more eagerly
           # 2015-12-11    5199926080    TypeInType (see #11196)
           # 2016-02-08    4918990352    Improved a bit by tyConRolesRepresentational
           # 2016-04-06:   4600233488    Refactoring of CSE #11781
+          # 2016-09-15:   4069522928    Fix #12422
            (wordsize(32), 2422750696, 5)
           # was           1700000000
           # 2016-04-06    2422750696    x86/Linux
@@ -732,13 +749,14 @@ test('T9872b',
 test('T9872c',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 4306667256, 5),
+          [(wordsize(64), 3702580928, 5),
           # 2014-12-10    5495850096    Initally created
           # 2014-12-16    5842024784    Flattener parameterized over roles
           # 2014-12-18    2963554096    Reduce type families even more eagerly
           # 2015-12-11    4723613784    TypeInType (see #11196)
           # 2016-02-08    4454071184    Improved a bit by tyConRolesRepresentational
           # 2016-04-06:   4306667256    Refactoring of CSE #11781
+          # 2016-09-15:   3702580928    Fixing #12422
            (wordsize(32), 2257242896, 5)
           # was           1500000000
           # 2016-04-06    2257242896
@@ -834,7 +852,10 @@ test('T10370',
 
 test('T10547',
      [ compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 39165544, 20),
+          [(wordsize(64), 31041520, 20),
+          # initial:    39165544
+          # 25/11/2106: 31041520 Linux   Around the time of refactoring the constraint solver;
+          #                              but I think that only pushed it over the edge
           ]),
      ],
      compile_fail,

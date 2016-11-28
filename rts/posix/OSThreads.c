@@ -14,6 +14,11 @@
  * because of some specific types, like u_char, u_int, etc. */
 #define __BSD_VISIBLE   1
 #endif
+#if defined(darwin_HOST_OS)
+/* Inclusion of system headers usually requires _DARWIN_C_SOURCE on Mac OS X
+ * because of some specific types like u_char, u_int, etc. */
+#define _DARWIN_C_SOURCE 1
+#endif
 
 #include "Rts.h"
 
@@ -231,6 +236,8 @@ forkOS_createThread ( HsStablePtr entry )
     return result;
 }
 
+void freeThreadingResources (void) { /* nothing */ }
+
 uint32_t
 getNumberOfProcessors (void)
 {
@@ -334,6 +341,7 @@ void releaseThreadNode (void)
         stg_exit(1);
     }
 }
+
 #else
 void setThreadNode (uint32_t node STG_UNUSED) { /* nothing */ }
 void releaseThreadNode (void) { /* nothing */ }
@@ -352,6 +360,8 @@ forkOS_createThread ( HsStablePtr entry STG_UNUSED )
 {
     return -1;
 }
+
+void freeThreadingResources (void) { /* nothing */ }
 
 uint32_t getNumberOfProcessors (void)
 {

@@ -1,0 +1,18 @@
+[1 of 3] Processing sig
+  [1 of 2] Compiling A[sig]          (.hsig -> nothing)
+  [2 of 2] Compiling M               (.hs -> nothing)
+[2 of 3] Processing mod
+  Instantiating mod
+  [1 of 1] Compiling A               (.hs -> .o)
+[3 of 3] Processing join
+  Instantiating join
+  [1 of 1] Including sig[A=mod:A]
+    Instantiating sig[A=mod:A]
+    [1 of 2] Compiling A[sig]          (.hsig -> .o)
+
+bkpfail11.out/sig/sig-HyoWTHt34SDIRGEX0vZ8iN/../A.hi:1:1: error:
+    No instance for (GHC.Show.Show mod:A.X)
+      arising when attempting to show that
+      instance [safe] GHC.Show.Show mod:A.T
+        -- Defined at bkpfail11.bkp:5:18
+      is provided by ‘mod:A’

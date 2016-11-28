@@ -476,6 +476,9 @@ hs_exit_(rtsBool wait_foreign)
 
     // Free the various argvs
     freeRtsArgs();
+
+    // Free threading resources
+    freeThreadingResources();
 }
 
 // Flush stdout and stderr.  We do this during shutdown so that it
@@ -497,6 +500,14 @@ hs_exit(void)
     // be safe; this might be a DLL
 }
 
+void
+hs_exit_nowait(void)
+{
+    hs_exit_(rtsFalse);
+    // do not wait for outstanding foreign calls to return; if they return in
+    // the future, they will block indefinitely.
+}
+
 // Compatibility interfaces
 void
 shutdownHaskell(void)
@@ -508,14 +519,9 @@ void
 shutdownHaskellAndExit(int n, int fastExit)
 {
     if (!fastExit) {
-        // even if hs_init_count > 1, we still want to shut down the RTS
-        // and exit immediately (see #5402)
-        hs_init_count = 1;
-
 #ifdef PARALLEL_RTS
         err = n; // set exit value for parallel shutdown routine
 #endif
-
         // we're about to exit(), no need to wait for foreign calls to return.
         hs_exit_(rtsFalse);
     }

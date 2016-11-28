@@ -1,0 +1,13 @@
+[1 of 3] Processing p
+  [1 of 2] Compiling A[sig]          (.hsig -> nothing)
+  [2 of 2] Compiling P               (.hs -> nothing)
+[2 of 3] Processing r
+  Instantiating r
+  [1 of 1] Compiling A               (.hs -> .o)
+[3 of 3] Processing q
+  Instantiating q
+  [1 of 1] Including p[A=r:A]
+    Instantiating p[A=r:A]
+    [1 of 2] Compiling A[sig]          (.hsig -> .o)
+    [2 of 2] Compiling P               (.hs -> .o)
+  [1 of 1] Compiling M               (.hs -> .o)

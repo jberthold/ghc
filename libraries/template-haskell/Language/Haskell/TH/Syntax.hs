@@ -112,9 +112,8 @@ class Monad m => Quasi m where
 -----------------------------------------------------
 
 instance Quasi IO where
-  qNewName s = do { n <- readIORef counter
-                 ; writeIORef counter (n+1)
-                 ; return (mkNameU s n) }
+  qNewName s = do { n <- atomicModifyIORef' counter (\x -> (x + 1, x))
+                  ; pure (mkNameU s n) }
 
   qReport True  msg = hPutStrLn stderr ("Template Haskell error: " ++ msg)
   qReport False msg = hPutStrLn stderr ("Template Haskell error: " ++ msg)
@@ -716,15 +715,12 @@ dataToQa mkCon mkLit appCon antiQ t =
                                           (NameG DataName
                                                 (mkPkgName "ghc-prim")
                                                 (mkModName "GHC.Tuple"))
-                      -- It is possible for a Data instance to be defined such
-                      -- that toConstr uses a Constr defined using a function,
-                      -- not a data constructor. In such a case, we must take
-                      -- care to build the Name using mkNameG_v (for values),
-                      -- not mkNameG_d (for data constructors).
-                      -- See Trac #10796.
+
+                      -- Tricky case: see Note [Data for non-algebraic types]
                       fun@(x:_)   | startsVarSym x || startsVarId x
                                   -> mkNameG_v tyconPkg tyconMod fun
                       con         -> mkNameG_d tyconPkg tyconMod con
+
                   where
                     tycon :: TyCon
                     tycon = (typeRepTyCon . typeOf) t
@@ -746,6 +742,34 @@ dataToQa mkCon mkLit appCon antiQ t =
           constr = toConstr t
 
       Just y -> y
+
+
+{- Note [Data for non-algebraic types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Class Data was originally intended for algebraic data types.  But
+it is possible to use it for abstract types too.  For example, in
+package `text` we find
+
+  instance Data Text where
+    ...
+    toConstr _ = packConstr
+
+  packConstr :: Constr
+  packConstr = mkConstr textDataType "pack" [] Prefix
+
+Here `packConstr` isn't a real data constructor, it's an ordiary
+function.  Two complications
+
+* In such a case, we must take care to build the Name using
+  mkNameG_v (for values), not mkNameG_d (for data constructors).
+  See Trac #10796.
+
+* The pseudo-constructor is named only by its string, here "pack".
+  But 'dataToQa' needs the TyCon of its defining module, and has
+  to assume it's defined in the same module as the TyCon itself.
+  But nothing enforces that; Trac #12596 shows what goes wrong if
+  "pack" is defined in a different module than the data type "Text".
+  -}
 
 -- | 'dataToExpQ' converts a value to a 'Q Exp' representation of the
 -- same value, in the SYB style. It is generalized to take a function
@@ -1525,13 +1549,15 @@ data Dec
   | ValD Pat Body [Dec]           -- ^ @{ p = b where decs }@
   | DataD Cxt Name [TyVarBndr]
           (Maybe Kind)            -- Kind signature (allowed only for GADTs)
-          [Con] Cxt
+          [Con] [DerivClause]
                                   -- ^ @{ data Cxt x => T x = A x | B (T x)
-                                  --       deriving (Z,W)}@
+                                  --       deriving (Z,W)
+                                  --       deriving stock Eq }@
   | NewtypeD Cxt Name [TyVarBndr]
              (Maybe Kind)         -- Kind signature
-             Con Cxt              -- ^ @{ newtype Cxt x => T x = A (B x)
-                                  --       deriving (Z,W Q)}@
+             Con [DerivClause]    -- ^ @{ newtype Cxt x => T x = A (B x)
+                                  --       deriving (Z,W Q)
+                                  --       deriving stock Eq }@
   | TySynD Name [TyVarBndr] Type  -- ^ @{ type T x = (x,x) }@
   | ClassD Cxt Name [TyVarBndr]
          [FunDep] [Dec]           -- ^ @{ class Eq a => Ord a where ds }@
@@ -1554,14 +1580,18 @@ data Dec
 
   | DataInstD Cxt Name [Type]
              (Maybe Kind)         -- Kind signature
-             [Con] Cxt            -- ^ @{ data instance Cxt x => T [x]
-                                  --       = A x | B (T x) deriving (Z,W)}@
+             [Con] [DerivClause]  -- ^ @{ data instance Cxt x => T [x]
+                                  --       = A x | B (T x)
+                                  --       deriving (Z,W)
+                                  --       deriving stock Eq }@
 
   | NewtypeInstD Cxt Name [Type]
-                 (Maybe Kind)     -- Kind signature
-                 Con Cxt          -- ^ @{ newtype instance Cxt x => T [x]
-                                  --        = A (B x) deriving (Z,W)}@
-  | TySynInstD Name TySynEqn      -- ^ @{ type instance ... }@
+                 (Maybe Kind)      -- Kind signature
+                 Con [DerivClause] -- ^ @{ newtype instance Cxt x => T [x]
+                                   --        = A (B x)
+                                   --        deriving (Z,W)
+                                   --        deriving stock Eq }@
+  | TySynInstD Name TySynEqn       -- ^ @{ type instance ... }@
 
   -- | open type families (may also appear in [Dec] of 'ClassD' and 'InstanceD')
   | OpenTypeFamilyD TypeFamilyHead
@@ -1571,7 +1601,8 @@ data Dec
        -- ^ @{ type family F a b = (r :: *) | r -> a where ... }@
 
   | RoleAnnotD Name [Role]     -- ^ @{ type role T nominal representational }@
-  | StandaloneDerivD Cxt Type  -- ^ @{ deriving instance Ord a => Ord (Foo a) }@
+  | StandaloneDerivD (Maybe DerivStrategy) Cxt Type
+       -- ^ @{ deriving stock instance Ord a => Ord (Foo a) }@
   | DefaultSigD Name Type      -- ^ @{ default size :: Data a => a -> Int }@
 
   -- | Pattern Synonyms
@@ -1594,6 +1625,17 @@ data Overlap = Overlappable   -- ^ May be overlapped by more specific instances
              | Incoherent     -- ^ Both 'Overlappable' and 'Overlappable', and
                               -- pick an arbitrary one if multiple choices are
                               -- available.
+  deriving( Show, Eq, Ord, Data, Generic )
+
+-- | A single @deriving@ clause at the end of a datatype.
+data DerivClause = DerivClause (Maybe DerivStrategy) Cxt
+    -- ^ @{ deriving stock (Eq, Ord) }@
+  deriving( Show, Eq, Ord, Data, Generic )
+
+-- | What the user explicitly requests when deriving an instance.
+data DerivStrategy = Stock    -- ^ A \"standard\" derived instance
+                   | Anyclass -- ^ @-XDeriveAnyClass@
+                   | Newtype  -- ^ @-XGeneralizedNewtypeDeriving@
   deriving( Show, Eq, Ord, Data, Generic )
 
 -- | A Pattern synonym's type. Note that a pattern synonym's *fully*

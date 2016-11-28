@@ -1,0 +1,11 @@
+[1 of 3] Processing p
+  [1 of 3] Compiling H[sig]          (.hsig -> nothing)
+  [2 of 3] Compiling Y[sig]          (.hsig -> nothing)
+  [3 of 3] Compiling M               (.hs -> nothing)
+[2 of 3] Processing impl
+  Instantiating impl
+  [1 of 2] Compiling F               (.hs -> .o)
+  [2 of 2] Compiling H               (.hs -> .o)
+[3 of 3] Processing q
+  [1 of 2] Compiling Y[sig]          (.hsig -> nothing)
+  [2 of 2] Compiling X               (.hs -> nothing)

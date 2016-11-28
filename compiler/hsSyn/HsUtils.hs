@@ -20,9 +20,9 @@ which deal with the instantiated versions are located elsewhere:
 
 module HsUtils(
   -- Terms
-  mkHsPar, mkHsApp, mkHsAppType, mkHsAppTypeOut, mkHsConApp, mkHsCaseAlt,
+  mkHsPar, mkHsApp, mkHsAppType, mkHsAppTypeOut, mkHsCaseAlt,
   mkSimpleMatch, unguardedGRHSs, unguardedRHS,
-  mkMatchGroup, mkMatchGroupName, mkMatch, mkHsLam, mkHsIf,
+  mkMatchGroup, mkMatch, mkHsLam, mkHsIf,
   mkHsWrap, mkLHsWrap, mkHsWrapCo, mkHsWrapCoR, mkLHsWrapCo,
   mkHsDictLet, mkHsLams,
   mkHsOpApp, mkHsDo, mkHsComp, mkHsWrapPat, mkHsWrapPatCo,
@@ -32,7 +32,7 @@ module HsUtils(
   nlHsIntLit, nlHsVarApps,
   nlHsDo, nlHsOpApp, nlHsLam, nlHsPar, nlHsIf, nlHsCase, nlList,
   mkLHsTupleExpr, mkLHsVarTuple, missingTupArg,
-  toLHsSigWcType,
+  typeToLHsType,
 
   -- * Constructing general big tuples
   -- $big_tuples
@@ -152,8 +152,9 @@ unguardedGRHSs rhs@(L loc _)
 unguardedRHS :: SrcSpan -> Located (body id) -> [LGRHS id (Located (body id))]
 unguardedRHS loc rhs = [L loc (GRHS [] rhs)]
 
-mkMatchGroup :: Origin -> [LMatch RdrName (Located (body RdrName))]
-             -> MatchGroup RdrName (Located (body RdrName))
+mkMatchGroup :: (PostTc name Type ~ PlaceHolder)
+             => Origin -> [LMatch name (Located (body name))]
+             -> MatchGroup name (Located (body name))
 mkMatchGroup origin matches = MG { mg_alts = mkLocatedList matches
                                  , mg_arg_tys = []
                                  , mg_res_ty = placeHolderType
@@ -162,13 +163,6 @@ mkMatchGroup origin matches = MG { mg_alts = mkLocatedList matches
 mkLocatedList ::  [Located a] -> Located [Located a]
 mkLocatedList [] = noLoc []
 mkLocatedList ms = L (combineLocs (head ms) (last ms)) ms
-
-mkMatchGroupName :: Origin -> [LMatch Name (Located (body Name))]
-             -> MatchGroup Name (Located (body Name))
-mkMatchGroupName origin matches = MG { mg_alts = mkLocatedList matches
-                                     , mg_arg_tys = []
-                                     , mg_res_ty = placeHolderType
-                                     , mg_origin = origin }
 
 mkHsApp :: LHsExpr name -> LHsExpr name -> LHsExpr name
 mkHsApp e1 e2 = addCLoc e1 e2 (HsApp e1 e2)
@@ -188,13 +182,6 @@ mkHsLam pats body = mkHsPar (L (getLoc body) (HsLam matches))
 mkHsLams :: [TyVar] -> [EvVar] -> LHsExpr Id -> LHsExpr Id
 mkHsLams tyvars dicts expr = mkLHsWrap (mkWpTyLams tyvars
                                        <.> mkWpLams dicts) expr
-
-mkHsConApp :: DataCon -> [Type] -> [HsExpr Id] -> LHsExpr Id
--- Used for constructing dictionary terms etc, so no locations
-mkHsConApp data_con tys args
-  = foldl mk_app (nlHsTyApp (dataConWrapId data_con) tys) args
-  where
-    mk_app f a = noLoc (HsApp f (noLoc a))
 
 -- |A simple case alternative with a single pattern, no binds, no guards;
 -- pre-typechecking
@@ -603,14 +590,14 @@ mkClassOpSigs sigs
     fiddle (L loc (TypeSig nms ty)) = L loc (ClassOpSig False nms (dropWildCards ty))
     fiddle sig                      = sig
 
-toLHsSigWcType :: Type -> LHsSigWcType RdrName
+typeToLHsType :: Type -> LHsType RdrName
 -- ^ Converting a Type to an HsType RdrName
 -- This is needed to implement GeneralizedNewtypeDeriving.
 --
 -- Note that we use 'getRdrName' extensively, which
 -- generates Exact RdrNames rather than strings.
-toLHsSigWcType ty
-  = mkLHsSigWcType (go ty)
+typeToLHsType ty
+  = go ty
   where
     go :: Type -> LHsType RdrName
     go ty@(FunTy arg _)
@@ -705,7 +692,7 @@ mkTopFunBind :: Origin -> Located Name -> [LMatch Name (LHsExpr Name)]
              -> HsBind Name
 -- In Name-land, with empty bind_fvs
 mkTopFunBind origin fn ms = FunBind { fun_id = fn
-                                    , fun_matches = mkMatchGroupName origin ms
+                                    , fun_matches = mkMatchGroup origin ms
                                     , fun_co_fn = idHsWrapper
                                     , bind_fvs = emptyNameSet -- NB: closed
                                                               --     binding
@@ -787,7 +774,7 @@ collectLocalBinders (HsIPBinds _)      = []
 collectLocalBinders EmptyLocalBinds    = []
 
 collectHsIdBinders, collectHsValBinders :: HsValBindsLR idL idR -> [idL]
--- Collect Id binders only, or Ids + pattern synonmys, respectively
+-- Collect Id binders only, or Ids + pattern synonyms, respectively
 collectHsIdBinders  = collect_hs_val_binders True
 collectHsValBinders = collect_hs_val_binders False
 

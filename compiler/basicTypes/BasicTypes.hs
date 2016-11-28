@@ -19,6 +19,9 @@ types that
 module BasicTypes(
         Version, bumpVersion, initialVersion,
 
+        LeftOrRight(..),
+        pickLR,
+
         ConTag, ConTagZ, fIRST_TAG,
 
         Arity, RepArity,
@@ -41,10 +44,14 @@ module BasicTypes(
 
         TopLevelFlag(..), isTopLevel, isNotTopLevel,
 
+        DerivStrategy(..),
+
         OverlapFlag(..), OverlapMode(..), setOverlapModeMaybe,
         hasOverlappingFlag, hasOverlappableFlag, hasIncoherentFlag,
 
         Boxity(..), isBoxed,
+
+        TyPrec(..), maybeParen,
 
         TupleSort(..), tupleSortBoxity, boxityTupleSort,
         tupleParens,
@@ -99,6 +106,25 @@ import SrcLoc ( Located,unLoc )
 import StaticFlags( opt_PprStyle_Debug )
 import Data.Data hiding (Fixity)
 import Data.Function (on)
+
+{-
+************************************************************************
+*                                                                      *
+          Binary choice
+*                                                                      *
+************************************************************************
+-}
+
+data LeftOrRight = CLeft | CRight
+                 deriving( Eq, Data )
+
+pickLR :: LeftOrRight -> (a,a) -> a
+pickLR CLeft  (l,_) = l
+pickLR CRight (_,r) = r
+
+instance Outputable LeftOrRight where
+  ppr CLeft    = text "Left"
+  ppr CRight   = text "Right"
 
 {-
 ************************************************************************
@@ -479,6 +505,30 @@ instance Outputable Origin where
 {-
 ************************************************************************
 *                                                                      *
+                Deriving strategies
+*                                                                      *
+************************************************************************
+-}
+
+-- | Which technique the user explicitly requested when deriving an instance.
+data DerivStrategy
+  -- See Note [Deriving strategies] in TcDeriv
+  = DerivStock    -- ^ GHC's \"standard\" strategy, which is to implement a
+                  --   custom instance for the data type. This only works for
+                  --   certain types that GHC knows about (e.g., 'Eq', 'Show',
+                  --   'Functor' when @-XDeriveFunctor@ is enabled, etc.)
+  | DerivAnyclass -- ^ @-XDeriveAnyClass@
+  | DerivNewtype  -- ^ @-XGeneralizedNewtypeDeriving@
+  deriving (Eq, Data)
+
+instance Outputable DerivStrategy where
+    ppr DerivStock    = text "stock"
+    ppr DerivAnyclass = text "anyclass"
+    ppr DerivNewtype  = text "newtype"
+
+{-
+************************************************************************
+*                                                                      *
                 Instance overlap flag
 *                                                                      *
 ************************************************************************
@@ -597,6 +647,26 @@ instance Outputable OverlapMode where
 pprSafeOverlap :: Bool -> SDoc
 pprSafeOverlap True  = text "[safe]"
 pprSafeOverlap False = empty
+
+{-
+************************************************************************
+*                                                                      *
+                Type precedence
+*                                                                      *
+************************************************************************
+-}
+
+data TyPrec   -- See Note [Prededence in types]
+  = TopPrec         -- No parens
+  | FunPrec         -- Function args; no parens for tycon apps
+  | TyOpPrec        -- Infix operator
+  | TyConPrec       -- Tycon args; no parens for atomic
+  deriving( Eq, Ord )
+
+maybeParen :: TyPrec -> TyPrec -> SDoc -> SDoc
+maybeParen ctxt_prec inner_prec pretty
+  | ctxt_prec < inner_prec = pretty
+  | otherwise              = parens pretty
 
 {-
 ************************************************************************
@@ -961,7 +1031,7 @@ data InlinePragma            -- Note [InlinePragma]
                                      --   That is, inl_sat describes the number of *source-code*
                                      --   arguments the thing must be applied to.  We add on the
                                      --   number of implicit, dictionary arguments when making
-                                     --   the InlineRule, and don't look at inl_sat further
+                                     --   the Unfolding, and don't look at inl_sat further
 
       , inl_act    :: Activation     -- Says during which phases inlining is allowed
 

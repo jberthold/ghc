@@ -983,7 +983,7 @@ schedulePushWork(Capability *cap USED_IF_THREADS,
         if (cap != cap0 && !cap0->disabled && tryGrabCapability(cap0,task)) {
             if (!emptyRunQueue(cap0)
                 || cap0->n_returning_tasks != 0
-                || cap0->inbox != (Message*)END_TSO_QUEUE) {
+                || !emptyInbox(cap0)) {
                 // it already has some work, we just grabbed it at
                 // the wrong moment.  Or maybe it's deadlocked!
                 releaseCapability(cap0);
@@ -1246,6 +1246,7 @@ scheduleProcessInbox (Capability **pcap USED_IF_THREADS)
 {
 #if defined(THREADED_RTS)
     Message *m, *next;
+    PutMVar *p, *pnext;
     int r;
     Capability *cap = *pcap;
 
@@ -1270,7 +1271,9 @@ scheduleProcessInbox (Capability **pcap USED_IF_THREADS)
         if (r != 0) return;
 
         m = cap->inbox;
+        p = cap->putMVars;
         cap->inbox = (Message*)END_TSO_QUEUE;
+        cap->putMVars = NULL;
 
         RELEASE_LOCK(&cap->lock);
 
@@ -1279,9 +1282,19 @@ scheduleProcessInbox (Capability **pcap USED_IF_THREADS)
             executeMessage(cap, m);
             m = next;
         }
+
+        while (p != NULL) {
+            pnext = p->link;
+            performTryPutMVar(cap, (StgMVar*)deRefStablePtr(p->mvar),
+                              Unit_closure);
+            freeStablePtr(p->mvar);
+            stgFree(p);
+            p = pnext;
+        }
     }
 #endif
 }
+
 
 /* ----------------------------------------------------------------------------
  * Activate spark threads (THREADED_RTS)
@@ -1788,9 +1801,13 @@ scheduleDoGC (Capability **pcap, Task *task USED_IF_THREADS,
     uint32_t gc_type;
     uint32_t i;
     uint32_t need_idle;
+    uint32_t n_gc_threads;
     uint32_t n_idle_caps = 0, n_failed_trygrab_idles = 0;
     StgTSO *tso;
     rtsBool *idle_cap;
+      // idle_cap is an array (allocated later) of size n_capabilities, where
+      // idle_cap[i] is rtsTrue if capability i will be idle during this GC
+      // cycle.
 #endif
 
     if (sched_state == SCHED_SHUTTING_DOWN) {
@@ -1818,27 +1835,14 @@ scheduleDoGC (Capability **pcap, Task *task USED_IF_THREADS,
         gc_type = SYNC_GC_SEQ;
     }
 
-    if (gc_type == SYNC_GC_PAR && RtsFlags.ParFlags.parGcThreads > 0) {
-        need_idle = stg_max(0, enabled_capabilities -
-                            RtsFlags.ParFlags.parGcThreads);
-    } else {
-        need_idle = 0;
-    }
-
     // In order to GC, there must be no threads running Haskell code.
-    // Therefore, the GC thread needs to hold *all* the capabilities,
-    // and release them after the GC has completed.
+    // Therefore, for single-threaded GC, the GC thread needs to hold *all* the
+    // capabilities, and release them after the GC has completed.  For parallel
+    // GC, we synchronise all the running threads using requestSync().
     //
-    // This seems to be the simplest way: previous attempts involved
-    // making all the threads with capabilities give up their
-    // capabilities and sleep except for the *last* one, which
-    // actually did the GC.  But it's quite hard to arrange for all
-    // the other tasks to sleep and stay asleep.
-    //
-
-    /*  Other capabilities are prevented from running yet more Haskell
-        threads if pending_sync is set. Tested inside
-        yieldCapability() and releaseCapability() in Capability.c */
+    // Other capabilities are prevented from running yet more Haskell threads if
+    // pending_sync is set. Tested inside yieldCapability() and
+    // releaseCapability() in Capability.c
 
     PendingSync sync = {
         .type = gc_type,
@@ -1850,6 +1854,30 @@ scheduleDoGC (Capability **pcap, Task *task USED_IF_THREADS,
         SyncType prev_sync = 0;
         rtsBool was_syncing;
         do {
+            // If -qn is not set and we have more capabilities than cores, set
+            // the number of GC threads to #cores.  We do this here rather than
+            // in normaliseRtsOpts() because here it will work if the program
+            // calls setNumCapabilities.
+            //
+            n_gc_threads = RtsFlags.ParFlags.parGcThreads;
+            if (n_gc_threads == 0 &&
+                enabled_capabilities > getNumberOfProcessors()) {
+                n_gc_threads = getNumberOfProcessors();
+            }
+
+            // This calculation must be inside the loop because
+            // enabled_capabilities may change if requestSync() below fails and
+            // we retry.
+            if (gc_type == SYNC_GC_PAR && n_gc_threads > 0) {
+                if (n_gc_threads >= enabled_capabilities) {
+                    need_idle = 0;
+                } else {
+                    need_idle = enabled_capabilities - n_gc_threads;
+                }
+            } else {
+                need_idle = 0;
+            }
+
             // We need an array of size n_capabilities, but since this may
             // change each time around the loop we must allocate it afresh.
             idle_cap = (rtsBool *)stgMallocBytes(n_capabilities *
@@ -1980,23 +2008,13 @@ scheduleDoGC (Capability **pcap, Task *task USED_IF_THREADS,
         }
         debugTrace(DEBUG_sched, "%d idle caps", n_idle_caps);
 
-        // We set the gc_thread[i]->idle flag if that
-        // capability/thread is not participating in this collection.
-        // We also keep a local record of which capabilities are idle
-        // in idle_cap[], because scheduleDoGC() is re-entrant:
-        // another thread might start a GC as soon as we've finished
-        // this one, and thus the gc_thread[]->idle flags are invalid
-        // as soon as we release any threads after GC.  Getting this
-        // wrong leads to a rare and hard to debug deadlock!
-
         for (i=0; i < n_capabilities; i++) {
-            gc_threads[i]->idle = idle_cap[i];
             capabilities[i]->idle++;
         }
 
         // For all capabilities participating in this GC, wait until
         // they have stopped mutating and are standing by for GC.
-        waitForGcThreads(cap);
+        waitForGcThreads(cap, idle_cap);
 
 #if defined(THREADED_RTS)
         // Stable point where we can do a global check on our spark counters
@@ -2064,9 +2082,9 @@ delete_threads_and_gc:
     // reset pending_sync *before* GC, so that when the GC threads
     // emerge they don't immediately re-enter the GC.
     pending_sync = 0;
-    GarbageCollect(collect_gen, heap_census, gc_type, cap);
+    GarbageCollect(collect_gen, heap_census, gc_type, cap, idle_cap);
 #else
-    GarbageCollect(collect_gen, heap_census, 0, cap);
+    GarbageCollect(collect_gen, heap_census, 0, cap, NULL);
 #endif
 
     traceSparkCounters(cap);
@@ -2116,7 +2134,6 @@ delete_threads_and_gc:
 
     if (gc_type == SYNC_GC_PAR)
     {
-        releaseGCThreads(cap);
         for (i = 0; i < n_capabilities; i++) {
             if (i != cap->no) {
                 if (idle_cap[i]) {
@@ -2129,6 +2146,16 @@ delete_threads_and_gc:
             }
         }
         task->cap = cap;
+
+        // releaseGCThreads() happens *after* we have released idle
+        // capabilities.  Otherwise what can happen is one of the released
+        // threads starts a new GC, and finds that it can't acquire some of
+        // the disabled capabilities, because the previous GC still holds
+        // them, so those disabled capabilities will not be idle during the
+        // next GC round.  However, if we release the capabilities first,
+        // then they will be free (because they're disabled) when the next
+        // GC cycle happens.
+        releaseGCThreads(cap, idle_cap);
     }
 #endif
 
@@ -3075,7 +3102,7 @@ raiseExceptionHelper (StgRegTable *reg, StgTSO *tso, StgClosure *exception)
     //
     // This closure represents the expression 'raise# E' where E
     // is the exception raise.  It is used to overwrite all the
-    // thunks which are currently under evaluataion.
+    // thunks which are currently under evaluation.
     //
 
     // OLD COMMENT (we don't have MIN_UPD_SIZE now):

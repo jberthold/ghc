@@ -3,9 +3,6 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 
--- See Note [Deprecations in Hoopl] in Hoopl module
-{-# OPTIONS_GHC -fno-warn-warnings-deprecations #-}
-
 module CmmLive
     ( CmmLocalLive
     , cmmLocalLiveness
@@ -18,10 +15,9 @@ where
 import DynFlags
 import BlockId
 import Cmm
-import CmmUtils
 import PprCmmExpr ()
+import Hoopl.Dataflow
 
-import Hoopl
 import Maybes
 import Outputable
 
@@ -37,10 +33,11 @@ type CmmLocalLive = CmmLive LocalReg
 liveLattice :: Ord r => DataflowLattice (CmmLive r)
 {-# SPECIALIZE liveLattice :: DataflowLattice (CmmLive LocalReg) #-}
 {-# SPECIALIZE liveLattice :: DataflowLattice (CmmLive GlobalReg) #-}
-liveLattice = DataflowLattice "live LocalReg's" emptyRegSet add
-    where add _ (OldFact old) (NewFact new) =
-               (changeIf $ sizeRegSet join > sizeRegSet old, join)
-              where !join = plusRegSet old new
+liveLattice = DataflowLattice emptyRegSet add
+  where
+    add (OldFact old) (NewFact new) =
+        let !join = plusRegSet old new
+        in changedIf (sizeRegSet join > sizeRegSet old) join
 
 
 -- | A mapping from block labels to the variables live on entry
@@ -52,14 +49,14 @@ type BlockEntryLiveness r = BlockEnv (CmmLive r)
 
 cmmLocalLiveness :: DynFlags -> CmmGraph -> BlockEntryLiveness LocalReg
 cmmLocalLiveness dflags graph =
-  check $ dataflowAnalBwd graph [] $ analBwd liveLattice (xferLive dflags)
+  check $ dataflowAnalBwd graph [] liveLattice (xferLive dflags)
   where entry = g_entry graph
         check facts = noLiveOnEntry entry
                         (expectJust "check" $ mapLookup entry facts) facts
 
 cmmGlobalLiveness :: DynFlags -> CmmGraph -> BlockEntryLiveness GlobalReg
 cmmGlobalLiveness dflags graph =
-  dataflowAnalBwd graph [] $ analBwd liveLattice (xferLive dflags)
+  dataflowAnalBwd graph [] liveLattice (xferLive dflags)
 
 -- | On entry to the procedure, there had better not be any LocalReg's live-in.
 noLiveOnEntry :: BlockId -> CmmLive LocalReg -> a -> a

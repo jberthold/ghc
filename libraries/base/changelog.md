@@ -23,6 +23,11 @@
     `ReadS`, as well as related combinators, have been added to
     `Data.Functor.Classes` (#12358)
 
+  * Add `Semigroup` instance for `IO`, as well as for `Event` and `Lifetime`
+    from `GHC.Event` (#12464)
+
+  * Add `Data` instance for `Const` (#12438)
+
 ## 4.9.0.0  *May 2016*
 
   * Bundled with GHC 8.0

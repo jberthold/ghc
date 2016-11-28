@@ -65,7 +65,6 @@ import Outputable
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad( unless )
-import Data.Maybe( isJust )
 
 {-
 ************************************************************************
@@ -226,7 +225,7 @@ deeplyInstantiate :: CtOrigin -> TcSigmaType -> TcM (HsWrapper, TcRhoType)
 -- if    deeplyInstantiate ty = (wrap, rho)
 -- and   e :: ty
 -- then  wrap e :: rho
--- That is, wrap :: ty "->" rho
+-- That is, wrap :: ty ~> rho
 
 deeplyInstantiate orig ty
   | Just (arg_tys, tvs, theta, rho) <- tcDeepSplitSigmaTy_maybe ty
@@ -382,7 +381,7 @@ tcInstBinderX _ subst (Anon ty)
      -- This is the *only* constraint currently handled in types.
   | Just (mk, role, k1, k2) <- get_pred_tys_maybe substed_ty
   = do { let origin = TypeEqOrigin { uo_actual   = k1
-                                   , uo_expected = mkCheckExpType k2
+                                   , uo_expected = k2
                                    , uo_thing    = Nothing }
        ; co <- case role of
                  Nominal          -> unifyKind noThing k1 k2
@@ -639,13 +638,15 @@ newClsInst overlap_mode dfun_name tvs theta clas tys
   = do { (subst, tvs') <- freshenTyVarBndrs tvs
              -- Be sure to freshen those type variables,
              -- so they are sure not to appear in any lookup
-       ; let tys'   = substTys subst tys
-             theta' = substTheta subst theta
-             dfun   = mkDictFunId dfun_name tvs' theta' clas tys'
-             -- Substituting in the DFun type just makes sure that
-             -- we are using TyVars rather than TcTyVars
-             -- Not sure if this is really the right place to do so,
-             -- but it'll do fine
+       ; let tys' = substTys subst tys
+
+             dfun = mkDictFunId dfun_name tvs theta clas tys
+             -- The dfun uses the original 'tvs' because
+             -- (a) they don't need to be fresh
+             -- (b) they may be mentioned in the ib_binds field of
+             --     an InstInfo, and in TcEnv.pprInstInfoDetails it's
+             --     helpful to use the same names
+
        ; oflag <- getOverlapFlag overlap_mode
        ; let inst = mkLocalInstance dfun oflag tvs' clas tys'
        ; warnIf (Reason Opt_WarnOrphans)
@@ -699,13 +700,7 @@ addLocalInst (home_ie, my_insts) ispec
                  | isGHCi    = deleteFromInstEnv home_ie ispec
                  | otherwise = home_ie
 
-               -- If we're compiling sig-of and there's an external duplicate
-               -- instance, silently ignore it (that's the instance we're
-               -- implementing!)  NB: we still count local duplicate instances
-               -- as errors.
-               -- See Note [Signature files and type class instances]
-               global_ie | isJust (tcg_sig_of tcg_env) = emptyInstEnv
-                         | otherwise = eps_inst_env eps
+               global_ie = eps_inst_env eps
                inst_envs = InstEnvs { ie_global  = global_ie
                                     , ie_local   = home_ie'
                                     , ie_visible = tcVisibleOrphanMods tcg_env }

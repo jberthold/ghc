@@ -1,0 +1,9 @@
+[1 of 3] Processing f
+  Instantiating f
+  [1 of 1] Compiling F               (.hs -> .o)
+[2 of 3] Processing p
+  [1 of 2] Compiling A[sig]          (.hsig -> nothing)
+  [2 of 2] Compiling P               (.hs -> nothing)
+[3 of 3] Processing q
+  [1 of 2] Compiling B[sig]          (.hsig -> nothing)
+  [2 of 2] Compiling Q               (.hs -> nothing)

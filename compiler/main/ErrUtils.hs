@@ -20,6 +20,7 @@ module ErrUtils (
         unionMessages,
         errMsgSpan, errMsgContext,
         errorsFound, isEmptyMessages,
+        isWarnMsgFatal,
 
         -- ** Formatting
         pprMessageBag, pprErrMsgBagWithLoc,
@@ -356,7 +357,7 @@ dumpSDoc dflags print_unqual flag hdr doc
                         gd <- readIORef gdref
                         let append = Set.member fileName gd
                             mode = if append then AppendMode else WriteMode
-                        when (not append) $
+                        unless append $
                             writeIORef gdref (Set.insert fileName gd)
                         createDirectoryIfMissing True (takeDirectory fileName)
                         handle <- openFile fileName mode
@@ -553,3 +554,9 @@ prettyPrintGhcErrors dflags
                           pprDebugAndThen dflags pgmError (text str) doc
                       _ ->
                           liftIO $ throwIO e
+
+-- | Checks if given 'WarnMsg' is a fatal warning.
+isWarnMsgFatal :: DynFlags -> WarnMsg -> Bool
+isWarnMsgFatal dflags ErrMsg{errMsgReason = Reason wflag}
+  = wopt_fatal wflag dflags
+isWarnMsgFatal dflags _ = gopt Opt_WarnIsError dflags

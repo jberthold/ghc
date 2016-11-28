@@ -13,7 +13,7 @@ module GHC (
         defaultErrorHandler,
         defaultCleanupHandler,
         prettyPrintGhcErrors,
-        installSignalHandlers,
+        withSignalHandlers,
         withCleanupSession,
 
         -- * GHC Monad
@@ -219,7 +219,7 @@ module GHC (
         pprParendType, pprTypeApp,
         Kind,
         PredType,
-        ThetaType, pprForAll, pprForAllImplicit, pprThetaArrowTy,
+        ThetaType, pprForAll, pprThetaArrowTy,
 
         -- ** Entities
         TyThing(..),
@@ -438,12 +438,9 @@ runGhc :: Maybe FilePath  -- ^ See argument to 'initGhcMonad'.
 runGhc mb_top_dir ghc = do
   ref <- newIORef (panic "empty session")
   let session = Session ref
-  flip unGhc session $ do
-    liftIO installSignalHandlers  -- catch ^C
+  flip unGhc session $ withSignalHandlers $ do -- catch ^C
     initGhcMonad mb_top_dir
     withCleanupSession ghc
-
-  -- XXX: unregister interrupt handlers here?
 
 -- | Run function for 'GhcT' monad transformer.
 --
@@ -458,8 +455,7 @@ runGhcT :: ExceptionMonad m =>
 runGhcT mb_top_dir ghct = do
   ref <- liftIO $ newIORef (panic "empty session")
   let session = Session ref
-  flip unGhcT session $ do
-    liftIO installSignalHandlers  -- catch ^C
+  flip unGhcT session $ withSignalHandlers $ do -- catch ^C
     initGhcMonad mb_top_dir
     withCleanupSession ghct
 
@@ -576,7 +572,7 @@ checkBrokenTablesNextToCode' dflags
 -- flags.  If you are not doing linking or doing static linking, you
 -- can ignore the list of packages returned.
 --
-setSessionDynFlags :: GhcMonad m => DynFlags -> m [UnitId]
+setSessionDynFlags :: GhcMonad m => DynFlags -> m [InstalledUnitId]
 setSessionDynFlags dflags = do
   dflags' <- checkNewDynFlags dflags
   (dflags'', preload) <- liftIO $ initPackages dflags'
@@ -586,7 +582,7 @@ setSessionDynFlags dflags = do
   return preload
 
 -- | Sets the program 'DynFlags'.
-setProgramDynFlags :: GhcMonad m => DynFlags -> m [UnitId]
+setProgramDynFlags :: GhcMonad m => DynFlags -> m [InstalledUnitId]
 setProgramDynFlags dflags = do
   dflags' <- checkNewDynFlags dflags
   (dflags'', preload) <- liftIO $ initPackages dflags'
@@ -1435,7 +1431,7 @@ isModuleTrusted m = withSession $ \hsc_env ->
     liftIO $ hscCheckSafe hsc_env m noSrcSpan
 
 -- | Return if a module is trusted and the pkgs it depends on to be trusted.
-moduleTrustReqs :: GhcMonad m => Module -> m (Bool, [UnitId])
+moduleTrustReqs :: GhcMonad m => Module -> m (Bool, [InstalledUnitId])
 moduleTrustReqs m = withSession $ \hsc_env ->
     liftIO $ hscGetSafe hsc_env m noSrcSpan
 
