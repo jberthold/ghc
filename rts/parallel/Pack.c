@@ -46,10 +46,15 @@
 #include <string.h> // memset
 #endif
 
-#if __GLASGOW_HASKELL__ < 711
 // programming against internal types is great, isn't it? :-P
+#if __GLASGOW_HASKELL__ < 711
 #define StgArrBytes StgArrWords
 #endif
+// and sometimes they did not appear very internal, just old...
+#if __GLASGOW_HASKELL__ < 801
+#define bool rtsBool
+#endif
+
 
 #ifdef DEBUG
 #define DBG_HEADROOM 1
@@ -587,7 +592,7 @@ getClosureInfo(StgClosure* node, StgInfoTable* info,
         // NB nonptrs field for array closures is only used in checkPacket
         break;
 
-#if __GLASGOW_HASKELL__ > 708
+#if __GLASGOW_HASKELL__ >= 709
         // Small arrays do not have card tables, straightforward
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
@@ -612,7 +617,7 @@ getClosureInfo(StgClosure* node, StgInfoTable* info,
     case RET_BCO:
         barf("getClosureInfo: stack frame!");
         break;
-#if __GLASGOW_HASKELL__ > 801
+#if __GLASGOW_HASKELL__ >= 801
     case COMPACT_NFDATA:
         barf("compact nfdata not supported");
         break;
@@ -636,9 +641,9 @@ getClosureInfo(StgClosure* node, StgInfoTable* info,
  * The graph is packed breadth-first into a given buffer of StgWords.
  *
  * In the buffer, 3 different types of entities are packed
- *  0L - closure with static address        - PackPLC
- *  1L - offset (closure already in packet) - PackOffset
- *  2L - a heap closure follows             - PackGeneric/specialised routines
+ *  1L - closure with static address        - PackPLC
+ *  2L - offset (closure already in packet) - PackOffset
+ *  3L - a heap closure follows             - PackGeneric/specialised routines
  *
  *  About "pointer tagging":
  *   Every closure pointer carries a tag in its l.s. bits (those which
@@ -915,17 +920,43 @@ loop:
     case CONSTR_2_0:
     case CONSTR_1_1:
     case CONSTR_0_2:
+#if __GLASGOW_HASKELL__ >= 801
+        // Between GHC 8.01 and (forthcoming) 8.02 the _STATIC constr.
+        // variants were removed, and the new CONSTR_NOCAF type added.
+        // Static constructors now have to be discovered using the
+        // HEAP_ALLOCED macro on the address.
+    case CONSTR_NOCAF:
+
+        // While it should be OK to execute the code below in older
+        // GHCs, the new type is not, and we separate it to make 
+        // differences apparent.
+
+        if (!HEAP_ALLOCED(closure)) {
+            // (see code below for other *_STATIC closures)
+            PACKETDEBUG(debugBelch("*>~~ Found static constr %p (%s),"
+                                   " packing as a PLC\n",
+                                   closure, info_type_by_ip(info)));
+            PackPLC(p, (StgPtr)closure);
+            // PLCs are packed with their tag (closure is still tagged)
+            return P_SUCCESS;
+        }
+        // otherwise fall through to old code and pack heap-allocated
+#endif
         return PackGeneric(p, closure);
 
-    case CONSTR_STATIC:        // We pack indirections to CAFs:
-    case CONSTR_NOCAF_STATIC:  // Therefore, we need keepCAFs==rtsTrue
-    case FUN_STATIC:           // (otherwise GC leaves dangling pointers
-    case THUNK_STATIC:         // from original CAF site to the heap)
-        // all these are packed with their tag (closure is still tagged)
+#if __GLASGOW_HASKELL__ < 801
+    case CONSTR_STATIC:
+    case CONSTR_NOCAF_STATIC:
+#endif
+    case FUN_STATIC:
+    case THUNK_STATIC:
+        // We pack indirections to CAFs: Therefore, we need
+        // keepCAFs==rtsTrue (otherwise GC leaves dangling pointers
+        // from original CAF site to the heap)
         PACKETDEBUG(debugBelch("*>~~ Packing a %p (%s) as a PLC\n",
                                closure, info_type_by_ip(info)));
-
         PackPLC(p, (StgPtr)closure);
+        // PLCs are packed with their tag (closure is still tagged)
         // NB: unpacked_size of a PLC is 0
         return P_SUCCESS;
 
@@ -1127,7 +1158,7 @@ loop:
         goto loop;
         // valid only for the threaded RTS... cannot distinguish here
 
-#if __GLASGOW_HASKELL__ > 708
+#if __GLASGOW_HASKELL__ >= 709
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
     case SMALL_MUT_ARR_PTRS_FROZEN:
@@ -1920,6 +1951,9 @@ UnpackClosure (ClosureQ* q, HashTable* offsets,
             case CONSTR_2_0:
             case CONSTR_1_1:
             case CONSTR_0_2:
+#if __GLASGOW_HASKELL__ >= 801
+            case CONSTR_NOCAF:
+#endif
             case FUN:
             case FUN_1_0:
             case FUN_0_1:
@@ -1933,7 +1967,7 @@ UnpackClosure (ClosureQ* q, HashTable* offsets,
             case THUNK_1_1:
             case THUNK_0_2:
             case THUNK_SELECTOR:
-#if __GLASGOW_HASKELL__ > 708
+#if __GLASGOW_HASKELL__ >= 709
             case SMALL_MUT_ARR_PTRS_CLEAN:
             case SMALL_MUT_ARR_PTRS_DIRTY:
             case SMALL_MUT_ARR_PTRS_FROZEN0:
@@ -2309,15 +2343,19 @@ StgClosure* createListNode(Capability *cap, StgClosure *head, StgClosure *tail) 
 # error Wrong closure type count in fingerprint array. Check code.
 # endif
 #elif __GLASGOW_HASKELL__ >= 801
-     // same count as 8.00 but different closures
-# if !(N_CLOSURE_TYPES == 65 )
+     // no CONSTR_NOCAF_STATIC, CONSTR_STATIC, but CONSTR_NOCAF
+# if !(N_CLOSURE_TYPES == 64 )
 # error Wrong closure type count in fingerprint array. Check code.
 # endif
 #endif
 static char* fingerPrintChar =
-    "0ccccccCC"    // INVALID CONSTRs (0-8)
-    "fffffff"      // FUNs (9-15)
-    "ttttttt"      // THUNKs (16-22)
+#if __GLASGOW_HASKELL__ >= 801
+    "0ccccccC"     // INVALID CONSTRs (0-7) (incl. C._NOCAF)
+#else
+    "0ccccccCC"    // INVALID CONSTRs (0-8) (incl. 2 C.*_STATIC)
+#endif
+    "fffffff"      // FUNs (9-15/8-14)
+    "ttttttt"      // THUNKs (16-22/15-21)
     "TBAPP"        // SELECTOR BCO AP PAP AP_STACK
 #if __GLASGOW_HASKELL__ >= 801
     "__"           // INDs (2)
@@ -2392,6 +2430,12 @@ static void graphFingerPrint_(char* fp, HashTable* visited, StgClosure *p) {
 
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(p));
 
+#if __GLASGOW_HASKELL__ >= 801
+    // GHC 8.1 and younger do not use CONSTR_*_STATIC any more,
+    // therefore we need this different case exit.
+    if ( ! HEAP_ALLOCED(p)) return;
+#endif
+
     info = get_itbl((StgClosure *)p);
 
     // append char for this node
@@ -2401,13 +2445,17 @@ static void graphFingerPrint_(char* fp, HashTable* visited, StgClosure *p) {
     switch (info -> type) {
 
         // simple and static objects
+#if __GLASGOW_HASKELL__ < 801
         case CONSTR_STATIC:
         case CONSTR_NOCAF_STATIC:
+#endif
         case FUN_STATIC:
         case THUNK_STATIC:
+            // NB should never be reached in GHC > 801
             break;
 
         /* CONSTRs, THUNKs, FUNs are written with arity */
+            // NB no static constructors should be around in GHC > 801
         case THUNK_2_0:
             // append char for this node
             strcat(fp, "20(");
@@ -2490,6 +2538,9 @@ static void graphFingerPrint_(char* fp, HashTable* visited, StgClosure *p) {
 
         case FUN:
         case CONSTR:
+#if __GLASGOW_HASKELL__ >= 801
+        case CONSTR_NOCAF:
+#endif
             {
                 char str[6];
                 sprintf(str,"%d?(",info->layout.payload.ptrs);
@@ -2668,7 +2719,7 @@ print:
         case WHITEHOLE:
             break;
 
-#if __GLASGOW_HASKELL__ > 708
+#if __GLASGOW_HASKELL__ >= 709
         case SMALL_MUT_ARR_PTRS_CLEAN:
         case SMALL_MUT_ARR_PTRS_DIRTY:
         case SMALL_MUT_ARR_PTRS_FROZEN0:
