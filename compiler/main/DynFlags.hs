@@ -27,6 +27,7 @@ module DynFlags (
         FatalMessager, LogAction, FlushOut(..), FlushErr(..),
         ProfAuto(..),
         glasgowExtsFlags,
+        warningGroups, warningHierarchies,
         dopt, dopt_set, dopt_unset,
         gopt, gopt_set, gopt_unset, setGeneralFlag', unSetGeneralFlag',
         wopt, wopt_set, wopt_unset,
@@ -40,6 +41,7 @@ module DynFlags (
         DynFlags(..),
         FlagSpec(..),
         HasDynFlags(..), ContainsDynFlags(..),
+        OverridingBool(..), overrideWith,
         RtsOptsEnabled(..),
         HscTarget(..), isObjectTarget, defaultObjectTarget,
         targetRetainsAllBindings,
@@ -122,9 +124,7 @@ module DynFlags (
         -- * Compiler configuration suitable for display to the user
         compilerInfo,
 
-#ifdef GHCI
         rtsIsProfiled,
-#endif
         dynamicGhc,
 
 #include "GHCConstantsHaskellExports.hs"
@@ -176,7 +176,9 @@ import FastString
 import Outputable
 import Foreign.C        ( CInt(..) )
 import System.IO.Unsafe ( unsafeDupablePerformIO )
-import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessageAnn )
+import {-# SOURCE #-} ErrUtils ( Severity(..), MsgDoc, mkLocMessageAnn
+                               , getCaretDiagnostic )
+import SysTools.Terminal ( stderrSupportsAnsiColors )
 
 import System.IO.Unsafe ( unsafePerformIO )
 import Data.IORef
@@ -211,6 +213,13 @@ import qualified Data.IntSet as IntSet
 
 import GHC.Foreign (withCString, peekCString)
 import qualified GHC.LanguageExtensions as LangExt
+
+#if __GLASGOW_HASKELL__ >= 709
+import Foreign
+#else
+import Foreign.Safe
+#endif
+
 
 -- Note [Updating flag description in the User's Guide]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -393,7 +402,7 @@ data GeneralFlag
 
    | Opt_WarnIsError                    -- -Werror; makes warnings fatal
    | Opt_ShowWarnGroups                 -- Show the group a warning belongs to
-   | Opt_ShowSourcePaths                -- Show module source/object paths
+   | Opt_HideSourcePaths                -- Hide module source/object paths
 
    | Opt_PrintExplicitForalls
    | Opt_PrintExplicitKinds
@@ -418,12 +427,14 @@ data GeneralFlag
    | Opt_CrossModuleSpecialise
    | Opt_StaticArgumentTransformation
    | Opt_CSE
+   | Opt_StgCSE
    | Opt_LiberateCase
    | Opt_SpecConstr
    | Opt_DoLambdaEtaExpansion
    | Opt_IgnoreAsserts
    | Opt_DoEtaReduction
    | Opt_CaseMerge
+   | Opt_CaseFolding                    -- Constant folding through case-expressions
    | Opt_UnboxStrictFields
    | Opt_UnboxSmallStrictFields
    | Opt_DictsCheap
@@ -508,8 +519,10 @@ data GeneralFlag
    -- output style opts
    | Opt_ErrorSpans -- Include full span info in error messages,
                     -- instead of just the start position.
+   | Opt_DiagnosticsShowCaret -- Show snippets of offending code
    | Opt_PprCaseAsLet
    | Opt_PprShowTicks
+   | Opt_ShowHoleConstraints
 
    -- Suppress all coercions, them replacing with '...'
    | Opt_SuppressCoercions
@@ -584,7 +597,6 @@ data WarningFlag =
    | Opt_WarnUnusedMatches
    | Opt_WarnUnusedTypePatterns
    | Opt_WarnUnusedForalls
-   | Opt_WarnContextQuantification -- remove in 8.2
    | Opt_WarnWarningsDeprecations
    | Opt_WarnDeprecatedFlags
    | Opt_WarnAMP -- Introduced in GHC 7.8, obsolete since 7.10
@@ -861,7 +873,9 @@ data DynFlags = DynFlags {
   pprUserLength         :: Int,
   pprCols               :: Int,
 
-  useUnicode      :: Bool,
+  useUnicode            :: Bool,
+  useColor              :: OverridingBool,
+  canUseColor           :: Bool,
 
   -- | what kind of {-# SCC #-} to add automatically
   profAuto              :: ProfAuto,
@@ -870,7 +884,7 @@ data DynFlags = DynFlags {
 
   nextWrapperNum        :: IORef (ModuleEnv Int),
 
-  -- | Machine dependant flags (-m<blah> stuff)
+  -- | Machine dependent flags (-m<blah> stuff)
   sseVersion            :: Maybe SseVersion,
   avx                   :: Bool,
   avx2                  :: Bool,
@@ -1239,6 +1253,17 @@ data DynLibLoader
 data RtsOptsEnabled = RtsOptsNone | RtsOptsSafeOnly | RtsOptsAll
   deriving (Show)
 
+data OverridingBool
+  = Auto
+  | Always
+  | Never
+  deriving Show
+
+overrideWith :: Bool -> OverridingBool -> Bool
+overrideWith b Auto   = b
+overrideWith _ Always = True
+overrideWith _ Never  = False
+
 -----------------------------------------------------------------------------
 -- Ways
 
@@ -1488,6 +1513,7 @@ initDynFlags dflags = do
                           do str' <- peekCString enc cstr
                              return (str == str'))
                          `catchIOError` \_ -> return False
+ canUseColor <- stderrSupportsAnsiColors
  return dflags{
         canGenerateDynamicToo = refCanGenerateDynamicToo,
         nextTempSuffix = refNextTempSuffix,
@@ -1497,6 +1523,7 @@ initDynFlags dflags = do
         generatedDumps = refGeneratedDumps,
         nextWrapperNum = wrapperNum,
         useUnicode    = canUseUnicode,
+        canUseColor   = canUseColor,
         rtldInfo      = refRtldInfo,
         rtccInfo      = refRtccInfo
         }
@@ -1653,6 +1680,8 @@ defaultDynFlags mySettings =
         pprUserLength = 5,
         pprCols = 100,
         useUnicode = False,
+        useColor = Auto,
+        canUseColor = False,
         profAuto = NoProfAuto,
         interactivePrint = Nothing,
         nextWrapperNum = panic "defaultDynFlags: No nextWrapperNum",
@@ -1720,8 +1749,14 @@ defaultLogAction dflags reason severity srcSpan style msg
       SevInteractive -> putStrSDoc msg style
       SevInfo        -> printErrs msg style
       SevFatal       -> printErrs msg style
-      _              -> do hPutChar stderr '\n'
-                           printErrs message style
+      _              -> do -- otherwise (i.e. SevError or SevWarning)
+                           hPutChar stderr '\n'
+                           caretDiagnostic <-
+                               if gopt Opt_DiagnosticsShowCaret dflags
+                               then getCaretDiagnostic severity srcSpan
+                               else pure empty
+                           printErrs (message $+$ caretDiagnostic)
+                               (setStyleColoured True style)
                            -- careful (#2302): printErrs prints in UTF-8,
                            -- whereas converting to string first and using
                            -- hPutStr would just emit the low 8 bits of
@@ -2713,6 +2748,13 @@ dynamic_flags_deps = [
                                                        d { pprUserLength = n }))
   , make_ord_flag defFlag "dppr-cols"        (intSuffix (\n d ->
                                                              d { pprCols = n }))
+  , make_ord_flag defFlag "fdiagnostics-color=auto"
+      (NoArg (upd (\d -> d { useColor = Auto })))
+  , make_ord_flag defFlag "fdiagnostics-color=always"
+      (NoArg (upd (\d -> d { useColor = Always })))
+  , make_ord_flag defFlag "fdiagnostics-color=never"
+      (NoArg (upd (\d -> d { useColor = Never })))
+
   -- Suppress all that is suppressable in core dumps.
   -- Except for uniques, as some simplifier phases introduce new variables that
   -- have otherwise identical names.
@@ -2898,7 +2940,7 @@ dynamic_flags_deps = [
         (NoArg (setGeneralFlag Opt_NoLlvmMangler)) -- hidden flag
   , make_ord_flag defGhcFlag "ddump-debug"        (setDumpFlag Opt_D_dump_debug)
 
-        ------ Machine dependant (-m<blah>) stuff ---------------------------
+        ------ Machine dependent (-m<blah>) stuff ---------------------------
 
   , make_ord_flag defGhcFlag "msse"         (noArg (\d ->
                                                   d { sseVersion = Just SSE1 }))
@@ -3386,8 +3428,6 @@ wWarningFlagsDeps = [
   flagSpec "dodgy-foreign-imports"       Opt_WarnDodgyForeignImports,
   flagSpec "dodgy-imports"               Opt_WarnDodgyImports,
   flagSpec "empty-enumerations"          Opt_WarnEmptyEnumerations,
-  depFlagSpec "context-quantification"   Opt_WarnContextQuantification
-    "it is subsumed by an error message that cannot be disabled",
   depFlagSpec "duplicate-constraints"    Opt_WarnDuplicateConstraints
     "it is subsumed by -Wredundant-constraints",
   flagSpec "redundant-constraints"       Opt_WarnRedundantConstraints,
@@ -3490,13 +3530,16 @@ fFlagsDeps = [
   flagSpec "building-cabal-package"           Opt_BuildingCabalPackage,
   flagSpec "call-arity"                       Opt_CallArity,
   flagSpec "case-merge"                       Opt_CaseMerge,
+  flagSpec "case-folding"                     Opt_CaseFolding,
   flagSpec "cmm-elim-common-blocks"           Opt_CmmElimCommonBlocks,
   flagSpec "cmm-sink"                         Opt_CmmSink,
   flagSpec "cse"                              Opt_CSE,
+  flagSpec "stg-cse"                          Opt_StgCSE,
   flagSpec "cpr-anal"                         Opt_CprAnal,
   flagSpec "defer-type-errors"                Opt_DeferTypeErrors,
   flagSpec "defer-typed-holes"                Opt_DeferTypedHoles,
   flagSpec "defer-out-of-scope-variables"     Opt_DeferOutOfScopeVariables,
+  flagSpec "diagnostics-show-caret"           Opt_DiagnosticsShowCaret,
   flagSpec "dicts-cheap"                      Opt_DictsCheap,
   flagSpec "dicts-strict"                     Opt_DictsStrict,
   flagSpec "dmd-tx-dict-sel"                  Opt_DmdTxDictSel,
@@ -3574,7 +3617,8 @@ fFlagsDeps = [
   flagSpec "version-macros"                   Opt_VersionMacros,
   flagSpec "worker-wrapper"                   Opt_WorkerWrapper,
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
-  flagSpec "show-source-paths"                Opt_ShowSourcePaths
+  flagSpec "hide-source-paths"                Opt_HideSourcePaths,
+  flagSpec "show-hole-constraints"            Opt_ShowHoleConstraints
   ]
 
 -- | These @-f\<blah\>@ flags can all be reversed with @-fno-\<blah\>@
@@ -3630,12 +3674,6 @@ supportedExtensions :: [String]
 supportedExtensions = concatMap toFlagSpecNamePair xFlags
   where
     toFlagSpecNamePair flg
-#ifndef GHCI
-      -- make sure that `ghc --supported-extensions` omits
-      -- "TemplateHaskell" when it's known to be unsupported. See also
-      -- GHC #11102 for rationale
-      | flagSpecFlag flg == LangExt.TemplateHaskell  = [noName]
-#endif
       | otherwise = [name, noName]
       where
         noName = "No" ++ name
@@ -3805,6 +3843,7 @@ defaultFlags :: Settings -> [GeneralFlag]
 defaultFlags settings
 -- See Note [Updating flag description in the User's Guide]
   = [ Opt_AutoLinkPackages,
+      Opt_DiagnosticsShowCaret,
       Opt_EmbedManifest,
       Opt_FlatCache,
       Opt_GenManifest,
@@ -3941,9 +3980,11 @@ optLevelFlags -- see Note [Documenting optimisation flags]
 
     , ([1,2],   Opt_CallArity)
     , ([1,2],   Opt_CaseMerge)
+    , ([1,2],   Opt_CaseFolding)
     , ([1,2],   Opt_CmmElimCommonBlocks)
     , ([1,2],   Opt_CmmSink)
     , ([1,2],   Opt_CSE)
+    , ([1,2],   Opt_StgCSE)
     , ([1,2],   Opt_EnableRewriteRules)  -- Off for -O0; see Note [Scoping for Builtin rules]
                                          --              in PrelRules
     , ([1,2],   Opt_FloatIn)
@@ -4171,7 +4212,6 @@ foreign import ccall unsafe "rts_isProfiled" rtsIsProfiledIO :: IO CInt
 rtsIsProfiled :: Bool
 rtsIsProfiled = unsafeDupablePerformIO rtsIsProfiledIO /= 0
 
-#ifdef GHCI
 -- Consult the RTS to find whether GHC itself has been built with
 -- dynamic linking.  This can't be statically known at compile-time,
 -- because we build both the static and dynamic versions together with
@@ -4180,10 +4220,6 @@ foreign import ccall unsafe "rts_isDynamic" rtsIsDynamicIO :: IO CInt
 
 dynamicGhc :: Bool
 dynamicGhc = unsafeDupablePerformIO rtsIsDynamicIO /= 0
-#else
-dynamicGhc :: Bool
-dynamicGhc = False
-#endif
 
 setWarnSafe :: Bool -> DynP ()
 setWarnSafe True  = getCurLoc >>= \l -> upd (\d -> d { warnSafeOnLoc = l })
@@ -4216,24 +4252,8 @@ setIncoherentInsts True = do
   upd (\d -> d { incoherentOnLoc = l })
 
 checkTemplateHaskellOk :: TurnOnFlag -> DynP ()
-#ifdef GHCI
 checkTemplateHaskellOk _turn_on
   = getCurLoc >>= \l -> upd (\d -> d { thOnLoc = l })
-#else
--- In stage 1, Template Haskell is simply illegal, except with -M
--- We don't bleat with -M because there's no problem with TH there,
--- and in fact GHC's build system does ghc -M of the DPH libraries
--- with a stage1 compiler
-checkTemplateHaskellOk turn_on
-  | turn_on = do dfs <- liftEwM getCmdLineState
-                 case ghcMode dfs of
-                    MkDepend -> return ()
-                    _        -> addErr msg
-  | otherwise = return ()
-  where
-    msg = "Template Haskell requires GHC with interpreter support\n    " ++
-          "Perhaps you are using a stage-1 compiler?"
-#endif
 
 {- **********************************************************************
 %*                                                                      *
@@ -5067,7 +5087,15 @@ defaultGlobalDynFlags =
   where
     settings = panic "v_unsafeGlobalDynFlags: not initialised"
 
+#if STAGE < 2
 GLOBAL_VAR(v_unsafeGlobalDynFlags, defaultGlobalDynFlags, DynFlags)
+#else
+SHARED_GLOBAL_VAR( v_unsafeGlobalDynFlags
+                 , getOrSetLibHSghcGlobalDynFlags
+                 , "getOrSetLibHSghcGlobalDynFlags"
+                 , defaultGlobalDynFlags
+                 , DynFlags )
+#endif
 
 unsafeGlobalDynFlags :: DynFlags
 unsafeGlobalDynFlags = unsafePerformIO $ readIORef v_unsafeGlobalDynFlags

@@ -9,7 +9,6 @@ where
 
 import Hoopl
 import Digraph
-import BlockId
 import Bitmap
 import CLabel
 import PprCmmDecl ()
@@ -83,9 +82,8 @@ This is what flattenCAFSets is doing.
 -- Finding the CAFs used by a procedure
 
 type CAFSet = Set CLabel
-type CAFEnv = BlockEnv CAFSet
+type CAFEnv = LabelMap CAFSet
 
--- First, an analysis to find live CAFs.
 cafLattice :: DataflowLattice CAFSet
 cafLattice = DataflowLattice Set.empty add
   where
@@ -93,21 +91,27 @@ cafLattice = DataflowLattice Set.empty add
         let !new' = old `Set.union` new
         in changedIf (Set.size new' > Set.size old) new'
 
-cafTransfers :: BwdTransfer CmmNode CAFSet
-cafTransfers = mkBTransfer3 first middle last
-  where first  _ live = live
-        middle m live = foldExpDeep addCaf m live
-        last   l live = foldExpDeep addCaf l (joinOutFacts cafLattice l live)
-        addCaf e set = case e of
-               CmmLit (CmmLabel c)              -> add c set
-               CmmLit (CmmLabelOff c _)         -> add c set
-               CmmLit (CmmLabelDiffOff c1 c2 _) -> add c1 $ add c2 set
-               _ -> set
-        add l s = if hasCAF l then Set.insert (toClosureLbl l) s
-                              else s
+cafTransfers :: TransferFun CAFSet
+cafTransfers (BlockCC eNode middle xNode) fBase =
+    let joined = cafsInNode xNode $! joinOutFacts cafLattice xNode fBase
+        !result = foldNodesBwdOO cafsInNode middle joined
+    in mapSingleton (entryLabel eNode) result
 
+cafsInNode :: CmmNode e x -> CAFSet -> CAFSet
+cafsInNode node set = foldExpDeep addCaf node set
+  where
+    addCaf expr !set =
+        case expr of
+            CmmLit (CmmLabel c) -> add c set
+            CmmLit (CmmLabelOff c _) -> add c set
+            CmmLit (CmmLabelDiffOff c1 c2 _) -> add c1 $! add c2 set
+            _ -> set
+    add l s | hasCAF l  = Set.insert (toClosureLbl l) s
+            | otherwise = s
+
+-- | An analysis to find live CAFs.
 cafAnal :: CmmGraph -> CAFEnv
-cafAnal g = dataflowAnalBwd g [] cafLattice cafTransfers
+cafAnal cmmGraph = analyzeCmmBwd cafLattice cafTransfers cmmGraph mapEmpty
 
 -----------------------------------------------------------------------
 -- Building the SRTs
@@ -287,7 +291,7 @@ flatten env cafset = foldSet (lookup env) Set.empty cafset
 bundle :: Map CLabel CAFSet
        -> (CAFEnv, CmmDecl)
        -> (CAFSet, Maybe CLabel)
-       -> (BlockEnv CAFSet, CmmDecl)
+       -> (LabelMap CAFSet, CmmDecl)
 bundle flatmap (env, decl@(CmmProc infos _lbl _ g)) (closure_cafs, mb_lbl)
   = ( mapMapWithKey get_cafs (info_tbls infos), decl )
  where
@@ -311,7 +315,7 @@ bundle _flatmap (_, decl) _
   = ( mapEmpty, decl )
 
 
-flattenCAFSets :: [(CAFEnv, [CmmDecl])] -> [(BlockEnv CAFSet, CmmDecl)]
+flattenCAFSets :: [(CAFEnv, [CmmDecl])] -> [(LabelMap CAFSet, CmmDecl)]
 flattenCAFSets cpsdecls = zipWith (bundle flatmap) zipped localCAFs
    where
      zipped    = [ (env,decl) | (env,decls) <- cpsdecls, decl <- decls ]
@@ -337,8 +341,8 @@ doSRTs dflags topSRT tops
     setSRT (topSRT, rst) (_, decl) =
       return (topSRT, decl : rst)
 
-buildSRTs :: DynFlags -> TopSRT -> BlockEnv CAFSet
-          -> UniqSM (TopSRT, [CmmDecl], BlockEnv C_SRT)
+buildSRTs :: DynFlags -> TopSRT -> LabelMap CAFSet
+          -> UniqSM (TopSRT, [CmmDecl], LabelMap C_SRT)
 buildSRTs dflags top_srt caf_map
   = foldM doOne (top_srt, [], mapEmpty) (mapToList caf_map)
   where
@@ -354,7 +358,7 @@ buildSRTs dflags top_srt caf_map
 - Each one needs an SRT.
 - We get the CAFSet for each one from the CAFEnv
 - flatten gives us
-    [(BlockEnv CAFSet, CmmDecl)]
+    [(LabelMap CAFSet, CmmDecl)]
 -
 -}
 
@@ -367,7 +371,7 @@ buildSRTs dflags top_srt caf_map
    instructions for forward refs.  --SDM
 -}
 
-updInfoSRTs :: BlockEnv C_SRT -> CmmDecl -> CmmDecl
+updInfoSRTs :: LabelMap C_SRT -> CmmDecl -> CmmDecl
 updInfoSRTs srt_env (CmmProc top_info top_l live g) =
   CmmProc (top_info {info_tbls = mapMapWithKey updInfoTbl (info_tbls top_info)}) top_l live g
   where updInfoTbl l info_tbl

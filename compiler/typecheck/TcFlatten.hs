@@ -19,7 +19,6 @@ import TyCoRep   -- performs delicate algorithm on types
 import Coercion
 import Var
 import VarEnv
-import NameEnv
 import Outputable
 import TcSMonad as TcS
 import BasicTypes( SwapFlag(..) )
@@ -895,19 +894,16 @@ flatten_one (AppTy ty1 ty2)
                                    role2 co2 xi2 ty2
                                    role1 ) }  -- output should match fmode
 
-flatten_one ty@(TyConApp tc tys)
+flatten_one (TyConApp tc tys)
   -- Expand type synonyms that mention type families
   -- on the RHS; see Note [Flattening synonyms]
   | Just (tenv, rhs, tys') <- expandSynTyCon_maybe tc tys
   , let expanded_ty = mkAppTys (substTy (mkTvSubstPrs tenv) rhs) tys'
   = do { mode <- getMode
-       ; let used_tcs = tyConsOfType rhs
        ; case mode of
-           FM_FlattenAll | anyNameEnv isTypeFamilyTyCon used_tcs
-                         -> do { traceFlat "flatten_one syn expand" (ppr ty $$ ppr used_tcs)
-                               ; flatten_one expanded_ty }
-           _             -> do { traceFlat "flatten_one syn no expand" (ppr ty)
-                               ; flatten_ty_con_app tc tys } }
+           FM_FlattenAll | not (isFamFreeTyCon tc)
+                         -> flatten_one expanded_ty
+           _             -> flatten_ty_con_app tc tys }
 
   -- Otherwise, it's a type function application, and we have to
   -- flatten it away as well, and generate a new given equality constraint
@@ -1322,7 +1318,7 @@ It is easy to implement, in TcInteract.kick_out, by only kicking out an inert
 only if (a) the work item can rewrite the inert AND
         (b) the inert cannot rewrite the work item
 
-This is signifcantly harder to think about. It can save a LOT of work
+This is significantly harder to think about. It can save a LOT of work
 in occurs-check cases, but we don't care about them much.  Trac #5837
 is an example; all the constraints here are Givens
 

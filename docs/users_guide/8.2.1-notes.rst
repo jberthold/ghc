@@ -95,7 +95,22 @@ Compiler
 
   to define a synonym of ``T``, you must write::
 
-    data TSyn = (T :: (forall k. k -> Type) -> Type)
+    type TSyn = (T :: (forall k. k -> Type) -> Type)
+
+- The Mingw-w64 toolchain for the Windows version of GHC has been updated. GHC now uses
+  `GCC 6.2.0` and `binutils 2.27`.
+
+- Previously, :ghc-flag:`-Wmissing-methods` would not warn whenever a type
+  class method beginning with an underscore was not implemented in an instance.
+  For instance, this code would compile without any warnings: ::
+
+     class Foo a where
+       _Bar :: a -> Int
+
+     instance Foo Int
+
+  :ghc-flag:`-Wmissing-methods` will now warn that ``_Bar`` is not implemented
+  in the ``Foo Int`` instance.
 
 GHCi
 ~~~~
@@ -120,6 +135,11 @@ Template Haskell
 -  Add support for type signatures in patterns. (:ghc-ticket:`12164`)
 
 -  Make quoting and reification return the same types.  (:ghc-ticket:`11629`)
+
+-  More kind annotations appear in the left-hand sides of reified closed
+   type family equations, in order to disambiguate types that would otherwise
+   be ambiguous in the presence of :ghc-flag:`-XPolyKinds`.
+   (:ghc-ticket:`12646`)
 
 Runtime system
 ~~~~~~~~~~~~~~

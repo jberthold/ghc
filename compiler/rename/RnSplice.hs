@@ -5,9 +5,7 @@ module RnSplice (
         rnSpliceType, rnSpliceExpr, rnSplicePat, rnSpliceDecl,
         rnBracket,
         checkThLocalName
-#ifdef GHCI
         , traceSplice, SpliceInfo(..)
-#endif
   ) where
 
 #include "HsVersions.h"
@@ -22,7 +20,7 @@ import Kind
 import RnEnv
 import RnSource         ( rnSrcDecls, findSplice )
 import RnPat            ( rnPat )
-import BasicTypes       ( TopLevelFlag, isTopLevel )
+import BasicTypes       ( TopLevelFlag, isTopLevel, SourceText(..) )
 import Outputable
 import Module
 import SrcLoc
@@ -35,7 +33,6 @@ import {-# SOURCE #-} RnExpr   ( rnLExpr )
 import TcEnv            ( checkWellStaged )
 import THNames          ( liftName )
 
-#ifdef GHCI
 import DynFlags
 import FastString
 import ErrUtils         ( dumpIfSet_dyn_printer )
@@ -57,7 +54,6 @@ import {-# SOURCE #-} TcSplice
 
 import GHCi.RemoteTypes ( ForeignRef )
 import qualified Language.Haskell.TH as TH (Q)
-#endif
 
 import qualified GHC.LanguageExtensions as LangExt
 
@@ -201,23 +197,6 @@ quotedNameStageErr br
   = sep [ text "Stage error: the non-top-level quoted name" <+> ppr br
         , text "must be used at the same stage at which is is bound" ]
 
-#ifndef GHCI
-rnTopSpliceDecls :: HsSplice RdrName -> RnM ([LHsDecl RdrName], FreeVars)
-rnTopSpliceDecls e = failTH e "Template Haskell top splice"
-
-rnSpliceType :: HsSplice RdrName -> PostTc Name Kind
-             -> RnM (HsType Name, FreeVars)
-rnSpliceType e _ = failTH e "Template Haskell type splice"
-
-rnSpliceExpr :: HsSplice RdrName -> RnM (HsExpr Name, FreeVars)
-rnSpliceExpr e = failTH e "Template Haskell splice"
-
-rnSplicePat :: HsSplice RdrName -> RnM (Either (Pat RdrName) (Pat Name), FreeVars)
-rnSplicePat e = failTH e "Template Haskell pattern splice"
-
-rnSpliceDecl :: SpliceDecl RdrName -> RnM (SpliceDecl Name, FreeVars)
-rnSpliceDecl e = failTH e "Template Haskell declaration splice"
-#else
 
 {-
 *********************************************************
@@ -309,7 +288,7 @@ runRnSplice flavour run_meta ppr_res splice
   = do { splice' <- getHooked runRnSpliceHook return >>= ($ splice)
 
        ; let the_expr = case splice' of
-                  HsUntypedSplice _ e     ->  e
+                  HsUntypedSplice _ _ e   ->  e
                   HsQuasiQuote _ q qs str -> mkQuasiQuoteExpr flavour q qs str
                   HsTypedSplice {}        -> pprPanic "runRnSplice" (ppr splice)
                   HsSpliced {}            -> pprPanic "runRnSplice" (ppr splice)
@@ -350,7 +329,7 @@ runRnSplice flavour run_meta ppr_res splice
 makePending :: UntypedSpliceFlavour
             -> HsSplice Name
             -> PendingRnSplice
-makePending flavour (HsUntypedSplice n e)
+makePending flavour (HsUntypedSplice _ n e)
   = PendingRnSplice flavour n e
 makePending flavour (HsQuasiQuote n quoter q_span quote)
   = PendingRnSplice flavour n (mkQuasiQuoteExpr flavour quoter q_span quote)
@@ -370,7 +349,7 @@ mkQuasiQuoteExpr flavour quoter q_span quote
                      quoteExpr
   where
     quoterExpr = L q_span $! HsVar $! (L q_span quoter)
-    quoteExpr  = L q_span $! HsLit $! HsString "" quote
+    quoteExpr  = L q_span $! HsLit $! HsString NoSourceText quote
     quote_selector = case flavour of
                        UntypedExpSplice  -> quoteExpName
                        UntypedPatSplice  -> quotePatName
@@ -380,19 +359,19 @@ mkQuasiQuoteExpr flavour quoter q_span quote
 ---------------------
 rnSplice :: HsSplice RdrName -> RnM (HsSplice Name, FreeVars)
 -- Not exported...used for all
-rnSplice (HsTypedSplice splice_name expr)
+rnSplice (HsTypedSplice hasParen splice_name expr)
   = do  { checkTH expr "Template Haskell typed splice"
         ; loc  <- getSrcSpanM
         ; n' <- newLocalBndrRn (L loc splice_name)
         ; (expr', fvs) <- rnLExpr expr
-        ; return (HsTypedSplice n' expr', fvs) }
+        ; return (HsTypedSplice hasParen n' expr', fvs) }
 
-rnSplice (HsUntypedSplice splice_name expr)
+rnSplice (HsUntypedSplice hasParen splice_name expr)
   = do  { checkTH expr "Template Haskell untyped splice"
         ; loc  <- getSrcSpanM
         ; n' <- newLocalBndrRn (L loc splice_name)
         ; (expr', fvs) <- rnLExpr expr
-        ; return (HsUntypedSplice n' expr', fvs) }
+        ; return (HsUntypedSplice hasParen n' expr', fvs) }
 
 rnSplice (HsQuasiQuote splice_name quoter q_loc quote)
   = do  { checkTH quoter "Template Haskell quasi-quote"
@@ -760,7 +739,6 @@ illegalUntypedSplice = text "Untyped splices may not appear in typed brackets"
 --  = vcat [ hang (text "In the splice:")
 --              2 (char '$' <> pprParendExpr expr)
 --        , text "To see what the splice expanded to, use -ddump-splices" ]
-#endif
 
 checkThLocalName :: Name -> RnM ()
 checkThLocalName name

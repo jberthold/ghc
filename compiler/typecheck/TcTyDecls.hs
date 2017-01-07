@@ -806,12 +806,7 @@ mkOneRecordSelector all_cons idDetails fl
     lbl      = flLabel fl
     sel_name = flSelector fl
 
-    sel_id =
-      -- Do not mark record selectors as exported to avoid keeping these Ids
-      -- alive unnecessarily. See #12125. Selectors are now marked as exported
-      -- when necessary by desugarer ('Desugar.addExportFlagsAndRules', also see
-      -- uses of 'availsToNameSetWithSelectors' in 'Desugar.hs').
-      mkNonExportedLocalId rec_details sel_name sel_ty
+    sel_id = mkExportedLocalId rec_details sel_name sel_ty
     rec_details = RecSelId { sel_tycon = idDetails, sel_naughty = is_naughty }
 
     -- Find a representative constructor, con1
@@ -885,7 +880,7 @@ mkOneRecordSelector all_cons idDetails fl
     inst_tys = substTyVars eq_subst univ_tvs
 
     unit_rhs = mkLHsTupleExpr []
-    msg_lit = HsStringPrim "" (fastStringToByteString lbl)
+    msg_lit = HsStringPrim NoSourceText (fastStringToByteString lbl)
 
 {-
 Note [Polymorphic selectors]

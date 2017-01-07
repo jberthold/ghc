@@ -155,6 +155,10 @@ tcTyClGroup (TyClGroup { group_tyclds = tyclds
        ; checkSynCycles this_uid tyclss tyclds
        ; traceTc "Done synonym cycle check" (ppr tyclss)
 
+       ; traceTc "Starting family consistency check" (ppr tyclss)
+       ; forM_ tyclss checkRecFamInstConsistency
+       ; traceTc "Done family consistency" (ppr tyclss)
+
            -- Step 2: Perform the validity check on those types/classes
            -- We can do this now because we are done with the recursive knot
            -- Do it before Step 3 (adding implicit things) because the latter
@@ -1157,7 +1161,7 @@ kcDataDefn fam_name (HsIB { hsib_body = pats })
             Just k  -> do { k' <- tcLHsKind k
                           ; unifyKind (Just hs_ty_pats) res_k k' } }
   where
-    hs_ty_pats = mkHsAppTys (noLoc $ HsTyVar (noLoc fam_name)) pats
+    hs_ty_pats = mkHsAppTys (noLoc $ HsTyVar NotPromoted (noLoc fam_name)) pats
 
 {-
 Kind check type patterns and kind annotate the embedded type variables.
@@ -2299,6 +2303,8 @@ checkValidDataCon dflags existential_ok tc con
 
           -- Check all argument types for validity
         ; checkValidType ctxt (dataConUserType con)
+        ; mapM_ (checkForRepresentationPolymorphism empty)
+                (dataConOrigArgTys con)
 
           -- Extra checks for newtype data constructors
         ; when (isNewTyCon tc) (checkNewDataCon con)

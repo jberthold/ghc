@@ -1155,7 +1155,7 @@ Note [Do not do improvement for WOnly]
 We do improvement between two constraints (e.g. for injectivity
 or functional dependencies) only if both are "improvable". And
 we improve a constraint wrt the top-level instances only if
-it is improveable.
+it is improvable.
 
 Improvable:     [G] [WD] [D}
 Not improvable: [W]
@@ -3052,6 +3052,7 @@ deferTcSForAllEq role loc kind_cos (bndrs1,body1) (bndrs2,body2)
                                , ic_status = IC_Unsolved
                                , ic_binds  = ev_binds
                                , ic_env    = env
+                               , ic_needed = emptyVarSet
                                , ic_info   = skol_info }
       ; updWorkListTcS (extendWorkListImplic imp)
       ; let cobndrs    = zip skol_tvs kind_cos

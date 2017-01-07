@@ -34,6 +34,9 @@ module TysWiredIn (
         gtDataCon, gtDataConId,
         promotedLTDataCon, promotedEQDataCon, promotedGTDataCon,
 
+        -- * Boxign primitive types
+        boxingDataCon_maybe,
+
         -- * Char
         charTyCon, charDataCon, charTyCon_RDR,
         charTy, stringTy, charTyConName,
@@ -143,8 +146,10 @@ import TyCon
 import Class            ( Class, mkClass )
 import RdrName
 import Name
+import NameEnv          ( NameEnv, mkNameEnv, lookupNameEnv )
 import NameSet          ( NameSet, mkNameSet, elemNameSet )
-import BasicTypes       ( Arity, Boxity(..), TupleSort(..), ConTagZ )
+import BasicTypes       ( Arity, Boxity(..), TupleSort(..), ConTagZ,
+                          SourceText(..) )
 import ForeignCall
 import SrcLoc           ( noSrcSpan )
 import Unique
@@ -525,7 +530,7 @@ pcDataConWithFixity' declared_infix dc_name wrk_key rri tyvars ex_tyvars arg_tys
                 (mkDataConWorkId wrk_name data_con)
                 NoDataConRep    -- Wired-in types are too simple to need wrappers
 
-    no_bang = HsSrcBang Nothing NoSrcUnpack NoSrcStrict
+    no_bang = HsSrcBang NoSourceText NoSrcUnpack NoSrcStrict
 
     wrk_name = mkDataConWorkerName data_con wrk_key
 
@@ -690,6 +695,7 @@ isBuiltInOcc_maybe occ =
 
       -- unboxed tuple data/tycon
       "(##)"  -> Just $ tup_name Unboxed 0
+      "Unit#" -> Just $ tup_name Unboxed 1
       _ | Just rest <- "(#" `stripPrefix` name
         , (commas, rest') <- BS.span (==',') rest
         , "#)" <- rest'
@@ -707,7 +713,7 @@ isBuiltInOcc_maybe occ =
         , Just rest'' <- "_" `stripPrefix` rest'
         , (pipes2, rest''') <- BS.span (=='|') rest''
         , "#)" <- rest'''
-             -> let arity = BS.length pipes1 + BS.length pipes2
+             -> let arity = BS.length pipes1 + BS.length pipes2 + 1
                     alt = BS.length pipes1 + 1
                 in Just $ dataConName $ sumDataCon alt arity
       _ -> Nothing
@@ -1174,13 +1180,38 @@ ptrRepLiftedTy = mkTyConTy ptrRepLiftedDataConTyCon
 *                                                                      *
 ********************************************************************* -}
 
+boxingDataCon_maybe :: TyCon -> Maybe DataCon
+--    boxingDataCon_maybe Char# = C#
+--    boxingDataCon_maybe Int#  = I#
+--    ... etc ...
+-- See Note [Boxing primitive types]
+boxingDataCon_maybe tc
+  = lookupNameEnv boxing_constr_env (tyConName tc)
+
+boxing_constr_env :: NameEnv DataCon
+boxing_constr_env
+  = mkNameEnv [(charPrimTyConName  , charDataCon  )
+              ,(intPrimTyConName   , intDataCon   )
+              ,(wordPrimTyConName  , wordDataCon  )
+              ,(floatPrimTyConName , floatDataCon )
+              ,(doublePrimTyConName, doubleDataCon) ]
+
+{- Note [Boxing primitive types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For a handful of primitive types (Int, Char, Word, Flaot, Double),
+we can readily box and an unboxed version (Int#, Char# etc) using
+the corresponding data constructor.  This is useful in a couple
+of places, notably let-floating -}
+
+
 charTy :: Type
 charTy = mkTyConTy charTyCon
 
 charTyCon :: TyCon
 charTyCon   = pcNonEnumTyCon charTyConName
-                       (Just (CType "" Nothing ("HsChar",fsLit "HsChar")))
-                       [] [charDataCon]
+                   (Just (CType NoSourceText Nothing
+                                  (NoSourceText,fsLit "HsChar")))
+                   [] [charDataCon]
 charDataCon :: DataCon
 charDataCon = pcDataCon charDataConName [] [charPrimTy] charTyCon
 
@@ -1192,8 +1223,8 @@ intTy = mkTyConTy intTyCon
 
 intTyCon :: TyCon
 intTyCon = pcNonEnumTyCon intTyConName
-                            (Just (CType "" Nothing ("HsInt",fsLit "HsInt"))) []
-                            [intDataCon]
+               (Just (CType NoSourceText Nothing (NoSourceText,fsLit "HsInt")))
+                 [] [intDataCon]
 intDataCon :: DataCon
 intDataCon = pcDataCon intDataConName [] [intPrimTy] intTyCon
 
@@ -1202,8 +1233,8 @@ wordTy = mkTyConTy wordTyCon
 
 wordTyCon :: TyCon
 wordTyCon = pcNonEnumTyCon wordTyConName
-                      (Just (CType "" Nothing ("HsWord", fsLit "HsWord"))) []
-                      [wordDataCon]
+            (Just (CType NoSourceText Nothing (NoSourceText, fsLit "HsWord")))
+               [] [wordDataCon]
 wordDataCon :: DataCon
 wordDataCon = pcDataCon wordDataConName [] [wordPrimTy] wordTyCon
 
@@ -1212,7 +1243,8 @@ word8Ty = mkTyConTy word8TyCon
 
 word8TyCon :: TyCon
 word8TyCon = pcNonEnumTyCon word8TyConName
-                      (Just (CType "" Nothing ("HsWord8", fsLit "HsWord8"))) []
+                      (Just (CType NoSourceText Nothing
+                             (NoSourceText, fsLit "HsWord8"))) []
                       [word8DataCon]
 word8DataCon :: DataCon
 word8DataCon = pcDataCon word8DataConName [] [wordPrimTy] word8TyCon
@@ -1222,7 +1254,8 @@ floatTy = mkTyConTy floatTyCon
 
 floatTyCon :: TyCon
 floatTyCon   = pcNonEnumTyCon floatTyConName
-                      (Just (CType "" Nothing ("HsFloat", fsLit "HsFloat"))) []
+                      (Just (CType NoSourceText Nothing
+                             (NoSourceText, fsLit "HsFloat"))) []
                       [floatDataCon]
 floatDataCon :: DataCon
 floatDataCon = pcDataCon         floatDataConName [] [floatPrimTy] floatTyCon
@@ -1232,7 +1265,8 @@ doubleTy = mkTyConTy doubleTyCon
 
 doubleTyCon :: TyCon
 doubleTyCon = pcNonEnumTyCon doubleTyConName
-                      (Just (CType "" Nothing ("HsDouble",fsLit "HsDouble"))) []
+                      (Just (CType NoSourceText Nothing
+                             (NoSourceText,fsLit "HsDouble"))) []
                       [doubleDataCon]
 
 doubleDataCon :: DataCon
@@ -1293,7 +1327,8 @@ boolTy = mkTyConTy boolTyCon
 
 boolTyCon :: TyCon
 boolTyCon = pcTyCon True boolTyConName
-                    (Just (CType "" Nothing ("HsBool", fsLit "HsBool")))
+                    (Just (CType NoSourceText Nothing
+                           (NoSourceText, fsLit "HsBool")))
                     [] [falseDataCon, trueDataCon]
 
 falseDataCon, trueDataCon :: DataCon

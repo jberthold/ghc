@@ -31,9 +31,7 @@ module GhcMake(
 
 #include "HsVersions.h"
 
-#ifdef GHCI
 import qualified Linker         ( unload )
-#endif
 
 import DriverPhases
 import DriverPipeline
@@ -479,7 +477,7 @@ guessOutputFile = modifySession $ \env ->
 
         name_exe = do
 #if defined(mingw32_HOST_OS)
-          -- we must add the .exe extention unconditionally here, otherwise
+          -- we must add the .exe extension unconditionally here, otherwise
           -- when name has an extension of its own, the .exe extension will
           -- not be added by DriverPipeline.exeFileName.  See #2248
           name' <- fmap (<.> "exe") name
@@ -563,13 +561,7 @@ findPartiallyCompletedCycles modsDone theGraph
 unload :: HscEnv -> [Linkable] -> IO ()
 unload hsc_env stable_linkables -- Unload everthing *except* 'stable_linkables'
   = case ghcLink (hsc_dflags hsc_env) of
-#ifdef GHCI
         LinkInMemory -> Linker.unload hsc_env stable_linkables
-#else
-        LinkInMemory -> panic "unload: no interpreter"
-                                -- urgh.  avoid warnings:
-                                hsc_env stable_linkables
-#endif
         _other -> return ()
 
 -- -----------------------------------------------------------------------------
@@ -2048,6 +2040,24 @@ summariseModule hsc_env old_summary_map is_boot (L loc wanted_mod)
                               text "File name does not match module name:"
                               $$ text "Saw:" <+> quotes (ppr mod_name)
                               $$ text "Expected:" <+> quotes (ppr wanted_mod)
+
+        when (hsc_src == HsigFile && isNothing (lookup mod_name (thisUnitIdInsts dflags))) $
+            let suggested_instantiated_with =
+                    hcat (punctuate comma $
+                        [ ppr k <> text "=" <> ppr v
+                        | (k,v) <- ((mod_name, mkHoleModule mod_name)
+                                : thisUnitIdInsts dflags)
+                        ])
+            in throwOneError $ mkPlainErrMsg dflags' mod_loc $
+                text "Unexpected signature:" <+> quotes (ppr mod_name)
+                $$ if gopt Opt_BuildingCabalPackage dflags
+                    then parens (text "Try adding" <+> quotes (ppr mod_name)
+                            <+> text "to the"
+                            <+> quotes (text "signatures")
+                            <+> text "field in your Cabal file.")
+                    else parens (text "Try passing -instantiated-with=\"" <>
+                                 suggested_instantiated_with <> text "\"" $$
+                                text "replacing <" <> ppr mod_name <> text "> as necessary.")
 
                 -- Find the object timestamp, and return the summary
         obj_timestamp <-

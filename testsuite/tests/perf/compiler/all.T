@@ -501,7 +501,7 @@ test('T5321Fun',
              # 2014-09-03: 299656164     (specialisation and inlining)
              # 10/12/2014: 206406188     #  Improvements in constraint solver
              # 2016-04-06: 279922360 x86/Linux
-            (wordsize(64), 565883176, 10)])
+            (wordsize(64), 497356688, 5)])
              # prev:       585521080
              # 29/08/2012: 713385808     #  (increase due to new codegen)
              # 15/05/2013: 628341952     #  (reason for decrease unknown)
@@ -515,6 +515,9 @@ test('T5321Fun',
              #  (undefined now takes an implicit parameter and GHC -O0 does
              #  not recognize that the application is bottom)
              # 11/12/2015: 565883176     #  TypeInType (see #11196)
+             # 06/01/2017: 497356688     #  Small coercion optimisations
+                                         #  The actual decrease was only 2%; earlier
+                                         #    commits had drifted down
       ],
       compile,[''])
 
@@ -767,7 +770,7 @@ test('T9872c',
 test('T9872d',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 506691240, 5),
+          [(wordsize(64), 478169352, 5),
           # 2014-12-18    796071864   Initally created
           # 2014-12-18    739189056   Reduce type families even more eagerly
           # 2015-01-07    687562440   TrieMap leaf compression
@@ -775,6 +778,8 @@ test('T9872d',
           # 2015-12-11    566134504   TypeInType; see #11196
           # 2016-02-08    534693648   Improved a bit by tyConRolesRepresentational
           # 2016-03-18    506691240   optimize Unify & zonking
+          # 2016-12-05    478169352   using tyConIsTyFamFree, I think, but only
+          #                           a 1% improvement 482 -> 478
            (wordsize(32), 264566040, 5)
           # some date     328810212
           # 2015-07-11    350369584
@@ -864,11 +869,55 @@ test('T10547',
 test('T12227',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 1822822016, 5),
+          [(wordsize(64), 1715827784, 5),
           # 2016-07-11    5650186880 (Windows) before fix for #12227
           # 2016-07-11    1822822016 (Windows) after fix for #12227
+          # 2016-12-20    1715827784 after d250d493 (INLINE in Traversable dms)
+          #                          (or thereabouts in the commit history)
           ]),
      ],
      compile,
      # Use `-M1G` to prevent memory thrashing with ghc-8.0.1.
      ['-O2 -ddump-hi -ddump-to-file +RTS -M1G'])
+
+test('T12425',
+     [ only_ways(['optasm']),
+       compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 125831400, 5),
+          # initial:    125831400
+          ]),
+     ],
+     compile,
+     [''])
+
+test('T12234',
+     [ only_ways(['optasm']),
+       compiler_stats_num_field('bytes allocated',
+          [(platform('x86_64-unknown-mingw32'), 77949232, 5),
+          # initial:    77949232
+           (wordsize(64), 72958288, 5),
+          # initial:    72958288
+          ]),
+     ],
+     compile,
+     [''])
+
+test('T13035',
+     [ only_ways(['normal']),
+       compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 90595208, 5),
+          # 2017-01-05   90595208 initial
+          ]),
+     ],
+     compile,
+     [''] )
+
+test('T13056',
+     [ only_ways(['optasm']),
+       compiler_stats_num_field('bytes allocated',
+         [(wordsize(64), 520166912, 5),
+         # 2017-01-06    520166912 initial
+         ]),
+     ],
+     compile,
+     ['-O1'])

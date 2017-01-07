@@ -390,7 +390,7 @@ buildClass tycon_name binders roles sc_theta
         ; traceIf (text "buildClass" <+> ppr tycon)
         ; return result }
   where
-    no_bang = HsSrcBang Nothing NoSrcUnpack NoSrcStrict
+    no_bang = HsSrcBang NoSourceText NoSrcUnpack NoSrcStrict
 
     mk_op_item :: Class -> TcMethInfo -> TcRnIf n m ClassOpItem
     mk_op_item rec_clas (op_name, _, dm_spec)
@@ -431,7 +431,7 @@ newImplicitBinder :: Name                       -- Base name
                   -> TcRnIf m n Name            -- Implicit name
 -- Called in BuildTyCl to allocate the implicit binders of type/class decls
 -- For source type/class decls, this is the first occurrence
--- For iface ones, the LoadIface has alrady allocated a suitable name in the cache
+-- For iface ones, the LoadIface has already allocated a suitable name in the cache
 newImplicitBinder base_name mk_sys_occ
   = newImplicitBinderLoc base_name mk_sys_occ (nameSrcSpan base_name)
 

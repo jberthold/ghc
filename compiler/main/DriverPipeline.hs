@@ -1698,13 +1698,13 @@ mkExtraObjToLinkIntoBinary dflags = do
           <> text (show (rtsOptsEnabled dflags)) <> semi,
       text " __conf.rts_opts_suggestions = "
           <> text (if rtsOptsSuggestions dflags
-                      then "rtsTrue"
-                      else "rtsFalse") <> semi,
+                      then "true"
+                      else "false") <> semi,
       case rtsOpts dflags of
          Nothing   -> Outputable.empty
          Just opts -> text "    __conf.rts_opts= " <>
                         text (show opts) <> semi,
-      text " __conf.rts_hs_main = rtsTrue;",
+      text " __conf.rts_hs_main = true;",
       text " return hs_main(argc,argv,&ZCMain_main_closure,__conf);",
       char '}',
       char '\n' -- final newline, to keep gcc happy
@@ -2306,11 +2306,7 @@ doCpp dflags raw input_fn output_fn = do
 
     backend_defs <- getBackendDefs dflags
 
-#ifdef GHCI
     let th_defs = [ "-D__GLASGOW_HASKELL_TH__" ]
-#else
-    let th_defs = [ "-D__GLASGOW_HASKELL_TH__=0" ]
-#endif
     -- Default CPP defines in Haskell source
     ghcVersionH <- getGhcVersionPathName dflags
     let hsSourceCppOpts = [ "-include", ghcVersionH ]

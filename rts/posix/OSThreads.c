@@ -35,7 +35,6 @@
 #endif
 #endif
 
-#if defined(THREADED_RTS)
 #include "RtsUtils.h"
 #include "Task.h"
 
@@ -100,19 +99,19 @@ closeCondition( Condition* pCond )
   return;
 }
 
-rtsBool
+bool
 broadcastCondition ( Condition* pCond )
 {
   return (pthread_cond_broadcast(pCond) == 0);
 }
 
-rtsBool
+bool
 signalCondition ( Condition* pCond )
 {
   return (pthread_cond_signal(pCond) == 0);
 }
 
-rtsBool
+bool
 waitCondition ( Condition* pCond, Mutex* pMut )
 {
   return (pthread_cond_wait(pCond,pMut) == 0);
@@ -151,12 +150,12 @@ osThreadId(void)
   return pthread_self();
 }
 
-rtsBool
+bool
 osThreadIsAlive(OSThreadId id STG_UNUSED)
 {
     // no good way to implement this on POSIX, AFAICT.  Returning true
     // is safe.
-    return rtsTrue;
+    return true;
 }
 
 void
@@ -215,6 +214,8 @@ freeThreadLocalKey (ThreadLocalKey *key)
     }
 }
 
+#if defined(THREADED_RTS)
+
 static void *
 forkOS_createThreadWrapper ( void * entry )
 {
@@ -265,6 +266,23 @@ getNumberOfProcessors (void)
 
     return nproc;
 }
+
+#else /* !defined(THREADED_RTS) */
+
+int
+forkOS_createThread ( HsStablePtr entry STG_UNUSED )
+{
+    return -1;
+}
+
+void freeThreadingResources (void) { /* nothing */ }
+
+uint32_t getNumberOfProcessors (void)
+{
+    return 1;
+}
+
+#endif /* defined(THREADED_RTS) */
 
 #if defined(HAVE_SCHED_H) && defined(HAVE_SCHED_SETAFFINITY)
 // Schedules the thread to run on CPU n of m.  m may be less than the
@@ -352,23 +370,6 @@ interruptOSThread (OSThreadId id)
 {
     pthread_kill(id, SIGPIPE);
 }
-
-#else /* !defined(THREADED_RTS) */
-
-int
-forkOS_createThread ( HsStablePtr entry STG_UNUSED )
-{
-    return -1;
-}
-
-void freeThreadingResources (void) { /* nothing */ }
-
-uint32_t getNumberOfProcessors (void)
-{
-    return 1;
-}
-
-#endif /* defined(THREADED_RTS) */
 
 KernelThreadId kernelThreadId (void)
 {

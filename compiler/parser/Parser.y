@@ -316,6 +316,48 @@ correctly, see the README in (REPO)/utils/check-api-annotations for details on
 how to set up a test using the check-api-annotations utility, and interpret the
 output it generates.
 
+Note [Parsing lists]
+---------------------
+You might be wondering why we spend so much effort encoding our lists this
+way:
+
+importdecls
+        : importdecls ';' importdecl
+        | importdecls ';'
+        | importdecl
+        | {- empty -}
+
+This might seem like an awfully roundabout way to declare a list; plus, to add
+insult to injury you have to reverse the results at the end.  The answer is that
+left recursion prevents us from running out of stack space when parsing long
+sequences.  See: https://www.haskell.org/happy/doc/html/sec-sequences.html for
+more guidance.
+
+By adding/removing branches, you can affect what lists are accepted.  Here
+are the most common patterns, rewritten as regular expressions for clarity:
+
+    -- Equivalent to: ';'* (x ';'+)* x?  (can be empty, permits leading/trailing semis)
+    xs : xs ';' x
+       | xs ';'
+       | x
+       | {- empty -}
+
+    -- Equivalent to x (';' x)* ';'*  (non-empty, permits trailing semis)
+    xs : xs ';' x
+       | xs ';'
+       | x
+
+    -- Equivalent to ';'* alts (';' alts)* ';'* (non-empty, permits leading/trailing semis)
+    alts : alts1
+         | ';' alts
+    alts1 : alts1 ';' alt
+          | alts1 ';'
+          | alt
+
+    -- Equivalent to x (',' x)+ (non-empty, no trailing semis)
+    xs : x
+       | x ',' xs
+
 -- -----------------------------------------------------------------------------
 
 -}
@@ -665,22 +707,15 @@ body2   :: { ([AddAnn]
                                                    :(fst $2), snd $2) }
         |  missing_module_keyword top close     { ([],snd $2) }
 
+
 top     :: { ([AddAnn]
              ,([LImportDecl RdrName], [LHsDecl RdrName])) }
-        : importdecls                   { (fst $1
-                                          ,(reverse $ snd $1,[]))}
-        | importdecls ';' cvtopdecls    {% if null (snd $1)
-                                             then return ((mj AnnSemi $2:(fst $1))
-                                                         ,(reverse $ snd $1,$3))
-                                             else do
-                                              { addAnnotation (gl $ head $ snd $1)
-                                                              AnnSemi (gl $2)
-                                              ; return (fst $1
-                                                       ,(reverse $ snd $1,$3)) }}
-        | cvtopdecls                    { ([],([],$1)) }
+        : semis top1                            { ($1, $2) }
 
-cvtopdecls :: { [LHsDecl RdrName] }
-        : topdecls                              { cvTopDecls $1 }
+top1    :: { ([LImportDecl RdrName], [LHsDecl RdrName]) }
+        : importdecls_semi topdecls_semi        { (reverse $1, cvTopDecls $2) }
+        | importdecls_semi topdecls             { (reverse $1, cvTopDecls $2) }
+        | importdecls                           { (reverse $1, []) }
 
 -----------------------------------------------------------------------------
 -- Module declaration & imports only
@@ -700,12 +735,19 @@ header  :: { Located (HsModule RdrName) }
                           Nothing)) }
 
 header_body :: { [LImportDecl RdrName] }
-        :  '{'            importdecls           { snd $2 }
-        |      vocurly    importdecls           { snd $2 }
+        :  '{'            header_top            { $2 }
+        |      vocurly    header_top            { $2 }
 
 header_body2 :: { [LImportDecl RdrName] }
-        :  '{' importdecls                      { snd $2 }
-        |  missing_module_keyword importdecls   { snd $2 }
+        :  '{' header_top                       { $2 }
+        |  missing_module_keyword header_top    { $2 }
+
+header_top :: { [LImportDecl RdrName] }
+        :  semis header_top_importdecls         { $2 }
+
+header_top_importdecls :: { [LImportDecl RdrName] }
+        :  importdecls_semi                     { $1 }
+        |  importdecls                          { $1 }
 
 -----------------------------------------------------------------------------
 -- The Export List
@@ -792,25 +834,31 @@ qcname  :: { Located RdrName }  -- Variable or type constructor
 -----------------------------------------------------------------------------
 -- Import Declarations
 
--- import decls can be *empty*, or even just a string of semicolons
--- whereas topdecls must contain at least one topdecl.
+-- importdecls and topdecls must contain at least one declaration;
+-- top handles the fact that these may be optional.
 
-importdecls :: { ([AddAnn],[LImportDecl RdrName]) }
-        : importdecls ';' importdecl
-                                {% if null (snd $1)
-                                     then return (mj AnnSemi $2:fst $1,$3 : snd $1)
-                                     else do
-                                      { addAnnotation (gl $ head $ snd $1)
-                                                      AnnSemi (gl $2)
-                                      ; return (fst $1,$3 : snd $1) } }
-        | importdecls ';'       {% if null (snd $1)
-                                     then return ((mj AnnSemi $2:fst $1),snd $1)
-                                     else do
-                                       { addAnnotation (gl $ head $ snd $1)
-                                                       AnnSemi (gl $2)
-                                       ; return $1} }
-        | importdecl             { ([],[$1]) }
-        | {- empty -}            { ([],[]) }
+-- One or more semicolons
+semis1  :: { [AddAnn] }
+semis1  : semis1 ';'  { mj AnnSemi $2 : $1 }
+        | ';'         { [mj AnnSemi $1] }
+
+-- Zero or more semicolons
+semis   :: { [AddAnn] }
+semis   : semis ';'   { mj AnnSemi $2 : $1 }
+        | {- empty -} { [] }
+
+-- No trailing semicolons, non-empty
+importdecls :: { [LImportDecl RdrName] }
+importdecls
+        : importdecls_semi importdecl
+                                { $2 : $1 }
+
+-- May have trailing semicolons, can be empty
+importdecls_semi :: { [LImportDecl RdrName] }
+importdecls_semi
+        : importdecls_semi importdecl semis1
+                                {% ams $2 $3 >> return ($2 : $1) }
+        | {- empty -}           { [] }
 
 importdecl :: { LImportDecl RdrName }
         : 'import' maybe_src maybe_safe optqualified maybe_pkg modid maybeas maybeimpspec
@@ -824,10 +872,10 @@ importdecl :: { LImportDecl RdrName }
                    ((mj AnnImport $1 : (fst $ fst $2) ++ fst $3 ++ fst $4
                                     ++ fst $5 ++ fst $7)) }
 
-maybe_src :: { (([AddAnn],Maybe SourceText),IsBootInterface) }
-        : '{-# SOURCE' '#-}'        { (([mo $1,mc $2],Just (getSOURCE_PRAGs $1))
+maybe_src :: { (([AddAnn],SourceText),IsBootInterface) }
+        : '{-# SOURCE' '#-}'        { (([mo $1,mc $2],getSOURCE_PRAGs $1)
                                       ,True) }
-        | {- empty -}               { (([],Nothing),False) }
+        | {- empty -}               { (([],NoSourceText),False) }
 
 maybe_safe :: { ([AddAnn],Bool) }
         : 'safe'                                { ([mj AnnSafe $1],True) }
@@ -871,7 +919,7 @@ impspec :: { Located (Bool, Located [LIE RdrName]) }
 -- Fixity Declarations
 
 prec    :: { Located (SourceText,Int) }
-        : {- empty -}           { noLoc ("",9) }
+        : {- empty -}           { noLoc (NoSourceText,9) }
         | INTEGER
                  {% checkPrecP (sL1 $1 (getINTEGERs $1,fromInteger (getINTEGER $1))) }
 
@@ -888,12 +936,14 @@ ops     :: { Located (OrdList (Located RdrName)) }
 -----------------------------------------------------------------------------
 -- Top-Level Declarations
 
+-- No trailing semicolons, non-empty
 topdecls :: { OrdList (LHsDecl RdrName) }
-        : topdecls ';' topdecl        {% addAnnotation (oll $1) AnnSemi (gl $2)
-                                         >> return ($1 `appOL` unitOL $3) }
-        | topdecls ';'                {% addAnnotation (oll $1) AnnSemi (gl $2)
-                                         >> return $1 }
-        | topdecl                     { unitOL $1 }
+        : topdecls_semi topdecl        { $1 `snocOL` $2 }
+
+-- May have trailing semicolons, can be empty
+topdecls_semi :: { OrdList (LHsDecl RdrName) }
+        : topdecls_semi topdecl semis1 {% ams $2 $3 >> return ($1 `snocOL` $2) }
+        | {- empty -}                  { nilOL }
 
 topdecl :: { LHsDecl RdrName }
         : cl_decl                               { sL1 $1 (TyClD (unLoc $1)) }
@@ -1053,11 +1103,11 @@ overlap_pragma :: { Maybe (Located OverlapMode) }
   | {- empty -}                 { Nothing }
 
 deriv_strategy :: { Maybe (Located DerivStrategy) }
-  : 'stock'                     {% ajs (Just (sL1 $1 DerivStock))
+  : 'stock'                     {% ajs (Just (sL1 $1 StockStrategy))
                                        [mj AnnStock $1] }
-  | 'anyclass'                  {% ajs (Just (sL1 $1 DerivAnyclass))
+  | 'anyclass'                  {% ajs (Just (sL1 $1 AnyclassStrategy))
                                        [mj AnnAnyclass $1] }
-  | 'newtype'                   {% ajs (Just (sL1 $1 DerivNewtype))
+  | 'newtype'                   {% ajs (Just (sL1 $1 NewtypeStrategy))
                                        [mj AnnNewtype $1] }
   | {- empty -}                 { Nothing }
 
@@ -1444,11 +1494,11 @@ binds   ::  { Located ([AddAnn],Located (HsLocalBinds RdrName)) }
                                                     ,sL1 $1 $ HsValBinds val_binds)) } }
 
         | '{'            dbinds '}'     { sLL $1 $> ([moc $1,mcc $3]
-                                             ,sL1 $2 $ HsIPBinds (IPBinds (unLoc $2)
+                                             ,sL1 $2 $ HsIPBinds (IPBinds (reverse $ unLoc $2)
                                                          emptyTcEvBinds)) }
 
         |     vocurly    dbinds close   { L (getLoc $2) ([]
-                                            ,sL1 $2 $ HsIPBinds (IPBinds (unLoc $2)
+                                            ,sL1 $2 $ HsIPBinds (IPBinds (reverse $ unLoc $2)
                                                         emptyTcEvBinds)) }
 
 
@@ -1521,7 +1571,7 @@ warnings :: { OrdList (LWarnDecl RdrName) }
 -- SUP: TEMPORARY HACK, not checking for `module Foo'
 warning :: { OrdList (LWarnDecl RdrName) }
         : namelist strings
-                {% amsu (sLL $1 $> (Warning (unLoc $1) (WarningTxt (noLoc "") $ snd $ unLoc $2)))
+                {% amsu (sLL $1 $> (Warning (unLoc $1) (WarningTxt (noLoc NoSourceText) $ snd $ unLoc $2)))
                      (fst $ unLoc $2) }
 
 deprecations :: { OrdList (LWarnDecl RdrName) }
@@ -1536,7 +1586,7 @@ deprecations :: { OrdList (LWarnDecl RdrName) }
 -- SUP: TEMPORARY HACK, not checking for `module Foo'
 deprecation :: { OrdList (LWarnDecl RdrName) }
         : namelist strings
-             {% amsu (sLL $1 $> $ (Warning (unLoc $1) (DeprecatedTxt (noLoc "") $ snd $ unLoc $2)))
+             {% amsu (sLL $1 $> $ (Warning (unLoc $1) (DeprecatedTxt (noLoc NoSourceText) $ snd $ unLoc $2)))
                      (fst $ unLoc $2) }
 
 strings :: { Located ([AddAnn],[Located StringLiteral]) }
@@ -1601,7 +1651,7 @@ fspec :: { Located ([AddAnn]
                                              ,(L (getLoc $1)
                                                     (getStringLiteral $1), $2, mkLHsSigType $4)) }
        |        var '::' sigtypedoc     { sLL $1 $> ([mu AnnDcolon $2]
-                                             ,(noLoc (StringLiteral "" nilFS), $1, mkLHsSigType $3)) }
+                                             ,(noLoc (StringLiteral NoSourceText nilFS), $1, mkLHsSigType $3)) }
          -- if the entity string is missing, it defaults to the empty string;
          -- the meaning of an empty entity string depends on the calling
          -- convention
@@ -1639,7 +1689,7 @@ sigtypes1 :: { (OrdList (LHsSigType RdrName)) }
 -- Types
 
 strict_mark :: { Located ([AddAnn],HsSrcBang) }
-        : strictness { sL1 $1 (let (a, str) = unLoc $1 in (a, HsSrcBang Nothing NoSrcUnpack str)) }
+        : strictness { sL1 $1 (let (a, str) = unLoc $1 in (a, HsSrcBang NoSourceText NoSrcUnpack str)) }
         | unpackedness { sL1 $1 (let (a, prag, unpk) = unLoc $1 in (a, HsSrcBang prag unpk NoSrcStrict)) }
         | unpackedness strictness { sLL $1 $> (let { (a, prag, unpk) = unLoc $1
                                                    ; (a', str) = unLoc $2 }
@@ -1651,9 +1701,9 @@ strictness :: { Located ([AddAnn], SrcStrictness) }
         : '!' { sL1 $1 ([mj AnnBang $1], SrcStrict) }
         | '~' { sL1 $1 ([mj AnnTilde $1], SrcLazy) }
 
-unpackedness :: { Located ([AddAnn], Maybe SourceText, SrcUnpackedness) }
-        : '{-# UNPACK' '#-}'   { sLL $1 $> ([mo $1, mc $2], Just $ getUNPACK_PRAGs $1, SrcUnpack) }
-        | '{-# NOUNPACK' '#-}' { sLL $1 $> ([mo $1, mc $2], Just $ getNOUNPACK_PRAGs $1, SrcNoUnpack) }
+unpackedness :: { Located ([AddAnn], SourceText, SrcUnpackedness) }
+        : '{-# UNPACK' '#-}'   { sLL $1 $> ([mo $1, mc $2], getUNPACK_PRAGs $1, SrcUnpack) }
+        | '{-# NOUNPACK' '#-}' { sLL $1 $> ([mo $1, mc $2], getNOUNPACK_PRAGs $1, SrcNoUnpack) }
 
 -- A ctype is a for-all type
 ctype   :: { LHsType RdrName }
@@ -1785,8 +1835,8 @@ tyapp :: { LHsAppType RdrName }
                                                [mj AnnSimpleQuote $1] }
 
 atype :: { LHsType RdrName }
-        : ntgtycon                       { sL1 $1 (HsTyVar $1) }      -- Not including unit tuples
-        | tyvar                          { sL1 $1 (HsTyVar $1) }      -- (See Note [Unit tuples])
+        : ntgtycon                       { sL1 $1 (HsTyVar NotPromoted $1) }      -- Not including unit tuples
+        | tyvar                          { sL1 $1 (HsTyVar NotPromoted $1) }      -- (See Note [Unit tuples])
         | strict_mark atype              {% ams (sLL $1 $> (HsBangTy (snd $ unLoc $1) $2))
                                                 (fst $ unLoc $1) }  -- Constructor sigs only
         | '{' fielddecls '}'             {% amms (checkRecordSyntax
@@ -1813,21 +1863,21 @@ atype :: { LHsType RdrName }
         | '(' ctype '::' kind ')'     {% ams (sLL $1 $> $ HsKindSig $2 $4)
                                              [mop $1,mu AnnDcolon $3,mcp $5] }
         | quasiquote                  { sL1 $1 (HsSpliceTy (unLoc $1) placeHolderKind) }
-        | '$(' exp ')'                {% ams (sLL $1 $> $ mkHsSpliceTy $2)
+        | '$(' exp ')'                {% ams (sLL $1 $> $ mkHsSpliceTy HasParens $2)
                                              [mj AnnOpenPE $1,mj AnnCloseP $3] }
-        | TH_ID_SPLICE                {%ams (sLL $1 $> $ mkHsSpliceTy $ sL1 $1 $ HsVar $
+        | TH_ID_SPLICE                {%ams (sLL $1 $> $ mkHsSpliceTy NoParens $ sL1 $1 $ HsVar $
                                              (sL1 $1 (mkUnqual varName (getTH_ID_SPLICE $1))))
                                              [mj AnnThIdSplice $1] }
                                       -- see Note [Promotion] for the followings
-        | SIMPLEQUOTE qcon_nowiredlist {% ams (sLL $1 $> $ HsTyVar $2) [mj AnnSimpleQuote $1,mj AnnName $2] }
+        | SIMPLEQUOTE qcon_nowiredlist {% ams (sLL $1 $> $ HsTyVar Promoted $2) [mj AnnSimpleQuote $1,mj AnnName $2] }
         | SIMPLEQUOTE  '(' ctype ',' comma_types1 ')'
                              {% addAnnotation (gl $3) AnnComma (gl $4) >>
                                 ams (sLL $1 $> $ HsExplicitTupleTy [] ($3 : $5))
                                     [mj AnnSimpleQuote $1,mop $2,mcp $6] }
-        | SIMPLEQUOTE  '[' comma_types0 ']'     {% ams (sLL $1 $> $ HsExplicitListTy
+        | SIMPLEQUOTE  '[' comma_types0 ']'     {% ams (sLL $1 $> $ HsExplicitListTy Promoted
                                                             placeHolderKind $3)
                                                        [mj AnnSimpleQuote $1,mos $2,mcs $4] }
-        | SIMPLEQUOTE var                       {% ams (sLL $1 $> $ HsTyVar $2)
+        | SIMPLEQUOTE var                       {% ams (sLL $1 $> $ HsTyVar Promoted $2)
                                                        [mj AnnSimpleQuote $1,mj AnnName $2] }
 
         -- Two or more [ty, ty, ty] must be a promoted list type, just as
@@ -1836,7 +1886,7 @@ atype :: { LHsType RdrName }
         -- so you have to quote those.)
         | '[' ctype ',' comma_types1 ']'  {% addAnnotation (gl $2) AnnComma
                                                            (gl $3) >>
-                                             ams (sLL $1 $> $ HsExplicitListTy
+                                             ams (sLL $1 $> $ HsExplicitListTy NotPromoted
                                                      placeHolderKind ($2 : $4))
                                                  [mos $1,mcs $5] }
         | INTEGER              { sLL $1 $> $ HsTyLit $ HsNumTy (getINTEGERs $1)
@@ -2362,7 +2412,7 @@ scc_annot :: { Located (([AddAnn],SourceText),StringLiteral) }
                                                 ,mc $3],getSCC_PRAGs $1),(StringLiteral (getSTRINGs $2) scc)) }
         | '{-# SCC' VARID  '#-}'      { sLL $1 $> (([mo $1,mj AnnVal $2
                                          ,mc $3],getSCC_PRAGs $1)
-                                        ,(StringLiteral (unpackFS $ getVARID $2) (getVARID $2))) }
+                                        ,(StringLiteral NoSourceText (getVARID $2))) }
 
 hpc_annot :: { Located ( (([AddAnn],SourceText),(StringLiteral,(Int,Int),(Int,Int))),
                          ((SourceText,SourceText),(SourceText,SourceText))
@@ -2471,17 +2521,17 @@ aexp2   :: { LHsExpr RdrName }
                                           [mo $1,mc $4] }
 
 splice_exp :: { LHsExpr RdrName }
-        : TH_ID_SPLICE          {% ams (sL1 $1 $ mkHsSpliceE
+        : TH_ID_SPLICE          {% ams (sL1 $1 $ mkHsSpliceE NoParens
                                         (sL1 $1 $ HsVar (sL1 $1 (mkUnqual varName
                                                            (getTH_ID_SPLICE $1)))))
                                        [mj AnnThIdSplice $1] }
-        | '$(' exp ')'          {% ams (sLL $1 $> $ mkHsSpliceE $2)
+        | '$(' exp ')'          {% ams (sLL $1 $> $ mkHsSpliceE HasParens $2)
                                        [mj AnnOpenPE $1,mj AnnCloseP $3] }
-        | TH_ID_TY_SPLICE       {% ams (sL1 $1 $ mkHsSpliceTE
+        | TH_ID_TY_SPLICE       {% ams (sL1 $1 $ mkHsSpliceTE NoParens
                                         (sL1 $1 $ HsVar (sL1 $1 (mkUnqual varName
                                                         (getTH_ID_TY_SPLICE $1)))))
                                        [mj AnnThIdTySplice $1] }
-        | '$$(' exp ')'         {% ams (sLL $1 $> $ mkHsSpliceTE $2)
+        | '$$(' exp ')'         {% ams (sLL $1 $> $ mkHsSpliceTE HasParens $2)
                                        [mj AnnOpenPTE $1,mj AnnCloseP $3] }
 
 cmdargs :: { [LHsCmdTop RdrName] }
@@ -2499,8 +2549,8 @@ cvtopbody :: { ([AddAnn],[LHsDecl RdrName]) }
         |      vocurly    cvtopdecls0 close    { ([],$2) }
 
 cvtopdecls0 :: { [LHsDecl RdrName] }
-        : {- empty -}           { [] }
-        | cvtopdecls            { $1 }
+        : topdecls_semi         { cvTopDecls $1 }
+        | topdecls              { cvTopDecls $1 }
 
 -----------------------------------------------------------------------------
 -- Tuple expressions
@@ -3046,8 +3096,8 @@ qtycon :: { Located RdrName }   -- Qualified or unqualified
         | tycon             { $1 }
 
 qtycondoc :: { LHsType RdrName } -- Qualified or unqualified
-        : qtycon            { sL1 $1                     (HsTyVar $1)      }
-        | qtycon docprev    { sLL $1 $> (HsDocTy (sL1 $1 (HsTyVar $1)) $2) }
+        : qtycon            { sL1 $1                     (HsTyVar NotPromoted $1)      }
+        | qtycon docprev    { sLL $1 $> (HsDocTy (sL1 $1 (HsTyVar NotPromoted $1)) $2) }
 
 tycon   :: { Located RdrName }  -- Unqualified
         : CONID                   { sL1 $1 $! mkUnqual tcClsName (getCONID $1) }
@@ -3555,7 +3605,19 @@ am a (b,s) = do
   addAnnotation l b (gl s)
   return av
 
--- |Add a list of AddAnns to the given AST element
+-- | Add a list of AddAnns to the given AST element.  For example,
+-- the parsing rule for @let@ looks like:
+--
+-- @
+--      | 'let' binds 'in' exp    {% ams (sLL $1 $> $ HsLet (snd $ unLoc $2) $4)
+--                                       (mj AnnLet $1:mj AnnIn $3
+--                                         :(fst $ unLoc $2)) }
+-- @
+--
+-- This adds an AnnLet annotation for @let@, an AnnIn for @in@, as well
+-- as any annotations that may arise in the binds. This will include open
+-- and closing braces if they are used to delimit the let expressions.
+--
 ams :: Located a -> [AddAnn] -> P (Located a)
 ams a@(L l _) bs = addAnnsAt l bs >> return a
 

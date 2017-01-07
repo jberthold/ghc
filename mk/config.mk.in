@@ -187,12 +187,12 @@ HaveLibDL = @HaveLibDL@
 # includes/stg/SMP.h
 ifeq "$(TargetArch_CPP)" "arm"
 # We don't support load/store barriers pre-ARMv7. See #10433.
-ArchSupportsSMP="$(if $(filter $(ARM_ISA),ARMv5 ARMv6),NO,YES)"
+ArchSupportsSMP=$(if $(filter $(ARM_ISA),ARMv5 ARMv6),NO,YES)
 else
 ArchSupportsSMP=$(strip $(patsubst $(TargetArch_CPP), YES, $(findstring $(TargetArch_CPP), i386 x86_64 sparc powerpc powerpc64 powerpc64le aarch64)))
 endif
 
-# The THREADED_RTS requites `BaseReg` to be in a register and the
+# The THREADED_RTS requires `BaseReg` to be in a register and the
 # `GhcUnregisterised` mode doesn't allow that.
 GhcWithSMP := $(strip $(if $(filter YESNO, $(ArchSupportsSMP)$(GhcUnregisterised)),YES,NO))
 
@@ -364,8 +364,12 @@ SupportsSplitObjs := $(strip \
                                $(filter NO,$(GhcUnregisterised))),\
                           YES,NO))
 
-# By default, enable SplitObjs for the libraries if this build supports it
-SplitObjs=$(SupportsSplitObjs)
+# By default, enable SplitObjs for the libraries if this build supports it.
+# Unless SplitSections is enabled - then let that take precedence.
+SplitObjs = $(strip \
+    $(if $(and $(filter YES,$(SupportsSplitObjs)),\
+               $(filter NO,$(SplitSections))),\
+         YES,NO))
 
 # ----------------------------------------------------------------------------
 # Section splitting
@@ -374,9 +378,16 @@ SplitObjs=$(SupportsSplitObjs)
 # like SplitObjs, but doesn't require post-processing and splitting of object
 # files.
 #
-# Set SplitSections=YES in your build.mk to enable.
-
-SplitSections=NO
+# Set SplitSections=YES or NO in your build.mk to override the default.
+#
+# This is not supported on Darwin (where you can use subsections-via-symbols
+# instead) and Windows is not yet working. (See #11445 and related tickets.)
+OsSupportsSplitSections=$(strip $(if $(filter $(TargetOS_CPP),mingw32 darwin),NO,YES))
+SupportsSplitSections = $(strip \
+                    $(if $(and $(filter YES,$(OsSupportsSplitSections)),\
+                               $(filter YES,$(LdIsGNULd))),\
+                          YES,NO))
+SplitSections ?= $(SupportsSplitSections)
 
 # Extra packages to add to the build, in dependency order
 EXTRA_PACKAGES =

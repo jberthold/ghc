@@ -87,7 +87,7 @@ module TcRnTypes(
         isDroppableDerivedLoc, insolubleImplic,
         arisesFromGivens,
 
-        Implication(..), ImplicStatus(..), isInsolubleStatus,
+        Implication(..), ImplicStatus(..), isInsolubleStatus, isSolvedStatus,
         SubGoalDepth, initialSubGoalDepth, maxSubGoalDepth,
         bumpSubGoalDepth, subGoalDepthExceeded,
         CtLoc(..), ctLocSpan, ctLocEnv, ctLocLevel, ctLocOrigin,
@@ -181,7 +181,6 @@ import qualified Control.Monad.Fail as MonadFail
 #endif
 import Data.Set      ( Set )
 
-#ifdef GHCI
 import Data.Map      ( Map )
 import Data.Dynamic  ( Dynamic )
 import Data.Typeable ( TypeRep )
@@ -189,7 +188,6 @@ import GHCi.Message
 import GHCi.RemoteTypes
 
 import qualified Language.Haskell.TH as TH
-#endif
 
 -- | A 'NameShape' is a substitution on 'Name's that can be used
 -- to refine the identities of a hole while we are renaming interfaces
@@ -439,6 +437,13 @@ data FrontendResult
 --        signatures (we just generate blank object files for
 --        hsig files.)
 --
+--        A corrolary of this is that the following invariant holds at any point
+--        past desugaring,
+--
+--            if I have a Module, this_mod, in hand representing the module
+--            currently being compiled,
+--            then moduleUnitId this_mod == thisPackage dflags
+--
 --      - For any code involving Names, we want semantic modules.
 --        See lookupIfaceTop in IfaceEnv, mkIface and addFingerprints
 --        in MkIface, and tcLookupGlobal in TcEnv
@@ -495,6 +500,13 @@ data TcGblEnv
           -- Includes the dfuns in tcg_insts
         tcg_fam_inst_env :: FamInstEnv, -- ^ Ditto for family instances
         tcg_ann_env      :: AnnEnv,     -- ^ And for annotations
+
+        -- | Family instances we have to check for consistency.
+        -- Invariant: each FamInst in the list's fi_fam matches the
+        -- key of the entry in the 'NameEnv'.  This gets consumed
+        -- by 'checkRecFamInstConsistency'.
+        -- See Note [Don't check hs-boot type family instances too early]
+        tcg_pending_fam_checks :: NameEnv [([FamInst], FamInstEnv)],
 
                 -- Now a bunch of things about this module that are simply
                 -- accumulated, but never consulted until the end.
@@ -573,7 +585,6 @@ data TcGblEnv
 
         tcg_dependent_files :: TcRef [FilePath], -- ^ dependencies from addDependentFile
 
-#ifdef GHCI
         tcg_th_topdecls :: TcRef [LHsDecl RdrName],
         -- ^ Top-level declarations from addTopDecls
 
@@ -589,7 +600,6 @@ data TcGblEnv
         tcg_th_state :: TcRef (Map TypeRep Dynamic),
         tcg_th_remote_state :: TcRef (Maybe (ForeignRef (IORef QState))),
         -- ^ Template Haskell state
-#endif /* GHCI */
 
         tcg_ev_binds  :: Bag EvBind,        -- Top-level evidence bindings
 
@@ -855,7 +865,6 @@ data ThStage    -- See Note [Template Haskell state diagram] in TcSplice
                       --   the result replaces the splice
                       -- Binding level = 0
 
-#ifdef GHCI
   | RunSplice (TcRef [ForeignRef (TH.Q ())])
       -- Set when running a splice, i.e. NOT when renaming or typechecking the
       -- Haskell code for the splice. See Note [RunSplice ThLevel].
@@ -870,9 +879,6 @@ data ThStage    -- See Note [Template Haskell state diagram] in TcSplice
       -- inserts them in the list of finalizers in the global environment.
       --
       -- See Note [Collecting modFinalizers in typed splices] in "TcSplice".
-#else
-  | RunSplice ()
-#endif
 
   | Comp        -- Ordinary Haskell code
                 -- Binding level = 1
@@ -1740,8 +1746,22 @@ tyCoFVsOfBag tvs_of = foldrBag (unionFV . tvs_of) emptyFV
 
 --------------------------
 dropDerivedSimples :: Cts -> Cts
-dropDerivedSimples simples = filterBag isWantedCt simples
-                             -- simples are all Wanted or Derived
+-- Drop all Derived constraints, but make [W] back into [WD],
+-- so that if we re-simplify these constraints we will get all
+-- the right derived constraints re-generated.  Forgetting this
+-- step led to #12936
+dropDerivedSimples simples = mapMaybeBag dropDerivedCt simples
+
+dropDerivedCt :: Ct -> Maybe Ct
+dropDerivedCt ct
+  = case ctEvFlavour ev of
+      Wanted WOnly -> Just (ct { cc_ev = ev_wd })
+      Wanted _     -> Just ct
+      _            -> ASSERT( isDerivedCt ct ) Nothing
+                      -- simples are all Wanted or Derived
+  where
+    ev    = ctEvidence ct
+    ev_wd = ev { ctev_nosh = WDeriv }
 
 dropDerivedInsols :: Cts -> Cts
 -- See Note [Dropping derived constraints]
@@ -2087,6 +2107,10 @@ dropDerivedWC wc@(WC { wc_simple = simples, wc_insol = insols })
        , wc_insol  = dropDerivedInsols insols }
     -- The wc_impl implications are already (recursively) filtered
 
+isSolvedStatus :: ImplicStatus -> Bool
+isSolvedStatus (IC_Solved {}) = True
+isSolvedStatus _              = False
+
 isInsolubleStatus :: ImplicStatus -> Bool
 isInsolubleStatus IC_Insoluble = True
 isInsolubleStatus _            = False
@@ -2160,12 +2184,16 @@ data Implication
       ic_binds  :: EvBindsVar,    -- Points to the place to fill in the
                                   -- abstraction and bindings.
 
+      ic_needed   :: VarSet,      -- Union of the ics_need fields of any /discarded/
+                                  -- solved implications in ic_wanted
+
       ic_status   :: ImplicStatus
     }
 
 data ImplicStatus
   = IC_Solved     -- All wanteds in the tree are solved, all the way down
-       { ics_need :: VarSet     -- Evidence variables needed by this implication
+       { ics_need :: VarSet     -- Evidence variables bound further out,
+                                -- but needed by this solved implication
        , ics_dead :: [EvVar] }  -- Subset of ic_given that are not needed
          -- See Note [Tracking redundant constraints] in TcSimplify
 
@@ -2177,7 +2205,7 @@ instance Outputable Implication where
   ppr (Implic { ic_tclvl = tclvl, ic_skols = skols
               , ic_given = given, ic_no_eqs = no_eqs
               , ic_wanted = wanted, ic_status = status
-              , ic_binds = binds, ic_info = info })
+              , ic_binds = binds, ic_needed = needed , ic_info = info })
    = hang (text "Implic" <+> lbrace)
         2 (sep [ text "TcLevel =" <+> ppr tclvl
                , text "Skolems =" <+> pprTyVars skols
@@ -2186,6 +2214,7 @@ instance Outputable Implication where
                , hang (text "Given =")  2 (pprEvVars given)
                , hang (text "Wanted =") 2 (ppr wanted)
                , text "Binds =" <+> ppr binds
+               , text "Needed =" <+> ppr needed
                , pprSkolInfo info ] <+> rbrace)
 
 instance Outputable ImplicStatus where

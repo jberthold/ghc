@@ -12,6 +12,10 @@
 #include "Rts.h"
 #include "Hash.h"
 
+#if RTS_LINKER_USE_MMAP
+#include <sys/mman.h>
+#endif
+
 #include "BeginPrivate.h"
 
 typedef void SymbolAddr;
@@ -259,18 +263,12 @@ extern /*Str*/HashTable *symhash;
 #define USE_CONTIGUOUS_MMAP 0
 #endif
 
-#include "EndPrivate.h"
-
 HsInt isAlreadyLoaded( pathchar *path );
 HsInt loadOc( ObjectCode* oc );
 ObjectCode* mkOc( pathchar *path, char *image, int imageSize,
-                  rtsBool mapped, char *archiveMemberName,
+                  bool mapped, char *archiveMemberName,
                   int misalignment
                   );
-
-#ifdef darwin_HOST_OS
-int machoGetMisalignment( FILE * f );
-#endif /* darwin_HOST_OS */
 
 #if defined (mingw32_HOST_OS)
 /* We use myindex to calculate array addresses, rather than
@@ -294,6 +292,12 @@ char *cstring_from_section_name(
     unsigned char* strtab);
 #endif /* mingw32_HOST_OS */
 
+/* MAP_ANONYMOUS is MAP_ANON on some systems,
+   e.g. OS X (before Sierra), OpenBSD etc */
+#if !defined(MAP_ANONYMOUS) && defined(MAP_ANON)
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+
 /* Which object file format are we targetting? */
 #if defined(linux_HOST_OS) || defined(solaris2_HOST_OS) || defined(freebsd_HOST_OS) || defined(kfreebsdgnu_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(openbsd_HOST_OS) || defined(gnu_HOST_OS)
 #  define OBJFORMAT_ELF
@@ -313,4 +317,5 @@ char *cstring_from_section_name(
 #define MAP_ANONYMOUS 0
 #endif
 
+#include "EndPrivate.h"
 #endif /* LINKERINTERNALS_H */

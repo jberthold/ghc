@@ -13,8 +13,8 @@ verbosityOptions =
          , flagType = DynamicFlag
          , flagReverse = ""
          }
-  , flag { flagName = "-fshow-source-paths"
-         , flagDescription = "show module source and object paths"
+  , flag { flagName = "-fhide-source-paths"
+         , flagDescription = "hide module source and object paths"
          , flagType = DynamicFlag
          , flagReverse = ""
          }
@@ -64,6 +64,14 @@ verbosityOptions =
          , flagType = DynamicFlag
          , flagReverse = "-fno-print-typechecker-elaboration"
          }
+  , flag { flagName = "-fdiagnostics-color=(always|auto|never)"
+         , flagDescription = "Use colors in error messages"
+         , flagType = DynamicFlag
+         }
+  , flag { flagName = "-f[no-]diagnostics-show-caret"
+         , flagDescription = "Whether to show snippets of original source code"
+         , flagType = DynamicFlag
+         }
   , flag { flagName = "-ferror-spans"
          , flagDescription = "Output full span in error messages"
          , flagType = DynamicFlag
@@ -71,6 +79,10 @@ verbosityOptions =
   , flag { flagName = "-Rghc-timing"
          , flagDescription =
            "Summarise timing stats for GHC (same as ``+RTS -tstderr``)."
+         , flagType = DynamicFlag
+         }
+  , flag { flagName = "-fshow-hole-constraints"
+         , flagDescription = "Show constraints when reporting typed holes"
          , flagType = DynamicFlag
          }
   ]

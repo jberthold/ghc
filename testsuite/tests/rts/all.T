@@ -46,8 +46,8 @@ test('divbyzero',
       # do not generate an exception (interrupt) for integer
       # division by zero but the result is undefined.
       # C programs compiled with gcc exit normally, so do we.
-      when(platform('powerpc64-unknown-linux'), exit_code(0)),
-      when(platform('powerpc64le-unknown-linux'), exit_code(0)),
+      when(platform('powerpc64-unknown-linux'), [ignore_stdout, exit_code(0)]),
+      when(platform('powerpc64le-unknown-linux'), [ignore_stdout, exit_code(0)]),
       when(opsys('mingw32'), exit_code(1)),
       # The output under OS X is too unstable to readily compare
       when(platform('i386-apple-darwin'), [ignore_stderr, exit_code(136)]),
@@ -199,8 +199,7 @@ test('T6006', [ omit_ways(prof_ways + ['ghci']),
                compile_and_run, ['T6006_c.c -no-hs-main'])
 
 test('T7037',
-     [ extra_clean(['T7037_main.o','T7037_main']),
-       when(opsys("mingw32"), expect_broken(12725))],
+     [ extra_clean(['T7037_main.o','T7037_main'])],
      run_command,
      ['$MAKE -s --no-print-directory T7037'])
 
@@ -248,10 +247,10 @@ test('linker_unload',
      run_command,
      ['$MAKE -s --no-print-directory linker_unload'])
 
-test('T8209', [ only_ways(threaded_ways), ignore_stdout ],
+test('T8209', [ req_smp, only_ways(threaded_ways), ignore_stdout ],
               compile_and_run, [''])
 
-test('T8242', [ only_ways(threaded_ways), ignore_stdout ],
+test('T8242', [ req_smp, only_ways(threaded_ways), ignore_stdout ],
               compile_and_run, [''])
 
 test('T8124', [ only_ways(threaded_ways), omit_ways(['ghci']),
@@ -364,7 +363,7 @@ test('T9405', [extra_clean(['T9405.ticky']), when(msys(), expect_broken(12714))]
 test('T11788', when(ghc_dynamic(), skip),
               run_command, ['$MAKE -s --no-print-directory T11788'])
 
-test('T10296a', [extra_clean(['T10296a.o','T10296a_c.o','T10296a'])],
+test('T10296a', [ req_smp, extra_clean(['T10296a.o','T10296a_c.o','T10296a'])],
                 run_command,
                 ['$MAKE -s --no-print-directory T10296a'])
 
@@ -376,4 +375,6 @@ test('numa001', [ extra_run_opts('8'), extra_ways(['debug_numa']) ]
 test('T12497', [ unless(opsys('mingw32'), skip)
                ],
                run_command, ['$MAKE -s --no-print-directory T12497'])
+
+test('T12903', [when(opsys('mingw32'), skip)], compile_and_run, [''])
 
