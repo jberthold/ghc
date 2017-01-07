@@ -80,7 +80,7 @@ const RtsConfig defaultRtsConfig  = {
 
 #if defined(PARALLEL_RTS)
 
-static void process_par_option(int arg, rtsBool *error);
+static void process_par_option(int arg, bool *error);
 
 #if defined(DEBUG)
 static char *par_debug_opts_strs[] = {
@@ -782,7 +782,7 @@ error = true;
 # define THREADED_OR_PARALLEL_BUILD_ONLY(x) THREADED_BUILD_ONLY(x)
 # define PARALLEL_RTS_BUILD_ONLY(x) \
 errorBelch("the flag %s requires a parallel build", rts_argv[arg]); \
-error = rtsTrue;
+error = true;
 #endif
 
 #ifdef THREADED_RTS
@@ -1269,7 +1269,7 @@ error = true;
                                   , RtsFlags.ParFlags.packBufferSize));
                   } else {
                     errorBelch("missing size of PackBuffer (for -qQ)\n");
-                    error = rtsTrue;
+                    error = true;
                   }
                   break;
                 }
@@ -1617,7 +1617,7 @@ static void errorUsage (void)
 #ifdef PARALLEL_RTS
 
 static void
-process_par_option(int arg, rtsBool *error)
+process_par_option(int arg, bool *error)
 {
 
   // the -q prefix is shared with THREADED_RTS.
@@ -1635,7 +1635,7 @@ process_par_option(int arg, rtsBool *error)
           decodeSize(rts_argv[arg], 3, 2, (nPEs>20?nPEs:20));
     } else {
         errorBelch("missing argument to -qq\n");
-        *error = rtsTrue;
+        *error = true;
     }
     break;
     // this one is valid for the sequential system as well, code moved
@@ -1650,7 +1650,7 @@ process_par_option(int arg, rtsBool *error)
   //     // used and sendBufferSize * packBufferSize > INT_MAX
   //   } else {
   //     errorBelch("missing size of PackBuffer (for -qQ)\n");
-  //     *error = rtsTrue;
+  //     *error = true;
   //   }
   //   IF_PAR_DEBUG(verbose,
   //                debugBelch("-qQ<n>: pack buffer size set to %d bytes\n",
@@ -1688,32 +1688,32 @@ process_par_option(int arg, rtsBool *error)
                        rts_argv[arg],RtsFlags.ParFlags.BufferTime));
     break;
   case 'P': // -qP for writing a log file 
-    //RtsFlags.ParFlags.ParStats.Full = rtsFalse;
+    //RtsFlags.ParFlags.ParStats.Full = false;
 
     // JB 11/2006: borrowed NewLogfile and Heap flags for Eden tracing
     // (pablo sddf format). NewLogfile (for now) always on, Heap can
     // be used as an optional extension (was commented out before).
-    RtsFlags.ParFlags.ParStats.NewLogfile = rtsTrue;
+    RtsFlags.ParFlags.ParStats.NewLogfile = true;
 
     // JB 03/2007: option -qPm for "Full" => include messages
 
     switch(rts_argv[arg][3]) {
-    case '\0': // JB 03/07... RtsFlags.ParFlags.ParStats.Full = rtsTrue;
+    case '\0': // JB 03/07... RtsFlags.ParFlags.ParStats.Full = true;
       // "Full" for Eden tracing: trace messages as well
       break; // nothing special, just an ordinary profile
-    case 'm': RtsFlags.ParFlags.ParStats.Full = rtsTrue;
+    case 'm': RtsFlags.ParFlags.ParStats.Full = true;
       // "Full" for Eden tracing: trace messages as well
       break;
-    case '0': RtsFlags.ParFlags.ParStats.Suppressed = rtsTrue;
-        RtsFlags.ParFlags.ParStats.Full = rtsFalse;
+    case '0': RtsFlags.ParFlags.ParStats.Suppressed = true;
+        RtsFlags.ParFlags.ParStats.Full = false;
       break;
-    case 'b': RtsFlags.ParFlags.ParStats.Binary = rtsTrue;
+    case 'b': RtsFlags.ParFlags.ParStats.Binary = true;
       break;
-    case 's': RtsFlags.ParFlags.ParStats.Sparks = rtsTrue;
+    case 's': RtsFlags.ParFlags.ParStats.Sparks = true;
       break;
-    case 'h': RtsFlags.ParFlags.ParStats.Heap = rtsTrue;
+    case 'h': RtsFlags.ParFlags.ParStats.Heap = true;
       break;
-    case 'n': RtsFlags.ParFlags.ParStats.NewLogfile = rtsTrue;
+    case 'n': RtsFlags.ParFlags.ParStats.NewLogfile = true;
       break;
     default: barf("Unknown option -qP%c", rts_argv[arg][2]);
     }
@@ -1726,7 +1726,7 @@ process_par_option(int arg, rtsBool *error)
   
     default:
       errorBelch("setupRtsFlags: unknown parallelism option %s ",rts_argv[arg]);
-      *error = rtsTrue;
+      *error = true;
     }
     break;
     */  
@@ -1773,7 +1773,7 @@ process_par_option(int arg, rtsBool *error)
   default:
     errorBelch("Unknown option -q%c (%d opts in total)", 
           rts_argv[arg][2], rts_argc);
-    *error = rtsTrue;
+    *error = true;
     break;
   } /* switch */
 }
@@ -1791,12 +1791,12 @@ set_par_debug_options(uint16_t n) {
     if ((n>>i)&1) {
       debugBelch("%s", par_debug_opts_strs[i]);
       switch (i) {
-        case 0: RtsFlags.ParFlags.Debug.verbose       = rtsTrue;  break;
-        case 1: RtsFlags.ParFlags.Debug.mpcomm        = rtsTrue;  break;
-        case 2: RtsFlags.ParFlags.Debug.pack          = rtsTrue;  break;
-        case 3: RtsFlags.ParFlags.Debug.packet        = rtsTrue;  break;
-        case 4: RtsFlags.ParFlags.Debug.procs         = rtsTrue;  break;
-        case 5: RtsFlags.ParFlags.Debug.ports         = rtsTrue;  break;
+        case 0: RtsFlags.ParFlags.Debug.verbose       = true;  break;
+        case 1: RtsFlags.ParFlags.Debug.mpcomm        = true;  break;
+        case 2: RtsFlags.ParFlags.Debug.pack          = true;  break;
+        case 3: RtsFlags.ParFlags.Debug.packet        = true;  break;
+        case 4: RtsFlags.ParFlags.Debug.procs         = true;  break;
+        case 5: RtsFlags.ParFlags.Debug.ports         = true;  break;
         default: barf("set_par_debug_options: only %d debug options expected",
                       MAX_PAR_DEBUG_OPTION);
       } /* switch */

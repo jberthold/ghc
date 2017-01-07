@@ -96,7 +96,7 @@ extern Port RtsPort, NoPort;
 // RtsPort = Port { thisPe, 0, 0}
 #define isRtsPort(p) ( (p).machine && !((p).process | (p).id))
 // Port comparison
-rtsBool equalPorts(Port p, Port q);
+bool equalPorts(Port p, Port q);
 
 typedef struct Inport_ {
   struct Inport_ *next;

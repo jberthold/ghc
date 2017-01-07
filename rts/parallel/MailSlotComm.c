@@ -31,11 +31,11 @@
  *
  * nPEs   - nat: number of PEs in the parallel system
  * thisPE - nat: logical address of this PE btw. 1 and nPEs
- * IAmMainThread - rtsBool: indicating main PE (thisPE == 1)
+ * IAmMainThread - bool: indicating main PE (thisPE == 1)
  */
 PEId nPEs = 0;
 PEId thisPE = 0;
-rtsBool IAmMainThread = rtsFalse;
+bool IAmMainThread = false;
 
 /* shutdown counter */
 PEId finishRecvd = 0;
@@ -56,7 +56,7 @@ char slotPrefix[252] = "";
 
 /* this function uses slotPrefix to create a slot name following the
    given pattern, in the (256 char pre-allocated) slotName */
-rtsBool mkSlotName(char slotName[], PEId proc);
+bool mkSlotName(char slotName[], PEId proc);
 
 /* this will be the array of handles (write end for sending) */
 HANDLE *mailslot;
@@ -92,14 +92,14 @@ PEId setnPEsArg(int *argc, char **argv);
  *     the MP-System requires to spawn nodes from here.
  *     sets globar var.s:
  *      nPEs          - int: no. of PEs to expect/start
- *      IAmMainThread - rtsBool: whether this node is main PE
+ *      IAmMainThread - bool: whether this node is main PE
  * Parameters:
  *     IN/OUT    argc  - int*   : program arg.count
  *     IN/OUT    argv  - char***: program arguments
  *   (at the moment, argc and argv are modified. TODO)
  * Returns: Bool: success or failure
  */
-rtsBool MP_start(int* argc, char** argv[]) {
+bool MP_start(int* argc, char** argv[]) {
   /* Child processes are created here, and the mailslots are reserved,
    * but not used yet. Later, in MP_sync, we know DATASPACEWORDS and
    * limit the max. msg. size to it.
@@ -125,9 +125,9 @@ rtsBool MP_start(int* argc, char** argv[]) {
 
   if(thisPE == 0) {
     thisPE = 1;
-    IAmMainThread = rtsTrue;
+    IAmMainThread = true;
   } else {
-    IAmMainThread = rtsFalse;
+    IAmMainThread = false;
   }
 
   if (IAmMainThread) {
@@ -212,7 +212,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
     stgFree(pi);
   }
 
-  return rtsTrue;
+  return true;
 }
 
 /* MP_sync synchronises all nodes in a parallel computation:
@@ -221,7 +221,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
  *             (logical node address for messages)
  * Returns: Bool: success (1) or failure (0)
  */
-rtsBool MP_sync(void) {
+bool MP_sync(void) {
   /* All processes maintain an array mailslot[nPEs], with mailslot
    * write handles opened here.
    *
@@ -361,7 +361,7 @@ rtsBool MP_sync(void) {
 
   IF_PAR_DEBUG(mpcomm, debugBelch("MP_sync.ed PE %i\n", thisPE));
   mp_state = MP_RUNNING;
-  return rtsTrue;
+  return true;
 }
 
 /* MP_quit disconnects current node from MP-System:
@@ -371,7 +371,7 @@ rtsBool MP_sync(void) {
  *     IN isError - error number, 0 if normal exit
  * Returns: Bool: success (1) or failure (0)
  */
-rtsBool MP_quit(int isError) {
+bool MP_quit(int isError) {
   /* same shutdown protocol as in CpComm:
    * if IAmMainThread: send PP_FINISH to all, await replies (count)
    * otherwise: send PP_FINISH to main, await reply if error
@@ -399,7 +399,7 @@ rtsBool MP_quit(int isError) {
                  debugBelch("MP_quit: wasn't started, skipping."));
     mp_state = MP_STOPPED;
     nPEs = 0;
-    return rtsFalse;
+    return false;
   }
   mp_state = MP_STOPPING;
 
@@ -487,7 +487,7 @@ rtsBool MP_quit(int isError) {
   nPEs=0; // indicate shutdown has completed
   mp_state = MP_STOPPED;
 
-  return rtsTrue;
+  return true;
 }
 
 
@@ -498,7 +498,7 @@ rtsBool MP_quit(int isError) {
  * sends the included data (array of length length) to the indicated node
  * (numbered from 1 to the requested nodecount nPEs) with the given message
  * tag. Length 0 is allowed and leads to a message containing no payload data.
- * The send action may fail, in which case rtsFalse is returned, and the
+ * The send action may fail, in which case false is returned, and the
  * caller is expected to handle this situation.
  * Data length should be given in bytes, data will be sent raw
  * (unsigned char).
@@ -509,10 +509,10 @@ rtsBool MP_quit(int isError) {
  *   IN data     -- array of raw data (unsigned char values) to send out
  *   IN length   -- length of data array. Allowed to be zero (no data).
  * Returns:
- *   rtsBool: success or failure inside comm. subsystem
+ *   bool: success or failure inside comm. subsystem
  */
 
-rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length) {
+bool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length) {
   /*
    * use the respective slot to send out the data (as a byte string)
    *
@@ -542,7 +542,7 @@ rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length) {
   fRes = WriteFile(mailslot[node-1], (char*)msg, sizeof(SlotMsg)+length,
                    &rwCount, (LPOVERLAPPED) NULL);
   if (!fRes) {
-    // we could return rtsFalse here, but that would probably loop...
+    // we could return false here, but that would probably loop...
     sysErrorBelch("MP_send failed");
     barf("Comm. system malfunction, aborting.");
   }
@@ -552,7 +552,7 @@ rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length) {
                           (int) rwCount-sizeof(SlotMsg),
                           length, getOpName(tag)));
 
-  return rtsTrue;
+  return true;
 }
 
 /* - a blocking receive operation
@@ -615,7 +615,7 @@ int MP_recv(uint32_t maxlength, StgWord8 *destination, // IN
 /* - a non-blocking probe operation
  * (unspecified sender, no receive buffers any more)
  */
-rtsBool MP_probe(void) {
+bool MP_probe(void) {
   /* use GetMailslotInfo to determine whether a message is waiting,
    * check for MAILSLOT_NO_MESSAGE
    */
@@ -668,12 +668,12 @@ static char* mkCmdLineString(int argc, char ** argv) {
  * Parameters:
  *    OUT slotName (assumed 256 char allocated)
  *    IN  proc     (proc number)
- * Returns rtsFalse on failures (to be caught by caller)
+ * Returns false on failures (to be caught by caller)
  */
-rtsBool mkSlotName(char slotName[], PEId proc) {
+bool mkSlotName(char slotName[], PEId proc) {
   char procStr[4];
 
-  if (proc > 999) return rtsFalse;
+  if (proc > 999) return false;
   ASSERT(strlen(slotPrefix) != 0 && strlen(slotPrefix) < 251);
 
   slotName[0] = slotName[252] = '\0';
@@ -681,7 +681,7 @@ rtsBool mkSlotName(char slotName[], PEId proc) {
   snprintf(procStr, 4, "%i", proc);
   strncat(slotName, procStr, 3);
 
-  return rtsTrue;
+  return true;
 }
 
 /* scans argv to find an argument "-N<num>", and sets nPEs to the
@@ -692,7 +692,7 @@ rtsBool mkSlotName(char slotName[], PEId proc) {
  */
 PEId setnPEsArg(int *argc, char **argv) {
   char **currArg, **lastArg;
-  rtsBool inRTS, finishedRTS;
+  bool inRTS, finishedRTS;
   int i;
   PEId pes;
 
@@ -700,7 +700,7 @@ PEId setnPEsArg(int *argc, char **argv) {
   IF_PAR_DEBUG(mpcomm,
                debugBelch("parsing flags, arg.count %d\n", *argc));
   */
-  inRTS = finishedRTS = rtsFalse;
+  inRTS = finishedRTS = false;
   pes = 0;
   i = *argc;
   currArg = argv;
@@ -710,7 +710,7 @@ PEId setnPEsArg(int *argc, char **argv) {
     if ( !finishedRTS && inRTS && (*currArg)[0]=='-' && (*currArg)[1]=='N') {
       // the PE flag we want. Parse it and only advance currArg, decrease argc
       if ((*currArg)[2]=='-') { // negative number, debug mode
-        RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
+        RtsFlags.ParFlags.Debug.mpcomm = true;
         pes = (PEId)atoi((*currArg)+3);
       } else {
         pes = (PEId)atoi((*currArg)+2);
@@ -722,10 +722,10 @@ PEId setnPEsArg(int *argc, char **argv) {
       (*argc)--;
     } else {
       // check for interesting flags
-      if      (strcmp(*currArg, "--RTS") == 0) finishedRTS=rtsTrue;
-      else if (strcmp(*currArg, "--") == 0) finishedRTS=rtsTrue;
-      else if (strcmp(*currArg, "+RTS") == 0) inRTS=rtsTrue;
-      else if (strcmp(*currArg, "-RTS") == 0) inRTS=rtsFalse;
+      if      (strcmp(*currArg, "--RTS") == 0) finishedRTS = true;
+      else if (strcmp(*currArg, "--") == 0)    finishedRTS = true;
+      else if (strcmp(*currArg, "+RTS") == 0) inRTS = true;
+      else if (strcmp(*currArg, "-RTS") == 0) inRTS = false;
       // copy argument to its new place
       *lastArg++ = *currArg++;
     }

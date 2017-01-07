@@ -29,7 +29,7 @@
 
 /* Global conditions defined here. */
 // main thread (PE 1 in logical numbering)
-rtsBool         IAmMainThread = rtsFalse; // Set for the main thread
+bool IAmMainThread = false; // Set for the main thread
 // nPEs, thisPE
 PEId nPEs = 0; // number of PEs in system
 PEId thisPE=0; // node's own ID
@@ -84,14 +84,14 @@ MPI_Comm sysComm;
  *     IN    argv  - char**: program arguments
  * Sets:
  *           nPEs - int: no. of PEs to expect/start
- *  IAmMainThread - rtsBool: wether this node is main PE
+ *  IAmMainThread - bool: wether this node is main PE
  * Returns: Bool: success or failure
  *
  * MPI Version:
  *   nodes are spawned by startup script calling mpirun
  *   This function only connects to MPI and determines the main PE.
  */
-rtsBool MP_start(int* argc, char** argv[]) {
+bool MP_start(int* argc, char** argv[]) {
 
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MPI_Init: starting MPI-Comm...\n"));
@@ -103,7 +103,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
                debugBelch("I am node %d.\n", mpiMyRank));
 
   if (!mpiMyRank) // we declare node 0 as main PE.
-    IAmMainThread = rtsTrue;
+    IAmMainThread = true;
 
   MPI_Comm_size(MPI_COMM_WORLD, &mpiWorldSize);
 
@@ -133,7 +133,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
   (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
   (*argv)++; (*argc)--;
 
-  return rtsTrue;
+  return true;
 }
 
 /* MP_sync synchronises all nodes in a parallel computation:
@@ -147,7 +147,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
  *   (could also be done by sync message)
  *   Own ID is known before, but returned only here.
  */
-rtsBool MP_sync(void) {
+bool MP_sync(void) {
   // initialise counters/constants and allocate/attach the buffer
 
   // buffer size default is 20, use RTS option -qq<N> to change it
@@ -191,7 +191,7 @@ rtsBool MP_sync(void) {
   MPI_Barrier(MPI_COMM_WORLD); // unnecessary...
                                // but currently used to synchronize system times
 
-  return rtsTrue;
+  return true;
 }
 
 /* MP_quit disconnects current node from MP-System:
@@ -203,7 +203,7 @@ rtsBool MP_sync(void) {
  * before quitting. Receive or cancel all pending messages (using msg.
  * count), then quit from MPI.
  */
-rtsBool MP_quit(int isError) {
+bool MP_quit(int isError) {
   StgWord data[2];
   MPI_Request sysRequest2;
 
@@ -319,10 +319,10 @@ rtsBool MP_quit(int isError) {
   /* indicate that quit has been executed */
   nPEs = 0;
 
-  return rtsTrue;
+  return true;
 }
 
-rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length){
+bool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length){
   /* MPI normally uses blocking send operations (MPI_*send). When
    * using nonblocking operations (MPI_I*send), dataspace must remain
    * untouched until the message has been delivered (MPI_Wait)!
@@ -374,7 +374,7 @@ rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length){
                  debugBelch("MPI CANCELED sending message to PE %u "
                           "(tag %d (%s), datasize %u)\n",
                             node, tag, getOpName(tag), length));
-    return rtsFalse;
+    return false;
   }
   //calculate offset in mpiMsgBuffer
   // using ptr. arithmetics and void* size (see includes/stg/Types.h)
@@ -391,7 +391,7 @@ rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length){
             MPI_COMM_WORLD, &(requests[sendIndex]));
   IF_PAR_DEBUG(mpcomm,
                debugBelch("Done sending message to PE %u\n", node+1));
-  return rtsTrue;
+  return true;
 }
 
 /* - a blocking receive operation
@@ -405,7 +405,7 @@ uint32_t MP_recv(uint32_t maxlength, StgWord8 *destination,
    *   No special buffer is needed here, can receive into *destination.
    */
   int source, size, code;
-  int haveSysMsg = rtsFalse;
+  int haveSysMsg = false;
   code = MIN_PEOPS-1;
 
   IF_PAR_DEBUG(mpcomm,
@@ -464,7 +464,7 @@ uint32_t MP_recv(uint32_t maxlength, StgWord8 *destination,
 
 /* - a non-blocking probe operation (unspecified sender)
  */
-rtsBool MP_probe(void){
+bool MP_probe(void){
   int flag = 0;
 
   // non-blocking probe: either flag is true and status filled, or no

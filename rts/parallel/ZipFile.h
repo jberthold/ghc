@@ -17,15 +17,13 @@
 
 #ifdef STANDALONE
 #include <stdint.h>
-typedef uint8_t rtsBool;
+#include <stdbool.h>
 
 typedef unsigned char StgWord8;
 typedef uint16_t StgWord16;
 typedef uint32_t StgWord32;
 typedef uint64_t StgWord64;
 
-#define rtsTrue 1
-#define rtsFalse 0
 #else
 #include "Rts.h"
 
@@ -44,7 +42,7 @@ typedef uint64_t StgWord64;
                                            but continue with next file,
                                            return true
 */
-rtsBool compressFiles(char const* archive, 
+bool compressFiles(char const* archive,
                       int count, char* names[],
                       char const* comment);
 

@@ -112,7 +112,7 @@ void freePackBuffer(void) {
  *  if buffer is not empty:  containing given packed graph
  * otherwise just using the sender/receiver fields
  */
-rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
+bool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
   uint32_t size;
   PEId     destinationPE = 0;
 
@@ -149,9 +149,9 @@ rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer) {
     IF_PAR_DEBUG(ports,
                  debugBelch("finished sending message to %d\n",
                             destinationPE));
-    return rtsTrue;
+    return true;
   } else {
-    return rtsFalse;
+    return false;
   }
 }
 

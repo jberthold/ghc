@@ -77,7 +77,7 @@ int hs_main ( int argc, char *argv[],       // program args
       char hostname[256];
       gethostname(hostname, sizeof(hostname));
       debugBelch("Process is ready for attaching debugger.\n"
-                 "%s %d (on host %s) and set RtsFlags.ParFlags.wait=rtsFalse\n"
+                 "%s %d (on host %s) and set RtsFlags.ParFlags.wait = 0\n"
                  , argv[0], getpid(), hostname);
       while (RtsFlags.ParFlags.wait != 0) {
         RtsFlags.ParFlags.wait--;
@@ -87,7 +87,7 @@ int hs_main ( int argc, char *argv[],       // program args
     }
 # endif
 
-    if (IAmMainThread == rtsTrue) {
+    if (IAmMainThread == true) {
 
       Capability *cap;
       IF_PAR_DEBUG(verbose,

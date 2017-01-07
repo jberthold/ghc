@@ -187,12 +187,12 @@ typedef struct _MISC_FLAGS {
 #ifdef PARALLEL_RTS
 typedef struct _PAR_DEBUG_FLAGS {
   /* flags to control debugging output in various subsystems */
-  rtsBool verbose    : 1; /* 2^0=1 */
-  rtsBool mpcomm     : 1; /* 2^1=2 */
-  rtsBool pack       : 1; /*     4 */
-  rtsBool packet     : 1; /*     8 */
-  rtsBool procs      : 1; /*    16 */
-  rtsBool ports      : 1; /*    32 */
+  bool verbose    : 1; /* 2^0=1 */
+  bool mpcomm     : 1; /* 2^1=2 */
+  bool pack       : 1; /*     4 */
+  bool packet     : 1; /*     8 */
+  bool procs      : 1; /*    16 */
+  bool ports      : 1; /*    32 */
 } PAR_DEBUG_FLAGS;
 
 /* starting at 0, number of flags defined above... */

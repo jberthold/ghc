@@ -334,14 +334,14 @@ void runCRC(StgWord32 *crc, StgWord8 *buf, int count) {
  *   - failing to access one of the files: skip file (resp. rest of
  *                                         file) but continue with
  *                                         next file, return true
- *   - no files given for archiving: return rtsFalse
- * Rationale: rtsTrue iff a valid zip file was created.
+ *   - no files given for archiving: return false
+ * Rationale: true iff a valid zip file was created.
  */
 
 // buffer size for filecopy and compression
 #define BUFSIZE 1024
 
-rtsBool compressFiles(char const* archive,
+bool compressFiles(char const* archive,
                       int count, char* names[],
                       char const* comment) {
   FileHeader *f;
@@ -360,7 +360,7 @@ rtsBool compressFiles(char const* archive,
   int flush;
 #endif
 
-  if (count == 0) return rtsFalse;
+  if (count == 0) return false;
 
   ds = (CentralDirEntry**) stgMallocBytes(sizeof(CentralDirEntry*) * count,
                                           "Zip central dir array");
@@ -372,7 +372,7 @@ rtsBool compressFiles(char const* archive,
 
   if ((fd = fopen(archive, "wb")) == NULL) {
     sysErrorBelch("Cannot zip; error opening zip file");
-    return rtsFalse;
+    return false;
   }
 
   for (i=0; i < count; i++) {
@@ -412,7 +412,7 @@ rtsBool compressFiles(char const* archive,
     if (ret != Z_OK) {
       // failed to initialise, abort operation
       errorBelch("Failed to init zlib, aborting archiving (code %d)", ret);
-      fclose(fdIn); fclose(fd); return rtsFalse;
+      fclose(fdIn); fclose(fd); return false;
     }
 
     do {
@@ -443,7 +443,7 @@ rtsBool compressFiles(char const* archive,
         if (size != (int) fwrite(outbuf, 1, size, fd)) {
           sysErrorBelch("Could not write to output file (aborting archiving)");
           (void) deflateEnd(&strm);
-          fclose (fdIn); fclose(fd); return rtsFalse;
+          fclose (fdIn); fclose(fd); return false;
         }
       } while (strm.avail_out == 0); // outbuf not utilised => compression ends
       ASSERT(strm.avail_in == 0); // all read data from input file consumed
@@ -461,7 +461,7 @@ rtsBool compressFiles(char const* archive,
     while (size > 0) { // copy the file (no compression)
       if (size != (int)fwrite(buffer, 1, size, fd)) {
         sysErrorBelch("Could not write to output file (aborting archiving)");
-        fclose (fdIn); fclose(fd); return rtsFalse;
+        fclose (fdIn); fclose(fd); return false;
       }
       dd.usize += size;
       runCRC(&dd.crc32, buffer, size);
@@ -500,5 +500,5 @@ rtsBool compressFiles(char const* archive,
   writeCDE(fd, de);
   stgFree(de);
   fclose(fd);
-  return rtsTrue;
+  return true;
 }

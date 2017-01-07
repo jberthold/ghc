@@ -18,7 +18,7 @@
 #ifdef PARALLEL_RTS /* whole file */
 
 /*
- * By including "Rts.h" here, we can use types GlobalTaskId, rtsBool, etc.
+ * By including "Rts.h" here, we can use types like GlobalTaskId, etc.
  * Normally, Rts.h should be included before including this file "MPSystem.h",
  * but it is save to use here (protected from double-inclusion) and
  * brings useful other stuff (e.g. stdlib).
@@ -27,9 +27,9 @@
 
 /* global constants, declared in Parallel.h:
  *
- * nPEs   - nat: number of PEs in the parallel system
- * thisPE - nat: logical address of this PE btw. 1 and nPEs
- * IAmMainThread - rtsBool: indicating main PE (thisPE == 1)
+ * nPEs   - uint32_t: number of PEs in the parallel system
+ * thisPE - uint32_t: logical address of this PE btw. 1 and nPEs
+ * IAmMainThread - bool: indicating main PE (thisPE == 1)
  */
 
 
@@ -46,14 +46,14 @@
  *     the MP-System requires to spawn nodes from here.
  *     sets globar var.s:
  *      nPEs          - int: no. of PEs to expect/start
- *      IAmMainThread - rtsBool: whether this node is main PE
+ *      IAmMainThread - bool: whether this node is main PE
  * Parameters:
  *     IN/OUT argc  - int*: program argument count ptr
  *     IN/OUT argv  - char***: program arguments ptr
  *       (argc and argv may be modified if a start script is used)
  * Returns: Bool: success or failure
  */
-rtsBool MP_start(int* argc, char** argv[]);
+bool MP_start(int* argc, char** argv[]);
 
 /* MP_sync synchronises all nodes in a parallel computation:
  *  sets global var.:
@@ -61,7 +61,7 @@ rtsBool MP_start(int* argc, char** argv[]);
  *             (logical node address for messages)
  * Returns: Bool: success (1) or failure (0)
  */
-rtsBool MP_sync(void);
+bool MP_sync(void);
 
 /* MP_quit disconnects current node from MP-System:
  * Main PE will shut down the parallel system, others just inform main PE.
@@ -70,7 +70,7 @@ rtsBool MP_sync(void);
  *     IN isError - error number, 0 if normal exit
  * Returns: Bool: success (1) or failure (0)
  */
-rtsBool MP_quit(int isError);
+bool MP_quit(int isError);
 
 
 /**************************************
@@ -86,7 +86,7 @@ Needed functionality: */
  * sends the included data (array of length length) to the indicated node
  * (numbered from 1 to the requested nodecount nPEs) with the given message
  * tag. Length 0 is allowed and leads to a message containing no payload data.
- * The send action may fail, in which case rtsFalse is returned, and the
+ * The send action may fail, in which case false is returned, and the
  * caller is expected to handle this situation.
  * Data length should be given in bytes, data will be sent raw
  * (unsigned char).
@@ -97,10 +97,10 @@ Needed functionality: */
  *   IN data     -- array of raw data (unsigned char values) to send out
  *   IN length   -- length of data array. Allowed to be zero (no data).
  * Returns:
- *   rtsBool: success or failure inside comm. subsystem
+ *   bool: success or failure inside comm. subsystem
  */
 
-rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length);
+bool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length);
 
 /* - a blocking receive operation
  *   where system messages from main node have priority!
@@ -127,7 +127,7 @@ uint32_t MP_recv(uint32_t maxlength, StgWord8 *destination, // IN
 /* - a non-blocking probe operation
  * (unspecified sender, no receive buffers any more)
  */
-rtsBool MP_probe(void);
+bool MP_probe(void);
 
 #endif /* PARALLEL_RTS */
 

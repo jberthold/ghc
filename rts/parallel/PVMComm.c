@@ -31,7 +31,7 @@ send data format is always PvmDataRaw, containing longs
 #define checkComms(c,s)         do {                  \
                                   if ((c)<0) {        \
                                     pvm_perror(s);    \
-                                    Failure = rtsTrue;\
+                                    Failure = true;   \
                                     stg_exit(-1);     \
                                 }} while(0)
 // Note that stg_exit calls back into this module; code must avoid a loop!
@@ -80,8 +80,8 @@ char* pvmError[] = {
 
 // Global conditions defined here.
 // main thread (PE 1 in logical numbering)
-rtsBool IAmMainThread = rtsFalse;       // Set this for the main PE
-rtsBool Failure = rtsFalse; // Set this in case of error shutdown
+bool IAmMainThread = false;       // Set this for the main PE
+bool Failure = false; // Set this in case of error shutdown
 // nPEs, thisPE
 PEId nPEs = 0; // number of PEs in system
 PEId thisPE=0;
@@ -163,7 +163,7 @@ static void MPMsgHandle(OpCode code, int buffer) {
     // JB: q&d solution for debugging GUM (global stop on first
     // error). RACE CONDITION on multiple failures!
     errorBelch("remote PE failure, aborting execution.\n");
-    Failure = rtsTrue;
+    Failure = true;
     stg_exit(EXIT_FAILURE);
     break;
   case PP_READY:
@@ -208,7 +208,7 @@ static void MPMsgHandle(OpCode code, int buffer) {
  * JB 01/2007: start in debug mode when nPEs parameter starts with '-'
  *
  */
-rtsBool MP_start(int* argc, char** argv[]) {
+bool MP_start(int* argc, char** argv[]) {
 
   if (*argc < 2) {
     debugBelch("Need argument to specify number of PEs");
@@ -217,7 +217,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
 
   // start in debug mode if negative number (or "-0")
   if ((*argv)[1][0] == '-') {
-    RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
+    RtsFlags.ParFlags.Debug.mpcomm = true;
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("PVM debug mode! Starting\n"));
   }
@@ -243,7 +243,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
     // no parent => we are the main node
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("I am main node\n"));
-    IAmMainThread = rtsTrue;
+    IAmMainThread = true;
     allPEs[0]=pvmMyself; // first node in array is main
 
     // get pvm config for spawning other tasks
@@ -348,13 +348,13 @@ rtsBool MP_start(int* argc, char** argv[]) {
     }
 
     // set back debug option (will be set again while digesting RTS flags)
-    RtsFlags.ParFlags.Debug.mpcomm = rtsFalse;
+    RtsFlags.ParFlags.Debug.mpcomm = false;
 
   } else {
 // we have a parent => slave node
     IF_PAR_DEBUG(mpcomm,
                  debugBelch("I am slave node\n"));
-    IAmMainThread = rtsFalse;
+    IAmMainThread = false;
 
     // send a synchronisation message
     pvm_initsend(PvmDataRaw);
@@ -369,7 +369,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
   (*argv)[1] = (*argv)[0];   /* ignore the nPEs argument */
   (*argv)++; (*argc)--;
 
-  return rtsTrue;
+  return true;
 }
 
 /* MP_sync synchronises all nodes in a parallel computation:
@@ -379,7 +379,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
  *               (logical node address for messages)
  * Returns: Bool: success (1) or failure (0)
  */
-rtsBool MP_sync(void) {
+bool MP_sync(void) {
 
   if (IAmMainThread) {
     int nodesArrived=1;
@@ -429,12 +429,12 @@ rtsBool MP_sync(void) {
       if (allPEs[i] == pvmMyself) thisPE=i+1;
       i++;
     }
-    if (!thisPE) return rtsFalse;
+    if (!thisPE) return false;
   }
 
   IF_PAR_DEBUG(mpcomm,
                debugBelch("I am node %d, synchronised.\n",thisPE));
-  return rtsTrue;
+  return true;
 }
 
 /* MP_quit disconnects current node from MP-System:
@@ -442,7 +442,7 @@ rtsBool MP_sync(void) {
  *     IN isError - error number, 0 if normal exit
  * Returns: Bool: success (1) or failure (0)
  */
-rtsBool MP_quit(int isError) {
+bool MP_quit(int isError) {
   int errval;
 
   IF_PAR_DEBUG(mpcomm,
@@ -533,7 +533,7 @@ rtsBool MP_quit(int isError) {
   /* indicate that quit has been executed */
   nPEs = 0;
 
-  return rtsTrue;
+  return true;
 }
 
 /**************************************
@@ -542,7 +542,7 @@ rtsBool MP_quit(int isError) {
 // note that any buffering of messages happens one level above!
 
 /* send operation directly using PVM */
-rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length) {
+bool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length) {
 
   ASSERT(node > 0); // node is valid PE number
   ASSERT(node <= nPEs);
@@ -559,7 +559,7 @@ rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length) {
   }
   checkComms(pvm_send(allPEs[node-1],tag),
              "PVM:send failed");
-  return rtsTrue;
+  return true;
 }
 
 /* - a blocking receive operation
@@ -654,7 +654,7 @@ uint32_t MP_recv(uint32_t maxlength, StgWord8 *destination,
 
 /* - a non-blocking probe operation (unspecified sender)
  */
-rtsBool MP_probe(void){
+bool MP_probe(void){
 
   return (pvm_probe(ANY_TASK, ANY_CODE) > 0);
 }

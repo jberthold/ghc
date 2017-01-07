@@ -206,7 +206,7 @@ loop:
     else if (info == &stg_TSO_info)
     {
 #ifdef PARALLEL_RTS
-        rtsBool is_system = p == (StgClosure*) &stg_system_tso;
+        bool is_system = p == (StgClosure*) &stg_system_tso;
         // In case of a system-created blackhole, most code stays the same as
         // below: create BQ with first message MSG, change BH pointer. But we
         // need to enqueue the BQ differently.
@@ -295,7 +295,7 @@ loop:
         ASSERT(bq->bh == bh);
 
 #ifdef PARALLEL_RTS
-        rtsBool is_system = bq->owner == (StgTSO*) &stg_system_tso;
+        bool is_system = bq->owner == (StgTSO*) &stg_system_tso;
         // In case of a system-created blackhole, most code stays the same as
         // below: create BQ with first message MSG, change BH pointer. But we
         // need to enqueue the BQ differently.

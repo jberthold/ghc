@@ -11,7 +11,7 @@
 #if defined(PARALLEL_RTS)&&defined(USE_COPY) /* whole file */
 
 /*
- * By including "Rts.h" here, we can use types GlobalTaskId, rtsBool, etc.
+ * By including "Rts.h" here, we can use types like GlobalTaskId, etc.
  * Normally, Rts.h should be included before including this file "MPSystem.h",
  * but it is save to use here (protected from double-inclusion) and
  * brings useful other stuff (e.g. stdlib).
@@ -189,11 +189,11 @@ PEId setnPEsArg(int *argc, char **argv);
  *
  * nPEs   - PEId: number of PEs in the parallel system
  * thisPE - PEId: logical address of this PE btw. 1 and nPEs
- * IAmMainThread - rtsBool: indicating main PE (thisPE == 1)
+ * IAmMainThread - bool: indicating main PE (thisPE == 1)
  */
 PEId nPEs = 0;
 PEId thisPE = 0;
-rtsBool IAmMainThread = rtsFalse;
+bool IAmMainThread = false;
 
 int cpw_state = CPW_NOT_STARTED; /* keep track of state, to avoid
                                     double-faults on error shutdown */
@@ -217,14 +217,14 @@ cpw_sem_t  *w_sems, *r_sems;     /* synchronize msg queues */
  *     the MP-System requires to spawn nodes from here.
  *     sets globar var.s:
  *      nPEs          - int: no. of PEs to expect/start
- *      IAmMainThread - rtsBool: whether this node is main PE
+ *      IAmMainThread - bool: whether this node is main PE
  * Parameters:
  *     IN/OUT argc - int*    : prog. arg. count
  *     IN/OUT argv  - char***: program arguments
  *   (first arg. added by start script, removed here)
  * Returns: Bool: success or failure
  */
-rtsBool MP_start(int* argc, char** argv[]) {
+bool MP_start(int* argc, char** argv[]) {
 
   /* HACK: We cannot fork child processes before RtsFlags have been
      parsed, since shared memory sizes can be configured in them.
@@ -247,10 +247,10 @@ rtsBool MP_start(int* argc, char** argv[]) {
 
   // for now, there is only one...
   thisPE = 1;
-  IAmMainThread = rtsTrue;
+  IAmMainThread = true;
 
   // actual startup/fork done in MP_sync
-  return rtsTrue;
+  return true;
 }
 
 /* MP_sync synchronises all nodes in a parallel computation:
@@ -259,7 +259,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
  *             (logical node address for messages)
  * Returns: Bool: success (1) or failure (0)
  */
-rtsBool MP_sync(void){
+bool MP_sync(void){
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_sync()\n"));
 
@@ -315,7 +315,7 @@ rtsBool MP_sync(void){
     case 0:
       /* we are the child */
       thisPE = i;
-      IAmMainThread = rtsFalse;
+      IAmMainThread = false;
       break;
     default:
       // TODO should save pids for shutdown (also for the error case
@@ -331,7 +331,7 @@ rtsBool MP_sync(void){
   cpw_sync_synchronize(&sync_point); /* Fails after CPW_SYNC_TIMEOUT seconds */
   cpw_state = CPW_RUNNING;
   /* GO */
-  return rtsTrue;
+  return true;
 }
 
 /* MP_quit disconnects current node from MP-System:
@@ -340,7 +340,7 @@ rtsBool MP_sync(void){
  * Returns: Bool: success (1) or failure (0)
  */
 
-rtsBool MP_quit(int isError){
+bool MP_quit(int isError){
   int retryCount;
 
   IF_PAR_DEBUG(mpcomm,
@@ -355,7 +355,7 @@ rtsBool MP_quit(int isError){
                  debugBelch("MP_quit: wasn't started, skipping."));
     cpw_state = CPW_STOPPED;
     nPEs = 0;
-    return rtsFalse;
+    return false;
   }
   cpw_state = CPW_STOPPING;
 
@@ -445,7 +445,7 @@ rtsBool MP_quit(int isError){
                debugBelch("MP_quit: stopped"));
   cpw_state = CPW_STOPPED;
 
-  return rtsTrue;
+  return true;
 }
 
 
@@ -462,7 +462,7 @@ Needed functionality: */
  * sends the included data (array of length length) to the indicated node
  * (numbered from 1 to the requested nodecount nPEs) with the given message
  * tag. Length 0 is allowed and leads to a message containing no payload data.
- * The send action may fail, in which case rtsFalse is returned, and the
+ * The send action may fail, in which case false is returned, and the
  * caller is expected to handle this situation.
  *
  * Parameters:
@@ -471,9 +471,9 @@ Needed functionality: */
  *   IN data     -- array of bytes (unsigned char) to send out
  *   IN length   -- length of array in bytes. Allowed to be zero (no data).
  * Returns:
- *   rtsBool: success or failure inside comm. subsystem
+ *   bool: success or failure inside comm. subsystem
  */
-rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length){
+bool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length){
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_send(%s)\n", getOpName(tag)));
 
@@ -486,10 +486,10 @@ rtsBool MP_send(PEId node, OpCode tag, StgWord8 *data, uint32_t length){
   /* send */
   switch (cpw_shm_send_msg(node, tag, length, data)) {
   case CPW_NOERROR:
-    return rtsTrue;
+    return true;
   case CPW_SEND_FAIL:
   default:
-    return rtsFalse;
+    return false;
   }
 }
 
@@ -543,7 +543,7 @@ uint32_t MP_recv(STG_UNUSED uint32_t maxlength, StgWord8 *destination, // IN
 /* - a non-blocking probe operation
  * (unspecified sender, no receive buffers any more)
  */
-rtsBool MP_probe(void) {
+bool MP_probe(void) {
   // IF_PAR_DEBUG(mpcomm,
   //              debugBelch("MP_probe()\n"));
 
@@ -551,9 +551,9 @@ rtsBool MP_probe(void) {
   cpw_shm_check_errors();
 
   if(cpw_shm_probe() || cpw_self_probe())
-    return rtsTrue;
+    return true;
   else
-    return rtsFalse;
+    return false;
 }
 
 
@@ -1517,11 +1517,11 @@ static char* cpw_mk_argv_string(int argc, char ** argv);
  *
  * nPEs   - PEId: number of PEs in the parallel system
  * thisPE - PEId: logical address of this PE btw. 1 and nPEs
- * IAmMainThread - rtsBool: indicating main PE (thisPE == 1)
+ * IAmMainThread - bool: indicating main PE (thisPE == 1)
  */
 PEId nPEs = 0;
 PEId thisPE = 0;
-rtsBool IAmMainThread = rtsFalse;
+bool IAmMainThread = false;
 
 int cpw_state = CPW_NOT_STARTED; /* keep track of state, to avoid
                                     double-faults on error shutdown */
@@ -1547,14 +1547,14 @@ char buffer[256];
  *     the MP-System requires to spawn nodes from here.
  *     sets globar var.s:
  *      nPEs          - int: no. of PEs to expect/start
- *      IAmMainThread - rtsBool: whether this node is main PE
+ *      IAmMainThread - bool: whether this node is main PE
  * Parameters:
  *     IN/OUT argc - int*    : prog. arg. count
  *     IN/OUT argv  - char***: program arguments
  *   (first arg. added by start script, removed here)
  * Returns: Bool: success or failure
  */
-rtsBool MP_start(int* argc, char** argv[]) {
+bool MP_start(int* argc, char** argv[]) {
         //printf("MP_Start: Starting CopyWay system... :)\n");
 
   /* is Environment Var set? then we are a child */
@@ -1567,9 +1567,9 @@ rtsBool MP_start(int* argc, char** argv[]) {
                debugBelch("IsEdenChild = %i\n", thisPE));
   if(thisPE == 0) {
     thisPE = 1;
-    IAmMainThread = rtsTrue;
+    IAmMainThread = true;
   } else {
-    IAmMainThread = rtsFalse;
+    IAmMainThread = false;
   }
 
   if (IAmMainThread)
@@ -1589,7 +1589,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
   // rest (actually starting child processes) done in MP_sync after
   // parsing RTS flags
 
-  return rtsTrue;
+  return true;
 }
 
 /* MP_sync synchronises all nodes in a parallel computation:
@@ -1598,7 +1598,7 @@ rtsBool MP_start(int* argc, char** argv[]) {
  *             (logical node address for messages)
  * Returns: Bool: success (1) or failure (0)
  */
-rtsBool MP_sync(void){
+bool MP_sync(void){
 
   /* set buffer sizes */
   num_msgs = RtsFlags.ParFlags.sendBufferSize * (int)nPEs;
@@ -1663,7 +1663,7 @@ rtsBool MP_sync(void){
 
   IF_PAR_DEBUG(mpcomm, debugBelch("%d ready to go", thisPE));
   cpw_state = CPW_RUNNING;
-  return rtsTrue;
+  return true;
 }
 
 /* MP_quit disconnects current node from MP-System:
@@ -1672,7 +1672,7 @@ rtsBool MP_sync(void){
  * Returns: Bool: success (1) or failure (0)
  */
 
-rtsBool MP_quit(int isError){
+bool MP_quit(int isError){
 
     StgWord data[1] = {isError};
     PEId sender;
@@ -1690,7 +1690,7 @@ rtsBool MP_quit(int isError){
                  debugBelch("MP_quit: wasn't started, skipping."));
     cpw_state = CPW_STOPPED;
     nPEs = 0;
-    return rtsFalse;
+    return false;
   }
   cpw_state = CPW_STOPPING;
 
@@ -1781,7 +1781,7 @@ rtsBool MP_quit(int isError){
                debugBelch("MP_quit: Finished."));
   cpw_state = CPW_STOPPED;
 
-  return rtsTrue;
+  return true;
 }
 
 /**************************************
@@ -1797,7 +1797,7 @@ Needed functionality: */
  * sends the included data (array of length length) to the indicated node
  * (numbered from 1 to the requested nodecount nPEs) with the given message
  * tag. Length 0 is allowed and leads to a message containing no payload data.
- * The send action may fail, in which case rtsFalse is returned, and the
+ * The send action may fail, in which case false is returned, and the
  * caller is expected to handle this situation.
  *
  * Parameters:
@@ -1806,9 +1806,9 @@ Needed functionality: */
  *   IN data     -- array of bytes (StgWord8) to send out
  *   IN length   -- data length in bytes. Allowed to be zero (no data).
  * Returns:
- *   rtsBool: success or failure inside comm. subsystem
+ *   bool: success or failure inside comm. subsystem
  */
-rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
+bool MP_send(int node, OpCode tag, StgWord8 *data, int length){
   IF_PAR_DEBUG(mpcomm,
                debugBelch("MP_send()"));
 
@@ -1821,10 +1821,10 @@ rtsBool MP_send(int node, OpCode tag, StgWord8 *data, int length){
   /* send */
   switch (cpw_shm_send_msg(node, tag, length, data)) {
   case CPW_NOERROR:
-    return rtsTrue;
+    return true;
   case CPW_SEND_FAIL:
   default:
-    return rtsFalse;
+    return false;
   }
 }
 
@@ -1881,7 +1881,7 @@ uint32_t MP_recv(STG_UNUSED uint32_t maxlength, StgWord8 *destination, // IN
 /* - a non-blocking probe operation
  * (unspecified sender, no receive buffers any more)
  */
-rtsBool MP_probe(void) {
+bool MP_probe(void) {
   // IF_PAR_DEBUG(mpcomm,
   //             debugBelch("MP_probe()"));
 
@@ -1891,9 +1891,9 @@ rtsBool MP_probe(void) {
   IF_PAR_DEBUG(mpcomm,
                debugBelch(".."));
   if(cpw_shm_probe() || cpw_self_probe())
-    return rtsTrue;
+    return true;
   else
-    return rtsFalse;
+    return false;
 }
 
 
@@ -2872,7 +2872,7 @@ static int cpw_mk_name(char *res) {
  */
 PEId setnPEsArg(int *argc, char **argv) {
   char **currArg, **lastArg;
-  rtsBool inRTS, finishedRTS;
+  bool inRTS, finishedRTS;
   int i;
   PEId pes;
 
@@ -2880,7 +2880,7 @@ PEId setnPEsArg(int *argc, char **argv) {
   IF_PAR_DEBUG(mpcomm,
                debugBelch("parsing flags, arg.count %d\n", *argc));
   */
-  inRTS = finishedRTS = rtsFalse;
+  inRTS = finishedRTS = false;
   pes = 0;
   i = *argc;
   currArg = argv;
@@ -2890,7 +2890,7 @@ PEId setnPEsArg(int *argc, char **argv) {
     if ( !finishedRTS && inRTS && (*currArg)[0]=='-' && (*currArg)[1]=='N') {
       // the PE flag we want. Parse it and only advance currArg, decrease argc
       if ((*currArg)[2]=='-') { // negative number, debug mode
-        RtsFlags.ParFlags.Debug.mpcomm = rtsTrue;
+        RtsFlags.ParFlags.Debug.mpcomm = true;
         pes = (PEId)atoi((*currArg)+3);
       } else {
         pes = (PEId)atoi((*currArg)+2);
@@ -2902,10 +2902,10 @@ PEId setnPEsArg(int *argc, char **argv) {
       (*argc)--;
     } else {
       // check for interesting flags
-      if      (strcmp(*currArg, "--RTS") == 0) finishedRTS=rtsTrue;
-      else if (strcmp(*currArg, "--") == 0) finishedRTS=rtsTrue;
-      else if (strcmp(*currArg, "+RTS") == 0) inRTS=rtsTrue;
-      else if (strcmp(*currArg, "-RTS") == 0) inRTS=rtsFalse;
+      if      (strcmp(*currArg, "--RTS") == 0) finishedRTS = true;
+      else if (strcmp(*currArg, "--") == 0)    finishedRTS = true;
+      else if (strcmp(*currArg, "+RTS") == 0)  inRTS = true;
+      else if (strcmp(*currArg, "-RTS") == 0)  inRTS = false;
       // copy argument to its new place
       *lastArg++ = *currArg++;
     }

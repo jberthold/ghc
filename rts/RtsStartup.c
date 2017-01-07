@@ -66,8 +66,8 @@ static void flushStdHandles(void);
 
 #ifdef PARALLEL_RTS
 // remember exit code in hs_exit, avoid loop on multiple failures
-int err=0;
-rtsBool exit_started=rtsFalse;
+int err           = 0;
+bool exit_started = false;
 #endif
 
 /* -----------------------------------------------------------------------------
@@ -626,7 +626,7 @@ stg_exit(int n)
   // therefore we avoid calling it again if nPEs is already 0.
   // exit_started avoids loop if stg_exit called again by functions called here
   if ( n != EXIT_SUCCESS && nPEs != 0 && !exit_started ) {
-    exit_started = rtsTrue;    // do not reenter here
+    exit_started = true;    // do not reenter here
     shutdownParallelSystem(n); // shutdown other PEs (see ParInit/MPSystem)
 #ifdef TRACING
     endTracing();

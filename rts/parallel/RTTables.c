@@ -57,7 +57,7 @@ Port NoPort  = {0, 0, 0}; // constant for error returns
 void CommCheckFailed(void);
 void killProcess_(ProcessData* p);
 Inport* addInport_(ProcessData *p, StgClosure *blackhole);
-rtsBool updateTSOList(ProcessData *p);
+bool updateTSOList(ProcessData *p);
 void updateInports(ProcessData *p);
 
 // action if 1 to 1 check fails:
@@ -121,12 +121,12 @@ void freeRTT(void) {
 }
 
 // Port comparison, is trivial...
-rtsBool equalPorts(Port p, Port q) {
+bool equalPorts(Port p, Port q) {
   if ( p.machine == q.machine
        && p.process == q.process
        && p.id      == q.id)
-    return rtsTrue;
-  return rtsFalse;
+    return true;
+  return false;
 }
 
 // processTable actions are implemented OO-style,
@@ -543,7 +543,7 @@ StgTSO* findTSO(StgWord processId, StgWord id) {
   // If we reach here, something is very wrong(tm): the thread does not exist,
   // but we found it earlier in the threadproctable (otherwise would be
   // proc=0, early exit. Complain (in debug mode)!
-  ASSERT(rtsFalse);
+  ASSERT(false);
   return NULL;
 }
 

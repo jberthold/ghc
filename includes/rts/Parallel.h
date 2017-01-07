@@ -51,7 +51,7 @@ extern PEId nPEs, thisPE;
 
 // Check, defined in Pack.c as well.
 // Is there still a macro for it somewhere else?
-rtsBool isBlackhole(StgClosure* closure);
+bool isBlackhole(StgClosure* closure);
 
 // interfaces for (un-)packing, defined in Pack.c.
 
@@ -98,7 +98,7 @@ StgClosure* createListNode(Capability *cap,
 
 // parallel machine setup, startup / shutdown
 // in MPSystem file (PVMComm | MPIComm | CpComm currently)
-extern rtsBool IAmMainThread;
+extern bool IAmMainThread;
 
 void          startupParallelSystem(int* argc, char** argv[]);
 void          synchroniseSystem(void);
@@ -129,7 +129,7 @@ void newProcess(StgTSO* firstTSO);
 
 // Sending messages. sender and receiver included in the buffer
 // Send operation may fail inside the communication subsystem.
-rtsBool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer);
+bool sendMsg(OpCode tag, rtsPackBuffer* dataBuffer);
 
 // sendWrapper is called by primitive operations, does not need
 // declaration here.

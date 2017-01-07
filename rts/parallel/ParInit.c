@@ -142,7 +142,7 @@ void zipTraceFiles(void) {
 
   char **files, *prog;
   int i;
-  rtsBool res;
+  bool res;
 
   if (!IAmMainThread || RtsFlags.TraceFlags.tracing != TRACE_EVENTLOG) {
     return;
@@ -197,7 +197,7 @@ void zipTraceFiles(void) {
       
       // and remove the files if this worked
       for (i=0; i < (int)pes; i++) {
-        if (res == rtsTrue) {
+        if (res == true) {
           if (remove(files[i]) < 0) {
             sysErrorBelch("Failed to remove file");
             errorBelch("(when removing file %s)\n", files[i]);

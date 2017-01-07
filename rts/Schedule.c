@@ -704,7 +704,7 @@ static void processMessages(Capability *cap) {
   PEId pe;
   Port sender, receiver;
   StgTSO* tso; // for terminate messages
-  rtsBool eventEmitted = rtsFalse;
+  bool eventEmitted = false;
 
   initRecvBuffer();
 
@@ -721,7 +721,7 @@ static void processMessages(Capability *cap) {
 
     if (!eventEmitted)  {
     //          edentrace: start communication event
-      eventEmitted = rtsTrue;
+      eventEmitted = true;
       traceEdenEventStartReceive(cap);
     }
 
