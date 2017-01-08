@@ -52,7 +52,9 @@
 #endif
 // and sometimes they did not appear very internal, just old...
 #if __GLASGOW_HASKELL__ < 801
-#define bool rtsBool
+#define bool  rtsBool
+#define true  rtsTrue
+#define false rtsFalse
 #endif
 
 
@@ -156,7 +158,7 @@ static void donePacking(PackState *state);
 // closure queue
 static ClosureQ* initClosureQ(uint32_t size);
 static void freeClosureQ(ClosureQ* q);
-STATIC_INLINE rtsBool queueEmpty(ClosureQ* q);
+STATIC_INLINE bool queueEmpty(ClosureQ* q);
 STATIC_INLINE uint32_t queueSize(ClosureQ* q);
 static void queueClosure(ClosureQ* q, StgClosure *closure);
 static StgClosure *deQueueClosure(ClosureQ* q);
@@ -168,7 +170,7 @@ static StgClosure *deQueueClosure(ClosureQ* q);
 // little helpers:
 STATIC_INLINE void registerOffset(PackState* p, StgClosure *closure);
 STATIC_INLINE StgWord offsetFor(PackState* p, StgClosure *closure);
-STATIC_INLINE rtsBool roomToPack(PackState* p, uint32_t size);
+STATIC_INLINE bool roomToPack(PackState* p, uint32_t size);
 
 // closure information
 STATIC_INLINE StgInfoTable* getClosureInfo(StgClosure* node, StgInfoTable* info,
@@ -176,11 +178,11 @@ STATIC_INLINE StgInfoTable* getClosureInfo(StgClosure* node, StgInfoTable* info,
                                            uint32_t *nonptrs, uint32_t *vhs);
 #ifdef LIBRARY_CODE
 // remains local when code is stand-alone for the library
-STATIC_INLINE rtsBool pmIsBlackhole(StgClosure* node);
+STATIC_INLINE bool pmIsBlackhole(StgClosure* node);
 #define isBlackhole pmIsBlackhole
 #else
 // if compiling for the RTS: used in other files, declared in Parallel.h
-// rtsBool isBlackhole(StgClosure* node);
+// bool isBlackhole(StgClosure* node);
 #endif
 
 /************************
@@ -298,7 +300,7 @@ static void checkPacket(StgWord* buffer, uint32_t size);
 static void init(void) {
     // we must retain all CAFs, as packet data might refer to it.
     // This variable lives in Storage.c, inhibits GC for CAFs.
-    keepCAFs = rtsTrue;
+    keepCAFs = true;
 }
 
 /***************************************************************
@@ -378,7 +380,7 @@ static void freeClosureQ(ClosureQ* q) {
 }
 
 // queue empty if head == tail
-STATIC_INLINE rtsBool queueEmpty(ClosureQ* q) {
+STATIC_INLINE bool queueEmpty(ClosureQ* q) {
     return (q->head == q->tail);
 }
 
@@ -457,7 +459,7 @@ STATIC_INLINE StgWord offsetFor(PackState* p, StgClosure *closure) {
 
 // roomToPack checks if the buffer has enough space to pack the given size (in
 // StgWords). For GUM, it would also include queue size * FETCHME-size.
-STATIC_INLINE rtsBool roomToPack(PackState* p, uint32_t size)
+STATIC_INLINE bool roomToPack(PackState* p, uint32_t size)
 {
     if ((p->position +  // where we are in the buffer right now
          size +         // space needed for the current closure
@@ -467,9 +469,9 @@ STATIC_INLINE rtsBool roomToPack(PackState* p, uint32_t size)
          1)             // closure tag
         >= p->size) {
         PACKDEBUG(debugBelch("Pack buffer full (size %d). ", p->position));
-        return rtsFalse;
+        return false;
     }
-    return rtsTrue;
+    return true;
 }
 
 // quick test for blackholes. Available somewhere else?
@@ -477,7 +479,7 @@ STATIC_INLINE rtsBool roomToPack(PackState* p, uint32_t size)
 #ifdef LIBRARY_CODE
 STATIC_INLINE
 #endif
-rtsBool isBlackhole(StgClosure* node) {
+bool isBlackhole(StgClosure* node) {
     // since ghc-7.0, blackholes are used as indirections. inspect indirectee.
     if(((StgInfoTable*)get_itbl(UNTAG_CLOSURE(node)))->type == BLACKHOLE) {
         StgClosure* indirectee = ((StgInd*)node)->indirectee;
@@ -485,12 +487,12 @@ rtsBool isBlackhole(StgClosure* node) {
         switch (((StgInfoTable*)get_itbl(UNTAG_CLOSURE(indirectee)))->type) {
         case TSO:
         case BLOCKING_QUEUE:
-            return rtsTrue;
+            return true;
         default:
-            return rtsFalse;
+            return false;
         }
     }
-    return rtsFalse;
+    return false;
 }
 
 // unwind (chains of) indirections, return the actual data closure
@@ -951,7 +953,7 @@ loop:
     case FUN_STATIC:
     case THUNK_STATIC:
         // We pack indirections to CAFs: Therefore, we need
-        // keepCAFs==rtsTrue (otherwise GC leaves dangling pointers
+        // keepCAFs==true (otherwise GC leaves dangling pointers
         // from original CAF site to the heap)
         PACKETDEBUG(debugBelch("*>~~ Packing a %p (%s) as a PLC\n",
                                closure, info_type_by_ip(info)));
@@ -2426,7 +2428,7 @@ static void graphFingerPrint_(char* fp, HashTable* visited, StgClosure *p) {
     }
 
     /* record that we are processing this closure */
-    insertHashTable(visited, (StgWord) p, (void *)rtsTrue/*non-NULL*/);
+    insertHashTable(visited, (StgWord) p, (void *) 1 /*non-NULL*/);
 
     ASSERT(LOOKS_LIKE_CLOSURE_PTR(p));
 
