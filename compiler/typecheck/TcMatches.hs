@@ -237,7 +237,7 @@ tcMatch ctxt pat_tys rhs_ty match
     tc_grhss _ (Just {}) _ _
       = panic "tc_ghrss"        -- Rejected by renamer
 
-        -- For (\x -> e), tcExpr has already said "In the expresssion \x->e"
+        -- For (\x -> e), tcExpr has already said "In the expression \x->e"
         -- so we don't want to add "In the lambda abstraction \x->e"
     add_match_ctxt match thing_inside
         = case mc_what ctxt of
@@ -408,7 +408,7 @@ tcGuardStmt _ (BodyStmt guard _ _ _) res_ty thing_inside
 tcGuardStmt ctxt (BindStmt pat rhs _ _ _) res_ty thing_inside
   = do  { (rhs', rhs_ty) <- tcInferSigmaNC rhs
                                    -- Stmt has a context already
-        ; (pat', thing)  <- tcPat_O (StmtCtxt ctxt) (exprCtOrigin (unLoc rhs))
+        ; (pat', thing)  <- tcPat_O (StmtCtxt ctxt) (lexprCtOrigin rhs)
                                     pat (mkCheckExpType rhs_ty) $
                             thing_inside res_ty
         ; return (mkTcBindStmt pat' rhs', thing) }
@@ -1002,6 +1002,7 @@ e_i   :: exp_ty_i
 <*>_i :: t_(i-1) -> exp_ty_i -> t_i
 join :: tn -> res_ty
 -}
+
 tcApplicativeStmts
   :: HsStmtContext Name
   -> [(SyntaxExpr Name, ApplicativeArg Name Name)]
@@ -1023,9 +1024,17 @@ tcApplicativeStmts ctxt pairs rhs_ty thing_inside
       ; let (ops, args) = unzip pairs
       ; ops' <- goOps fun_ty (zip3 ops (ts ++ [rhs_ty]) exp_tys)
 
-      ; (args', thing) <- goArgs (zip3 args pat_tys exp_tys) $
-                             thing_inside body_ty
-      ; return (zip ops' args', body_ty, thing) }
+      -- Typecheck each ApplicativeArg separately
+      -- See Note [ApplicativeDo and constraints]
+      ; args' <- mapM goArg (zip3 args pat_tys exp_tys)
+
+      -- Bring into scope all the things bound by the args,
+      -- and typecheck the thing_inside
+      -- See Note [ApplicativeDo and constraints]
+      ; res <- tcExtendIdEnv (concatMap get_arg_bndrs args') $
+               thing_inside body_ty
+
+      ; return (zip ops' args', body_ty, res) }
   where
     goOps _ [] = return []
     goOps t_left ((op,t_i,exp_ty) : ops)
@@ -1037,41 +1046,60 @@ tcApplicativeStmts ctxt pairs rhs_ty thing_inside
            ; ops' <- goOps t_i ops
            ; return (op' : ops') }
 
-    goArgs
-      :: [(ApplicativeArg Name Name, Type, Type)]
-      -> TcM t
-      -> TcM ([ApplicativeArg TcId TcId], t)
+    goArg :: (ApplicativeArg Name Name, Type, Type)
+          -> TcM (ApplicativeArg TcId TcId)
 
-    goArgs [] thing_inside
-      = do { thing <- thing_inside
-           ; return ([],thing)
-           }
-    goArgs ((ApplicativeArgOne pat rhs, pat_ty, exp_ty) : rest) thing_inside
-      = do { let stmt :: ExprStmt Name
-                 stmt = mkBindStmt pat rhs
-           ; setSrcSpan (combineSrcSpans (getLoc pat) (getLoc rhs)) $
-             addErrCtxt (pprStmtInCtxt ctxt stmt) $
-               do { rhs' <- tcMonoExprNC rhs (mkCheckExpType exp_ty)
-                  ; (pat',(pairs, thing)) <-
-                      tcPat (StmtCtxt ctxt) pat (mkCheckExpType pat_ty) $
-                      popErrCtxt $
-                      goArgs rest thing_inside
-                  ; return (ApplicativeArgOne pat' rhs' : pairs, thing) } }
+    goArg (ApplicativeArgOne pat rhs, pat_ty, exp_ty)
+      = setSrcSpan (combineSrcSpans (getLoc pat) (getLoc rhs)) $
+        addErrCtxt (pprStmtInCtxt ctxt (mkBindStmt pat rhs))   $
+        do { rhs' <- tcMonoExprNC rhs (mkCheckExpType exp_ty)
+           ; (pat', _) <- tcPat (StmtCtxt ctxt) pat (mkCheckExpType pat_ty) $
+                          return ()
+           ; return (ApplicativeArgOne pat' rhs') }
 
-    goArgs ((ApplicativeArgMany stmts ret pat, pat_ty, exp_ty) : rest)
-            thing_inside
-      = do { (stmts', (ret',pat',rest',thing))  <-
+    goArg (ApplicativeArgMany stmts ret pat, pat_ty, exp_ty)
+      = do { (stmts', (ret',pat')) <-
                 tcStmtsAndThen ctxt tcDoStmt stmts (mkCheckExpType exp_ty) $
                 \res_ty  -> do
                   { L _ ret' <- tcMonoExprNC (noLoc ret) res_ty
-                  ; (pat',(rest', thing)) <-
-                      tcPat (StmtCtxt ctxt) pat (mkCheckExpType pat_ty) $
-                        goArgs rest thing_inside
-                  ; return (ret', pat', rest', thing)
+                  ; (pat', _) <- tcPat (StmtCtxt ctxt) pat (mkCheckExpType pat_ty) $
+                                 return ()
+                  ; return (ret', pat')
                   }
-           ; return (ApplicativeArgMany stmts' ret' pat' : rest', thing) }
+           ; return (ApplicativeArgMany stmts' ret' pat') }
 
-{-
+    get_arg_bndrs :: ApplicativeArg TcId TcId -> [Id]
+    get_arg_bndrs (ApplicativeArgOne pat _)    = collectPatBinders pat
+    get_arg_bndrs (ApplicativeArgMany _ _ pat) = collectPatBinders pat
+
+
+{- Note [ApplicativeDo and constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+An applicative-do is supposed to take place in parallel, so
+constraints bound in one arm can't possibly be available in another
+(Trac #13242).  Our current rule is this (more details and discussion
+on the ticket). Consider
+
+   ...stmts...
+   ApplicativeStmts [arg1, arg2, ... argN]
+   ...more stmts...
+
+where argi :: ApplicativeArg. Each 'argi' itself contains one or more Stmts.
+Now, we say that:
+
+* Constraints required by the argi can be solved from
+  constraint bound by ...stmts...
+
+* Constraints and existentials bound by the argi are not available
+  to solve constraints required either by argj (where i /= j),
+  or by ...more stmts....
+
+* Within the stmts of each 'argi' individually, however, constraints bound
+  by earlier stmts can be used to solve later ones.
+
+To achieve this, we just typecheck each 'argi' separately, bring all
+the variables they bind into scope, and typecheck the thing_inside.
+
 ************************************************************************
 *                                                                      *
 \subsection{Errors and contexts}

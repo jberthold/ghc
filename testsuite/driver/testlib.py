@@ -23,7 +23,7 @@ import subprocess
 
 from testglobals import *
 from testutil import *
-from extra_files import extra_src_files
+extra_src_files = {'T4198': ['exitminus1.c']} # TODO: See #12223
 
 if config.use_threads:
     import threading
@@ -872,7 +872,7 @@ def do_test(name, way, func, args, files):
 # if found and instead have the testsuite decide on what to do
 # with the output.
 def override_options(pre_cmd):
-    if config.verbose >= 4 and bool(re.match('\$make', pre_cmd, re.I)):
+    if config.verbose >= 5 and bool(re.match('\$make', pre_cmd, re.I)):
         return pre_cmd.replace('-s'      , '') \
                       .replace('--silent', '') \
                       .replace('--quiet' , '')
@@ -1801,11 +1801,11 @@ def runCmd(cmd, stdin=None, stdout=None, stderr=None, timeout_multiplier=1.0, pr
                 sys.stderr.buffer.write(stderr_buffer)
 
         if stdout:
-            with io.open(stdout, 'ab') as f:
+            with io.open(stdout, 'wb') as f:
                 f.write(stdout_buffer)
         if stderr:
             if stderr is not subprocess.STDOUT:
-                with io.open(stderr, 'ab') as f:
+                with io.open(stderr, 'wb') as f:
                     f.write(stderr_buffer)
 
     if r.returncode == 98:
@@ -1893,26 +1893,41 @@ def find_expected_file(name, suff):
 
 if config.msys:
     import stat
+    import time
     def cleanup():
         testdir = getTestOpts().testdir
-
+        max_attemps = 5
+        retries = max_attemps
         def on_error(function, path, excinfo):
             # At least one test (T11489) removes the write bit from a file it
             # produces. Windows refuses to delete read-only files with a
             # permission error. Try setting the write bit and try again.
-            if excinfo[1].errno == 13:
-                os.chmod(path, stat.S_IWRITE)
-                function(path)
+            os.chmod(path, stat.S_IWRITE)
+            function(path)
 
-        shutil.rmtree(testdir, ignore_errors=False, onerror=on_error)
+        # On Windows we have to retry the delete a couple of times.
+        # The reason for this is that a FileDelete command just marks a
+        # file for deletion. The file is really only removed when the last
+        # handle to the file is closed. Unfortunately there are a lot of
+        # system services that can have a file temporarily opened using a shared
+        # readonly lock, such as the built in AV and search indexer.
+        #
+        # We can't really guarantee that these are all off, so what we can do is
+        # whenever after a rmtree the folder still exists to try again and wait a bit.
+        #
+        # Based on what I've seen from the tests on CI server, is that this is relatively rare.
+        # So overall we won't be retrying a lot. If after a reasonable amount of time the folder is
+        # still locked then abort the current test by throwing an exception, this so it won't fail
+        # with an even more cryptic error.
+        #
+        # See Trac #13162
+        while retries > 0 and os.path.exists(testdir):
+            time.sleep((max_attemps-retries)*6)
+            shutil.rmtree(testdir, onerror=on_error, ignore_errors=False)
+            retries=-1
 
-        if os.path.exists(testdir):
-            # And now we try to cleanup the folder again, since the above
-            # Would have removed the problematic file(s), but not the folder.
-            # The onerror doesn't seem to be raised during the tree walk, only
-            # afterwards to report the failures.
-            # See https://bugs.python.org/issue8523 and https://bugs.python.org/issue19643
-            shutil.rmtree(testdir, ignore_errors=False)
+        if retries == 0 and os.path.exists(testdir):
+            raise Exception("Unable to remove folder '" + testdir + "'. Unable to start current test.")
 else:
     def cleanup():
         testdir = getTestOpts().testdir

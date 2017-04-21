@@ -60,7 +60,6 @@ import TysWiredIn
 import TysPrim( intPrimTy )
 import PrimOp( tagToEnumKey )
 import PrelNames
-import MkId ( proxyHashId )
 import DynFlags
 import SrcLoc
 import Util
@@ -71,7 +70,7 @@ import Outputable
 import FastString
 import Control.Monad
 import Class(classTyCon)
-import UniqFM ( nonDetEltsUFM )
+import UniqSet ( nonDetEltsUniqSet )
 import qualified GHC.LanguageExtensions as LangExt
 
 import Data.Function
@@ -149,7 +148,7 @@ tcInferRho expr = addErrCtxt (exprCtxt expr) (tcInferRhoNC expr)
 
 tcInferRhoNC expr
   = do { (expr', sigma) <- tcInferSigmaNC expr
-       ; (wrap, rho) <- topInstantiate (exprCtOrigin (unLoc expr)) sigma
+       ; (wrap, rho) <- topInstantiate (lexprCtOrigin expr) sigma
        ; return (mkLHsWrap wrap expr', rho) }
 
 
@@ -216,21 +215,28 @@ tcExpr e@(HsIPVar x) res_ty
                           unwrapIP $ mkClassPred ipClass [x,ty]
   origin = IPOccOrigin x
 
-tcExpr e@(HsOverLabel l) res_ty  -- See Note [Type-checking overloaded labels]
-  = do { isLabelClass <- tcLookupClass isLabelClassName
-       ; alpha <- newOpenFlexiTyVarTy
-       ; let lbl = mkStrLitTy l
-             pred = mkClassPred isLabelClass [lbl, alpha]
-       ; loc <- getSrcSpanM
-       ; var <- emitWantedEvVar origin pred
-       ; let proxy_arg = L loc (mkHsWrap (mkWpTyApps [typeSymbolKind, lbl])
-                                         (HsVar (L loc proxyHashId)))
-             tm = L loc (fromDict pred (HsVar (L loc var))) `HsApp` proxy_arg
-       ; tcWrapResult e tm alpha res_ty }
+tcExpr e@(HsOverLabel mb_fromLabel l) res_ty
+  = do { -- See Note [Type-checking overloaded labels]
+         loc <- getSrcSpanM
+       ; case mb_fromLabel of
+           Just fromLabel -> tcExpr (applyFromLabel loc fromLabel) res_ty
+           Nothing -> do { isLabelClass <- tcLookupClass isLabelClassName
+                         ; alpha <- newFlexiTyVarTy liftedTypeKind
+                         ; let pred = mkClassPred isLabelClass [lbl, alpha]
+                         ; loc <- getSrcSpanM
+                         ; var <- emitWantedEvVar origin pred
+                         ; tcWrapResult e (fromDict pred (HsVar (L loc var)))
+                                        alpha res_ty } }
   where
-  -- Coerces a dictionary for `IsLabel "x" t` into `Proxy# x -> t`.
+  -- Coerces a dictionary for `IsLabel "x" t` into `t`,
+  -- or `HasField "x" r a into `r -> a`.
   fromDict pred = HsWrap $ mkWpCastR $ unwrapIP pred
   origin = OverLabelOrigin l
+  lbl = mkStrLitTy l
+
+  applyFromLabel loc fromLabel =
+    L loc (HsVar (L loc fromLabel)) `HsAppType`
+      mkEmptyWildCardBndrs (L loc (HsTyLit (HsStrTy NoSourceText l)))
 
 tcExpr (HsLam match) res_ty
   = do  { (match', wrap) <- tcMatchLambda herald match_ctxt match res_ty
@@ -265,19 +271,27 @@ tcExpr e@(ExprWithTySig expr sig_ty) res_ty
 {-
 Note [Type-checking overloaded labels]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Recall that (in GHC.OverloadedLabels) we have
+Recall that we have
 
+  module GHC.OverloadedLabels where
     class IsLabel (x :: Symbol) a where
-      fromLabel :: Proxy# x -> a
+      fromLabel :: a
 
-When we see an overloaded label like `#foo`, we generate a fresh
-variable `alpha` for the type and emit an `IsLabel "foo" alpha`
-constraint.  Because the `IsLabel` class has a single method, it is
-represented by a newtype, so we can coerce `IsLabel "foo" alpha` to
-`Proxy# "foo" -> alpha` (just like for implicit parameters).  We then
-apply it to `proxy#` of type `Proxy# "foo"`.
+We translate `#foo` to `fromLabel @"foo"`, where we use
 
-That is, we translate `#foo` to `fromLabel (proxy# :: Proxy# "foo")`.
+ * the in-scope `fromLabel` if `RebindableSyntax` is enabled; or if not
+ * `GHC.OverloadedLabels.fromLabel`.
+
+In the `RebindableSyntax` case, the renamer will have filled in the
+first field of `HsOverLabel` with the `fromLabel` function to use, and
+we simply apply it to the appropriate visible type argument.
+
+In the `OverloadedLabels` case, when we see an overloaded label like
+`#foo`, we generate a fresh variable `alpha` for the type and emit an
+`IsLabel "foo" alpha` constraint.  Because the `IsLabel` class has a
+single method, it is represented by a newtype, so we can coerce
+`IsLabel "foo" alpha` to `alpha` (just like for implicit parameters).
+
 -}
 
 
@@ -324,7 +338,7 @@ tuple.  The trouble is that this might accept a partially-applied
 only going to work when it's fully applied, so it turns into
     case x of _ -> (# p,q #)
 
-So it seems more uniform to treat 'seq' as it it was a language
+So it seems more uniform to treat 'seq' as if it was a language
 construct.
 
 See also Note [seqId magic] in MkId
@@ -350,7 +364,7 @@ tcExpr expr@(OpApp arg1 op fix arg2) res_ty
        ; (arg1', arg1_ty) <- tcInferSigma arg1
 
        ; let doc   = text "The first argument of ($) takes"
-             orig1 = exprCtOrigin (unLoc arg1)
+             orig1 = lexprCtOrigin arg1
        ; (wrap_arg1, [arg2_sigma], op_res_ty) <-
            matchActualFunTys doc orig1 (Just arg1) 1 arg1_ty
 
@@ -388,8 +402,9 @@ tcExpr expr@(OpApp arg1 op fix arg2) res_ty
              -- op' :: (a2_ty -> res_ty) -> a2_ty -> res_ty
 
              -- wrap1 :: arg1_ty "->" (arg2_sigma -> res_ty)
-             wrap1 = mkWpFun idHsWrapper wrap_res arg2_sigma res_ty
+             wrap1 = mkWpFun idHsWrapper wrap_res arg2_sigma res_ty doc
                      <.> wrap_arg1
+             doc = text "When looking at the argument to ($)"
 
        ; return (OpApp (mkLHsWrap wrap1 arg1') op' fix arg2') }
 
@@ -414,13 +429,18 @@ tcExpr expr@(OpApp arg1 op fix arg2) res_ty
 
 tcExpr expr@(SectionR op arg2) res_ty
   = do { (op', op_ty) <- tcInferFun op
-       ; (wrap_fun, [arg1_ty, arg2_ty], op_res_ty) <-
-           matchActualFunTys (mk_op_msg op) SectionOrigin (Just op) 2 op_ty
+       ; (wrap_fun, [arg1_ty, arg2_ty], op_res_ty)
+                  <- matchActualFunTys (mk_op_msg op) fn_orig (Just op) 2 op_ty
        ; wrap_res <- tcSubTypeHR SectionOrigin (Just expr)
                                  (mkFunTy arg1_ty op_res_ty) res_ty
        ; arg2' <- tcArg op arg2 arg2_ty 2
        ; return ( mkHsWrap wrap_res $
                   SectionR (mkLHsWrap wrap_fun op') arg2' ) }
+  where
+    fn_orig = lexprCtOrigin op
+    -- It's important to use the origin of 'op', so that call-stacks
+    -- come out right; they are driven by the OccurrenceOf CtOrigin
+    -- See Trac #13285
 
 tcExpr expr@(SectionL arg1 op) res_ty
   = do { (op', op_ty) <- tcInferFun op
@@ -429,13 +449,18 @@ tcExpr expr@(SectionL arg1 op) res_ty
                          | otherwise                            = 2
 
        ; (wrap_fn, (arg1_ty:arg_tys), op_res_ty)
-           <- matchActualFunTys (mk_op_msg op) SectionOrigin (Just op)
+           <- matchActualFunTys (mk_op_msg op) fn_orig (Just op)
                                 n_reqd_args op_ty
        ; wrap_res <- tcSubTypeHR SectionOrigin (Just expr)
                                  (mkFunTys arg_tys op_res_ty) res_ty
        ; arg1' <- tcArg op arg1 arg1_ty 1
        ; return ( mkHsWrap wrap_res $
                   SectionL arg1' (mkLHsWrap wrap_fn op') ) }
+  where
+    fn_orig = lexprCtOrigin op
+    -- It's important to use the origin of 'op', so that call-stacks
+    -- come out right; they are driven by the OccurrenceOf CtOrigin
+    -- See Trac #13285
 
 tcExpr expr@(ExplicitTuple tup_args boxity) res_ty
   | all tupArgPresent tup_args
@@ -581,6 +606,7 @@ tcExpr (HsProc pat cmd) res_ty
         ; return $ mkHsWrapCo coi (HsProc pat' cmd') }
 
 -- Typechecks the static form and wraps it with a call to 'fromStaticPtr'.
+-- See Note [Grand plan for static forms] in StaticPtrTable for an overview.
 tcExpr (HsStatic fvs expr) res_ty
   = do  { res_ty          <- expTypeToType res_ty
         ; (co, (p_ty, expr_ty)) <- matchExpectedAppTy res_ty
@@ -590,9 +616,9 @@ tcExpr (HsStatic fvs expr) res_ty
                        ) $
             tcPolyExprNC expr expr_ty
         -- Check that the free variables of the static form are closed.
-        -- It's OK to use nonDetEltsUFM here as the only side effects of
+        -- It's OK to use nonDetEltsUniqSet here as the only side effects of
         -- checkClosedInStaticForm are error messages.
-        ; mapM_ checkClosedInStaticForm $ nonDetEltsUFM fvs
+        ; mapM_ checkClosedInStaticForm $ nonDetEltsUniqSet fvs
 
         -- Require the type of the argument to be Typeable.
         -- The evidence is not used, but asking the constraint ensures that
@@ -604,8 +630,8 @@ tcExpr (HsStatic fvs expr) res_ty
                              [liftedTypeKind, expr_ty]
         -- Insert the constraints of the static form in a global list for later
         -- validation.
-        ; stWC <- tcg_static_wc <$> getGblEnv
-        ; updTcRef stWC (andWC lie)
+        ; emitStaticConstraints lie
+
         -- Wrap the static form with the 'fromStaticPtr' call.
         ; fromStaticPtr <- newMethodFromName StaticOrigin fromStaticPtrName p_ty
         ; let wrap = mkWpTyApps [expr_ty]
@@ -1136,7 +1162,7 @@ tcApp m_herald orig_fun orig_args res_ty
     go fun args
       = do {   -- Type-check the function
            ; (fun1, fun_sigma) <- tcInferFun fun
-           ; let orig = exprCtOrigin (unLoc fun)
+           ; let orig = lexprCtOrigin fun
 
            ; (wrap_fun, args1, actual_res_ty)
                <- tcArgs fun fun_sigma orig args
@@ -1229,9 +1255,12 @@ tcArgs fun orig_fun_ty fun_orig orig_args herald
            ; (inner_wrap, args', inner_res_ty)
                <- go (arg_ty : acc_args) (n+1) res_ty args
                -- inner_wrap :: res_ty "->" (map typeOf args') -> inner_res_ty
-           ; return ( mkWpFun idHsWrapper inner_wrap arg_ty res_ty <.> wrap
+           ; return ( mkWpFun idHsWrapper inner_wrap arg_ty res_ty doc <.> wrap
                     , Left arg' : args'
                     , inner_res_ty ) }
+      where
+        doc = text "When checking the" <+> speakNth n <+>
+              text "argument to" <+> quotes (ppr fun)
 
     ty_app_err ty arg
       = do { (_, ty) <- zonkTidyTcType emptyTidyEnv ty
@@ -1355,9 +1384,10 @@ tcSynArgE orig sigma_ty syn_ty thing_inside
            ; return ( result
                     , match_wrapper <.>
                       mkWpFun (arg_wrapper2 <.> arg_wrapper1) res_wrapper
-                              arg_ty res_ty ) }
+                              arg_ty res_ty doc ) }
       where
         herald = text "This rebindable syntax expects a function with"
+        doc = text "When checking a rebindable syntax operator arising from" <+> ppr orig
 
     go rho_ty (SynType the_ty)
       = do { wrap   <- tcSubTypeET orig GenSigCtxt the_ty rho_ty
@@ -1630,21 +1660,21 @@ tc_infer_id lbl id_name
     return_data_con con
        -- For data constructors, must perform the stupid-theta check
       | null stupid_theta
-      = return_id con_wrapper_id
+      = return (HsConLikeOut (RealDataCon con), con_ty)
 
       | otherwise
        -- See Note [Instantiating stupid theta]
-      = do { let (tvs, theta, rho) = tcSplitSigmaTy (idType con_wrapper_id)
+      = do { let (tvs, theta, rho) = tcSplitSigmaTy con_ty
            ; (subst, tvs') <- newMetaTyVars tvs
            ; let tys'   = mkTyVarTys tvs'
                  theta' = substTheta subst theta
                  rho'   = substTy subst rho
            ; wrap <- instCall (OccurrenceOf id_name) tys' theta'
            ; addDataConStupidTheta con tys'
-           ; return (mkHsWrap wrap (HsVar (noLoc con_wrapper_id)), rho') }
+           ; return (mkHsWrap wrap (HsConLikeOut (RealDataCon con)), rho') }
 
       where
-        con_wrapper_id = dataConWrapId con
+        con_ty         = dataConUserType con
         stupid_theta   = dataConStupidTheta con
 
     check_naughty id
@@ -1819,7 +1849,7 @@ too_many_args fun args
     hang (text "Too many type arguments to" <+> text fun <> colon)
        2 (sep (map pp args))
   where
-    pp (Left e)                             = pprParendLExpr e
+    pp (Left e)                             = ppr e
     pp (Right (HsWC { hswc_body = L _ t })) = pprParendHsType t
 
 

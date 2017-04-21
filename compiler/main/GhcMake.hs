@@ -132,8 +132,47 @@ depanal excluded_mods allow_dup_roots = do
     mod_graphE <- liftIO $ downsweep hsc_env old_graph
                                      excluded_mods allow_dup_roots
     mod_graph <- reportImportErrors mod_graphE
+
+    warnMissingHomeModules hsc_env mod_graph
+
     setSession hsc_env { hsc_mod_graph = mod_graph }
     return mod_graph
+
+-- Note [Missing home modules]
+-- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+-- Sometimes user doesn't want GHC to pick up modules, not explicitly listed
+-- in a command line. For example, cabal may want to enable this warning
+-- when building a library, so that GHC warns user about modules, not listed
+-- neither in `exposed-modules`, nor in `other-modules`.
+--
+-- Here "home module" means a module, that doesn't come from an other package.
+--
+-- For example, if GHC is invoked with modules "A" and "B" as targets,
+-- but "A" imports some other module "C", then GHC will issue a warning
+-- about module "C" not being listed in a command line.
+--
+-- The warning in enabled by `-Wmissing-home-modules`. See Trac #13129
+warnMissingHomeModules :: GhcMonad m => HscEnv -> ModuleGraph -> m ()
+warnMissingHomeModules hsc_env mod_graph =
+    when (wopt Opt_WarnMissingHomeModules dflags && not (null missing)) $
+        logWarnings (listToBag [warn])
+    where
+    dflags = hsc_dflags hsc_env
+    missing = filter (`notElem` targets) imports
+    imports = map (moduleName . ms_mod) mod_graph
+    targets = map (targetid_to_name . targetId) (hsc_targets hsc_env)
+
+    msg = text "Modules are not listed in command line: "
+        <> sep (map ppr missing)
+    warn = makeIntoWarning
+      (Reason Opt_WarnMissingHomeModules)
+      (mkPlainErrMsg dflags noSrcSpan msg)
+
+    targetid_to_name (TargetModule name) = name
+    targetid_to_name (TargetFile file _) =
+      -- We can get a file even if module name in specified in command line
+      -- because it can be converted in guessTarget. So let's convert it back.
+      mkModuleName (fst $ splitExtension file)
 
 -- | Describes which modules of the module graph need to be loaded.
 data LoadHowMuch
@@ -375,7 +414,7 @@ load' how_much mHscMessage mod_graph = do
                  = findPartiallyCompletedCycles modsDone_names
                       mg2_with_srcimps
           let mods_to_keep
-                 = filter ((`notElem` mods_to_zap_names).ms_mod)
+                 = filter ((`Set.notMember` mods_to_zap_names).ms_mod)
                       modsDone
 
           hsc_env1 <- getSession
@@ -536,23 +575,18 @@ pruneHomePackageTable hpt summ (stable_obj, stable_bco)
 --
 -- | Return (names of) all those in modsDone who are part of a cycle as defined
 -- by theGraph.
-findPartiallyCompletedCycles :: [Module] -> [SCC ModSummary] -> [Module]
+findPartiallyCompletedCycles :: [Module] -> [SCC ModSummary] -> Set.Set Module
 findPartiallyCompletedCycles modsDone theGraph
-   = chew theGraph
-     where
-        chew [] = []
-        chew ((AcyclicSCC _):rest) = chew rest    -- acyclic?  not interesting.
-        chew ((CyclicSCC vs):rest)
-           = let names_in_this_cycle = nub (map ms_mod vs)
-                 mods_in_this_cycle
-                    = nub ([done | done <- modsDone,
-                                   done `elem` names_in_this_cycle])
-                 chewed_rest = chew rest
-             in
-             if   notNull mods_in_this_cycle
-                  && length mods_in_this_cycle < length names_in_this_cycle
-             then mods_in_this_cycle ++ chewed_rest
-             else chewed_rest
+   = Set.unions
+       [mods_in_this_cycle
+       | CyclicSCC vs <- theGraph  -- Acyclic? Not interesting.
+       , let names_in_this_cycle = Set.fromList (map ms_mod vs)
+             mods_in_this_cycle =
+                    Set.intersection (Set.fromList modsDone) names_in_this_cycle
+         -- If size mods_in_this_cycle == size names_in_this_cycle,
+         -- then this cycle has already been completed and we're not
+         -- interested.
+       , Set.size mods_in_this_cycle < Set.size names_in_this_cycle]
 
 
 -- ---------------------------------------------------------------------------
@@ -1246,6 +1280,18 @@ upsweep mHscMessage old_hpt stable_mods cleanup sccs = do
                         -- retypecheck.
                 hsc_env4 <- liftIO $ reTypecheckLoop hsc_env3 mod done'
                 setSession hsc_env4
+
+                        -- Add any necessary entries to the static pointer
+                        -- table. See Note [Grand plan for static forms] in
+                        -- StaticPtrTable.
+                when (hscTarget (hsc_dflags hsc_env4) == HscInterpreted) $
+                    liftIO $ hscAddSptEntries hsc_env4
+                                 [ spt
+                                 | Just linkable <- pure $ hm_linkable mod_info
+                                 , unlinked <- linkableUnlinked linkable
+                                 , BCOs _ spts <- pure unlinked
+                                 , spt <- spts
+                                 ]
 
                 upsweep' old_hpt1 done' mods (mod_index+1) nmods uids_to_check' done_holes'
 

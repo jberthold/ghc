@@ -126,8 +126,12 @@ rnExpr (HsVar (L l v))
 rnExpr (HsIPVar v)
   = return (HsIPVar v, emptyFVs)
 
-rnExpr (HsOverLabel v)
-  = return (HsOverLabel v, emptyFVs)
+rnExpr (HsOverLabel _ v)
+  = do { rebindable_on <- xoptM LangExt.RebindableSyntax
+       ; if rebindable_on
+         then do { fromLabel <- lookupOccRn (mkVarUnqual (fsLit "fromLabel"))
+                 ; return (HsOverLabel (Just fromLabel) v, unitFV fromLabel) }
+         else return (HsOverLabel Nothing v, emptyFVs) }
 
 rnExpr (HsLit lit@(HsString src s))
   = do { opt_OverloadedStrings <- xoptM LangExt.OverloadedStrings
@@ -360,15 +364,6 @@ wired-in. See the Notes about the NameSorts in Name.hs.
 -}
 
 rnExpr e@(HsStatic _ expr) = do
-    target <- fmap hscTarget getDynFlags
-    case target of
-      -- SPT entries are expected to exist in object code so far, and this is
-      -- not the case in interpreted mode. See bug #9878.
-      HscInterpreted -> addErr $ sep
-        [ text "The static form is not supported in interpreted mode."
-        , text "Please use -fobject-code."
-        ]
-      _ -> return ()
     (expr',fvExpr) <- rnLExpr expr
     stage <- getStage
     case stage of

@@ -34,6 +34,7 @@
 module Data.Type.Equality (
   -- * The equality types
   (:~:)(..), type (~~),
+  (:~~:)(..),
 
   -- * Working with equality
   sym, trans, castWith, gcastWith, apply, inner, outer,
@@ -137,6 +138,34 @@ instance a ~ b => Enum (a :~: b) where
 -- | @since 4.7.0.0
 deriving instance a ~ b => Bounded (a :~: b)
 
+-- | Kind heterogeneous propositional equality. Like '(:~:)', @a :~~: b@ is
+-- inhabited by a terminating value if and only if @a@ is the same type as @b@.
+--
+-- @since 4.10.0.0
+data (a :: k1) :~~: (b :: k2) where
+   HRefl :: a :~~: a
+
+-- | @since 4.10.0.0
+deriving instance Eq   (a :~~: b)
+-- | @since 4.10.0.0
+deriving instance Show (a :~~: b)
+-- | @since 4.10.0.0
+deriving instance Ord  (a :~~: b)
+
+-- | @since 4.10.0.0
+instance a ~~ b => Read (a :~~: b) where
+  readsPrec d = readParen (d > 10) (\r -> [(HRefl, s) | ("HRefl",s) <- lex r ])
+
+-- | @since 4.10.0.0
+instance a ~~ b => Enum (a :~~: b) where
+  toEnum 0 = HRefl
+  toEnum _ = errorWithoutStackTrace "Data.Type.Equality.toEnum: bad argument"
+
+  fromEnum HRefl = 0
+
+-- | @since 4.10.0.0
+deriving instance a ~~ b => Bounded (a :~~: b)
+
 -- | This class contains types where you can learn the equality of two types
 -- from information contained in /terms/. Typically, only singleton types should
 -- inhabit this class.
@@ -147,6 +176,10 @@ class TestEquality f where
 -- | @since 4.7.0.0
 instance TestEquality ((:~:) a) where
   testEquality Refl Refl = Just Refl
+
+-- | @since 4.10.0.0
+instance TestEquality ((:~~:) a) where
+  testEquality HRefl HRefl = Just Refl
 
 -- | A type family to compute Boolean equality. Instances are provided
 -- only for /open/ kinds, such as @*@ and function kinds. Instances are

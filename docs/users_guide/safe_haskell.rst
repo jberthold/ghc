@@ -40,7 +40,7 @@ The design of Safe Haskell covers the following aspects:
 Safe Haskell, however, *does not offer* compilation safety. During
 compilation time it is possible for arbitrary processes to be launched,
 using for example the :ref:`custom pre-processor <pre-processor>` flag.
-This can be manipulated to either compromise a users system at
+This can be manipulated to either compromise a user's system at
 compilation time, or to modify the source code just before compilation
 to try to alter Safe Haskell flags. This is discussed further in section
 :ref:`safe-compilation`.
@@ -85,7 +85,7 @@ due to the presence of functions like ``unsafePerformIO``. Safe Haskell
 gives users enough guarantees about the type system to allow them to
 build such secure systems.
 
-As an example, lets define an interface for a plugin system where the
+As an example, let's define an interface for a plugin system where the
 plugin authors are untrusted, possibly malicious third-parties. We do
 this by restricting the plugin interface to pure functions or to a
 restricted ``IO`` monad that we have defined. The restricted ``IO``
@@ -137,7 +137,7 @@ We then compile the ``Danger`` plugin using the new Safe Haskell
     runMe :: RIO ()
     runMe = ...
 
-Before going into the Safe Haskell details, lets point out some of the
+Before going into the Safe Haskell details, let's point out some of the
 reasons this security mechanism would fail without Safe Haskell:
 
 - The design attempts to restrict the operations that ``Danger`` can perform by
@@ -507,7 +507,7 @@ The reason there are two modes of checking trust is that the extra
 requirement enabled by :ghc-flag:`-fpackage-trust` causes the design of Safe
 Haskell to be invasive. Packages using Safe Haskell when the flag is
 enabled may or may not compile depending on the state of trusted
-packages on a users machine. This is both fragile, and causes
+packages on a user's machine. This is both fragile, and causes
 compilation failures for everyone, even if they aren't trying to use any
 of the guarantees provided by Safe Haskell. Disabling
 :ghc-flag:`-fpackage-trust` by default and turning it into a flag makes Safe

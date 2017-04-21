@@ -115,7 +115,7 @@ Note [Analysis II: The Co-Called analysis]
 ------------------------------------------
 
 The second part is more sophisticated. For reasons explained below, it is not
-sufficient to simply know how often an expression evalutes a variable. Instead
+sufficient to simply know how often an expression evaluates a variable. Instead
 we need to know which variables are possibly called together.
 
 The data structure here is an undirected graph of variables, which is provided
@@ -342,7 +342,7 @@ For a mutually recursive let, we begin by
  4. For each variable, we find out the incoming arity and whether it is called
     once, based on the the current analysis result. If this differs from the
     memoized results, we re-analyse the rhs and update the memoized table.
- 5. If nothing had to be reanalized, we are done.
+ 5. If nothing had to be reanalyzed, we are done.
     Otherwise, repeat from step 3.
 
 
@@ -609,11 +609,11 @@ callArityBind boring_vars ae_body int b@(Rec binds)
             | Just (old_called_once, old_arity, _) <- mbLastRun
             , called_once == old_called_once
             , new_arity == old_arity
-            -- No change, no need to re-analize
+            -- No change, no need to re-analyze
             = (False, (i, mbLastRun, rhs))
 
             | otherwise
-            -- We previously analized this with a different arity (or not at all)
+            -- We previously analyzed this with a different arity (or not at all)
             = let is_thunk = not (exprIsCheap rhs) -- see note [What is a thunk]
 
                   safe_arity | is_thunk    = 0  -- See Note [Thunks in recursive groups]

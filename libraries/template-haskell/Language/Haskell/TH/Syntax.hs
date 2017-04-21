@@ -1,6 +1,7 @@
 {-# LANGUAGE CPP, DeriveDataTypeable,
              DeriveGeneric, FlexibleInstances, DefaultSignatures,
-             RankNTypes, RoleAnnotations, ScopedTypeVariables #-}
+             RankNTypes, RoleAnnotations, ScopedTypeVariables,
+             Trustworthy #-}
 
 {-# OPTIONS_GHC -fno-warn-inline-rule-shadowing #-}
 
@@ -26,6 +27,7 @@ module Language.Haskell.TH.Syntax
     ( module Language.Haskell.TH.Syntax
       -- * Language extensions
     , module Language.Haskell.TH.LanguageExtensions
+    , ForeignSrcLang(..)
     ) where
 
 import Data.Data hiding (Fixity(..))
@@ -39,6 +41,7 @@ import Data.Word
 import Data.Ratio
 import GHC.Generics     ( Generic )
 import GHC.Lexeme       ( startsVarSym, startsVarId )
+import GHC.ForeignSrcLang.Type
 import Language.Haskell.TH.LanguageExtensions
 import Numeric.Natural
 
@@ -91,6 +94,8 @@ class Monad m => Quasi m where
 
   qAddTopDecls :: [Dec] -> m ()
 
+  qAddForeignFile :: ForeignSrcLang -> String -> m ()
+
   qAddModFinalizer :: Q () -> m ()
 
   qGetQ :: Typeable a => m (Maybe a)
@@ -130,6 +135,7 @@ instance Quasi IO where
   qRecover _ _          = badIO "recover" -- Maybe we could fix this?
   qAddDependentFile _   = badIO "addDependentFile"
   qAddTopDecls _        = badIO "addTopDecls"
+  qAddForeignFile _ _   = badIO "addForeignFile"
   qAddModFinalizer _    = badIO "addModFinalizer"
   qGetQ                 = badIO "getQ"
   qPutQ _               = badIO "putQ"
@@ -455,6 +461,26 @@ addDependentFile fp = Q (qAddDependentFile fp)
 addTopDecls :: [Dec] -> Q ()
 addTopDecls ds = Q (qAddTopDecls ds)
 
+-- | Emit a foreign file which will be compiled and linked to the object for
+-- the current module. Currently only languages that can be compiled with
+-- the C compiler are supported, and the flags passed as part of -optc will
+-- be also applied to the C compiler invocation that will compile them.
+--
+-- Note that for non-C languages (for example C++) @extern "C"@ directives
+-- must be used to get symbols that we can access from Haskell.
+--
+-- To get better errors, it is reccomended to use #line pragmas when
+-- emitting C files, e.g.
+--
+-- > {-# LANGUAGE CPP #-}
+-- > ...
+-- > addForeignFile LangC $ unlines
+-- >   [ "#line " ++ show (__LINE__ + 1) ++ " " ++ show __FILE__
+-- >   , ...
+-- >   ]
+addForeignFile :: ForeignSrcLang -> String -> Q ()
+addForeignFile lang str = Q (qAddForeignFile lang str)
+
 -- | Add a finalizer that will run in the Q monad after the current module has
 -- been type checked. This only makes sense when run within a top-level splice.
 --
@@ -498,6 +524,7 @@ instance Quasi Q where
   qRunIO              = runIO
   qAddDependentFile   = addDependentFile
   qAddTopDecls        = addTopDecls
+  qAddForeignFile     = addForeignFile
   qAddModFinalizer    = addModFinalizer
   qGetQ               = getQ
   qPutQ               = putQ
@@ -757,7 +784,7 @@ package `text` we find
   packConstr :: Constr
   packConstr = mkConstr textDataType "pack" [] Prefix
 
-Here `packConstr` isn't a real data constructor, it's an ordiary
+Here `packConstr` isn't a real data constructor, it's an ordinary
 function.  Two complications
 
 * In such a case, we must take care to build the Name using
@@ -1720,7 +1747,7 @@ data DerivStrategy = StockStrategy    -- ^ A \"standard\" derived instance
 --     'PatSynSigD' either one of the universals, the existentials, or
 --     their contexts may be left empty.
 --
--- See the GHC users guide for more information on pattern synonyms
+-- See the GHC user's guide for more information on pattern synonyms
 -- and their types: https://downloads.haskell.org/~ghc/latest/docs/html/
 -- users_guide/syntax-extns.html#pattern-synonyms.
 type PatSynType = Type
@@ -1763,6 +1790,8 @@ data Pragma = InlineP         Name Inline RuleMatch Phases
             | RuleP           String [RuleBndr] Exp Exp Phases
             | AnnP            AnnTarget Exp
             | LineP           Int String
+            | CompleteP       [Name] (Maybe Name)
+                -- ^ @{ {\-\# COMPLETE C_1, ..., C_i [ :: T ] \#-} }@
         deriving( Show, Eq, Ord, Data, Generic )
 
 data Inline = NoInline

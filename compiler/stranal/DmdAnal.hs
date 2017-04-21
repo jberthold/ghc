@@ -35,6 +35,7 @@ import TysPrim          ( realWorldStatePrimTy )
 import ErrUtils         ( dumpIfSet_dyn )
 import Name             ( getName, stableNameCmp )
 import Data.Function    ( on )
+import UniqSet
 
 {-
 ************************************************************************
@@ -111,7 +112,7 @@ dmdTransformThunkDmd e
 
 -- Do not process absent demands
 -- Otherwise act like in a normal demand analysis
--- See |-* relation in the companion paper
+-- See ↦* relation in the Cardinality Analysis paper
 dmdAnalStar :: AnalEnv
             -> Demand   -- This one takes a *Demand*
             -> CoreExpr -> (BothDmdArg, CoreExpr)
@@ -268,7 +269,7 @@ dmdAnal' env dmd (Case scrut case_bndr ty alts)
 -- This is used for a non-recursive local let without manifest lambdas.
 -- This is the LetUp rule in the paper “Higher-Order Cardinality Analysis”.
 dmdAnal' env dmd (Let (NonRec id rhs) body)
-  | useLetUp rhs
+  | useLetUp id rhs
   , Nothing <- unpackTrivial rhs
       -- dmdAnalRhsLetDown treats trivial right hand sides specially
       -- so if we have a trival right hand side, fall through to that.
@@ -632,7 +633,7 @@ dmdAnalRhsLetDown top_lvl rec_flag env id rhs
     trim_sums = not (isTopLevel top_lvl) -- See Note [CPR for sum types]
 
     -- See Note [CPR for thunks]
-    is_thunk = not (exprIsHNF rhs)
+    is_thunk = not (exprIsHNF rhs) && not (isJoinId id)
     not_strict
        =  isTopLevel top_lvl  -- Top level and recursive things don't
        || isJust rec_flag     -- get their demandInfo set at all
@@ -654,11 +655,13 @@ unpackTrivial _                       = Nothing
 -- down (rhs before body).
 --
 -- We use LetDown if there is a chance to get a useful strictness signature.
--- This is the case when there are manifest value lambdas.
-useLetUp :: CoreExpr -> Bool
-useLetUp (Lam v e) | isTyVar v = useLetUp e
-useLetUp (Lam _ _)             = False
-useLetUp _                     = True
+-- This is the case when there are manifest value lambdas or the binding is a
+-- join point (hence always acts like a function, not a value).
+useLetUp :: Var -> CoreExpr -> Bool
+useLetUp f _         | isJoinId f = False
+useLetUp f (Lam v e) | isTyVar v  = useLetUp f e
+useLetUp _ (Lam _ _)              = False
+useLetUp _ _                      = True
 
 
 {-
@@ -715,7 +718,7 @@ unitDmdType :: DmdEnv -> DmdType
 unitDmdType dmd_env = DmdType dmd_env [] topRes
 
 coercionDmdEnv :: Coercion -> DmdEnv
-coercionDmdEnv co = mapVarEnv (const topDmd) (coVarsOfCo co)
+coercionDmdEnv co = mapVarEnv (const topDmd) (getUniqSet $ coVarsOfCo co)
                     -- The VarSet from coVarsOfCo is really a VarEnv Var
 
 addVarDmd :: DmdType -> Var -> Demand -> DmdType
@@ -1017,7 +1020,7 @@ mentioned in the (unsound) strictness signature, conservatively approximate the
 demand put on them (topDmd), and add that to the "lazy_fv" returned by "dmdFix".
 
 
-Note [Lamba-bound unfoldings]
+Note [Lambda-bound unfoldings]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We allow a lambda-bound variable to carry an unfolding, a facility that is used
 exclusively for join points; see Note [Case binders and join points].  If so,
@@ -1234,7 +1237,7 @@ binders the CPR property.  Specifically
                    | otherwise = x
 
    For $wf2 we are going to unbox the MkT *and*, since it is strict, the
-   first agument of the MkT; see Note [Add demands for strict constructors].
+   first argument of the MkT; see Note [Add demands for strict constructors].
    But then we don't want box it up again when returning it!  We want
    'f2' to have the CPR property, so we give 'x' the CPR property.
 
@@ -1245,7 +1248,7 @@ binders the CPR property.  Specifically
               MkT x y | y>0       -> ...
                       | otherwise -> x
    Here we don't have the unboxed 'x' available.  Hence the
-   is_var_scrut test when making use of the strictness annoatation.
+   is_var_scrut test when making use of the strictness annotation.
    Slightly ad-hoc, because even if the scrutinee *is* a variable it
    might not be a onre of the arguments to the original function, or a
    sub-component thereof.  But it's simple, and nothing terrible

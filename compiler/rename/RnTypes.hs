@@ -918,19 +918,19 @@ bindLHsTyVarBndr :: HsDocContext
 bindLHsTyVarBndr doc mb_assoc kv_names tv_names hs_tv_bndr thing_inside
   = case hs_tv_bndr of
       L loc (UserTyVar lrdr@(L lv rdr)) ->
-        do { check_dup loc rdr
+        do { check_dup loc rdr []
            ; nm <- newTyVarNameRn mb_assoc lrdr
            ; bindLocalNamesFV [nm] $
              thing_inside [] emptyNameSet (L loc (UserTyVar (L lv nm))) }
       L loc (KindedTyVar lrdr@(L lv rdr) kind) ->
-        do { check_dup lv rdr
+        do { free_kvs <- freeKiTyVarsAllVars <$> extractHsTyRdrTyVars kind
+           ; check_dup lv rdr (map unLoc free_kvs)
 
              -- check for -XKindSignatures
            ; sig_ok <- xoptM LangExt.KindSignatures
            ; unless sig_ok (badKindSigErr doc kind)
 
              -- deal with kind vars in the user-written kind
-           ; free_kvs <- freeKiTyVarsAllVars <$> extractHsTyRdrTyVars kind
            ; bindImplicitKvs doc mb_assoc free_kvs tv_names $
              \ new_kv_nms other_kv_nms ->
              do { (kind', fvs1) <- rnLHsKind doc kind
@@ -943,9 +943,15 @@ bindLHsTyVarBndr doc mb_assoc kv_names tv_names hs_tv_bndr thing_inside
       -- make sure that the RdrName isn't in the sets of
       -- names. We can't just check that it's not in scope at all
       -- because we might be inside an associated class.
-    check_dup :: SrcSpan -> RdrName -> RnM ()
-    check_dup loc rdr
-      = do { m_name <- lookupLocalOccRn_maybe rdr
+    check_dup :: SrcSpan -> RdrName -> [RdrName] -> RnM ()
+    check_dup loc rdr kindFreeVars
+      = do { -- Disallow use of a type variable name in its
+             -- kind signature (#11592).
+             when (rdr `elem` kindFreeVars) $
+             addErrAt loc (vcat [ ki_ty_self_err rdr
+                                , pprHsDocContext doc ])
+
+           ; m_name <- lookupLocalOccRn_maybe rdr
            ; whenIsJust m_name $ \name ->
         do { when (name `elemNameSet` kv_names) $
              addErrAt loc (vcat [ ki_ty_err_msg name
@@ -956,6 +962,10 @@ bindLHsTyVarBndr doc mb_assoc kv_names tv_names hs_tv_bndr thing_inside
     ki_ty_err_msg n = text "Variable" <+> quotes (ppr n) <+>
                       text "used as a kind variable before being bound" $$
                       text "as a type variable. Perhaps reorder your variables?"
+
+    ki_ty_self_err n = text "Variable" <+> quotes (ppr n) <+>
+                       text "is used in the kind signature of its" $$
+                       text "declaration as a type variable."
 
 
 bindImplicitKvs :: HsDocContext
@@ -1111,7 +1121,7 @@ the programmer actually wrote, so you can't find it out from the Name.
 
 Furthermore, the second argument is guaranteed not to be another
 operator application.  Why? Because the parser parses all
-operator appications left-associatively, EXCEPT negation, which
+operator applications left-associatively, EXCEPT negation, which
 we need to handle specially.
 Infix types are read in a *right-associative* way, so that
         a `op` b `op` c
@@ -1150,7 +1160,7 @@ mk_hs_op_ty :: (LHsType Name -> LHsType Name -> HsType Name)
             -> RnM (HsType Name)
 mk_hs_op_ty mk1 op1 fix1 ty1
             mk2 op2 fix2 ty21 ty22 loc2
-  | nofix_error     = do { precParseErr (op1,fix1) (op2,fix2)
+  | nofix_error     = do { precParseErr (NormalOp op1,fix1) (NormalOp op2,fix2)
                          ; return (mk1 ty1 (L loc2 (mk2 ty21 ty22))) }
   | associate_right = return (mk1 ty1 (L loc2 (mk2 ty21 ty22)))
   | otherwise       = do { -- Rearrange to ((ty1 `op1` ty21) `op2` ty22)
@@ -1184,7 +1194,7 @@ mkOpAppRn e1@(L _ (OpApp e11 op1 fix1 e12)) op2 fix2 e2
 --      (- neg_arg) `op` e2
 mkOpAppRn e1@(L _ (NegApp neg_arg neg_name)) op2 fix2 e2
   | nofix_error
-  = do precParseErr (negateName,negateFixity) (get_op op2,fix2)
+  = do precParseErr (NegateOp,negateFixity) (get_op op2,fix2)
        return (OpApp e1 op2 fix2 e2)
 
   | associate_right
@@ -1198,7 +1208,7 @@ mkOpAppRn e1@(L _ (NegApp neg_arg neg_name)) op2 fix2 e2
 --      e1 `op` - neg_arg
 mkOpAppRn e1 op1 fix1 e2@(L _ (NegApp _ _))     -- NegApp can occur on the right
   | not associate_right                 -- We *want* right association
-  = do precParseErr (get_op op1, fix1) (negateName, negateFixity)
+  = do precParseErr (get_op op1, fix1) (NegateOp, negateFixity)
        return (OpApp e1 op1 fix1 e2)
   where
     (_, associate_right) = compareFixity fix1 negateFixity
@@ -1212,16 +1222,31 @@ mkOpAppRn e1 op fix e2                  -- Default case, no rearrangment
     return (OpApp e1 op fix e2)
 
 ----------------------------
-get_op :: LHsExpr Name -> Name
+
+-- | Name of an operator in an operator application or section
+data OpName = NormalOp Name         -- ^ A normal identifier
+            | NegateOp              -- ^ Prefix negation
+            | UnboundOp UnboundVar  -- ^ An unbound indentifier
+            | RecFldOp (AmbiguousFieldOcc Name)
+              -- ^ A (possibly ambiguous) record field occurrence
+
+instance Outputable OpName where
+  ppr (NormalOp n)   = ppr n
+  ppr NegateOp       = ppr negateName
+  ppr (UnboundOp uv) = ppr uv
+  ppr (RecFldOp fld) = ppr fld
+
+get_op :: LHsExpr Name -> OpName
 -- An unbound name could be either HsVar or HsUnboundVar
 -- See RnExpr.rnUnboundVar
-get_op (L _ (HsVar (L _ n)))   = n
-get_op (L _ (HsUnboundVar uv)) = mkUnboundName (unboundVarOcc uv)
+get_op (L _ (HsVar (L _ n)))   = NormalOp n
+get_op (L _ (HsUnboundVar uv)) = UnboundOp uv
+get_op (L _ (HsRecFld fld))    = RecFldOp fld
 get_op other                   = pprPanic "get_op" (ppr other)
 
 -- Parser left-associates everything, but
 -- derived instances may have correctly-associated things to
--- in the right operarand.  So we just check that the right operand is OK
+-- in the right operand.  So we just check that the right operand is OK
 right_op_ok :: Fixity -> HsExpr Name -> Bool
 right_op_ok fix1 (OpApp _ _ fix2 _)
   = not error_please && associate_right
@@ -1278,7 +1303,8 @@ mkConOpPatRn op2 fix2 p1@(L loc (ConPatIn op1 (InfixCon p11 p12))) p2
         ; let (nofix_error, associate_right) = compareFixity fix1 fix2
 
         ; if nofix_error then do
-                { precParseErr (unLoc op1,fix1) (unLoc op2,fix2)
+                { precParseErr (NormalOp (unLoc op1),fix1)
+                               (NormalOp (unLoc op2),fix2)
                 ; return (ConPatIn op2 (InfixCon p1 p2)) }
 
           else if associate_right then do
@@ -1327,8 +1353,8 @@ checkPrec op (ConPatIn op1 (InfixCon _ _)) right = do
                   (op1_dir == InfixR && op_dir == InfixR && right ||
                    op1_dir == InfixL && op_dir == InfixL && not right))
 
-        info  = (op,        op_fix)
-        info1 = (unLoc op1, op1_fix)
+        info  = (NormalOp op,          op_fix)
+        info1 = (NormalOp (unLoc op1), op1_fix)
         (infol, infor) = if right then (info, info1) else (info1, info)
     unless inf_ok (precParseErr infol infor)
 
@@ -1343,23 +1369,33 @@ checkSectionPrec :: FixityDirection -> HsExpr RdrName
         -> LHsExpr Name -> LHsExpr Name -> RnM ()
 checkSectionPrec direction section op arg
   = case unLoc arg of
-        OpApp _ op fix _ -> go_for_it (get_op op) fix
-        NegApp _ _       -> go_for_it negateName  negateFixity
-        _                -> return ()
+        OpApp _ op' fix _ -> go_for_it (get_op op') fix
+        NegApp _ _        -> go_for_it NegateOp     negateFixity
+        _                 -> return ()
   where
     op_name = get_op op
     go_for_it arg_op arg_fix@(Fixity _ arg_prec assoc) = do
-          op_fix@(Fixity _ op_prec _) <- lookupFixityRn op_name
+          op_fix@(Fixity _ op_prec _) <- lookupFixityOp op_name
           unless (op_prec < arg_prec
                   || (op_prec == arg_prec && direction == assoc))
-                 (sectionPrecErr (op_name, op_fix)
+                 (sectionPrecErr (get_op op, op_fix)
                                  (arg_op, arg_fix) section)
+
+-- | Look up the fixity for an operator name.  Be careful to use
+-- 'lookupFieldFixityRn' for (possibly ambiguous) record fields
+-- (see Trac #13132).
+lookupFixityOp :: OpName -> RnM Fixity
+lookupFixityOp (NormalOp n)  = lookupFixityRn n
+lookupFixityOp NegateOp      = lookupFixityRn negateName
+lookupFixityOp (UnboundOp u) = lookupFixityRn (mkUnboundName (unboundVarOcc u))
+lookupFixityOp (RecFldOp f)  = lookupFieldFixityRn f
+
 
 -- Precedence-related error messages
 
-precParseErr :: (Name, Fixity) -> (Name, Fixity) -> RnM ()
+precParseErr :: (OpName,Fixity) -> (OpName,Fixity) -> RnM ()
 precParseErr op1@(n1,_) op2@(n2,_)
-  | isUnboundName n1 || isUnboundName n2
+  | is_unbound n1 || is_unbound n2
   = return ()     -- Avoid error cascade
   | otherwise
   = addErr $ hang (text "Precedence parsing error")
@@ -1367,9 +1403,9 @@ precParseErr op1@(n1,_) op2@(n2,_)
                ppr_opfix op2,
                text "in the same infix expression"])
 
-sectionPrecErr :: (Name, Fixity) -> (Name, Fixity) -> HsExpr RdrName -> RnM ()
+sectionPrecErr :: (OpName,Fixity) -> (OpName,Fixity) -> HsExpr RdrName -> RnM ()
 sectionPrecErr op@(n1,_) arg_op@(n2,_) section
-  | isUnboundName n1 || isUnboundName n2
+  | is_unbound n1 || is_unbound n2
   = return ()     -- Avoid error cascade
   | otherwise
   = addErr $ vcat [text "The operator" <+> ppr_opfix op <+> ptext (sLit "of a section"),
@@ -1377,11 +1413,16 @@ sectionPrecErr op@(n1,_) arg_op@(n2,_) section
                       nest 2 (text "namely" <+> ppr_opfix arg_op)]),
          nest 4 (text "in the section:" <+> quotes (ppr section))]
 
-ppr_opfix :: (Name, Fixity) -> SDoc
+is_unbound :: OpName -> Bool
+is_unbound UnboundOp{} = True
+is_unbound _           = False
+
+ppr_opfix :: (OpName, Fixity) -> SDoc
 ppr_opfix (op, fixity) = pp_op <+> brackets (ppr fixity)
    where
-     pp_op | op == negateName = text "prefix `-'"
-           | otherwise        = quotes (ppr op)
+     pp_op | NegateOp <- op = text "prefix `-'"
+           | otherwise      = quotes (ppr op)
+
 
 {- *****************************************************
 *                                                      *
@@ -1520,7 +1561,7 @@ extractHsTyRdrTyVars :: LHsType RdrName -> RnM FreeKiTyVars
 -- It's used when making the for-alls explicit.
 -- Does not return any wildcards
 -- When the same name occurs multiple times in the types, only the first
--- occurence is returned.
+-- occurrence is returned.
 -- See Note [Kind and type-variable binders]
 extractHsTyRdrTyVars ty
   = do { FKTV kis k_set tys t_set all <- extract_lty TypeLevel ty emptyFKTV
@@ -1530,20 +1571,20 @@ extractHsTyRdrTyVars ty
 
 -- | Extracts free type and kind variables from types in a list.
 -- When the same name occurs multiple times in the types, only the first
--- occurence is returned and the rest is filtered out.
+-- occurrence is returned and the rest is filtered out.
 -- See Note [Kind and type-variable binders]
 extractHsTysRdrTyVars :: [LHsType RdrName] -> RnM FreeKiTyVars
 extractHsTysRdrTyVars tys
   = rmDupsInRdrTyVars <$> extractHsTysRdrTyVarsDups tys
 
 -- | Extracts free type and kind variables from types in a list.
--- When the same name occurs multiple times in the types, all occurences
+-- When the same name occurs multiple times in the types, all occurrences
 -- are returned.
 extractHsTysRdrTyVarsDups :: [LHsType RdrName] -> RnM FreeKiTyVars
 extractHsTysRdrTyVarsDups tys
   = extract_ltys TypeLevel tys emptyFKTV
 
--- | Removes multiple occurences of the same name from FreeKiTyVars.
+-- | Removes multiple occurrences of the same name from FreeKiTyVars.
 rmDupsInRdrTyVars :: FreeKiTyVars -> FreeKiTyVars
 rmDupsInRdrTyVars (FKTV kis k_set tys t_set all)
   = FKTV (nubL kis) k_set (nubL tys) t_set (nubL all)
@@ -1681,18 +1722,20 @@ extract_tv t_or_k ltv@(L _ tv) acc
   | isRdrTyVar tv = case acc of
       FKTV kvs k_set tvs t_set all
         |  isTypeLevel t_or_k
-        -> do { when (occ `elemOccSet` k_set) $
+        -> do { when (not_exact && occ `elemOccSet` k_set) $
                 mixedVarsErr ltv
               ; return (FKTV kvs k_set (ltv : tvs) (t_set `extendOccSet` occ)
                              (ltv : all)) }
         |  otherwise
-        -> do { when (occ `elemOccSet` t_set) $
+        -> do { when (not_exact && occ `elemOccSet` t_set) $
                 mixedVarsErr ltv
               ; return (FKTV (ltv : kvs) (k_set `extendOccSet` occ) tvs t_set
                              (ltv : all)) }
   | otherwise     = return acc
   where
     occ = rdrNameOcc tv
+    -- See Note [TypeInType validity checking and Template Haskell]
+    not_exact = not $ isExact tv
 
 mixedVarsErr :: Located RdrName -> RnM ()
 mixedVarsErr (L loc tv)
@@ -1705,3 +1748,37 @@ mixedVarsErr (L loc tv)
 -- just used in this module; seemed convenient here
 nubL :: Eq a => [Located a] -> [Located a]
 nubL = nubBy eqLocated
+
+{-
+Note [TypeInType validity checking and Template Haskell]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+extract_tv enforces an invariant that no variable can be used as both a kind
+and a type unless -XTypeInType is enabled. It does so by accumulating two sets
+of variables' OccNames (one for type variables and one for kind variables) that
+it has seen before. If a new type variable's OccName appears in the kind set,
+then it errors, and similarly for kind variables and the type set.
+
+This relies on the assumption that any two variables with the same OccName
+are the same. While this is always true of user-written code, it is not always
+true in the presence of Template Haskell! GHC Trac #12503 demonstrates a
+scenario where two different Exact TH-generated names can have the same
+OccName. As a result, if one of these Exact names is for a type variable
+and the other Exact name is for a kind variable, then extracting them both
+can lead to a spurious error in extract_tv.
+
+To avoid such a scenario, we simply don't check the invariant in extract_tv
+when the name is Exact. This allows Template Haskell users to write code that
+uses -XPolyKinds without needing to enable -XTypeInType.
+
+This is a somewhat arbitrary design choice, as adding this special case causes
+this code to be accepted when spliced in via Template Haskell:
+
+  data T1 k e
+  class C1 b
+  instance C1 (T1 k (e :: k))
+
+Even if -XTypeInType is _not enabled. But accepting too many programs without
+the prerequisite GHC extensions is better than the alternative, where some
+programs would not be accepted unless enabling an extension which has nothing
+to do with the code itself.
+-}

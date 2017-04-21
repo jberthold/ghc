@@ -85,7 +85,7 @@ pprPatSynSig nm ty
 -- | Pretty prints a pattern synonym's type; follows the usual
 -- conventions to print a pattern synonym type compactly, yet
 -- unambiguously. See the note on 'PatSynType' and the section on
--- pattern synonyms in the GHC users guide for more information.
+-- pattern synonyms in the GHC user's guide for more information.
 pprPatSynType :: PatSynType -> Doc
 pprPatSynType ty@(ForallT uniTys reqs ty'@(ForallT exTys provs ty''))
   | null exTys,  null provs = ppr (ForallT uniTys reqs ty'')
@@ -527,6 +527,9 @@ instance Ppr Pragma where
             target1 (ValueAnnotation v) = ppr v
     ppr (LineP line file)
        = text "{-# LINE" <+> int line <+> text (show file) <+> text "#-}"
+    ppr (CompleteP cls mty)
+       = text "{-# COMPLETE" <+> (fsep $ punctuate comma $ map ppr cls)
+                <+> maybe empty (\ty -> dcolon <+> ppr ty) mty
 
 ------------------------------
 instance Ppr Inline where

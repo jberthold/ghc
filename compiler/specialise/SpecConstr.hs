@@ -41,8 +41,8 @@ import VarEnv
 import VarSet
 import Name
 import BasicTypes
-import DynFlags         ( DynFlags(..) )
-import StaticFlags      ( opt_PprStyle_Debug )
+import DynFlags         ( DynFlags(..), GeneralFlag( Opt_SpecConstrKeen )
+                        , gopt, hasPprDebug )
 import Maybes           ( orElse, catMaybes, isJust, isNothing )
 import Demand
 import GHC.Serialized   ( deserializeWithData )
@@ -210,7 +210,7 @@ This only makes sense if either
   b) the type variable 'a' is an argument to f (and hence fs)
 
 Actually, (a) may hold for value arguments too, in which case
-we may not want to pass them.  Supose 'x' is in scope at f's
+we may not want to pass them.  Suppose 'x' is in scope at f's
 defn, but xs is not.  Then we'd like
 
         f_spec xs = let p = (:) [a] x xs in ....as before....
@@ -448,7 +448,6 @@ breaks an invariant.
 
 Note [Forcing specialisation]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
 With stream fusion and in other similar cases, we want to fully
 specialise some (but not necessarily all!) loops regardless of their
 size and the number of specialisations.
@@ -755,6 +754,39 @@ into a work-free value again, thus
    a'_shr = (a1, x_af7)
 but that's more work, so until its shown to be important I'm going to
 leave it for now.
+
+Note [Making SpecConstr keener]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider this, in (perf/should_run/T9339)
+   last (filter odd [1..1000])
+
+After optimisation, including SpecConstr, we get:
+   f :: Int# -> Int -> Int
+   f x y = case case remInt# x 2# of
+             __DEFAULT -> case x of
+                            __DEFAULT -> f (+# wild_Xp 1#) (I# x)
+                            1000000# -> ...
+             0# -> case x of
+                     __DEFAULT -> f (+# wild_Xp 1#) y
+                    1000000#   -> y
+
+Not good!  We build an (I# x) box every time around the loop.
+SpecConstr (as described in the paper) does not specialise f, despite
+the call (f ... (I# x)) because 'y' is not scrutinied in the body.
+But it is much better to specialise f for the case where the argument
+is of form (I# x); then we build the box only when returning y, which
+is on the cold path.
+
+Another example:
+
+   f x = ...(g x)....
+
+Here 'x' is not scrutinised in f's body; but if we did specialise 'f'
+then the call (g x) might allow 'g' to be specialised in turn.
+
+So sc_keen controls whether or not we take account of whether argument is
+scrutinised in the body.  True <=> ignore that, and speicalise whenever
+the function is applied to a data constructor.
 -}
 
 data ScEnv = SCE { sc_dflags    :: DynFlags,
@@ -765,6 +797,11 @@ data ScEnv = SCE { sc_dflags    :: DynFlags,
 
                    sc_recursive :: Int,         -- Max # of specialisations over recursive type.
                                                 -- Stops ForceSpecConstr from diverging.
+
+                   sc_keen     :: Bool,         -- Specialise on arguments that are known
+                                                -- constructors, even if they are not
+                                                -- scrutinised in the body.  See
+                                                -- Note [Making SpecConstr keener]
 
                    sc_force     :: Bool,        -- Force specialisation?
                                                 -- See Note [Forcing specialisation]
@@ -808,6 +845,7 @@ initScEnv dflags this_mod anns
           sc_size        = specConstrThreshold dflags,
           sc_count       = specConstrCount     dflags,
           sc_recursive   = specConstrRecursive dflags,
+          sc_keen        = gopt Opt_SpecConstrKeen dflags,
           sc_force       = False,
           sc_subst       = emptySubst,
           sc_how_bound   = emptyVarEnv,
@@ -1347,7 +1385,8 @@ scTopBind env body_usage (Rec prs)
   , not force_spec
   , not (all (couldBeSmallEnoughToInline (sc_dflags env) threshold) rhss)
                 -- No specialisation
-  = do  { (rhs_usgs, rhss')   <- mapAndUnzipM (scExpr env) rhss
+  = -- pprTrace "scTopBind: nospec" (ppr bndrs) $
+    do  { (rhs_usgs, rhss')   <- mapAndUnzipM (scExpr env) rhss
         ; return (body_usage `combineUsage` combineUsages rhs_usgs, Rec (bndrs `zip` rhss')) }
 
   | otherwise   -- Do specialisation
@@ -1470,7 +1509,10 @@ specRec top_lvl env body_usg rhs_infos
     -- Loop, specialising, until you get no new specialisations
     go seed_calls usg_so_far spec_infos
       | isEmptyVarEnv seed_calls
-      = return (usg_so_far, spec_infos)
+      = -- pprTrace "specRec" (vcat [ ppr (map ri_fn rhs_infos)
+        --                         , ppr seed_calls
+        --                         , ppr body_usg ]) $
+        return (usg_so_far, spec_infos)
       | otherwise
       = do  { specs_w_usg <- zipWithM (specialise env seed_calls) rhs_infos spec_infos
             ; let (extra_usg_s, new_spec_infos) = unzip specs_w_usg
@@ -1500,17 +1542,19 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
                spec_info@(SI specs spec_count mb_unspec)
   | isBottomingId fn      -- Note [Do not specialise diverging functions]
                           -- and do not generate specialisation seeds from its RHS
-  = return (nullUsage, spec_info)
+  = -- pprTrace "specialise bot" (ppr fn) $
+    return (nullUsage, spec_info)
 
   | isNeverActive (idInlineActivation fn) -- See Note [Transfer activation]
     || null arg_bndrs                     -- Only specialise functions
-  = case mb_unspec of    -- Behave as if there was a single, boring call
+  = -- pprTrace "specialise inactive" (ppr fn) $
+    case mb_unspec of    -- Behave as if there was a single, boring call
       Just rhs_usg -> return (rhs_usg, SI specs spec_count Nothing)
                          -- See Note [spec_usg includes rhs_usg]
       Nothing      -> return (nullUsage, spec_info)
 
   | Just all_calls <- lookupVarEnv bind_calls fn
-  = -- pprTrace "specialise entry {" (ppr fn <+> ppr (length all_calls)) $
+  = -- pprTrace "specialise entry {" (ppr fn <+> ppr all_calls) $
     do  { (boring_call, all_pats) <- callsToPats env specs arg_occs all_calls
                 -- Bale out if too many specialisations
         ; let pats = filter (is_small_enough . fst) all_pats
@@ -1522,8 +1566,10 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
               spec_count' = n_pats + spec_count
         ; case sc_count env of
             Just max | not (sc_force env) && spec_count' > max
-                -> if (debugIsOn || opt_PprStyle_Debug)  -- Suppress this scary message for
-                   then pprTrace "SpecConstr" msg $      -- ordinary users!  Trac #5125
+                -- Suppress this scary message for
+                -- ordinary users!  Trac #5125
+                -> if (debugIsOn || hasPprDebug (sc_dflags env))
+                   then pprTrace "SpecConstr" msg $
                         return (nullUsage, spec_info)
                    else return (nullUsage, spec_info)
                 where
@@ -1533,8 +1579,10 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
                                               text "but the limit is" <+> int max) ]
                               , text "Use -fspec-constr-count=n to set the bound"
                               , extra ]
-                   extra | not opt_PprStyle_Debug = text "Use -dppr-debug to see specialisations"
-                         | otherwise = text "Specialisations:" <+> ppr (pats ++ [p | OS p _ _ _ <- specs])
+                   extra = sdocWithPprDebug $ \dbg -> if dbg
+                              then text "Specialisations:"
+                                   <+> ppr (pats ++ [p | OS p _ _ _ <- specs])
+                              else text "Use -dppr-debug to see specialisations"
 
             _normal_case -> do {
 
@@ -1562,8 +1610,9 @@ specialise env bind_calls (RI { ri_fn = fn, ri_lam_bndrs = arg_bndrs
                       Just rhs_usg | boring_call -> (spec_usg `combineUsage` rhs_usg, Nothing)
                       _                          -> (spec_usg,                      mb_unspec)
 
---        ; pprTrace "specialise return }" (ppr fn
---                                        <+> ppr (scu_calls new_usg))
+--        ; pprTrace "specialise return }" (vcat [ ppr fn
+--                                               , text "boring_call:" <+> ppr boring_call
+--                                               , text "new calls:" <+> ppr (scu_calls new_usg)]) $
           ; return (new_usg, SI (new_specs ++ specs) spec_count' mb_unspec') } }
 
 
@@ -1625,15 +1674,8 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
 --        return ()
 
                 -- And build the results
-        ; let spec_id    = mkLocalIdOrCoVar spec_name (mkLamTypes spec_lam_args body_ty)
-                             -- See Note [Transfer strictness]
-                             `setIdStrictness` spec_str
-                             `setIdArity` count isId spec_lam_args
-              spec_str   = calcSpecStrictness fn spec_lam_args pats
-
-
-                -- Conditionally use result of new worker-wrapper transform
-              (spec_lam_args, spec_call_args) = mkWorkerArgs (sc_dflags env) qvars body_ty
+        ; let (spec_lam_args, spec_call_args) = mkWorkerArgs (sc_dflags env)
+                                                             qvars body_ty
                 -- Usual w/w hack to avoid generating
                 -- a spec_rhs of unlifted type and no args
 
@@ -1641,6 +1683,18 @@ spec_one env fn arg_bndrs body (call_pat@(qvars, pats), rule_number)
                 -- Annotate the variables with the strictness information from
                 -- the function (see Note [Strictness information in worker binders])
 
+              spec_join_arity | isJoinId fn = Just (length spec_lam_args)
+                              | otherwise   = Nothing
+              spec_id    = mkLocalIdOrCoVar spec_name
+                                            (mkLamTypes spec_lam_args body_ty)
+                             -- See Note [Transfer strictness]
+                             `setIdStrictness` spec_str
+                             `setIdArity` count isId spec_lam_args
+                             `asJoinId_maybe` spec_join_arity
+              spec_str   = calcSpecStrictness fn spec_lam_args pats
+
+
+                -- Conditionally use result of new worker-wrapper transform
               spec_rhs   = mkLams spec_lam_args_str spec_body
               body_ty    = exprType spec_body
               rule_rhs   = mkVarApps (Var spec_id) spec_call_args
@@ -1807,8 +1861,11 @@ callsToPats env done_specs bndr_occs calls
               is_done p = any (samePat p) done_pats
               no_recursive = map fst (filterOut (is_too_recursive env) good_pats)
 
-        ; return (any isNothing mb_pats,
-                  filterOut is_done (nubBy samePat no_recursive)) }
+--        ; pprTrace "callsToPats" (vcat [ text "calls:" <+> ppr calls
+--                                       , text "good_pats:" <+> ppr good_pats
+--                                       , text "no_recursive:" <+> ppr no_recursive ])  $
+          ; return (any isNothing mb_pats,
+                    filterOut is_done (nubBy samePat no_recursive)) }
 
 is_too_recursive :: ScEnv -> (CallPat, ValueEnv) -> Bool
     -- Count the number of recursive constructors in a call pattern,
@@ -1958,11 +2015,12 @@ argToPat env in_scope val_env arg arg_occ
                   mkConApp dc (ty_args ++ args')) }
   where
     mb_scrut dc = case arg_occ of
-                    ScrutOcc bs
-                           | Just occs <- lookupUFM bs dc
-                                          -> Just (occs)  -- See Note [Reboxing]
-                    _other | sc_force env -> Just (repeat UnkOcc)
-                           | otherwise    -> Nothing
+                    ScrutOcc bs | Just occs <- lookupUFM bs dc
+                                -> Just (occs)  -- See Note [Reboxing]
+                    _other      | sc_force env || sc_keen env
+                                -> Just (repeat UnkOcc)
+                                | otherwise
+                                -> Nothing
 
   -- Check if the argument is a variable that
   --    (a) is used in an interesting way in the function body
@@ -1971,6 +2029,9 @@ argToPat env in_scope val_env arg arg_occ
 argToPat env in_scope val_env (Var v) arg_occ
   | sc_force env || case arg_occ of { UnkOcc -> False; _other -> True }, -- (a)
     is_value,                                                            -- (b)
+       -- Ignoring sc_keen here to avoid gratuitously incurring Note [Reboxing]
+       -- So sc_keen focused just on f (I# x), where we have freshly-allocated
+       -- box that we can eliminate in the caller
     not (ignoreType env (varType v))
   = return (True, Var v)
   where

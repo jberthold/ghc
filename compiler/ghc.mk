@@ -239,7 +239,7 @@ compiler/stage3/$(PLATFORM_H) : compiler/stage2/$(PLATFORM_H)
 	"$(CP)" $< $@
 
 # ----------------------------------------------------------------------------
-#		Generate supporting stuff for prelude/PrimOp.lhs
+#		Generate supporting stuff for prelude/PrimOp.hs
 #		from prelude/primops.txt
 
 PRIMOP_BITS_NAMES = primop-data-decl.hs-incl        \
@@ -365,6 +365,10 @@ endif
 ifneq "$(GhcWithSMP)" "YES"
 compiler_CONFIGURE_OPTS += --ghc-option=-DNOSMP
 compiler_CONFIGURE_OPTS += --ghc-option=-optc-DNOSMP
+endif
+
+ifeq "$(WITH_TERMINFO)" "NO"
+compiler_stage2_CONFIGURE_OPTS += --flags=-terminfo
 endif
 
 # Careful optimisation of the parser: we don't want to throw everything
@@ -499,6 +503,7 @@ compiler_stage2_dll0_MODULES = \
 	IdInfo \
 	IfaceSyn \
 	IfaceType \
+	Json 		\
 	ToIface \
 	InstEnv \
 	Kind \
@@ -536,7 +541,6 @@ compiler_stage2_dll0_MODULES = \
 	RdrName \
 	Rules \
 	SrcLoc \
-	StaticFlags \
 	StringBuffer \
 	SysTools.Terminal \
 	TcEvidence \

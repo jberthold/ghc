@@ -504,13 +504,11 @@ for example).
 
     There's one other gotcha to bear in mind when using external
     libraries: if the library contains a ``main()`` function, then this
-    will be linked in preference to GHC's own ``main()`` function (eg.
-    ``libf2c`` and ``libl`` have their own ``main()``\ s). This is
-    because GHC's ``main()`` comes from the ``HSrts`` library, which is
-    normally included *after* all the other libraries on the linker's
-    command line. To force GHC's ``main()`` to be used in preference to
-    any other ``main()``\ s from external libraries, just add the option
-    ``-lHSrts`` before any other libraries on the command line.
+    will be a link conflict with GHC's own ``main()`` function (eg.
+    ``libf2c`` and ``libl`` have their own ``main()``\ s).
+
+    You can use an external main function if you initialize the RTS manually
+    and pass ``-no-hs-main``. See also :ref:`using-own-main`.
 
 .. ghc-flag:: -c
 
@@ -855,3 +853,18 @@ for example).
     the dynamic symbol table. Currently Linux and Windows/MinGW32 only.
     This is equivalent to using ``-optl -rdynamic`` on Linux, and
     ``-optl -export-all-symbols`` on Windows.
+
+.. ghc-flag:: -fwhole-archive-hs-libs
+
+    When linking a binary executable, this inserts the flag
+    ``-Wl,--whole-archive`` before any ``-l`` flags for Haskell
+    libraries, and ``-Wl,--no-whole-archive`` afterwards (on OS X, the
+    flag is ``-Wl,-all_load``, there is no equivalent for
+    ``-Wl,--no-whole-archive``).  This flag also disables the use of
+    ``-Wl,--gc-sections`` (``-Wl,-dead_strip`` on OS X).
+
+    This is for specialist applications that may require symbols
+    defined in these Haskell libraries at runtime even though they
+    aren't referenced by any other code linked into the executable.
+    If you're using ``-fwhole-archive-hs-libs``, you probably also
+    want ``-rdynamic``.

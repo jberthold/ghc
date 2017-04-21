@@ -112,6 +112,20 @@
 #define RESERVED_C_STACK_BYTES (2048 * SIZEOF_LONG)
 
 /* -----------------------------------------------------------------------------
+   How large is the stack frame saved by StgRun?
+   world.  Used in StgCRun.c.
+   -------------------------------------------------------------------------- */
+#if defined(x86_64_HOST_ARCH)
+#  if defined(mingw32_HOST_OS)
+/* 8 larger than necessary to make the alignment right*/
+#    define STG_RUN_STACK_FRAME_SIZE 80
+#  else
+#    define STG_RUN_STACK_FRAME_SIZE 48
+#  endif
+#endif
+
+
+/* -----------------------------------------------------------------------------
    How much Haskell stack space to reserve for the saving of registers
    etc. in the case of a stack/heap overflow.
 
@@ -198,7 +212,7 @@
 
 /*
  * Constants for the why_blocked field of a TSO
- * NB. keep these in sync with GHC/Conc.lhs: threadStatus
+ * NB. keep these in sync with GHC/Conc/Sync.hs: threadStatus
  */
 #define NotBlocked          0
 #define BlockedOnMVar       1

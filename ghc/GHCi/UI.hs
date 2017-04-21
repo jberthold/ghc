@@ -56,6 +56,7 @@ import Module
 import Name
 import Packages ( trusted, getPackageDetails, getInstalledPackageDetails,
                   listVisibleModuleNames, pprFlag )
+import IfaceSyn ( showToHeader )
 import PprTyThing
 import PrelNames
 import RdrName ( RdrName, getGRE_NameQualifier_maybes, getRdrName )
@@ -95,6 +96,7 @@ import Data.Function
 import Data.IORef ( IORef, modifyIORef, newIORef, readIORef, writeIORef )
 import Data.List ( find, group, intercalate, intersperse, isPrefixOf, nub,
                    partition, sort, sortBy )
+import qualified Data.Set as S
 import Data.Maybe
 import qualified Data.Map as M
 import Data.Time.LocalTime ( getZonedTime )
@@ -1500,7 +1502,8 @@ defineMacro overwrite s = do
     -- > ghciStepIO . definition :: String -> IO String
     let stringTy = nlHsTyVar stringTy_RDR
         ioM = nlHsTyVar (getRdrName ioTyConName) `nlHsAppTy` stringTy
-        body = nlHsVar compose_RDR `mkHsApp` step `mkHsApp` expr
+        body = nlHsVar compose_RDR `mkHsApp` (nlHsPar step)
+                                   `mkHsApp` (nlHsPar expr)
         tySig = mkLHsSigWcType (stringTy `nlHsFunTy` ioM)
         new_expr = L (getLoc expr) $ ExprWithTySig body tySig
     hv <- GHC.compileParsedExprRemote new_expr
@@ -2040,15 +2043,15 @@ isSafeModule m = do
     -- print info to user...
     liftIO $ putStrLn $ "Trust type is (Module: " ++ trust ++ ", Package: " ++ pkg ++ ")"
     liftIO $ putStrLn $ "Package Trust: " ++ (if packageTrustOn dflags then "On" else "Off")
-    when (not $ null good)
+    when (not $ S.null good)
          (liftIO $ putStrLn $ "Trusted package dependencies (trusted): " ++
-                        (intercalate ", " $ map (showPpr dflags) good))
-    case msafe && null bad of
+                        (intercalate ", " $ map (showPpr dflags) (S.toList good)))
+    case msafe && S.null bad of
         True -> liftIO $ putStrLn $ mname ++ " is trusted!"
         False -> do
             when (not $ null bad)
                  (liftIO $ putStrLn $ "Trusted package dependencies (untrusted): "
-                            ++ (intercalate ", " $ map (showPpr dflags) bad))
+                            ++ (intercalate ", " $ map (showPpr dflags) (S.toList bad)))
             liftIO $ putStrLn $ mname ++ " is NOT trusted!"
 
   where
@@ -2058,8 +2061,8 @@ isSafeModule m = do
         | thisPackage dflags == moduleUnitId md = True
         | otherwise = trusted $ getPackageDetails dflags (moduleUnitId md)
 
-    tallyPkgs dflags deps | not (packageTrustOn dflags) = ([], [])
-                          | otherwise = partition part deps
+    tallyPkgs dflags deps | not (packageTrustOn dflags) = (S.empty, S.empty)
+                          | otherwise = S.partition part deps
         where part pkg = trusted $ getInstalledPackageDetails dflags pkg
 
 -----------------------------------------------------------------------------
@@ -2135,8 +2138,8 @@ browseModule bang modl exports_only = do
 
         let things | bang      = catMaybes mb_things
                    | otherwise = filtered_things
-            pretty | bang      = pprTyThing
-                   | otherwise = pprTyThingInContext
+            pretty | bang      = pprTyThing showToHeader
+                   | otherwise = pprTyThingInContext showToHeader
 
             labels  [] = text "-- not currently imported"
             labels  l  = text $ intercalate "\n" $ map qualifier l
@@ -2830,7 +2833,7 @@ showBindings = do
 
     pprTT :: (TyThing, Fixity, [GHC.ClsInst], [GHC.FamInst]) -> SDoc
     pprTT (thing, fixity, _cls_insts, _fam_insts)
-      = pprTyThing thing
+      = pprTyThing showToHeader thing
         $$ show_fixity
       where
         show_fixity
@@ -2839,7 +2842,7 @@ showBindings = do
 
 
 printTyThing :: TyThing -> GHCi ()
-printTyThing tyth = printForUser (pprTyThing tyth)
+printTyThing tyth = printForUser (pprTyThing showToHeader tyth)
 
 showBkptTable :: GHCi ()
 showBkptTable = do
@@ -3361,7 +3364,7 @@ findBreakByLine line arr
         (comp, incomp) = partition ends_here starts_here
             where ends_here (_,pan) = GHC.srcSpanEndLine pan == line
 
--- The aim is to find the breakpionts for all the RHSs of the
+-- The aim is to find the breakpoints for all the RHSs of the
 -- equations corresponding to a binding.  So we find all breakpoints
 -- for
 --   (a) this binder only (not a nested declaration)

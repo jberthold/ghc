@@ -402,13 +402,29 @@ enclosed between ``+RTS ... -RTS`` as usual):
        single: time profile
 
     The :rts-flag:`-p` option produces a standard *time profile* report. It is
-    written into the file :file:`program.prof`.
+    written into the file :file:`<stem>.prof`; the stem is taken to be the program
+    name by default, but can be overridden by the :rts-flag:`-po` flag.
 
     The :rts-flag:`-P` option produces a more detailed report containing the
     actual time and allocation data as well. (Not used much.)
 
     The :rts-flag:`-pa` option produces the most detailed report containing all
     cost centres in addition to the actual time and allocation data.
+
+.. rts-flag:: -pj
+
+    The :rts-flag:`-pj` option produces a time/allocation profile report in JSON
+    format written into the file :file:`<program>.prof`.
+
+.. rts-flag:: -po ⟨stem⟩
+
+    The :rts-flag:`-po` option overrides the stem used to form the output file
+    paths for the cost-center profiler (see :rts-flag:`-p` and :rts-flag:`-pj`
+    flags above) and heap profiler (see :rts-flag:`-h`).
+
+    For instance, running a program with ``+RTS -h -p -pohello-world`` would
+    produce a heap profile named :file:`hello-world.hp` and a cost-center
+    profile named :file:`hello-world.prof`.
 
 .. rts-flag:: -V <secs>
 
@@ -423,6 +439,155 @@ enclosed between ``+RTS ... -RTS`` as usual):
     useful for debugging the location of exceptions, such as the
     notorious ``Prelude.head: empty list`` error. See
     :ref:`rts-options-debugging`.
+
+
+JSON profile format
+~~~~~~~~~~~~~~~~~~~
+
+When invoked with the :rts-flag:`-pj` flag the runtime will emit the cost-centre
+profile in a machine-readable JSON format. The top-level object of this format
+has the following properties,
+
+``program`` (string)
+    The name of the program
+``arguments`` (list of strings)
+    The command line arguments passed to the program
+``rts_arguments`` (list of strings)
+    The command line arguments passed to the runtime system
+``initial_capabilities`` (integral number)
+    How many capabilities the program was started with (e.g. using the
+    :rts-flag:`-N` option). Note that the number of capabilities may change
+    during execution due to the ``setNumCapabilities`` function.
+``total_time`` (number)
+    The total wall time of the program's execution in seconds.
+``total_ticks`` (integral number)
+    How many profiler "ticks" elapsed over the course of the program's execution.
+``end_time`` (number)
+    The approximate time when the program finished execution as a UNIX epoch timestamp.
+``tick_interval`` (float)
+    How much time between profiler ticks.
+``total_alloc`` (integer)
+    The cumulative allocations of the program in bytes.
+``cost_centres`` (list of objects)
+    A list of the program's cost centres
+``profile`` (object)
+    The profile tree itself
+
+Each entry in ``cost_centres`` is an object describing a cost-centre of the
+program having the following properies,
+
+``id`` (integral number)
+    A unique identifier used to refer to the cost-centre
+``is_caf`` (boolean)
+    Whether the cost-centre is a Constant Applicative Form (CAF)
+``label`` (string)
+    A descriptive string roughly identifying the cost-centre.
+``src_loc`` (string)
+    A string describing the source span enclosing the cost-centre.
+
+The profile data itself is described by the ``profile`` field, which contains a
+tree-like object (which we'll call a "cost-centre stack" here) with the
+following properties,
+
+``id`` (integral number)
+    The ``id`` of a cost-center listed in the ``cost_centres`` list.
+``entries`` (integral number)
+    How many times was this cost-centre entered?
+``ticks`` (integral number)
+    How many ticks was the program's execution inside of this cost-centre? This
+    does not include child cost-centres.
+``alloc`` (integral number)
+    How many bytes did the program allocate while inside of this cost-centre?
+    This does not include allocations while in child cost-centres.
+``children`` (list)
+    A list containing child cost-centre stacks.
+
+For instance, a simple profile might look like this,
+
+.. code-block:: json
+
+    {
+      "program": "Main",
+      "arguments": [
+        "nofib/shootout/n-body/Main",
+        "50000"
+      ],
+      "rts_arguments": [
+        "-pj",
+        "-hy"
+      ],
+      "end_time": "Thu Feb 23 17:15 2017",
+      "initial_capabilities": 0,
+      "total_time": 1.7,
+      "total_ticks": 1700,
+      "tick_interval": 1000,
+      "total_alloc": 3770785728,
+      "cost_centres": [
+        {
+          "id": 168,
+          "label": "IDLE",
+          "module": "IDLE",
+          "src_loc": "<built-in>",
+          "is_caf": false
+        },
+        {
+          "id": 156,
+          "label": "CAF",
+          "module": "GHC.Integer.Logarithms.Internals",
+          "src_loc": "<entire-module>",
+          "is_caf": true
+        },
+        {
+          "id": 155,
+          "label": "CAF",
+          "module": "GHC.Integer.Logarithms",
+          "src_loc": "<entire-module>",
+          "is_caf": true
+        },
+        {
+          "id": 154,
+          "label": "CAF",
+          "module": "GHC.Event.Array",
+          "src_loc": "<entire-module>",
+          "is_caf": true
+        }
+        ...
+      ],
+      "profile": {
+        "id": 162,
+        "entries": 0,
+        "alloc": 688,
+        "ticks": 0,
+        "children": [
+          {
+            "id": 1,
+            "entries": 0,
+            "alloc": 208,
+            "ticks": 0,
+            "children": [
+              {
+                "id": 22,
+                "entries": 1,
+                "alloc": 80,
+                "ticks": 0,
+                "children": []
+              }
+            ]
+          },
+          {
+            "id": 42,
+            "entries": 1,
+            "alloc": 1632,
+            "ticks": 0,
+            "children": []
+          }
+        ]
+      }
+    }
+
+
+
+
 
 .. _prof-heap:
 
@@ -887,8 +1052,8 @@ The flags are:
 
 .. _manipulating-hp:
 
-Manipulating the hp file
-~~~~~~~~~~~~~~~~~~~~~~~~
+Manipulating the ``hp`` file
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 (Notes kindly offered by Jan-Willem Maessen.)
 

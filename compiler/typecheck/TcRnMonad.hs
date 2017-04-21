@@ -10,7 +10,7 @@ Functions for working with the typechecker environment (setters, getters...).
 
 module TcRnMonad(
   -- * Initalisation
-  initTc, initTcInteractive, initTcForLookup, initTcRnIf,
+  initTc, initTcWithGbl, initTcInteractive, initTcForLookup, initTcRnIf,
 
   -- * Simple accessors
   discardResult,
@@ -93,9 +93,9 @@ module TcRnMonad(
   getTcEvTyCoVars, getTcEvBindsMap,
   chooseUniqueOccTc,
   getConstraintVar, setConstraintVar,
-  emitConstraints, emitSimple, emitSimples,
+  emitConstraints, emitStaticConstraints, emitSimple, emitSimples,
   emitImplication, emitImplications, emitInsoluble,
-  discardConstraints, captureConstraints, captureTopConstraints,
+  discardConstraints, captureConstraints, tryCaptureConstraints,
   pushLevelAndCaptureConstraints,
   pushTcLevelM_, pushTcLevelM,
   getTcLevel, setTcLevel, isTouchableTcM,
@@ -124,6 +124,7 @@ module TcRnMonad(
   failIfM,
   forkM_maybe,
   forkM,
+  setImplicitEnvM,
 
   withException,
 
@@ -161,7 +162,6 @@ import Bag
 import Outputable
 import UniqSupply
 import DynFlags
-import StaticFlags
 import FastString
 import Panic
 import Util
@@ -200,15 +200,12 @@ initTc :: HscEnv
                 -- (error messages should have been printed already)
 
 initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
- = do { errs_var     <- newIORef (emptyBag, emptyBag) ;
-        tvs_var      <- newIORef emptyVarSet ;
-        keep_var     <- newIORef emptyNameSet ;
+ = do { keep_var     <- newIORef emptyNameSet ;
         used_gre_var <- newIORef [] ;
         th_var       <- newIORef False ;
         th_splice_var<- newIORef False ;
         th_locs_var  <- newIORef Set.empty ;
         infer_var    <- newIORef (True, emptyBag) ;
-        lie_var      <- newIORef emptyWC ;
         dfun_n_var   <- newIORef emptyOccSet ;
         type_env_var <- case hsc_type_env_var hsc_env of {
                            Just (_mod, te_var) -> return te_var ;
@@ -217,6 +214,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
         dependent_files_var <- newIORef [] ;
         static_wc_var       <- newIORef emptyWC ;
         th_topdecls_var      <- newIORef [] ;
+        th_foreign_files_var <- newIORef [] ;
         th_topnames_var      <- newIORef emptyNameSet ;
         th_modfinalizers_var <- newIORef [] ;
         th_state_var         <- newIORef Map.empty ;
@@ -231,6 +229,7 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
 
              gbl_env = TcGblEnv {
                 tcg_th_topdecls      = th_topdecls_var,
+                tcg_th_foreign_files = th_foreign_files_var,
                 tcg_th_topnames      = th_topnames_var,
                 tcg_th_modfinalizers = th_modfinalizers_var,
                 tcg_th_state         = th_state_var,
@@ -296,9 +295,26 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 tcg_dependent_files = dependent_files_var,
                 tcg_tc_plugins     = [],
                 tcg_top_loc        = loc,
-                tcg_static_wc      = static_wc_var
+                tcg_static_wc      = static_wc_var,
+                tcg_complete_matches = []
              } ;
-             lcl_env = TcLclEnv {
+        } ;
+
+        -- OK, here's the business end!
+        initTcWithGbl hsc_env gbl_env loc do_this
+    }
+
+-- | Run a 'TcM' action in the context of an existing 'GblEnv'.
+initTcWithGbl :: HscEnv
+              -> TcGblEnv
+              -> RealSrcSpan
+              -> TcM r
+              -> IO (Messages, Maybe r)
+initTcWithGbl hsc_env gbl_env loc do_this
+ = do { tvs_var      <- newIORef emptyVarSet
+      ; lie_var      <- newIORef emptyWC
+      ; errs_var     <- newIORef (emptyBag, emptyBag)
+      ; let lcl_env = TcLclEnv {
                 tcl_errs       = errs_var,
                 tcl_loc        = loc,     -- Should be over-ridden very soon!
                 tcl_ctxt       = [],
@@ -312,31 +328,29 @@ initTc hsc_env hsc_src keep_rn_syntax mod loc do_this
                 tcl_tyvars     = tvs_var,
                 tcl_lie        = lie_var,
                 tcl_tclvl      = topTcLevel
-             } ;
-        } ;
+                }
 
-        -- OK, here's the business end!
-        maybe_res <- initTcRnIf 'a' hsc_env gbl_env lcl_env $
+      ; maybe_res <- initTcRnIf 'a' hsc_env gbl_env lcl_env $
                      do { r <- tryM do_this
                         ; case r of
                           Right res -> return (Just res)
-                          Left _    -> return Nothing } ;
+                          Left _    -> return Nothing }
 
         -- Check for unsolved constraints
-        lie <- readIORef lie_var ;
-        if isEmptyWC lie
+      ; lie <- readIORef (tcl_lie lcl_env)
+      ; if isEmptyWC lie
            then return ()
-           else pprPanic "initTc: unsolved constraints" (ppr lie) ;
+           else pprPanic "initTc: unsolved constraints" (ppr lie)
 
         -- Collect any error messages
-        msgs <- readIORef errs_var ;
+      ; msgs <- readIORef (tcl_errs lcl_env)
 
-        let { final_res | errorsFound dflags msgs = Nothing
-                        | otherwise               = maybe_res } ;
+      ; let { final_res | errorsFound dflags msgs = Nothing
+                        | otherwise               = maybe_res }
 
-        return (msgs, final_res)
-    }
-
+      ; return (msgs, final_res)
+      }
+  where dflags = hsc_dflags hsc_env
 
 initTcInteractive :: HscEnv -> TcM a -> IO (Messages, Maybe a)
 -- Initialise the type checker monad for use in GHCi
@@ -695,14 +709,14 @@ traceTcRn :: DumpFlag -> SDoc -> TcRn ()
 -- for --dump-to-file, not to decide whether or not to output
 -- That part is done by the caller
 traceTcRn flag doc
-  = do { real_doc <- prettyDoc doc
-       ; dflags   <- getDynFlags
+  = do { dflags   <- getDynFlags
+       ; real_doc <- prettyDoc dflags doc
        ; printer  <- getPrintUnqualified dflags
        ; liftIO $ dumpSDoc dflags printer flag "" real_doc  }
   where
-    -- Add current location if opt_PprStyle_Debug
-    prettyDoc :: SDoc -> TcRn SDoc
-    prettyDoc doc = if opt_PprStyle_Debug
+    -- Add current location if -dppr-debug
+    prettyDoc :: DynFlags -> SDoc -> TcRn SDoc
+    prettyDoc dflags doc = if hasPprDebug dflags
        then do { loc  <- getSrcSpanM; return $ mkLocMessage SevOutput loc doc }
        else return doc -- The full location is usually way too much
 
@@ -929,16 +943,16 @@ reportWarning reason err
 try_m :: TcRn r -> TcRn (Either IOEnvFailure r)
 -- Does tryM, with a debug-trace on failure
 try_m thing
-  = do { mb_r <- tryM (captureConstraints thing)
+  = do { (mb_r, lie) <- tryCaptureConstraints thing
+       ; emitConstraints lie
 
-            -- See Note [Constraints and errors] for the
-            -- captureConstraints/emitContraints dance
+       -- Debug trace
        ; case mb_r of
-           Left exn -> do { traceTc "tryTc/recoverM recovering from" $
-                            text (showException exn)
-                          ; return (Left exn) }
-           Right (res, lie) -> do { emitConstraints lie
-                                  ; return (Right res) } }
+            Left exn -> traceTc "tryTc/recoverM recovering from" $
+                        text (showException exn)
+            Right {} -> return ()
+
+       ; return mb_r }
 
 -----------------------
 recoverM :: TcRn r      -- Recovery action; do this if the main one fails
@@ -1088,43 +1102,8 @@ failTH e what  -- Raise an error in a stage-1 compiler
                           2 (ppr e)
                      , text "Perhaps you are using a stage-1 compiler?" ])
 
-{- Note [Constraints and errors]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Consider this (Trac #12124):
 
-  foo :: Maybe Int
-  foo = return (case Left 3 of
-                  Left -> 1  -- Error here!
-                  _    -> 0)
-
-The call to 'return' will generate a (Monad m) wanted constraint; but
-then there'll be "hard error" (i.e. an exception in the TcM monad).
-We'll recover in tcPolyBinds, using recoverM.  But then the final
-tcSimplifyTop will see that (Monad m) constraint, with 'm' utterly
-un-filled-in, and will emit a misleading error message.
-
-The underlying problem is that an exception interrupts the constraint
-gathering process. Bottom line: if we have an exception, it's best
-simply to discard any gathered constraints.  Hence in 'try_m' we
-capture the constraints in a fresh variable, and only emit them into
-the surrounding context if we exit normally.  If an exception is
-raised, simply discard the collected constraints... we have a hard
-error to report.  So this capture-the-emit dance isn't as stupid as it
-looks :-).
-
-However suppose we throw an exception inside an invocation of
-captureConstraints.  Then we'll discard all the constraints. But some
-of those contraints might be "variable out of scope" Hole constraints,
-and that might have been the actual original cause of the exception!
-For example (Trac #12529):
-   f = p @ Int
-Here 'p' is out of scope, so we get an insolube Hole constraint. But
-the visible type application fails in the monad (thows an exception).
-We must not discard the out-of-scope error.  Hence the use of tryM in
-captureConstraints to propagate insoluble constraints.
-
-
-************************************************************************
+{- *********************************************************************
 *                                                                      *
         Context management for the type checker
 *                                                                      *
@@ -1333,21 +1312,23 @@ add_err_tcm tidy_env err_msg loc ctxt
 mkErrInfo :: TidyEnv -> [ErrCtxt] -> TcM SDoc
 -- Tidy the error info, trimming excessive contexts
 mkErrInfo env ctxts
---  | opt_PprStyle_Debug     -- In -dppr-debug style the output
---  = return empty           -- just becomes too voluminous
- | otherwise
- = go 0 env ctxts
+--  = do
+--       dbg <- hasPprDebug <$> getDynFlags
+--       if dbg                -- In -dppr-debug style the output
+--          then return empty  -- just becomes too voluminous
+--          else go dbg 0 env ctxts
+ = go False 0 env ctxts
  where
-   go :: Int -> TidyEnv -> [ErrCtxt] -> TcM SDoc
-   go _ _   [] = return empty
-   go n env ((is_landmark, ctxt) : ctxts)
-     | is_landmark || n < mAX_CONTEXTS -- Too verbose || opt_PprStyle_Debug
+   go :: Bool -> Int -> TidyEnv -> [ErrCtxt] -> TcM SDoc
+   go _ _ _   [] = return empty
+   go dbg n env ((is_landmark, ctxt) : ctxts)
+     | is_landmark || n < mAX_CONTEXTS -- Too verbose || dbg
      = do { (env', msg) <- ctxt env
           ; let n' = if is_landmark then n else n+1
-          ; rest <- go n' env' ctxts
+          ; rest <- go dbg n' env' ctxts
           ; return (msg $$ rest) }
      | otherwise
-     = go n env ctxts
+     = go dbg n env ctxts
 
 mAX_CONTEXTS :: Int     -- No more than this number of non-landmark contexts
 mAX_CONTEXTS = 3
@@ -1407,6 +1388,11 @@ getConstraintVar = do { env <- getLclEnv; return (tcl_lie env) }
 setConstraintVar :: TcRef WantedConstraints -> TcM a -> TcM a
 setConstraintVar lie_var = updLclEnv (\ env -> env { tcl_lie = lie_var })
 
+emitStaticConstraints :: WantedConstraints -> TcM ()
+emitStaticConstraints static_lie
+  = do { gbl_env <- getGblEnv
+       ; updTcRef (tcg_static_wc gbl_env) (`andWC` static_lie) }
+
 emitConstraints :: WantedConstraints -> TcM ()
 emitConstraints ct
   = do { lie_var <- getConstraintVar ;
@@ -1450,34 +1436,37 @@ emitInsolubles cts
 discardConstraints :: TcM a -> TcM a
 discardConstraints thing_inside = fst <$> captureConstraints thing_inside
 
-captureConstraints :: TcM a -> TcM (a, WantedConstraints)
--- (captureConstraints m) runs m, and returns the type constraints it generates
-captureConstraints thing_inside
+tryCaptureConstraints :: TcM a -> TcM (Either IOEnvFailure a, WantedConstraints)
+-- (captureConstraints_maybe m) runs m,
+-- and returns the type constraints it generates
+-- It never throws an exception; instead if thing_inside fails,
+--   it returns Left exn and the insoluble constraints
+tryCaptureConstraints thing_inside
   = do { lie_var <- newTcRef emptyWC
        ; mb_res <- tryM $
                    updLclEnv (\ env -> env { tcl_lie = lie_var }) $
                    thing_inside
-
        ; lie <- readTcRef lie_var
 
-            -- See Note [Constraints and errors] for the
-            -- tryM/failM dance here
-       ; case mb_res of
-           Left _    -> do { emitInsolubles (getInsolubles lie)
-                           ; failM }
-           Right res -> return (res, lie) }
+       -- See Note [Constraints and errors]
+       ; let lie_to_keep = case mb_res of
+                             Left {}  -> insolublesOnly lie
+                             Right {} -> lie
 
-captureTopConstraints :: TcM a -> TcM (a, WantedConstraints)
--- (captureTopConstraints m) runs m, and returns the type constraints it
--- generates plus the constraints produced by static forms inside.
-captureTopConstraints thing_inside
-  = do { (res, lie) <- captureConstraints thing_inside ;
-         -- wanted constraints from static forms
-       ; tcg_static_wc_ref <- tcg_static_wc <$> getGblEnv
-       ; stWC <- readTcRef tcg_static_wc_ref
-       ; writeTcRef tcg_static_wc_ref emptyWC
-       ; return (res, andWC stWC lie)
-       }
+       ; return (mb_res, lie_to_keep) }
+
+captureConstraints :: TcM a -> TcM (a, WantedConstraints)
+-- (captureConstraints m) runs m, and returns the type constraints it generates
+captureConstraints thing_inside
+  = do { (mb_res, lie) <- tryCaptureConstraints thing_inside
+
+            -- See Note [Constraints and errors]
+            -- If the thing_inside threw an exception, emit the insoluble
+            -- constraints only (returned by tryCaptureConstraints)
+            -- so that they are not lost
+       ; case mb_res of
+           Left _    -> do { emitConstraints lie; failM }
+           Right res -> return (res, lie) }
 
 pushLevelAndCaptureConstraints :: TcM a -> TcM (TcLevel, WantedConstraints, a)
 pushLevelAndCaptureConstraints thing_inside
@@ -1551,7 +1540,48 @@ emitWildCardHoleConstraints wcs
                -- Wildcards are defined locally, and so have RealSrcSpans
          ct_loc' = setCtLocSpan ct_loc real_span
 
-{-
+{- Note [Constraints and errors]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider this (Trac #12124):
+
+  foo :: Maybe Int
+  foo = return (case Left 3 of
+                  Left -> 1  -- Hard error here!
+                  _    -> 0)
+
+The call to 'return' will generate a (Monad m) wanted constraint; but
+then there'll be "hard error" (i.e. an exception in the TcM monad), from
+the unsaturated Left constructor pattern.
+
+We'll recover in tcPolyBinds, using recoverM.  But then the final
+tcSimplifyTop will see that (Monad m) constraint, with 'm' utterly
+un-filled-in, and will emit a misleading error message.
+
+The underlying problem is that an exception interrupts the constraint
+gathering process. Bottom line: if we have an exception, it's best
+simply to discard any gathered constraints.  Hence in 'try_m' we
+capture the constraints in a fresh variable, and only emit them into
+the surrounding context if we exit normally.  If an exception is
+raised, simply discard the collected constraints... we have a hard
+error to report.  So this capture-the-emit dance isn't as stupid as it
+looks :-).
+
+However suppose we throw an exception inside an invocation of
+captureConstraints, and discard all the constraints. Some of those
+contraints might be "variable out of scope" Hole constraints, and that
+might have been the actual original cause of the exception!  For
+example (Trac #12529):
+   f = p @ Int
+Here 'p' is out of scope, so we get an insolube Hole constraint. But
+the visible type application fails in the monad (thows an exception).
+We must not discard the out-of-scope error.
+
+So we /retain the insoluble constraints/ if there is an exception.
+Hence:
+  - insolublesOnly in tryCaptureConstraints
+  - emitConstraints in the Left case of captureConstraints
+
+
 ************************************************************************
 *                                                                      *
              Template Haskell context
@@ -1670,6 +1700,7 @@ mkIfLclEnv mod loc boot
                                 if_loc     = loc,
                                 if_boot    = boot,
                                 if_nsubst  = Nothing,
+                                if_implicits_env = Nothing,
                                 if_tv_env  = emptyFsEnv,
                                 if_id_env  = emptyFsEnv }
 
@@ -1737,7 +1768,7 @@ getIfModule = do { env <- getLclEnv; return (if_mod env) }
 --------------------
 failIfM :: MsgDoc -> IfL a
 -- The Iface monad doesn't have a place to accumulate errors, so we
--- just fall over fast if one happens; it "shouldnt happen".
+-- just fall over fast if one happens; it "shouldn't happen".
 -- We use IfL here so that we can get context info out of the local env
 failIfM msg
   = do  { env <- getLclEnv
@@ -1799,6 +1830,9 @@ forkM doc thing_inside
                         Nothing -> pgmError "Cannot continue after interface file error"
                                    -- pprPanic "forkM" doc
                         Just r  -> r) }
+
+setImplicitEnvM :: TypeEnv -> IfL a -> IfL a
+setImplicitEnvM tenv m = updLclEnv (\lcl -> lcl { if_implicits_env = Just tenv }) m
 
 {-
 Note [Masking exceptions in forkM_maybe]

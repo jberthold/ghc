@@ -5,12 +5,14 @@ module TcSimplify(
        growThetaTyVars,
        simplifyAmbiguityCheck,
        simplifyDefault,
-       simplifyTop, simplifyInteractive, solveEqualities,
+       simplifyTop, captureTopConstraints,
+       simplifyInteractive, solveEqualities,
        simplifyWantedsTcM,
        tcCheckSatisfiability,
 
        -- For Rules we need these
-       solveWanteds, runTcSDeriveds
+       solveWanteds, solveWantedsAndDrop,
+       approximateWC, runTcSDeriveds
   ) where
 
 #include "HsVersions.h"
@@ -37,12 +39,12 @@ import TcSMonad  as TcS
 import TcType
 import TrieMap       () -- DV: for now
 import Type
-import TysWiredIn    ( ptrRepLiftedTy )
+import TysWiredIn    ( liftedRepTy )
 import Unify         ( tcMatchTyKi )
 import Util
 import Var
 import VarSet
-import UniqFM
+import UniqSet
 import BasicTypes    ( IntWithInf, intGtLimit )
 import ErrUtils      ( emptyMessages )
 import qualified GHC.LanguageExtensions as LangExt
@@ -57,6 +59,27 @@ import Data.List     ( partition )
 *                                                                               *
 *********************************************************************************
 -}
+
+captureTopConstraints :: TcM a -> TcM (a, WantedConstraints)
+-- (captureTopConstraints m) runs m, and returns the type constraints it
+-- generates plus the constraints produced by static forms inside.
+-- If it fails with an exception, it reports any insolubles
+-- (out of scope variables) before doing so
+captureTopConstraints thing_inside
+  = do { static_wc_var <- TcM.newTcRef emptyWC ;
+       ; (mb_res, lie) <- TcM.updGblEnv (\env -> env { tcg_static_wc = static_wc_var } ) $
+                          TcM.tryCaptureConstraints thing_inside
+       ; stWC <- TcM.readTcRef static_wc_var
+
+       -- See TcRnMonad Note [Constraints and errors]
+       -- If the thing_inside threw an exception, but generated some insoluble
+       -- constraints, report the latter before propagating the exception
+       -- Otherwise they will be lost altogether
+       ; case mb_res of
+           Right res -> return (res, lie `andWC` stWC)
+           Left {}   -> do { _ <- reportUnsolved lie; failM } }
+                -- This call to reportUnsolved is the reason
+                -- this function is here instead of TcRnMonad
 
 simplifyTop :: WantedConstraints -> TcM (Bag EvBind)
 -- Simplify top-level constraints
@@ -128,7 +151,7 @@ simpl_top wanteds
                    -- zonkTyCoVarsAndFV: the wc_first_go is not yet zonked
                    -- filter isMetaTyVar: we might have runtime-skolems in GHCi,
                    -- and we definitely don't want to try to assign to those!
-                   -- the isTyVar needs to weed out coercion variables
+                   -- The isTyVar is needed to weed out coercion variables
 
            ; defaulted <- mapM defaultTyVarTcS meta_tvs   -- Has unification side effects
            ; if or defaulted
@@ -645,7 +668,7 @@ simplifyInfer rhs_tclvl infer_mode sigs name_taus wanteds
          -- they had better be unifiable at the outer_tclvl!
          -- Example:   envt mentions alpha[1]
          --            tau_ty = beta[2] -> beta[2]
-         --            consraints = alpha ~ [beta]
+         --            constraints = alpha ~ [beta]
          -- we don't quantify over beta (since it is fixed by envt)
          -- so we must promote it!  The inferred type is just
          --   f :: beta -> beta
@@ -666,8 +689,8 @@ simplifyInfer rhs_tclvl infer_mode sigs name_taus wanteds
 
            -- promoteTyVar ignores coercion variables
        ; outer_tclvl <- TcM.getTcLevel
-       ; mapM_ (promoteTyVar outer_tclvl) (nonDetEltsUFM promote_tkvs)
-           -- It's OK to use nonDetEltsUFM here because promoteTyVar is
+       ; mapM_ (promoteTyVar outer_tclvl) (nonDetEltsUniqSet promote_tkvs)
+           -- It's OK to use nonDetEltsUniqSet here because promoteTyVar is
            -- commutative
 
            -- Emit an implication constraint for the
@@ -931,7 +954,7 @@ over them, for two reasons
   add it to the ic_skols of the residual implication.
 
   Note that we /only/ do this to the residual implication. We don't
-  complicate the quantified type varialbes of 'f' for downstream code;
+  complicate the quantified type variables of 'f' for downstream code;
   it's just a device to make the error message generator know what to
   report.
 
@@ -1413,7 +1436,7 @@ neededEvVars (ev_binds, tcvs) initial_seeds
 
    also_needs :: VarSet -> VarSet
    also_needs needs
-     = nonDetFoldUFM add emptyVarSet needs
+     = nonDetFoldUniqSet add emptyVarSet needs
      -- It's OK to use nonDetFoldUFM here because we immediately forget
      -- about the ordering by creating a set
      where
@@ -1586,15 +1609,14 @@ promoteTyVarTcS tclvl tv
   | otherwise
   = return ()
 
--- | If the tyvar is a RuntimeRep var, set it to PtrRepLifted. Returns whether or
--- not this happened.
+-- | If the tyvar is a RuntimeRep var, set it to LiftedRep.
 defaultTyVar :: TcTyVar -> TcM ()
 -- Precondition: MetaTyVars only
 -- See Note [DefaultTyVar]
 defaultTyVar the_tv
   | isRuntimeRepVar the_tv
   = do { traceTc "defaultTyVar RuntimeRep" (ppr the_tv)
-       ; writeMetaTyVar the_tv ptrRepLiftedTy }
+       ; writeMetaTyVar the_tv liftedRepTy }
 
   | otherwise = return ()    -- The common case
 
@@ -1603,7 +1625,7 @@ defaultTyVarTcS :: TcTyVar -> TcS Bool
 defaultTyVarTcS the_tv
   | isRuntimeRepVar the_tv
   = do { traceTcS "defaultTyVarTcS RuntimeRep" (ppr the_tv)
-       ; unifyTyVar the_tv ptrRepLiftedTy
+       ; unifyTyVar the_tv liftedRepTy
        ; return True }
   | otherwise
   = return False  -- the common case
@@ -1617,18 +1639,9 @@ approximateWC float_past_equalities wc
     float_wc :: TcTyCoVarSet -> WantedConstraints -> Cts
     float_wc trapping_tvs (WC { wc_simple = simples, wc_impl = implics })
       = filterBag is_floatable simples `unionBags`
-        do_bag (float_implic new_trapping_tvs) implics
+        do_bag (float_implic trapping_tvs) implics
       where
-        is_floatable ct = tyCoVarsOfCt ct `disjointVarSet` new_trapping_tvs
-        new_trapping_tvs = transCloVarSet grow trapping_tvs
-
-        grow :: VarSet -> VarSet  -- Maps current trapped tyvars to newly-trapped ones
-        grow so_far = foldrBag (grow_one so_far) emptyVarSet simples
-        grow_one so_far ct tvs
-          | ct_tvs `intersectsVarSet` so_far = tvs `unionVarSet` ct_tvs
-          | otherwise                        = tvs
-          where
-            ct_tvs = tyCoVarsOfCt ct
+        is_floatable ct = tyCoVarsOfCt ct `disjointVarSet` trapping_tvs
 
     float_implic :: TcTyCoVarSet -> Implication -> Cts
     float_implic trapping_tvs imp
@@ -1652,7 +1665,7 @@ out from inside, if they are not captured by skolems.
 The same function is used when doing type-class defaulting (see the call
 to applyDefaultingRules) to extract constraints that that might be defaulted.
 
-There are two caveats:
+There is one caveat:
 
 1.  When infering most-general types (in simplifyInfer), we do *not*
     float anything out if the implication binds equality constraints,
@@ -1675,25 +1688,37 @@ There are two caveats:
    the most-general type; and we /do/ want to float out of equalities.
    Hence the boolean flag to approximateWC.
 
-2. We do not float out an inner constraint that shares a type variable
-   (transitively) with one that is trapped by a skolem.  Eg
-       forall a.  F a ~ beta, Integral beta
-   We don't want to float out (Integral beta).  Doing so would be bad
-   when defaulting, because then we'll default beta:=Integer, and that
-   makes the error message much worse; we'd get
-       Can't solve  F a ~ Integer
-   rather than
-       Can't solve  Integral (F a)
+------ Historical note -----------
+There used to be a second caveat, driven by Trac #8155
 
-   Moreover, floating out these "contaminated" constraints doesn't help
-   when generalising either. If we generalise over (Integral b), we still
-   can't solve the retained implication (forall a. F a ~ b).  Indeed,
-   arguably that too would be a harder error to understand.
+   2. We do not float out an inner constraint that shares a type variable
+      (transitively) with one that is trapped by a skolem.  Eg
+          forall a.  F a ~ beta, Integral beta
+      We don't want to float out (Integral beta).  Doing so would be bad
+      when defaulting, because then we'll default beta:=Integer, and that
+      makes the error message much worse; we'd get
+          Can't solve  F a ~ Integer
+      rather than
+          Can't solve  Integral (F a)
+
+      Moreover, floating out these "contaminated" constraints doesn't help
+      when generalising either. If we generalise over (Integral b), we still
+      can't solve the retained implication (forall a. F a ~ b).  Indeed,
+      arguably that too would be a harder error to understand.
+
+But this transitive closure stuff gives rise to a complex rule for
+when defaulting actually happens, and one that was never documented.
+Moreover (Trac #12923), the more complex rule is sometimes NOT what
+you want.  So I simply removed the extra code to implement the
+contamination stuff.  There was zero effect on the testsuite (not even
+#8155).
+------ End of historical note -----------
+
 
 Note [DefaultTyVar]
 ~~~~~~~~~~~~~~~~~~~
 defaultTyVar is used on any un-instantiated meta type variables to
-default any RuntimeRep variables to PtrRepLifted.  This is important
+default any RuntimeRep variables to LiftedRep.  This is important
 to ensure that instance declarations match.  For example consider
 
      instance Show (a->b)
@@ -1709,7 +1734,7 @@ hand.  However we aren't ready to default them fully to () or
 whatever, because the type-class defaulting rules have yet to run.
 
 An alternate implementation would be to emit a derived constraint setting
-the RuntimeRep variable to PtrRepLifted, but this seems unnecessarily indirect.
+the RuntimeRep variable to LiftedRep, but this seems unnecessarily indirect.
 
 Note [Promote _and_ default when inferring]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1940,14 +1965,14 @@ to beta[1], and that means the (a ~ beta[1]) will be stuck, as it should be.
 
 *********************************************************************************
 *                                                                               *
-*                          Defaulting and disamgiguation                        *
+*                          Defaulting and disambiguation                        *
 *                                                                               *
 *********************************************************************************
 -}
 
 applyDefaultingRules :: WantedConstraints -> TcS Bool
 -- True <=> I did some defaulting, by unifying a meta-tyvar
--- Imput WantedConstraints are not necessarily zonked
+-- Input WantedConstraints are not necessarily zonked
 
 applyDefaultingRules wanteds
   | isEmptyWC wanteds
@@ -1994,6 +2019,7 @@ findDefaultableGroups (default_tys, (ovl_strings, extended_defaults)) wanteds
         -- Finds unary type-class constraints
         -- But take account of polykinded classes like Typeable,
         -- which may look like (Typeable * (a:*))   (Trac #8931)
+    find_unary :: Ct -> Either (Ct, Class, TyVar) Ct
     find_unary cc
         | Just (cls,tys)   <- getClassPredTys_maybe (ctPred cc)
         , [ty] <- filterOutInvisibleTypes (classTyCon cls) tys
@@ -2009,11 +2035,13 @@ findDefaultableGroups (default_tys, (ovl_strings, extended_defaults)) wanteds
 
     cmp_tv (_,_,tv1) (_,_,tv2) = tv1 `compare` tv2
 
+    defaultable_tyvar :: TcTyVar -> Bool
     defaultable_tyvar tv
         = let b1 = isTyConableTyVar tv  -- Note [Avoiding spurious errors]
               b2 = not (tv `elemVarSet` bad_tvs)
-          in b1 && b2
+          in b1 && (b2 || extended_defaults) -- Note [Multi-parameter defaults]
 
+    defaultable_classes :: [Class] -> Bool
     defaultable_classes clss
         | extended_defaults = any (isInteractiveClass ovl_strings) clss
         | otherwise         = all is_std_class clss && (any (isNumClass ovl_strings) clss)
@@ -2100,4 +2128,28 @@ that g isn't polymorphic enough; but then we get another one when
 dealing with the (Num a) context arising from f's definition;
 we try to unify a with Int (to default it), but find that it's
 already been unified with the rigid variable from g's type sig.
+
+Note [Multi-parameter defaults]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+With -XExtendedDefaultRules, we default only based on single-variable
+constraints, but do not exclude from defaulting any type variables which also
+appear in multi-variable constraints. This means that the following will
+default properly:
+
+   default (Integer, Double)
+
+   class A b (c :: Symbol) where
+      a :: b -> Proxy c
+
+   instance A Integer c where a _ = Proxy
+
+   main = print (a 5 :: Proxy "5")
+
+Note that if we change the above instance ("instance A Integer") to
+"instance A Double", we get an error:
+
+   No instance for (A Integer "5")
+
+This is because the first defaulted type (Integer) has successfully satisfied
+its single-parameter constraints (in this case Num).
 -}

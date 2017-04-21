@@ -64,7 +64,7 @@ import LoadIface
 import ToIface
 import FlagChecker
 
-import Desugar ( mkUsageInfo, mkUsedNames, mkDependencies )
+import DsUsage ( mkUsageInfo, mkUsedNames, mkDependencies )
 import Id
 import Annotations
 import CoreSyn
@@ -100,12 +100,11 @@ import BasicTypes       hiding ( SuccessFlag(..) )
 import Unique
 import Util             hiding ( eqListBy )
 import FastString
-import FastStringEnv
 import Maybes
 import Binary
 import Fingerprint
 import Exception
-import UniqFM
+import UniqSet
 import UniqDFM
 import Packages
 
@@ -206,7 +205,8 @@ mkIface_ hsc_env maybe_old_fingerprint
                       md_anns      = anns,
                       md_vect_info = vect_info,
                       md_types     = type_env,
-                      md_exports   = exports }
+                      md_exports   = exports,
+                      md_complete_sigs = complete_sigs }
 -- NB:  notice that mkIface does not look at the bindings
 --      only at the TypeEnv.  The previous Tidy phase has
 --      put exactly the info into the TypeEnv that we want
@@ -241,6 +241,7 @@ mkIface_ hsc_env maybe_old_fingerprint
         iface_vect_info = flattenVectInfo vect_info
         trust_info  = setSafeMode safe_mode
         annotations = map mkIfaceAnnotation anns
+        icomplete_sigs = map mkIfaceCompleteSig complete_sigs
 
         intermediate_iface = ModIface {
               mi_module      = this_mod,
@@ -285,7 +286,8 @@ mkIface_ hsc_env maybe_old_fingerprint
 
               -- And build the cached values
               mi_warn_fn     = mkIfaceWarnCache warns,
-              mi_fix_fn      = mkIfaceFixCache fixities }
+              mi_fix_fn      = mkIfaceFixCache fixities,
+              mi_complete_sigs = icomplete_sigs }
 
     (new_iface, no_change_at_all)
           <- {-# SCC "versioninfo" #-}
@@ -451,7 +453,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
                         -- filtering must be on the semantic module!
                         -- See Note [Identity versus semantic module]
                         . filter ((== semantic_mod) . name_module)
-                        . nonDetEltsUFM
+                        . nonDetEltsUniqSet
                    -- It's OK to use nonDetEltsUFM as localOccs is only
                    -- used to construct the edges and
                    -- stronglyConnCompFromEdgedVertices is deterministic
@@ -498,7 +500,7 @@ addFingerprints hsc_env mb_old_fingerprint iface0 new_decls
                      , not (isHoleModule semantic_mod) = global_hash_fn name
                      | otherwise = return (snd (lookupOccEnv local_env (getOccName name)
                            `orElse` pprPanic "urk! lookup local fingerprint"
-                                       (ppr name)))
+                                       (ppr name $$ ppr local_env)))
                 -- This panic indicates that we got the dependency
                 -- analysis wrong, because we needed a fingerprint for
                 -- an entity that wasn't in the environment.  To debug
@@ -929,7 +931,7 @@ declExtras fix_fn ann_fn rule_env inst_env fi_env decl
                          map ifDFun         (lookupOccEnvL inst_env n))
                         (ann_fn n)
                         (map (id_extras . occName . ifConName) (visibleIfConDecls cons))
-      IfaceClass{ifSigs=sigs, ifATs=ats} ->
+      IfaceClass{ifBody = IfConcreteClass { ifSigs=sigs, ifATs=ats }} ->
                      IfaceClassExtras (fix_fn n)
                         (map ifDFun $ (concatMap at_extras ats)
                                     ++ lookupOccEnvL inst_env n)
@@ -989,6 +991,18 @@ mkOrphMap get_key decls
         | NotOrphan occ <- get_key d
         = (extendOccEnv_Acc (:) singleton non_orphs occ d, orphs)
         | otherwise = (non_orphs, d:orphs)
+
+{-
+************************************************************************
+*                                                                      *
+       COMPLETE Pragmas
+*                                                                      *
+************************************************************************
+-}
+
+mkIfaceCompleteSig :: CompleteMatch -> IfaceCompleteMatch
+mkIfaceCompleteSig (CompleteMatch cls tc) = IfaceCompleteMatch cls tc
+
 
 {-
 ************************************************************************
@@ -1087,7 +1101,8 @@ checkOldIface hsc_env mod_summary source_modified maybe_iface
   = do  let dflags = hsc_dflags hsc_env
         showPass dflags $
             "Checking old interface for " ++
-              (showPpr dflags $ ms_mod mod_summary)
+              (showPpr dflags $ ms_mod mod_summary) ++
+              " (use -ddump-hi-diffs for more details)"
         initIfaceCheck (text "checkOldIface") hsc_env $
             check_old_iface hsc_env mod_summary source_modified maybe_iface
 
@@ -1110,10 +1125,11 @@ check_old_iface hsc_env mod_summary src_modified maybe_iface
 
         loadIface = do
              let iface_path = msHiFilePath mod_summary
-             read_result <- readIface (ms_installed_mod mod_summary) iface_path
+             read_result <- readIface (ms_mod mod_summary) iface_path
              case read_result of
                  Failed err -> do
                      traceIf (text "FYI: cannot read old interface file:" $$ nest 4 err)
+                     traceHiDiffs (text "Old interface file was invalid:" $$ nest 4 err)
                      return Nothing
                  Succeeded iface -> do
                      traceIf (text "Read the interface file" <+> text iface_path)
@@ -1171,6 +1187,11 @@ checkVersions hsc_env mod_summary iface
   = do { traceHiDiffs (text "Considering whether compilation is required for" <+>
                         ppr (mi_module iface) <> colon)
 
+       -- readIface will have verified that the InstalledUnitId matches,
+       -- but we ALSO must make sure the instantiation matches up.  See
+       -- test case bkpcabal04!
+       ; if moduleUnitId (mi_module iface) /= thisPackage (hsc_dflags hsc_env)
+            then return (RecompBecause "-this-unit-id changed", Nothing) else do {
        ; recomp <- checkFlagHash hsc_env iface
        ; if recompileRequired recomp then return (recomp, Nothing) else do {
        ; recomp <- checkMergedSignatures mod_summary iface
@@ -1196,7 +1217,7 @@ checkVersions hsc_env mod_summary iface
        ; updateEps_ $ \eps  -> eps { eps_is_boot = udfmToUfm mod_deps }
        ; recomp <- checkList [checkModUsage this_pkg u | u <- mi_usages iface]
        ; return (recomp, Just iface)
-    }}}}}
+    }}}}}}
   where
     this_pkg = thisPackage (hsc_dflags hsc_env)
     -- This is a bit of a hack really
@@ -1551,7 +1572,7 @@ tyConToIfaceDecl env tycon
                   ifCType   = tyConCType tycon,
                   ifRoles   = tyConRoles tycon,
                   ifCtxt    = tidyToIfaceContext tc_env1 (tyConStupidTheta tycon),
-                  ifCons    = ifaceConDecls (algTyConRhs tycon) (algTcFields tycon),
+                  ifCons    = ifaceConDecls (algTyConRhs tycon),
                   ifGadtSyntax = isGadtSyntaxTyCon tycon,
                   ifParent  = parent })
 
@@ -1566,7 +1587,7 @@ tyConToIfaceDecl env tycon
                   ifCType      = Nothing,
                   ifRoles      = tyConRoles tycon,
                   ifCtxt       = [],
-                  ifCons       = IfDataTyCon [] False [],
+                  ifCons       = IfDataTyCon [],
                   ifGadtSyntax = False,
                   ifParent     = IfNoParent })
   where
@@ -1600,11 +1621,11 @@ tyConToIfaceDecl env tycon
 
 
 
-    ifaceConDecls (NewTyCon { data_con = con })    flds = IfNewTyCon  (ifaceConDecl con) (ifaceOverloaded flds) (ifaceFields flds)
-    ifaceConDecls (DataTyCon { data_cons = cons }) flds = IfDataTyCon (map ifaceConDecl cons) (ifaceOverloaded flds) (ifaceFields flds)
-    ifaceConDecls (TupleTyCon { data_con = con })  _    = IfDataTyCon [ifaceConDecl con] False []
-    ifaceConDecls (SumTyCon { data_cons = cons })  flds = IfDataTyCon (map ifaceConDecl cons) (ifaceOverloaded flds) (ifaceFields flds)
-    ifaceConDecls (AbstractTyCon distinct)         _    = IfAbstractTyCon distinct
+    ifaceConDecls (NewTyCon { data_con = con })    = IfNewTyCon  (ifaceConDecl con)
+    ifaceConDecls (DataTyCon { data_cons = cons }) = IfDataTyCon (map ifaceConDecl cons)
+    ifaceConDecls (TupleTyCon { data_con = con })  = IfDataTyCon [ifaceConDecl con]
+    ifaceConDecls (SumTyCon { data_cons = cons })  = IfDataTyCon (map ifaceConDecl cons)
+    ifaceConDecls AbstractTyCon                    = IfAbstractTyCon
         -- The AbstractTyCon case happens when a TyCon has been trimmed
         -- during tidying.
         -- Furthermore, tyThingToIfaceDecl is also used in TcRnDriver
@@ -1620,7 +1641,7 @@ tyConToIfaceDecl env tycon
                     ifConEqSpec  = map (to_eq_spec . eqSpecPair) eq_spec,
                     ifConCtxt    = tidyToIfaceContext con_env2 theta,
                     ifConArgTys  = map (tidyToIfaceType con_env2) arg_tys,
-                    ifConFields  = map flSelector (dataConFieldLabels data_con),
+                    ifConFields  = dataConFieldLabels data_con,
                     ifConStricts = map (toIfaceBang con_env2)
                                        (dataConImplBangs data_con),
                     ifConSrcStricts = map toIfaceSrcBang
@@ -1643,26 +1664,27 @@ tyConToIfaceDecl env tycon
           (con_env2, ex_bndrs') = tidyTyVarBinders con_env1 ex_bndrs
           to_eq_spec (tv,ty) = (tidyTyVar con_env2 tv, tidyToIfaceType con_env2 ty)
 
-    ifaceOverloaded flds = case dFsEnvElts flds of
-                             fl:_ -> flIsOverloaded fl
-                             []   -> False
-    ifaceFields flds = map flLabel $ dFsEnvElts flds
-
 classToIfaceDecl :: TidyEnv -> Class -> (TidyEnv, IfaceDecl)
 classToIfaceDecl env clas
   = ( env1
-    , IfaceClass { ifCtxt   = tidyToIfaceContext env1 sc_theta,
-                   ifName   = getName tycon,
+    , IfaceClass { ifName   = getName tycon,
                    ifRoles  = tyConRoles (classTyCon clas),
                    ifBinders = toIfaceTyVarBinders tc_binders,
-                   ifFDs    = map toIfaceFD clas_fds,
-                   ifATs    = map toIfaceAT clas_ats,
-                   ifSigs   = map toIfaceClassOp op_stuff,
-                   ifMinDef = fmap getOccFS (classMinimalDef clas) })
+                   ifBody   = body,
+                   ifFDs    = map toIfaceFD clas_fds })
   where
     (_, clas_fds, sc_theta, _, clas_ats, op_stuff)
       = classExtraBigSig clas
     tycon = classTyCon clas
+
+    body | isAbstractTyCon tycon = IfAbstractClass
+         | otherwise
+         = IfConcreteClass {
+                ifClassCtxt   = tidyToIfaceContext env1 sc_theta,
+                ifATs    = map toIfaceAT clas_ats,
+                ifSigs   = map toIfaceClassOp op_stuff,
+                ifMinDef = fmap getOccFS (classMinimalDef clas)
+            }
 
     (env1, tc_binders) = tidyTyConBinders env (tyConBinders tycon)
 

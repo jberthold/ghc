@@ -26,6 +26,7 @@ module CLabel (
         mkApEntryLabel,
         mkApInfoTableLabel,
         mkClosureTableLabel,
+        mkBytesLabel,
 
         mkLocalClosureLabel,
         mkLocalInfoTableLabel,
@@ -88,6 +89,7 @@ module CLabel (
         addLabelSize,
 
         foreignLabelStdcallInfo,
+        isBytesLabel,
         isForeignLabel,
         mkCCLabel, mkCCSLabel,
 
@@ -389,6 +391,9 @@ data IdLabelInfo
 
   | ClosureTable        -- ^ Table of closures for Enum tycons
 
+  | Bytes               -- ^ Content of a string literal. See
+                        -- Note [Bytes label].
+
   deriving (Eq, Ord)
 
 
@@ -474,6 +479,7 @@ mkClosureTableLabel         :: Name -> CafInfo -> CLabel
 mkLocalConInfoTableLabel    :: CafInfo -> Name -> CLabel
 mkLocalConEntryLabel        :: CafInfo -> Name -> CLabel
 mkConInfoTableLabel         :: Name -> CafInfo -> CLabel
+mkBytesLabel                :: Name -> CLabel
 mkClosureLabel name         c     = IdLabel name c Closure
 mkInfoTableLabel name       c     = IdLabel name c InfoTable
 mkEntryLabel name           c     = IdLabel name c Entry
@@ -481,6 +487,7 @@ mkClosureTableLabel name    c     = IdLabel name c ClosureTable
 mkLocalConInfoTableLabel    c con = IdLabel con c ConInfoTable
 mkLocalConEntryLabel        c con = IdLabel con c ConEntry
 mkConInfoTableLabel name    c     = IdLabel name c ConInfoTable
+mkBytesLabel name                 = IdLabel name NoCafRefs Bytes
 
 mkConEntryLabel       :: Name -> CafInfo -> CLabel
 mkConEntryLabel name        c     = IdLabel name c ConEntry
@@ -566,6 +573,11 @@ addLabelSize (ForeignLabel str _ src  fod) sz
     = ForeignLabel str (Just sz) src fod
 addLabelSize label _
     = label
+
+-- | Whether label is a top-level string literal
+isBytesLabel :: CLabel -> Bool
+isBytesLabel (IdLabel _ _ Bytes) = True
+isBytesLabel _lbl = False
 
 -- | Whether label is a non-haskell label (defined in C code)
 isForeignLabel :: CLabel -> Bool
@@ -935,6 +947,7 @@ idInfoLabelType info =
     ConInfoTable  -> DataLabel
     ClosureTable  -> DataLabel
     RednCounts    -> DataLabel
+    Bytes         -> DataLabel
     _             -> CodeLabel
 
 
@@ -1056,6 +1069,11 @@ export this because in other modules we either have
        * A saturated call 'Just x'; allocate using Just_con_info
 Not exporting these Just_info labels reduces the number of symbols
 somewhat.
+
+Note [Bytes label]
+~~~~~~~~~~~~~~~~~~
+For a top-level string literal 'foo', we have just one symbol 'foo_bytes', which
+points to a static data block containing the content of the literal.
 -}
 
 instance Outputable CLabel where
@@ -1067,14 +1085,14 @@ pprCLabel platform (AsmTempLabel u)
  | cGhcWithNativeCodeGen == "YES"
   =  getPprStyle $ \ sty ->
      if asmStyle sty then
-        ptext (asmTempLabelPrefix platform) <> pprUnique u
+        ptext (asmTempLabelPrefix platform) <> pprUniqueAlways u
      else
-        char '_' <> pprUnique u
+        char '_' <> pprUniqueAlways u
 
 pprCLabel platform (AsmTempDerivedLabel l suf)
  | cGhcWithNativeCodeGen == "YES"
    = ptext (asmTempLabelPrefix platform)
-     <> case l of AsmTempLabel u -> pprUnique u
+     <> case l of AsmTempLabel u -> pprUniqueAlways u
                   _other         -> pprCLabel platform l
      <> ftext suf
 
@@ -1092,7 +1110,7 @@ pprCLabel platform (DeadStripPreventer lbl)
 
 pprCLabel _ (StringLitLabel u)
  | cGhcWithNativeCodeGen == "YES"
-  = pprUnique u <> ptext (sLit "_str")
+  = pprUniqueAlways u <> ptext (sLit "_str")
 
 pprCLabel platform lbl
    = getPprStyle $ \ sty ->
@@ -1116,22 +1134,22 @@ pprAsmCLbl _ lbl
 
 pprCLbl :: CLabel -> SDoc
 pprCLbl (StringLitLabel u)
-  = pprUnique u <> text "_str"
+  = pprUniqueAlways u <> text "_str"
 
 pprCLbl (CaseLabel u CaseReturnPt)
-  = hcat [pprUnique u, text "_ret"]
+  = hcat [pprUniqueAlways u, text "_ret"]
 pprCLbl (CaseLabel u CaseReturnInfo)
-  = hcat [pprUnique u, text "_info"]
+  = hcat [pprUniqueAlways u, text "_info"]
 pprCLbl (CaseLabel u (CaseAlt tag))
-  = hcat [pprUnique u, pp_cSEP, int tag, text "_alt"]
+  = hcat [pprUniqueAlways u, pp_cSEP, int tag, text "_alt"]
 pprCLbl (CaseLabel u CaseDefault)
-  = hcat [pprUnique u, text "_dflt"]
+  = hcat [pprUniqueAlways u, text "_dflt"]
 
 pprCLbl (SRTLabel u)
-  = pprUnique u <> pp_cSEP <> text "srt"
+  = pprUniqueAlways u <> pp_cSEP <> text "srt"
 
-pprCLbl (LargeSRTLabel u)  = pprUnique u <> pp_cSEP <> text "srtd"
-pprCLbl (LargeBitmapLabel u)  = text "b" <> pprUnique u <> pp_cSEP <> text "btm"
+pprCLbl (LargeSRTLabel u)  = pprUniqueAlways u <> pp_cSEP <> text "srtd"
+pprCLbl (LargeBitmapLabel u)  = text "b" <> pprUniqueAlways u <> pp_cSEP <> text "btm"
 -- Some bitsmaps for tuple constructors have a numeric tag (e.g. '7')
 -- until that gets resolved we'll just force them to start
 -- with a letter so the label will be legal assmbly code.
@@ -1234,6 +1252,7 @@ ppIdFlavor x = pp_cSEP <>
                        ConEntry         -> text "con_entry"
                        ConInfoTable     -> text "con_info"
                        ClosureTable     -> text "closure_tbl"
+                       Bytes            -> text "bytes"
                       )
 
 

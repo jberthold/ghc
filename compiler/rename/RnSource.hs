@@ -51,7 +51,7 @@ import HscTypes         ( HscEnv, hsc_dflags )
 import ListSetOps       ( findDupsEq, removeDups, equivClasses )
 import Digraph          ( SCC, flattenSCC, flattenSCCs
                         , stronglyConnCompFromEdgedVerticesUniq )
-import UniqFM
+import UniqSet
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
@@ -60,25 +60,22 @@ import Data.List ( sortBy, mapAccumL )
 import Data.Maybe ( isJust )
 import qualified Data.Set as Set ( difference, fromList, toList, null )
 
-{-
-@rnSourceDecl@ `renames' declarations.
+{- | @rnSourceDecl@ "renames" declarations.
 It simultaneously performs dependency analysis and precedence parsing.
 It also does the following error checks:
-\begin{enumerate}
-\item
-Checks that tyvars are used properly. This includes checking
-for undefined tyvars, and tyvars in contexts that are ambiguous.
-(Some of this checking has now been moved to module @TcMonoType@,
-since we don't have functional dependency information at this point.)
-\item
-Checks that all variable occurrences are defined.
-\item
-Checks the @(..)@ etc constraints in the export list.
-\end{enumerate}
--}
 
--- Brings the binders of the group into scope in the appropriate places;
--- does NOT assume that anything is in scope already
+* Checks that tyvars are used properly. This includes checking
+  for undefined tyvars, and tyvars in contexts that are ambiguous.
+  (Some of this checking has now been moved to module @TcMonoType@,
+  since we don't have functional dependency information at this point.)
+
+* Checks that all variable occurrences are defined.
+
+* Checks the @(..)@ etc constraints in the export list.
+
+Brings the binders of the group into scope in the appropriate places;
+does NOT assume that anything is in scope already
+-}
 rnSrcDecls :: HsGroup RdrName -> RnM (TcGblEnv, HsGroup Name)
 -- Rename a top-level HsGroup; used for normal source files *and* hs-boot files
 rnSrcDecls group@(HsGroup { hs_valds   = val_decls,
@@ -1351,7 +1348,7 @@ depAnalTyClDecls :: GlobalRdrEnv
 depAnalTyClDecls rdr_env ds_w_fvs
   = stronglyConnCompFromEdgedVerticesUniq edges
   where
-    edges = [ (d, tcdName (unLoc d), map (getParent rdr_env) (nonDetEltsUFM fvs))
+    edges = [ (d, tcdName (unLoc d), map (getParent rdr_env) (nonDetEltsUniqSet fvs))
             | (d, fvs) <- ds_w_fvs ]
             -- It's OK to use nonDetEltsUFM here as
             -- stronglyConnCompFromEdgedVertices is still deterministic
@@ -1360,7 +1357,7 @@ depAnalTyClDecls rdr_env ds_w_fvs
 
 toParents :: GlobalRdrEnv -> NameSet -> NameSet
 toParents rdr_env ns
-  = nonDetFoldUFM add emptyNameSet ns
+  = nonDetFoldUniqSet add emptyNameSet ns
   -- It's OK to use nonDetFoldUFM because we immediately forget the
   -- ordering by creating a set
   where

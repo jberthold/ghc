@@ -48,7 +48,7 @@ import FamInst     ( makeInjectivityErrors )
 import Name
 import VarEnv
 import VarSet
-import UniqFM
+import UniqSet
 import Var         ( TyVarBndr(..), mkTyVar )
 import ErrUtils
 import DynFlags
@@ -306,7 +306,7 @@ This might not necessarily show up in kind checking.
 
 checkValidType :: UserTypeCtxt -> Type -> TcM ()
 -- Checks that a user-written type is valid for the given context
--- Assumes arguemt is fully zonked
+-- Assumes argument is fully zonked
 -- Not used for instance decls; checkValidInstance instead
 checkValidType ctxt ty
   = do { traceTc "checkValidType" (ppr ty <+> text "::" <+> ppr (typeKind ty))
@@ -365,7 +365,7 @@ checkValidType ctxt ty
        ; traceTc "checkValidType done" (ppr ty <+> text "::" <+> ppr (typeKind ty)) }
 
 checkValidMonoType :: Type -> TcM ()
--- Assumes arguemt is fully zonked
+-- Assumes argument is fully zonked
 checkValidMonoType ty
   = do { env <- tcInitOpenTidyEnv (tyCoVarsOfTypeList ty)
        ; check_type env SigmaCtxt MustBeMonoType ty }
@@ -658,7 +658,7 @@ applying the instance decl would show up two uses of ?x.  Trac #8912.
 -}
 
 checkValidTheta :: UserTypeCtxt -> ThetaType -> TcM ()
--- Assumes arguemt is fully zonked
+-- Assumes argument is fully zonked
 checkValidTheta ctxt theta
   = do { env <- tcInitOpenTidyEnv (tyCoVarsOfTypesList theta)
        ; addErrCtxtM (checkThetaCtxt ctxt theta) $
@@ -1017,6 +1017,9 @@ checkValidInstHead ctxt clas cls_args
                   nameModule (getName clas) == mod)
                  (instTypeErr clas cls_args abstract_class_msg)
 
+       ; when (clas `hasKey` hasFieldClassNameKey) $
+             checkHasFieldInst clas cls_args
+
            -- Check language restrictions;
            -- but not for SPECIALISE instance pragmas
        ; let ty_args = filterOutInvisibleTypes (classTyCon clas) cls_args
@@ -1109,6 +1112,27 @@ instTypeErr cls tys msg
              2 (quotes (pprClassPred cls tys)))
        2 msg
 
+-- | See Note [Validity checking of HasField instances]
+checkHasFieldInst :: Class -> [Type] -> TcM ()
+checkHasFieldInst cls tys@[_k_ty, x_ty, r_ty, _a_ty] =
+  case splitTyConApp_maybe r_ty of
+    Nothing -> whoops (text "Record data type must be specified")
+    Just (tc, _)
+      | isFamilyTyCon tc
+                  -> whoops (text "Record data type may not be a data family")
+      | otherwise -> case isStrLitTy x_ty of
+       Just lbl
+         | isJust (lookupTyConFieldLabel lbl tc)
+                     -> whoops (ppr tc <+> text "already has a field"
+                                       <+> quotes (ppr lbl))
+         | otherwise -> return ()
+       Nothing
+         | null (tyConFieldLabels tc) -> return ()
+         | otherwise -> whoops (ppr tc <+> text "has fields")
+  where
+    whoops = addErrTc . instTypeErr cls tys
+checkHasFieldInst _ tys = pprPanic "checkHasFieldInst" (ppr tys)
+
 {- Note [Casts during validity checking]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider the (bogus)
@@ -1122,6 +1146,26 @@ CastTys here.
 Another example:  Eq (Either a).  Then we actually get a cast in
 the middle:
    Eq ((Either |> g) a)
+
+
+Note [Validity checking of HasField instances]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The HasField class has magic constraint solving behaviour (see Note
+[HasField instances] in TcInteract).  However, we permit users to
+declare their own instances, provided they do not clash with the
+built-in behaviour.  In particular, we forbid:
+
+  1. `HasField _ r _` where r is a variable
+
+  2. `HasField _ (T ...) _` if T is a data family
+     (because it might have fields introduced later)
+
+  3. `HasField x (T ...) _` where x is a variable,
+      if T has any fields at all
+
+  4. `HasField "foo" (T ...) _` if T has a "foo" field
+
+The usual functional dependency checks also apply.
 
 
 Note [Valid 'deriving' predicate]
@@ -1192,11 +1236,42 @@ validDerivPred tv_set pred
 ************************************************************************
 -}
 
+{- Note [Instances and constraint synonyms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Currently, we don't allow instances for constraint synonyms at all.
+Consider these (Trac #13267):
+  type C1 a = Show (a -> Bool)
+  instance C1 Int where    -- I1
+    show _ = "ur"
+
+This elicits "show is not a (visible) method of class C1", which isn't
+a great message. But it comes from the renamer, so it's hard to improve.
+
+This needs a bit more care:
+  type C2 a = (Show a, Show Int)
+  instance C2 Int           -- I2
+
+If we use (splitTyConApp_maybe tau) in checkValidInstance to decompose
+the instance head, we'll expand the synonym on fly, and it'll look like
+  instance (%,%) (Show Int, Show Int)
+and we /really/ don't want that.  So we carefully do /not/ expand
+synonyms, by matching on TyConApp directly.
+-}
+
 checkValidInstance :: UserTypeCtxt -> LHsSigType Name -> Type
                    -> TcM ([TyVar], ThetaType, Class, [Type])
 checkValidInstance ctxt hs_type ty
-  | Just (clas,inst_tys) <- getClassPredTys_maybe tau
-  , inst_tys `lengthIs` classArity clas
+  | not is_tc_app
+  = failWithTc (text "Instance head is not headed by a class")
+
+  | isNothing mb_cls
+  = failWithTc (vcat [ text "Illegal instance for a" <+> text (tyConFlavour tc)
+                     , text "A class instance must be for a class" ])
+
+  | not arity_ok
+  = failWithTc (text "Arity mis-match in instance head")
+
+  | otherwise
   = do  { setSrcSpan head_loc (checkValidInstHead ctxt clas inst_tys)
         ; traceTc "checkValidInstance {" (ppr ty)
         ; checkValidTheta ctxt theta
@@ -1225,11 +1300,13 @@ checkValidInstance ctxt hs_type ty
         ; traceTc "End checkValidInstance }" empty
 
         ; return (tvs, theta, clas, inst_tys) }
-
-  | otherwise
-  = failWithTc (text "Malformed instance head:" <+> ppr tau)
   where
-    (tvs, theta, tau) = tcSplitSigmaTy ty
+    (tvs, theta, tau)    = tcSplitSigmaTy ty
+    is_tc_app            = case tau of { TyConApp {} -> True; _ -> False }
+    TyConApp tc inst_tys = tau   -- See Note [Instances and constraint synonyms]
+    mb_cls               = tyConClass_maybe tc
+    Just clas            = mb_cls
+    arity_ok             = inst_tys `lengthIs` classArity clas
 
         -- The location of the "head" of the instance
     head_loc = getLoc (getLHsInstDeclHead hs_type)
@@ -1822,8 +1899,8 @@ checkValidInferredKinds orig_kvs out_of_scope extra
 
   where
     (env1, _) = tidyTyCoVarBndrs emptyTidyEnv orig_kvs
-    (env, _)  = tidyTyCoVarBndrs env1         (nonDetEltsUFM out_of_scope)
-      -- It's OK to use nonDetEltsUFM here because it's only used for
+    (env, _)  = tidyTyCoVarBndrs env1         (nonDetEltsUniqSet out_of_scope)
+      -- It's OK to use nonDetEltsUniqSet here because it's only used for
       -- generating the error message
 
 {-
@@ -1856,6 +1933,7 @@ fvCo (Refl _ ty)            = fvType ty
 fvCo (TyConAppCo _ _ args)  = concatMap fvCo args
 fvCo (AppCo co arg)         = fvCo co ++ fvCo arg
 fvCo (ForAllCo tv h co)     = filter (/= tv) (fvCo co) ++ fvCo h
+fvCo (FunCo _ co1 co2)      = fvCo co1 ++ fvCo co2
 fvCo (CoVarCo v)            = [v]
 fvCo (AxiomInstCo _ _ args) = concatMap fvCo args
 fvCo (UnivCo p _ t1 t2)     = fvProv p ++ fvType t1 ++ fvType t2

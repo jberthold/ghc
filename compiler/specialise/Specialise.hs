@@ -23,6 +23,7 @@ import CoreSyn
 import Rules
 import CoreUtils        ( exprIsTrivial, applyTypeToArgs, mkCast )
 import CoreFVs          ( exprFreeVars, exprsFreeVars, idFreeVars, exprsFreeIdsList )
+import CoreArity        ( etaExpandToJoinPointRule )
 import UniqSupply
 import Name
 import MkId             ( voidArgId, voidPrimId )
@@ -144,7 +145,7 @@ becomes
                          fl
 
 We still have recusion for non-overloaded functions which we
-speciailise, but the recursive call should get specialised to the
+specialise, but the recursive call should get specialised to the
 same recursive version.
 
 
@@ -213,7 +214,7 @@ Consider a function whose most general type is
         f :: forall a b. Ord a => [a] -> b -> b
 
 There is really no point in making a version of g at Int/Int and another
-at Int/Bool, because it's only instancing the type variable "a" which
+at Int/Bool, because it's only instantiating the type variable "a" which
 buys us any efficiency. Since g is completely polymorphic in b there
 ain't much point in making separate versions of g for the different
 b types.
@@ -1152,8 +1153,8 @@ specCalls :: Maybe Module      -- Just this_mod  =>  specialising imported fn
 
 specCalls mb_mod env rules_for_me calls_for_me fn rhs
         -- The first case is the interesting one
-  |  rhs_tyvars `lengthIs`     n_tyvars -- Rhs of fn's defn has right number of big lambdas
-  && rhs_ids    `lengthAtLeast` n_dicts -- and enough dict args
+  |  rhs_tyvars `lengthIs`      n_tyvars -- Rhs of fn's defn has right number of big lambdas
+  && rhs_bndrs1 `lengthAtLeast` n_dicts -- and enough dict args
   && notNull calls_for_me               -- And there are some calls to specialise
   && not (isNeverActive (idInlineActivation fn))
         -- Don't specialise NOINLINE things
@@ -1177,7 +1178,7 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
     return ([], [], emptyUDs)
   where
     _trace_doc = sep [ ppr rhs_tyvars, ppr n_tyvars
-                     , ppr rhs_ids, ppr n_dicts
+                     , ppr rhs_bndrs, ppr n_dicts
                      , ppr (idInlineActivation fn) ]
 
     fn_type                 = idType fn
@@ -1193,11 +1194,12 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
         -- Figure out whether the function has an INLINE pragma
         -- See Note [Inline specialisations]
 
-    (rhs_tyvars, rhs_ids, rhs_body) = collectTyAndValBinders rhs
-
-    rhs_dict_ids = take n_dicts rhs_ids
-    body         = mkLams (drop n_dicts rhs_ids) rhs_body
-                -- Glue back on the non-dict lambdas
+    (rhs_bndrs, rhs_body)      = CoreSubst.collectBindersPushingCo rhs
+                                 -- See Note [Account for casts in binding]
+    (rhs_tyvars, rhs_bndrs1)   = span isTyVar rhs_bndrs
+    (rhs_dict_ids, rhs_bndrs2) = splitAt n_dicts rhs_bndrs1
+    body                       = mkLams rhs_bndrs2 rhs_body
+                                 -- Glue back on the non-dict lambdas
 
     already_covered :: DynFlags -> [CoreExpr] -> Bool
     already_covered dflags args      -- Note [Specialisations already covered]
@@ -1270,11 +1272,17 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
              let body_ty = applyTypeToArgs rhs fn_type rule_args
                  (lam_args, app_args)           -- Add a dummy argument if body_ty is unlifted
                    | isUnliftedType body_ty     -- C.f. WwLib.mkWorkerArgs
+                   , not (isJoinId fn)
                    = (poly_tyvars ++ [voidArgId], poly_tyvars ++ [voidPrimId])
                    | otherwise = (poly_tyvars, poly_tyvars)
                  spec_id_ty = mkLamTypes lam_args body_ty
+                 join_arity_change = length app_args - length rule_args
+                 spec_join_arity | Just orig_join_arity <- isJoinId_maybe fn
+                                 = Just (orig_join_arity + join_arity_change)
+                                 | otherwise
+                                 = Nothing
 
-           ; spec_f <- newSpecIdSM fn spec_id_ty
+           ; spec_f <- newSpecIdSM fn spec_id_ty spec_join_arity
            ; (spec_rhs, rhs_uds) <- specExpr rhs_env2 (mkLams lam_args body)
            ; this_mod <- getModule
            ; let
@@ -1286,13 +1294,14 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                            Just this_mod  -- Specialising imoprted fn
                                -> text "SPEC/" <> ppr this_mod
 
-                rule_name = mkFastString $ showSDocForUser dflags neverQualify $
-                            herald <+> ppr fn <+> hsep (map ppr_call_key_ty call_ts)
-                            -- This name ends up in interface files, so use showSDocForUser,
-                            -- otherwise uniques end up there, making builds
+                rule_name = mkFastString $ showSDoc dflags $
+                            herald <+> ftext (occNameFS (getOccName fn))
+                                   <+> hsep (map ppr_call_key_ty call_ts)
+                            -- This name ends up in interface files, so use occNameString.
+                            -- Otherwise uniques end up there, making builds
                             -- less deterministic (See #4012 comment:61 ff)
 
-                spec_env_rule = mkRule
+                rule_wout_eta = mkRule
                                   this_mod
                                   True {- Auto generated -}
                                   is_local
@@ -1302,6 +1311,12 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                                   rule_bndrs
                                   rule_args
                                   (mkVarApps (Var spec_f) app_args)
+
+                spec_env_rule
+                  = case isJoinId_maybe fn of
+                      Just join_arity -> etaExpandToJoinPointRule join_arity
+                                                                  rule_wout_eta
+                      Nothing -> rule_wout_eta
 
                 -- Add the { d1' = dx1; d2' = dx2 } usage stuff
                 final_uds = foldr consDictBind rhs_uds dx_binds
@@ -1332,10 +1347,27 @@ specCalls mb_mod env rules_for_me calls_for_me fn rhs
                 spec_f_w_arity = spec_f `setIdArity`      max 0 (fn_arity - n_dicts)
                                         `setInlinePragma` spec_inl_prag
                                         `setIdUnfolding`  spec_unf
+                                        `asJoinId_maybe`  spec_join_arity
 
            ; return (Just ((spec_f_w_arity, spec_rhs), final_uds, spec_env_rule)) } }
 
-{- Note [Evidence foralls]
+{- Note [Account for casts in binding]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+   f :: Eq a => a -> IO ()
+   {-# INLINABLE f
+       StableUnf = (/\a \(d:Eq a) (x:a). blah) |> g
+     #-}
+   f = ...
+
+In f's stable unfolding we have done some modest simplification which
+has pushed the cast to the outside.  (I wonder if this is the Right
+Thing, but it's what happens now; see SimplUtils Note [Casts and
+lambdas].)  Now that stable unfolding must be specialised, so we want
+to push the cast back inside. It would be terrible if the cast
+defeated specialisation!  Hence the use of collectBindersPushingCo.
+
+Note [Evidence foralls]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose (Trac #12212) that we are specialising
    f :: forall a b. (Num a, F a ~ F b) => blah
@@ -1784,8 +1816,8 @@ This makes b), c), d) trivial and pushes a) towards the end. The deduplication
 is done by using a TrieMap for membership tests on CallKey. This lets us delete
 the nondeterministic Ord CallKey instance.
 
-An alternative approach would be to augument the Map the same way that UniqDFM
-is augumented, by keeping track of insertion order and using it to order the
+An alternative approach would be to augment the Map the same way that UniqDFM
+is augmented, by keeping track of insertion order and using it to order the
 resulting lists. It would mean keeping the nondeterministic Ord CallKey
 instance making it easy to reintroduce nondeterminism in the future.
 -}
@@ -2260,13 +2292,14 @@ newDictBndr env b = do { uniq <- getUniqueM
                              ty' = substTy env (idType b)
                        ; return (mkUserLocalOrCoVar (nameOccName n) uniq ty' (getSrcSpan n)) }
 
-newSpecIdSM :: Id -> Type -> SpecM Id
+newSpecIdSM :: Id -> Type -> Maybe JoinArity -> SpecM Id
     -- Give the new Id a similar occurrence name to the old one
-newSpecIdSM old_id new_ty
+newSpecIdSM old_id new_ty join_arity_maybe
   = do  { uniq <- getUniqueM
         ; let name    = idName old_id
               new_occ = mkSpecOcc (nameOccName name)
               new_id  = mkUserLocalOrCoVar new_occ uniq new_ty (getSrcSpan name)
+                          `asJoinId_maybe` join_arity_maybe
         ; return new_id }
 
 {-

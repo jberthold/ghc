@@ -14,7 +14,6 @@ Thumbs.db
 *.rej
 *.patch
 *.stackdump
-foo*
 
 *.hi
 *.hi-boot
@@ -176,6 +175,7 @@ _darcs/
 /stage3.package.conf
 /testsuite_summary*.txt
 /testlog*
+/utils/mkUserGuidePart/mkUserGuidePart.cabal
 /utils/runghc/runghc.cabal
 
 /extra-gcc-opts

@@ -37,7 +37,7 @@ module DataCon (
         dataConStupidTheta,
         dataConInstArgTys, dataConOrigArgTys, dataConOrigResTy,
         dataConInstOrigArgTys, dataConRepArgTys,
-        dataConFieldLabels, dataConFieldType,
+        dataConFieldLabels, dataConFieldType, dataConFieldType_maybe,
         dataConSrcBangs,
         dataConSourceArity, dataConRepArity,
         dataConIsInfix,
@@ -79,7 +79,6 @@ import FastString
 import Module
 import Binary
 import UniqSet
-import UniqFM
 import Unique( mkAlphaTyVarUnique )
 
 import qualified Data.Data as Data
@@ -696,7 +695,7 @@ instance Binary SrcStrictness where
       do h <- getByte bh
          case h of
            0 -> return SrcLazy
-           1 -> return SrcLazy
+           1 -> return SrcStrict
            _ -> return NoSrcStrict
 
 instance Binary SrcUnpackedness where
@@ -973,10 +972,16 @@ dataConFieldLabels = dcFields
 
 -- | Extract the type for any given labelled field of the 'DataCon'
 dataConFieldType :: DataCon -> FieldLabelString -> Type
-dataConFieldType con label
-  = case find ((== label) . flLabel . fst) (dcFields con `zip` dcOrigArgTys con) of
+dataConFieldType con label = case dataConFieldType_maybe con label of
       Just (_, ty) -> ty
-      Nothing -> pprPanic "dataConFieldType" (ppr con <+> ppr label)
+      Nothing      -> pprPanic "dataConFieldType" (ppr con <+> ppr label)
+
+-- | Extract the label and type for any given labelled field of the
+-- 'DataCon', or return 'Nothing' if the field does not belong to it
+dataConFieldType_maybe :: DataCon -> FieldLabelString
+                       -> Maybe (FieldLabel, Type)
+dataConFieldType_maybe con label
+  = find ((== label) . flLabel . fst) (dcFields con `zip` dcOrigArgTys con)
 
 -- | Strictness/unpack annotations, from user; or, for imported
 -- DataCons, from the interface file
@@ -1109,7 +1114,6 @@ dataConUserType (MkData { dcUnivTyVars = univ_tvs,
     mkFunTys theta $
     mkFunTys arg_tys $
     res_ty
-  where
 
 -- | Finds the instantiated types of the arguments required to construct a 'DataCon' representation
 -- NB: these INCLUDE any dictionary args
@@ -1197,7 +1201,7 @@ isLegacyPromotableDataCon dc
   =  null (dataConEqSpec dc)  -- no GADTs
   && null (dataConTheta dc)   -- no context
   && not (isFamInstTyCon (dataConTyCon dc))   -- no data instance constructors
-  && allUFM isLegacyPromotableTyCon (tyConsOfType (dataConUserType dc))
+  && uniqSetAll isLegacyPromotableTyCon (tyConsOfType (dataConUserType dc))
 
 -- | Was this tycon promotable before GHC 8.0? That is, is it promotable
 -- without -XTypeInType

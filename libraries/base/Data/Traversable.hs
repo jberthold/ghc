@@ -208,7 +208,7 @@ that's all!  We get
   $fTraversable[]_$cmapM = ...code for traverse on lists...
 
 with NO INLINE pragma!  This happens even though 'traverse' had an
-INLINE pragma becuase the author knew it should be inlined pretty
+INLINE pragma because the author knew it should be inlined pretty
 vigorously.
 
 Indeed, it turned out that the rhs of $cmapM was just too big to
@@ -235,7 +235,7 @@ instance Traversable Maybe where
 instance Traversable [] where
     {-# INLINE traverse #-} -- so that traverse can fuse
     traverse f = List.foldr cons_f (pure [])
-      where cons_f x ys = (:) <$> f x <*> ys
+      where cons_f x ys = liftA2 (:) (f x) ys
 
 -- | @since 4.7.0.0
 instance Traversable (Either a) where

@@ -81,7 +81,11 @@ module TcMType (
 
   zonkEvVar, zonkWC, zonkSimples, zonkId, zonkCt, zonkSkolemInfo,
 
-  tcGetGlobalTyCoVars
+  tcGetGlobalTyCoVars,
+
+  ------------------------------
+  -- Levity polymorphism
+  ensureNotLevPoly, checkForLevPoly, checkForLevPolyX, formatLevPolyErr
   ) where
 
 #include "HsVersions.h"
@@ -111,7 +115,7 @@ import FastString
 import SrcLoc
 import Bag
 import Pair
-import UniqFM
+import UniqSet
 import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
@@ -1011,7 +1015,7 @@ zonkQuantifiedTyVar default_kind tv
     zonk_meta_tv :: TcTyVar -> TcM (Maybe TcTyVar)
     zonk_meta_tv tv
       | isRuntimeRepVar tv   -- Never quantify over a RuntimeRep var
-      = do { writeMetaTyVar tv ptrRepLiftedTy
+      = do { writeMetaTyVar tv liftedRepTy
            ; return Nothing }
 
       | default_kind         -- -XNoPolyKinds and this is a kind var
@@ -1135,7 +1139,7 @@ variables (the MetaTv constructor of TcTyVarDetails) are represented by mutable
 variables (known as TcRefs).
 
 Zonking is the process of ripping out these mutable variables and replacing them
-with a real TcType. This involves traversing the entire type expression, but the
+with a real Type. This involves traversing the entire type expression, but the
 interesting part of replacing the mutable variables occurs in zonkTyVarOcc.
 
 There are two ways to zonk a Type:
@@ -1276,8 +1280,8 @@ zonkTyCoVar tv | isTcTyVar tv = zonkTcTyVar tv
 
 zonkTyCoVarsAndFV :: TyCoVarSet -> TcM TyCoVarSet
 zonkTyCoVarsAndFV tycovars =
-  tyCoVarsOfTypes <$> mapM zonkTyCoVar (nonDetEltsUFM tycovars)
-  -- It's OK to use nonDetEltsUFM here because we immediately forget about
+  tyCoVarsOfTypes <$> mapM zonkTyCoVar (nonDetEltsUniqSet tycovars)
+  -- It's OK to use nonDetEltsUniqSet here because we immediately forget about
   -- the ordering by turning it into a nondeterministic set and the order
   -- of zonking doesn't matter for determinism.
 
@@ -1351,12 +1355,50 @@ zonkSimples cts = do { cts' <- mapBagM zonkCt' cts
 zonkCt' :: Ct -> TcM Ct
 zonkCt' ct = zonkCt ct
 
+{- Note [zonkCt behaviour]
+zonkCt tries to maintain the canonical form of a Ct.  For example,
+  - a CDictCan should stay a CDictCan;
+  - a CTyEqCan should stay a CTyEqCan (if the LHS stays as a variable.).
+  - a CHoleCan should stay a CHoleCan
+
+Why?, for example:
+- For CDictCan, the @TcSimplify.expandSuperClasses@ step, which runs after the
+  simple wanted and plugin loop, looks for @CDictCan@s. If a plugin is in use,
+  constraints are zonked before being passed to the plugin. This means if we
+  don't preserve a canonical form, @expandSuperClasses@ fails to expand
+  superclasses. This is what happened in Trac #11525.
+
+- For CHoleCan, once we forget that it's a hole, we can never recover that info.
+
+NB: we do not expect to see any CFunEqCans, because zonkCt is only
+called on unflattened constraints.
+NB: Constraints are always re-flattened etc by the canonicaliser in
+@TcCanonical@ even if they come in as CDictCan. Only canonical constraints that
+are actually in the inert set carry all the guarantees. So it is okay if zonkCt
+creates e.g. a CDictCan where the cc_tyars are /not/ function free.
+-}
 zonkCt :: Ct -> TcM Ct
 zonkCt ct@(CHoleCan { cc_ev = ev })
   = do { ev' <- zonkCtEvidence ev
        ; return $ ct { cc_ev = ev' } }
+zonkCt ct@(CDictCan { cc_ev = ev, cc_tyargs = args })
+  = do { ev'   <- zonkCtEvidence ev
+       ; args' <- mapM zonkTcType args
+       ; return $ ct { cc_ev = ev', cc_tyargs = args' } }
+zonkCt ct@(CTyEqCan { cc_ev = ev, cc_tyvar = tv, cc_rhs = rhs })
+  = do { ev'    <- zonkCtEvidence ev
+       ; tv_ty' <- zonkTcTyVar tv
+       ; case getTyVar_maybe tv_ty' of
+           Just tv' -> do { rhs' <- zonkTcType rhs
+                          ; return ct { cc_ev    = ev'
+                                      , cc_tyvar = tv'
+                                      , cc_rhs   = rhs' } }
+           Nothing  -> return (mkNonCanonical ev') }
 zonkCt ct
-  = do { fl' <- zonkCtEvidence (cc_ev ct)
+  = ASSERT( not (isCFunEqCan ct) )
+  -- We do not expect to see any CFunEqCans, because zonkCt is only called on
+  -- unflattened constraints.
+    do { fl' <- zonkCtEvidence (cc_ev ct)
        ; return (mkNonCanonical fl') }
 
 zonkCtEvidence :: CtEvidence -> TcM CtEvidence
@@ -1569,3 +1611,55 @@ tidySkolemInfo env (SigSkol cx ty)      = SigSkol cx (tidyType env ty)
 tidySkolemInfo env (InferSkol ids)      = InferSkol (mapSnd (tidyType env) ids)
 tidySkolemInfo env (UnifyForAllSkol ty) = UnifyForAllSkol (tidyType env ty)
 tidySkolemInfo _   info                 = info
+
+-------------------------------------------------------------------------
+{-
+%************************************************************************
+%*                                                                      *
+             Levity polymorphism checks
+*                                                                      *
+************************************************************************
+
+See Note [Levity polymorphism checking] in DsMonad
+
+-}
+
+-- | According to the rules around representation polymorphism
+-- (see https://ghc.haskell.org/trac/ghc/wiki/NoSubKinds), no binder
+-- can have a representation-polymorphic type. This check ensures
+-- that we respect this rule. It is a bit regrettable that this error
+-- occurs in zonking, after which we should have reported all errors.
+-- But it's hard to see where else to do it, because this can be discovered
+-- only after all solving is done. And, perhaps most importantly, this
+-- isn't really a compositional property of a type system, so it's
+-- not a terrible surprise that the check has to go in an awkward spot.
+ensureNotLevPoly :: Type  -- its zonked type
+                 -> SDoc  -- where this happened
+                 -> TcM ()
+ensureNotLevPoly ty doc
+  = whenNoErrs $   -- sometimes we end up zonking bogus definitions of type
+                   -- forall a. a. See, for example, test ghci/scripts/T9140
+    checkForLevPoly doc ty
+
+  -- See Note [Levity polymorphism checking] in DsMonad
+checkForLevPoly :: SDoc -> Type -> TcM ()
+checkForLevPoly = checkForLevPolyX addErr
+
+checkForLevPolyX :: Monad m
+                 => (SDoc -> m ())  -- how to report an error
+                 -> SDoc -> Type -> m ()
+checkForLevPolyX add_err extra ty
+  | isTypeLevPoly ty
+  = add_err (formatLevPolyErr ty $$ extra)
+  | otherwise
+  = return ()
+
+formatLevPolyErr :: Type  -- levity-polymorphic type
+                 -> SDoc
+formatLevPolyErr ty
+  = hang (text "A levity-polymorphic type is not allowed here:")
+       2 (vcat [ text "Type:" <+> ppr tidy_ty
+               , text "Kind:" <+> ppr tidy_ki ])
+  where
+    (tidy_env, tidy_ty) = tidyOpenType emptyTidyEnv ty
+    tidy_ki             = tidyType tidy_env (typeKind ty)

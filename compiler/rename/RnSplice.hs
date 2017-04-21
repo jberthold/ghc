@@ -195,7 +195,7 @@ illegalUntypedBracket =
 quotedNameStageErr :: HsBracket RdrName -> SDoc
 quotedNameStageErr br
   = sep [ text "Stage error: the non-top-level quoted name" <+> ppr br
-        , text "must be used at the same stage at which is is bound" ]
+        , text "must be used at the same stage at which it is bound" ]
 
 
 {-
@@ -733,12 +733,6 @@ illegalTypedSplice = text "Typed splices may not appear in untyped brackets"
 
 illegalUntypedSplice :: SDoc
 illegalUntypedSplice = text "Untyped splices may not appear in typed brackets"
-
--- spliceResultDoc :: OutputableBndr id => LHsExpr id -> SDoc
--- spliceResultDoc expr
---  = vcat [ hang (text "In the splice:")
---              2 (char '$' <> pprParendExpr expr)
---        , text "To see what the splice expanded to, use -ddump-splices" ]
 
 checkThLocalName :: Name -> RnM ()
 checkThLocalName name

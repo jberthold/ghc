@@ -239,7 +239,6 @@ import Unique
 import UniqFM
 import SrcLoc
 import DynFlags
-import StaticFlags
 import ErrUtils
 import StringBuffer
 import FastString
@@ -636,8 +635,23 @@ stmt    :: { CmmParse () }
                 { pushStackFrame $3 $5 }
         | 'reserve' expr '=' lreg maybe_body
                 { reserveStackFrame $2 $4 $5 }
-        | 'unwind' GLOBALREG '=' expr
-                { $4 >>= code . emitUnwind $2 }
+        | 'unwind' unwind_regs ';'
+                { $2 >>= code . emitUnwind }
+
+unwind_regs
+        :: { CmmParse [(GlobalReg, Maybe CmmExpr)] }
+        : GLOBALREG '=' expr_or_unknown ',' unwind_regs
+                { do e <- $3; rest <- $5; return (($1, e) : rest) }
+        | GLOBALREG '=' expr_or_unknown
+                { do e <- $3; return [($1, e)] }
+
+-- | Used by unwind to indicate unknown unwinding values.
+expr_or_unknown
+        :: { CmmParse (Maybe CmmExpr) }
+        : 'return'
+                { do return Nothing }
+        | expr
+                { do e <- $1; return (Just e) }
 
 foreignLabel     :: { CmmParse CmmExpr }
         : NAME                          { return (CmmLit (CmmLabel (mkForeignLabel $1 Nothing ForeignLabelInThisPackage IsFunction))) }

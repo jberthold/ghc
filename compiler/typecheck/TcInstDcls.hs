@@ -36,12 +36,13 @@ import TcHsType
 import TcUnify
 import CoreSyn    ( Expr(..), mkApps, mkVarApps, mkLams )
 import MkCore     ( nO_METHOD_BINDING_ERROR_ID )
-import CoreUnfold ( mkInlineUnfolding, mkDFunUnfolding )
+import CoreUnfold ( mkInlineUnfoldingWithArity, mkDFunUnfolding )
 import Type
 import TcEvidence
 import TyCon
 import CoAxiom
 import DataCon
+import ConLike
 import Class
 import Var
 import VarEnv
@@ -519,6 +520,10 @@ doClsInstErrorChecks inst_info
          -- In hs-boot files there should be no bindings
       ; failIfTc (is_boot && not no_binds) badBootDeclErr
 
+         -- If not in an hs-boot file, abstract classes cannot have
+         -- instances declared
+      ; failIfTc (not is_boot && isAbstractClass clas) abstractClassInstErr
+
          -- Handwritten instances of any rejected
          -- class is always forbidden
          -- #12837
@@ -534,11 +539,15 @@ doClsInstErrorChecks inst_info
     binds    = iBinds inst_info
     no_binds = isEmptyLHsBinds (ib_binds binds) && null (ib_pragmas binds)
     clas_nm  = is_cls_nm ispec
+    clas     = is_cls ispec
 
     gen_inst_err = hang (text ("Generic instances can only be "
                             ++ "derived in Safe Haskell.") $+$
                          text "Replace the following instance:")
                       2 (pprInstanceHdr ispec)
+
+    abstractClassInstErr =
+        text "Cannot define instance for abstract class" <+> quotes (ppr clas_nm)
 
     -- Report an error or a warning for certain class instances.
     -- If we are working on an .hs-boot file, we just report a warning,
@@ -835,7 +844,8 @@ tcInstDecl2 (InstInfo { iSpec = ispec, iBinds = ibinds })
                      --    con_app_tys  = MkD ty1 ty2
                      --    con_app_scs  = MkD ty1 ty2 sc1 sc2
                      --    con_app_args = MkD ty1 ty2 sc1 sc2 op1 op2
-             con_app_tys  = wrapId (mkWpTyApps inst_tys) (dataConWrapId dict_constr)
+             con_app_tys  = mkHsWrap (mkWpTyApps inst_tys)
+                                     (HsConLikeOut (RealDataCon dict_constr))
                        -- NB: We *can* have covars in inst_tys, in the case of
                        -- promoted GADT constructors.
 
@@ -884,7 +894,7 @@ addDFunPrags :: DFunId -> [Id] -> DFunId
 -- is messing with.
 addDFunPrags dfun_id sc_meth_ids
  | is_newtype
-  = dfun_id `setIdUnfolding`  mkInlineUnfolding (Just 0) con_app
+  = dfun_id `setIdUnfolding`  mkInlineUnfoldingWithArity 0 con_app
             `setInlinePragma` alwaysInlinePragma { inl_sat = Just 0 }
  | otherwise
  = dfun_id `setIdUnfolding`  mkDFunUnfolding dfun_bndrs dict_con dict_args
@@ -892,6 +902,8 @@ addDFunPrags dfun_id sc_meth_ids
  where
    con_app    = mkLams dfun_bndrs $
                 mkApps (Var (dataConWrapId dict_con)) dict_args
+                 -- mkApps is OK because of the checkForLevPoly call in checkValidClass
+                 -- See Note [Levity polymorphism checking] in DsMonad
    dict_args  = map Type inst_tys ++
                 [mkVarApps (Var id) dfun_bndrs | id <- sc_meth_ids]
 
@@ -984,7 +996,7 @@ tcSuperClasses :: DFunId -> Class -> [TcTyVar] -> [EvVar] -> [TcType]
 --    $Ordp1 = /\a \(d:Ord a). dfunEqList a (sc_sel d)
 --
 -- See Note [Recursive superclasses] for why this is so hard!
--- In effect, be build a special-purpose solver for the first step
+-- In effect, we build a special-purpose solver for the first step
 -- of solving each superclass constraint
 tcSuperClasses dfun_id cls tyvars dfun_evs inst_tys dfun_ev_binds sc_theta
   = do { (ids, binds, implics) <- mapAndUnzip3M tc_super (zip sc_theta [fIRST_TAG..])

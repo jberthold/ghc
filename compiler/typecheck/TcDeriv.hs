@@ -80,12 +80,12 @@ Overall plan
 3.  Add the derived bindings, generating InstInfos
 -}
 
-data EarlyDerivSpec = InferTheta (DerivSpec ThetaOrigin)
+data EarlyDerivSpec = InferTheta (DerivSpec [ThetaOrigin])
                     | GivenTheta (DerivSpec ThetaType)
         -- InferTheta ds => the context for the instance should be inferred
-        --      In this case ds_theta is the list of all the constraints
-        --      needed, such as (Eq [a], Eq a), together with a suitable CtLoc
-        --      to get good error messages.
+        --      In this case ds_theta is the list of all the sets of
+        --      constraints needed, such as (Eq [a], Eq a), together with a
+        --      suitable CtLoc to get good error messages.
         --      The inference process is to reduce this to a
         --      simpler form (e.g. Eq a)
         --
@@ -97,7 +97,8 @@ earlyDSLoc :: EarlyDerivSpec -> SrcSpan
 earlyDSLoc (InferTheta spec) = ds_loc spec
 earlyDSLoc (GivenTheta spec) = ds_loc spec
 
-splitEarlyDerivSpec :: [EarlyDerivSpec] -> ([DerivSpec ThetaOrigin], [DerivSpec ThetaType])
+splitEarlyDerivSpec :: [EarlyDerivSpec]
+                    -> ([DerivSpec [ThetaOrigin]], [DerivSpec ThetaType])
 splitEarlyDerivSpec [] = ([],[])
 splitEarlyDerivSpec (InferTheta spec : specs) =
     case splitEarlyDerivSpec specs of (is, gs) -> (spec : is, gs)
@@ -232,11 +233,12 @@ tcDeriving deriv_infos deriv_decls
         ; insts1 <- mapM genInst given_specs
         ; insts2 <- mapM genInst infer_specs
 
+        ; dflags <- getDynFlags
+
         ; let (_, deriv_stuff, maybe_fvs) = unzip3 (insts1 ++ insts2)
         ; loc <- getSrcSpanM
-        ; let (binds, famInsts) = genAuxBinds loc (unionManyBags deriv_stuff)
-
-        ; dflags <- getDynFlags
+        ; let (binds, famInsts) = genAuxBinds dflags loc
+                                    (unionManyBags deriv_stuff)
 
         ; let mk_inst_infos1 = map fstOf3 insts1
         ; inst_infos1 <- apply_inst_infos mk_inst_infos1 given_specs
@@ -979,8 +981,7 @@ mkDataTypeEqn dflags overlap_mode tvs cls cls_tys
   = case deriv_strat of
       Just StockStrategy    -> mk_eqn_stock dflags mtheta cls cls_tys rep_tc
                                 go_for_it bale_out
-      Just AnyclassStrategy -> mk_eqn_anyclass dflags rep_tc cls
-                                go_for_it bale_out
+      Just AnyclassStrategy -> mk_eqn_anyclass dflags go_for_it bale_out
       -- GeneralizedNewtypeDeriving makes no sense for non-newtypes
       Just NewtypeStrategy  -> bale_out gndNonNewtypeErr
       -- Lacking a user-requested deriving strategy, we will try to pick
@@ -1009,17 +1010,18 @@ mk_data_eqn overlap_mode tvs cls cls_tys tycon tc_args rep_tc rep_tc_args
        dfun_name            <- newDFunName' cls tycon
        case mtheta of
         Nothing -> -- Infer context
-          inferConstraints tvs cls cls_tys
-                           inst_ty rep_tc rep_tc_args
-            $ \inferred_constraints tvs' inst_tys' ->
-            return $ InferTheta $ DS
+          do { (inferred_constraints, tvs', inst_tys')
+                 <- inferConstraints tvs cls cls_tys inst_ty
+                                     rep_tc rep_tc_args mechanism
+             ; return $ InferTheta $ DS
                    { ds_loc = loc
                    , ds_name = dfun_name, ds_tvs = tvs'
                    , ds_cls = cls, ds_tys = inst_tys'
                    , ds_tc = rep_tc
                    , ds_theta = inferred_constraints
                    , ds_overlap = overlap_mode
-                   , ds_mechanism = mechanism }
+                   , ds_mechanism = mechanism } }
+
         Just theta -> do -- Specified context
             return $ GivenTheta $ DS
                    { ds_loc = loc
@@ -1051,14 +1053,14 @@ mk_eqn_stock' cls go_for_it
         Nothing ->
           pprPanic "mk_eqn_stock': Not a stock class!" (ppr cls)
 
-mk_eqn_anyclass :: DynFlags -> TyCon -> Class
+mk_eqn_anyclass :: DynFlags
                 -> (DerivSpecMechanism -> TcRn EarlyDerivSpec)
                 -> (SDoc -> TcRn EarlyDerivSpec)
                 -> TcRn EarlyDerivSpec
-mk_eqn_anyclass dflags rep_tc cls go_for_it bale_out
-  = case canDeriveAnyClass dflags rep_tc cls of
-        Nothing  -> go_for_it DerivSpecAnyClass
-        Just msg -> bale_out msg
+mk_eqn_anyclass dflags go_for_it bale_out
+  = case canDeriveAnyClass dflags of
+        IsValid      -> go_for_it DerivSpecAnyClass
+        NotValid msg -> bale_out msg
 
 mk_eqn_no_mechanism :: DynFlags -> TyCon -> DerivContext
                     -> Class -> [Type] -> TyCon
@@ -1102,8 +1104,7 @@ mkNewTypeEqn dflags overlap_mode tvs
     case deriv_strat of
       Just StockStrategy    -> mk_eqn_stock dflags mtheta cls cls_tys rep_tycon
                                  go_for_it_other bale_out
-      Just AnyclassStrategy -> mk_eqn_anyclass dflags rep_tycon cls
-                                 go_for_it_other bale_out
+      Just AnyclassStrategy -> mk_eqn_anyclass dflags go_for_it_other bale_out
       Just NewtypeStrategy  ->
         -- Since the user explicitly asked for GeneralizedNewtypeDeriving, we
         -- don't need to perform all of the checks we normally would, such as
@@ -1169,7 +1170,7 @@ mkNewTypeEqn dflags overlap_mode tvs
         deriveAnyClass    = xopt LangExt.DeriveAnyClass             dflags
         go_for_it_gnd     = do
           traceTc "newtype deriving:" $
-            ppr tycon <+> ppr rep_tys <+> ppr all_preds
+            ppr tycon <+> ppr rep_tys <+> ppr all_thetas
           let mechanism = DerivSpecNewtype rep_inst_ty
           doDerivInstErrorChecks1 cls cls_tys tycon tc_args rep_tycon mtheta
                                   strat_used mechanism
@@ -1178,7 +1179,7 @@ mkNewTypeEqn dflags overlap_mode tvs
           case mtheta of
            Just theta -> return $ GivenTheta $ DS
                { ds_loc = loc
-               , ds_name = dfun_name, ds_tvs = dfun_tvs
+               , ds_name = dfun_name, ds_tvs = tvs
                , ds_cls = cls, ds_tys = inst_tys
                , ds_tc = rep_tycon
                , ds_theta = theta
@@ -1186,10 +1187,10 @@ mkNewTypeEqn dflags overlap_mode tvs
                , ds_mechanism = mechanism }
            Nothing -> return $ InferTheta $ DS
                { ds_loc = loc
-               , ds_name = dfun_name, ds_tvs = dfun_tvs
+               , ds_name = dfun_name, ds_tvs = tvs
                , ds_cls = cls, ds_tys = inst_tys
                , ds_tc = rep_tycon
-               , ds_theta = all_preds
+               , ds_theta = all_thetas
                , ds_overlap = overlap_mode
                , ds_mechanism = mechanism }
         go_for_it_other = mk_data_eqn overlap_mode tvs cls cls_tys tycon
@@ -1257,12 +1258,11 @@ mkNewTypeEqn dflags overlap_mode tvs
 
         -- Next we figure out what superclass dictionaries to use
         -- See Note [Newtype deriving superclasses] above
-        sc_theta   :: [PredOrigin]
+        sc_preds   :: [PredOrigin]
         cls_tyvars = classTyVars cls
-        dfun_tvs   = tyCoVarsOfTypesWellScoped inst_tys
         inst_ty    = mkTyConApp tycon tc_args
         inst_tys   = cls_tys ++ [inst_ty]
-        sc_theta   = mkThetaOrigin DerivOrigin TypeLevel $
+        sc_preds   = map (mkPredOrigin DerivOrigin TypeLevel) $
                      substTheta (zipTvSubst cls_tyvars inst_tys) $
                      classSCTheta cls
 
@@ -1270,20 +1270,20 @@ mkNewTypeEqn dflags overlap_mode tvs
         -- If there are no methods, we don't need any constraints
         -- Otherwise we need (C rep_ty), for the representation methods,
         -- and constraints to coerce each individual method
-        meth_theta :: [PredOrigin]
+        meth_preds :: [PredOrigin]
         meths = classMethods cls
-        meth_theta | null meths = [] -- No methods => no constraints
+        meth_preds | null meths = [] -- No methods => no constraints
                                      -- (Trac #12814)
                    | otherwise = rep_pred_o : coercible_constraints
         coercible_constraints
           = [ mkPredOrigin (DerivOriginCoerce meth t1 t2) TypeLevel
                            (mkReprPrimEqPred t1 t2)
             | meth <- meths
-            , let (Pair t1 t2) = mkCoerceClassMethEqn cls dfun_tvs
+            , let (Pair t1 t2) = mkCoerceClassMethEqn cls tvs
                                          inst_tys rep_inst_ty meth ]
 
-        all_preds :: [PredOrigin]
-        all_preds = meth_theta ++ sc_theta
+        all_thetas :: [ThetaOrigin]
+        all_thetas = [mkThetaOriginFromPreds $ meth_preds ++ sc_preds]
 
         -------------------------------------------------------------------
         --  Figuring out whether we can only do this newtype-deriving thing
@@ -1626,7 +1626,9 @@ genDerivStuff mechanism loc clas tycon inst_tys tyvars
             mini_subst = mkTvSubst (mkInScopeSet (mkVarSet tyvars)) mini_env
         dflags <- getDynFlags
         tyfam_insts <-
-          ASSERT2( isNothing (canDeriveAnyClass dflags tycon clas)
+          -- canDeriveAnyClass should ensure that this code can't be reached
+          -- unless -XDeriveAnyClass is enabled.
+          ASSERT2( isValid (canDeriveAnyClass dflags)
                  , ppr "genDerivStuff: bad derived class" <+> ppr clas )
           mapM (tcATDefault False loc mini_subst emptyNameSet)
                (classATItems clas)

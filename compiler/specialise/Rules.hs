@@ -31,11 +31,11 @@ module Rules (
 import CoreSyn          -- All of it
 import Module           ( Module, ModuleSet, elemModuleSet )
 import CoreSubst
-import OccurAnal        ( occurAnalyseExpr )
 import CoreFVs          ( exprFreeVars, exprsFreeVars, bindFreeVars
                         , rulesFreeVarsDSet, exprsOrphNames, exprFreeVarsList )
 import CoreUtils        ( exprType, eqExpr, mkTick, mkTicks,
-                          stripTicksTopT, stripTicksTopE )
+                          stripTicksTopT, stripTicksTopE,
+                          isJoinBind )
 import PprCore          ( pprRules )
 import Type             ( Type, substTy, mkTCvSubst )
 import TcType           ( tcSplitTyConApp_maybe )
@@ -53,7 +53,6 @@ import NameEnv
 import UniqFM
 import Unify            ( ruleMatchTyKiX )
 import BasicTypes       ( Activation, CompilerPhase, isActive, pprRuleName )
-import StaticFlags      ( opt_PprStyle_Debug )
 import DynFlags         ( DynFlags )
 import Outputable
 import FastString
@@ -172,7 +171,7 @@ mkRule :: Module -> Bool -> Bool -> RuleName -> Activation
 mkRule this_mod is_auto is_local name act fn bndrs args rhs
   = Rule { ru_name = name, ru_fn = fn, ru_act = act,
            ru_bndrs = bndrs, ru_args = args,
-           ru_rhs = occurAnalyseExpr rhs,
+           ru_rhs = rhs,
            ru_rough = roughTopNames args,
            ru_origin = this_mod,
            ru_orphan = orph,
@@ -254,14 +253,14 @@ functions (lambdas) except by name, so in this case it seems like
 a good idea to treat 'M.k' as a roughTopName of the call.
 -}
 
-pprRulesForUser :: [CoreRule] -> SDoc
+pprRulesForUser :: DynFlags -> [CoreRule] -> SDoc
 -- (a) tidy the rules
 -- (b) sort them into order based on the rule name
 -- (c) suppress uniques (unless -dppr-debug is on)
 -- This combination makes the output stable so we can use in testing
 -- It's here rather than in PprCore because it calls tidyRules
-pprRulesForUser rules
-  = withPprStyle defaultUserStyle $
+pprRulesForUser dflags rules
+  = withPprStyle (defaultUserStyle dflags) $
     pprRules $
     sortBy (comparing ru_name) $
     tidyRules emptyTidyEnv rules
@@ -418,15 +417,16 @@ findBest _      (rule,ans)   [] = (rule,ans)
 findBest target (rule1,ans1) ((rule2,ans2):prs)
   | rule1 `isMoreSpecific` rule2 = findBest target (rule1,ans1) prs
   | rule2 `isMoreSpecific` rule1 = findBest target (rule2,ans2) prs
-  | debugIsOn = let pp_rule rule
-                        | opt_PprStyle_Debug = ppr rule
-                        | otherwise          = doubleQuotes (ftext (ru_name rule))
+  | debugIsOn = let pp_rule rule = sdocWithPprDebug $ \dbg -> if dbg
+                        then ppr rule
+                        else doubleQuotes (ftext (ru_name rule))
                 in pprTrace "Rules.findBest: rule overlap (Rule 1 wins)"
-                         (vcat [if opt_PprStyle_Debug then
-                                   text "Expression to match:" <+> ppr fn <+> sep (map ppr args)
-                                else empty,
-                                text "Rule 1:" <+> pp_rule rule1,
-                                text "Rule 2:" <+> pp_rule rule2]) $
+                         (vcat [ sdocWithPprDebug $ \dbg -> if dbg
+                                   then text "Expression to match:" <+> ppr fn
+                                        <+> sep (map ppr args)
+                                   else empty
+                               , text "Rule 1:" <+> pp_rule rule1
+                               , text "Rule 2:" <+> pp_rule rule2]) $
                 findBest target (rule1,ans1) prs
   | otherwise = findBest target (rule1,ans1) prs
   where
@@ -507,8 +507,7 @@ matchRule dflags rule_env _is_active fn args _rough_args
 -- Built-in rules can't be switched off, it seems
   = case match_fn dflags rule_env fn args of
         Nothing   -> Nothing
-        Just expr -> Just (occurAnalyseExpr expr)
-        -- We could do this when putting things into the rulebase, I guess
+        Just expr -> Just expr
 
 matchRule _ in_scope is_active _ args rough_args
           (Rule { ru_name = rule_name, ru_act = act, ru_rough = tpl_tops
@@ -521,8 +520,7 @@ matchRule _ in_scope is_active _ args rough_args
         Just (bind_wrapper, tpl_vals) -> Just (bind_wrapper $
                                                rule_fn `mkApps` tpl_vals)
   where
-    rule_fn = occurAnalyseExpr (mkLams tpl_vars rhs)
-        -- We could do this when putting things into the rulebase, I guess
+    rule_fn = mkLams tpl_vars rhs
 
 ---------------------------------------
 matchN  :: InScopeEnv
@@ -728,7 +726,8 @@ match renv subst e1 (Var v2)      -- Note [Expanding variables]
 
 match renv subst e1 (Let bind e2)
   | -- pprTrace "match:Let" (vcat [ppr bind, ppr $ okToFloat (rv_lcl renv) (bindFreeVars bind)]) $
-    okToFloat (rv_lcl renv) (bindFreeVars bind)        -- See Note [Matching lets]
+    not (isJoinBind bind) -- can't float join point out of argument position
+  , okToFloat (rv_lcl renv) (bindFreeVars bind) -- See Note [Matching lets]
   = match (renv { rv_fltR = flt_subst' })
           (subst { rs_binds = rs_binds subst . Let bind'
                  , rs_bndrs = extendVarSetList (rs_bndrs subst) new_bndrs })
@@ -808,6 +807,12 @@ match_co renv subst co1 co2
         |  tc1 == tc2
         -> match_cos renv subst cos1 cos2
       _ -> Nothing
+match_co renv subst co1 co2
+  | Just (arg1, res1) <- splitFunCo_maybe co1
+  = case splitFunCo_maybe co2 of
+      Just (arg2, res2)
+        -> match_cos renv subst [arg1, res1] [arg2, res2]
+      _ -> Nothing
 match_co _ _ _co1 _co2
     -- Currently just deals with CoVarCo, TyConAppCo and Refl
 #ifdef DEBUG
@@ -859,7 +864,7 @@ match_alts _ _ _ _
 ------------------------------------------
 okToFloat :: RnEnv2 -> VarSet -> Bool
 okToFloat rn_env bind_fvs
-  = varSetAll not_captured bind_fvs
+  = allVarSet not_captured bind_fvs
   where
     not_captured fv = not (inRnEnvR rn_env fv)
 

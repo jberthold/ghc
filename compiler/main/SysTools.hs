@@ -79,20 +79,22 @@ import System.Directory
 import Data.Char
 import Data.List
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 
 #ifndef mingw32_HOST_OS
 import qualified System.Posix.Internals
 #else /* Must be Win32 */
 import Foreign
 import Foreign.C.String
-import qualified System.Win32.Info as Info
-import Control.Exception (finally)
-import Foreign.Ptr (FunPtr, castPtrToFunPtr)
+#if MIN_VERSION_Win32(2,5,0)
+import qualified System.Win32.Types as Win32
+#else
+import qualified System.Win32.Info as Win32
+#endif
 import System.Win32.Types (DWORD, LPTSTR, HANDLE)
 import System.Win32.Types (failIfNull, failIf, iNVALID_HANDLE_VALUE)
 import System.Win32.File (createFile,closeHandle, gENERIC_READ, fILE_SHARE_READ, oPEN_EXISTING, fILE_ATTRIBUTE_NORMAL, fILE_FLAG_BACKUP_SEMANTICS )
 import System.Win32.DLL (loadLibrary, getProcAddress)
-import Data.Bits((.|.))
 #endif
 
 import System.Process
@@ -126,9 +128,9 @@ On Unix:
 On Windows:
   - ghc never has a shell wrapper.
   - we can find the location of the ghc binary, which is
-        $topdir/bin/<something>.exe
+        $topdir/<foo>/<something>.exe
     where <something> may be "ghc", "ghc-stage2", or similar
-  - we strip off the "bin/<something>.exe" to leave $topdir.
+  - we strip off the "<foo>/<something>.exe" to leave $topdir.
 
 from topdir we can find package.conf, ghc-asm, etc.
 
@@ -1064,9 +1066,11 @@ cleanTempFilesExcept dflags dont_delete
    $ mask_
    $ do let ref = filesToClean dflags
         to_delete <- atomicModifyIORef' ref $ \files ->
-            let (to_keep,to_delete) = partition (`elem` dont_delete) files
-            in  (to_keep,to_delete)
+            let res@(_to_keep, _to_delete) =
+                    partition (`Set.member` dont_delete_set) files
+            in  res
         removeTmpFiles dflags to_delete
+  where dont_delete_set = Set.fromList dont_delete
 
 
 -- Return a unique numeric temp file suffix
@@ -1240,7 +1244,11 @@ runSomethingResponseFile dflags filter_fn phase_name pgm args mb_env =
     getResponseFile args = do
       fp <- newTempName dflags "rsp"
       withFile fp WriteMode $ \h -> do
+#if defined(mingw32_HOST_OS)
+          hSetEncoding h latin1
+#else
           hSetEncoding h utf8
+#endif
           hPutStr h $ unlines $ map escape args
       return fp
 
@@ -1345,10 +1353,12 @@ builderMainLoop dflags filter_fn pgm real_args mb_env = do
               msg <- readChan chan
               case msg of
                 BuildMsg msg -> do
-                  log_action dflags dflags NoReason SevInfo noSrcSpan defaultUserStyle msg
+                  log_action dflags dflags NoReason SevInfo noSrcSpan
+                     (defaultUserStyle dflags) msg
                   loop chan hProcess t p exitcode
                 BuildError loc msg -> do
-                  log_action dflags dflags NoReason SevError (mkSrcSpan loc loc) defaultUserStyle msg
+                  log_action dflags dflags NoReason SevError (mkSrcSpan loc loc)
+                     (defaultUserStyle dflags) msg
                   loop chan hProcess t p exitcode
                 EOF ->
                   loop chan hProcess (t-1) p exitcode
@@ -1450,7 +1460,7 @@ traceCmd dflags phase_name cmd_line action
 
 getBaseDir :: IO (Maybe String)
 #if defined(mingw32_HOST_OS)
--- Assuming we are running ghc, accessed by path  $(stuff)/bin/ghc.exe,
+-- Assuming we are running ghc, accessed by path  $(stuff)/<foo>/ghc.exe,
 -- return the path $(stuff)/lib.
 getBaseDir = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
   where
@@ -1458,9 +1468,14 @@ getBaseDir = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
         ret <- c_GetModuleFileName nullPtr buf size
         case ret of
           0 -> return Nothing
-          _ | ret < size -> do path <- peekCWString buf
-                               real <- getFinalPath path -- try to resolve symlinks paths
-                               return $ (Just . rootDir . sanitize . maybe path id) real
+          _ | ret < size -> do
+                path <- peekCWString buf
+                real <- getFinalPath path -- try to resolve symlinks paths
+                let libdir = (rootDir . sanitize . maybe path id) real
+                exists <- doesDirectoryExist libdir
+                if exists
+                   then return $ Just libdir
+                   else fail path
             | otherwise  -> try_size (size * 2)
 
     -- getFinalPath returns paths in full raw form.
@@ -1479,11 +1494,11 @@ getBaseDir = try_size 2048 -- plenty, PATH_MAX is 512 under Win32.
                                          "ghc-stage3.exe"] ->
                     case splitFileName $ takeDirectory d of
                     -- ghc is in $topdir/bin/ghc.exe
-                    (d', bin) | lower bin == "bin" -> takeDirectory d' </> "lib"
-                    _ -> fail
-                _ -> fail
-        where fail = panic ("can't decompose ghc.exe path: " ++ show s)
-              lower = map toLower
+                    (d', _) -> takeDirectory d' </> "lib"
+                _ -> fail s
+
+    fail s = panic ("can't decompose ghc.exe path: " ++ show s)
+    lower = map toLower
 
 foreign import WINDOWS_CCONV unsafe "windows.h GetModuleFileNameW"
   c_GetModuleFileName :: Ptr () -> CWString -> Word32 -> IO Word32
@@ -1510,7 +1525,7 @@ getFinalPath name = do
                                                      (fILE_ATTRIBUTE_NORMAL .|. fILE_FLAG_BACKUP_SEMANTICS)
                                                      Nothing
                       let fnPtr = makeGetFinalPathNameByHandle $ castPtrToFunPtr addr
-                      path    <- Info.try "GetFinalPathName"
+                      path    <- Win32.try "GetFinalPathName"
                                     (\buf len -> fnPtr handle buf len 0) 512
                                     `finally` closeHandle handle
                       return $ Just path
@@ -1584,7 +1599,8 @@ linkDynLib dflags0 o_files dep_packages
              osMachOTarget (platformOS (targetPlatform dflags)) ) &&
            dynLibLoader dflags == SystemDependent &&
            WayDyn `elem` ways dflags
-            = ["-L" ++ l, "-Wl,-rpath", "-Wl," ++ l]
+            = ["-L" ++ l, "-Xlinker", "-rpath", "-Xlinker", l]
+              -- See Note [-Xlinker -rpath vs -Wl,-rpath]
          | otherwise = ["-L" ++ l]
 
     let lib_paths = libraryPaths dflags

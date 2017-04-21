@@ -31,7 +31,6 @@ module GHC (
         getSessionDynFlags, setSessionDynFlags,
         getProgramDynFlags, setProgramDynFlags,
         getInteractiveDynFlags, setInteractiveDynFlags,
-        parseStaticFlags,
 
         -- * Targets
         Target(..), TargetId(..), Phase,
@@ -146,11 +145,6 @@ module GHC (
         BreakInfo(breakInfo_number, breakInfo_module),
         InteractiveEval.back,
         InteractiveEval.forward,
-
-        -- ** Deprecated API
-        RunResult(..),
-        runStmt, runStmtWithLocation,
-        resume,
 
         -- * Abstract syntax elements
 
@@ -281,7 +275,6 @@ module GHC (
  ToDo:
 
   * inline bits of HscMain here to simplify layering: hscTcExpr, hscStmt.
-  * what StaticFlags should we expose, if any?
 -}
 
 #include "HsVersions.h"
@@ -322,13 +315,12 @@ import DriverPhases     ( Phase(..), isHaskellSrcFilename )
 import Finder
 import HscTypes
 import DynFlags
-import StaticFlags
 import SysTools
 import Annotations
 import Module
 import Panic
 import Platform
-import Bag              ( unitBag )
+import Bag              ( listToBag, unitBag )
 import ErrUtils
 import MonadUtils
 import Util
@@ -341,6 +333,7 @@ import qualified Parser
 import Lexer
 import ApiAnnotation
 import qualified GHC.LanguageExtensions as LangExt
+import Data.Set (Set)
 
 import System.Directory ( doesFileExist )
 import Data.Maybe
@@ -464,6 +457,7 @@ withCleanupSession ghc = ghc `gfinally` cleanup
           cleanTempFiles dflags
           cleanTempDirs dflags
           stopIServ hsc_env -- shut down the IServ
+          log_finaliser dflags dflags
           --  exceptions will be blocked while we clean the temporary files,
           -- so there shouldn't be any difficulty if we receive further
           -- signals.
@@ -483,8 +477,7 @@ withCleanupSession ghc = ghc `gfinally` cleanup
 initGhcMonad :: GhcMonad m => Maybe FilePath -> m ()
 initGhcMonad mb_top_dir
   = do { env <- liftIO $
-                do { initStaticOpts
-                   ; mySettings <- initSysTools mb_top_dir
+                do { mySettings <- initSysTools mb_top_dir
                    ; dflags <- initDynFlags (defaultDynFlags mySettings)
                    ; checkBrokenTablesNextToCode dflags
                    ; setUnsafeGlobalDynFlags dflags
@@ -619,7 +612,8 @@ getProgramDynFlags = getSessionDynFlags
 setInteractiveDynFlags :: GhcMonad m => DynFlags -> m ()
 setInteractiveDynFlags dflags = do
   dflags' <- checkNewDynFlags dflags
-  modifySession $ \h -> h{ hsc_IC = (hsc_IC h) { ic_dflags = dflags' }}
+  dflags'' <- checkNewInteractiveDynFlags dflags'
+  modifySession $ \h -> h{ hsc_IC = (hsc_IC h) { ic_dflags = dflags'' }}
 
 -- | Get the 'DynFlags' used to evaluate interactive expressions.
 getInteractiveDynFlags :: GhcMonad m => m DynFlags
@@ -640,6 +634,18 @@ checkNewDynFlags dflags = do
   let (dflags', warnings) = makeDynFlagsConsistent dflags
   liftIO $ handleFlagWarnings dflags warnings
   return dflags'
+
+checkNewInteractiveDynFlags :: MonadIO m => DynFlags -> m DynFlags
+checkNewInteractiveDynFlags dflags0 = do
+  dflags1 <-
+      if xopt LangExt.StaticPointers dflags0
+      then do liftIO $ printOrThrowWarnings dflags0 $ listToBag
+                [mkPlainWarnMsg dflags0 interactiveSrcSpan
+                 $ text "StaticPointers is not supported in GHCi interactive expressions."]
+              return $ xopt_unset dflags0 LangExt.StaticPointers
+      else return dflags0
+  return dflags1
+
 
 -- %************************************************************************
 -- %*                                                                      *
@@ -1407,7 +1413,7 @@ isModuleTrusted m = withSession $ \hsc_env ->
     liftIO $ hscCheckSafe hsc_env m noSrcSpan
 
 -- | Return if a module is trusted and the pkgs it depends on to be trusted.
-moduleTrustReqs :: GhcMonad m => Module -> m (Bool, [InstalledUnitId])
+moduleTrustReqs :: GhcMonad m => Module -> m (Bool, Set InstalledUnitId)
 moduleTrustReqs m = withSession $ \hsc_env ->
     liftIO $ hscGetSafe hsc_env m noSrcSpan
 

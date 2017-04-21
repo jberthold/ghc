@@ -21,6 +21,7 @@ import HsSyn
 import Module
 import Outputable
 import DynFlags
+import ConLike
 import Control.Monad
 import SrcLoc
 import ErrUtils
@@ -110,8 +111,8 @@ addTicksToBinds hsc_env mod mod_loc exports tyCons binds
      modBreaks <- mkModBreaks hsc_env mod tickCount entries
 
      when (dopt Opt_D_dump_ticked dflags) $
-         log_action dflags dflags NoReason SevDump noSrcSpan defaultDumpStyle
-             (pprLHsBinds binds1)
+         log_action dflags dflags NoReason SevDump noSrcSpan
+             (defaultDumpStyle dflags) (pprLHsBinds binds1)
 
      return (binds1, HpcInfo tickCount hashNo, Just modBreaks)
 
@@ -509,9 +510,11 @@ addBinTickLHsExpr boxLabel (L pos e0)
 addTickHsExpr :: HsExpr Id -> TM (HsExpr Id)
 addTickHsExpr e@(HsVar (L _ id)) = do freeVar id; return e
 addTickHsExpr (HsUnboundVar {})  = panic "addTickHsExpr.HsUnboundVar"
+addTickHsExpr e@(HsConLikeOut con)
+  | Just id <- conLikeWrapId_maybe con = do freeVar id; return e
 addTickHsExpr e@(HsIPVar _)      = return e
 addTickHsExpr e@(HsOverLit _)    = return e
-addTickHsExpr e@(HsOverLabel _)  = return e
+addTickHsExpr e@(HsOverLabel{})  = return e
 addTickHsExpr e@(HsLit _)        = return e
 addTickHsExpr (HsLam matchgroup) = liftM HsLam (addTickMatchGroup True matchgroup)
 addTickHsExpr (HsLamCase mgs)    = liftM HsLamCase (addTickMatchGroup True mgs)

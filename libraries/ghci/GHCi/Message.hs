@@ -30,6 +30,8 @@ import GHCi.TH.Binary ()
 import GHCi.BreakArray
 
 import GHC.LanguageExtensions
+import GHC.ForeignSrcLang
+import GHC.Fingerprint
 import Control.Concurrent
 import Control.Exception
 import Data.Binary
@@ -39,6 +41,10 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as LB
 import Data.Dynamic
+#if MIN_VERSION_base(4,10,0)
+-- Previously this was re-exported by Data.Dynamic
+import Data.Typeable (TypeRep)
+#endif
 import Data.IORef
 import Data.Map (Map)
 import GHC.Generics
@@ -80,10 +86,16 @@ data Message a where
   -- Interpreter -------------------------------------------
 
   -- | Create a set of BCO objects, and return HValueRefs to them
+  -- Note: Each ByteString contains a Binary-encoded [ResolvedBCO], not
+  -- a ResolvedBCO. The list is to allow us to serialise the ResolvedBCOs
+  -- in parallel. See @createBCOs@ in compiler/ghci/GHCi.hsc.
   CreateBCOs :: [LB.ByteString] -> Message [HValueRef]
 
   -- | Release 'HValueRef's
   FreeHValueRefs :: [HValueRef] -> Message ()
+
+  -- | Add entries to the Static Pointer Table
+  AddSptEntry :: Fingerprint -> HValueRef -> Message ()
 
   -- | Malloc some data and return a 'RemotePtr' to it
   MallocData :: ByteString -> Message (RemotePtr ())
@@ -233,6 +245,7 @@ data THMessage a where
   AddDependentFile :: FilePath -> THMessage (THResult ())
   AddModFinalizer :: RemoteRef (TH.Q ()) -> THMessage (THResult ())
   AddTopDecls :: [TH.Dec] -> THMessage (THResult ())
+  AddForeignFile :: ForeignSrcLang -> String -> THMessage (THResult ())
   IsExtEnabled :: Extension -> THMessage (THResult Bool)
   ExtsEnabled :: THMessage (THResult [Extension])
 
@@ -268,7 +281,8 @@ getTHMessage = do
     14 -> THMsg <$> return StartRecover
     15 -> THMsg <$> EndRecover <$> get
     16 -> return (THMsg RunTHDone)
-    _  -> THMsg <$> AddModFinalizer <$> get
+    17 -> THMsg <$> AddModFinalizer <$> get
+    _  -> THMsg <$> (AddForeignFile <$> get <*> get)
 
 putTHMessage :: THMessage a -> Put
 putTHMessage m = case m of
@@ -290,6 +304,7 @@ putTHMessage m = case m of
   EndRecover a                -> putWord8 15 >> put a
   RunTHDone                   -> putWord8 16
   AddModFinalizer a           -> putWord8 17 >> put a
+  AddForeignFile lang a       -> putWord8 18 >> put lang >> put a
 
 
 data EvalOpts = EvalOpts
@@ -373,7 +388,7 @@ fromSerializableException (EOtherException str) = toException (ErrorCall str)
 -- as the minimum
 instance Binary ExitCode where
   put ExitSuccess      = putWord8 0
-  put (ExitFailure ec) = putWord8 1 `mappend` put ec
+  put (ExitFailure ec) = putWord8 1 >> put ec
   get = do
     w <- getWord8
     case w of
@@ -446,6 +461,7 @@ getMessage = do
       30 -> Msg <$> (GetBreakpointVar <$> get <*> get)
       31 -> Msg <$> return StartTH
       32 -> Msg <$> (RunModFinalizers <$> get <*> get)
+      33 -> Msg <$> (AddSptEntry <$> get <*> get)
       _  -> Msg <$> (RunTH <$> get <*> get <*> get <*> get)
 
 putMessage :: Message a -> Put
@@ -483,7 +499,8 @@ putMessage m = case m of
   GetBreakpointVar a b        -> putWord8 30 >> put a >> put b
   StartTH                     -> putWord8 31
   RunModFinalizers a b        -> putWord8 32 >> put a >> put b
-  RunTH st q loc ty           -> putWord8 33 >> put st >> put q >> put loc >> put ty
+  AddSptEntry a b             -> putWord8 33 >> put a >> put b
+  RunTH st q loc ty           -> putWord8 34 >> put st >> put q >> put loc >> put ty
 
 -- -----------------------------------------------------------------------------
 -- Reading/writing messages

@@ -12,6 +12,7 @@ module OptCoercion ( optCoercion, checkAxInstCo ) where
 
 #include "HsVersions.h"
 
+import DynFlags
 import TyCoRep
 import Coercion
 import Type hiding( substTyVarBndr, substTy )
@@ -20,7 +21,6 @@ import TyCon
 import CoAxiom
 import VarSet
 import VarEnv
-import StaticFlags      ( opt_NoOptCoercion )
 import Outputable
 import FamInstEnv ( flattenTys )
 import Pair
@@ -87,7 +87,7 @@ optCoercion :: TCvSubst -> Coercion -> NormalCo
 -- ^ optCoercion applies a substitution to a coercion,
 --   *and* optimises it to reduce its size
 optCoercion env co
-  | opt_NoOptCoercion = substCo env co
+  | hasNoOptCoercion unsafeGlobalDynFlags = substCo env co
   | debugIsOn
   = let out_co = opt_co1 lc False co
         (Pair in_ty1  in_ty2,  in_role)  = coercionKindRole co
@@ -206,6 +206,15 @@ opt_co4 env sym rep r (ForAllCo tv k_co co)
       (env', tv', k_co') -> mkForAllCo tv' k_co' $
                             opt_co4_wrap env' sym rep r co
      -- Use the "mk" functions to check for nested Refls
+
+opt_co4 env sym rep r (FunCo _r co1 co2)
+  = ASSERT( r == _r )
+    if rep
+    then mkFunCo Representational co1' co2'
+    else mkFunCo r co1' co2'
+  where
+    co1' = opt_co4_wrap env sym rep r co1
+    co2' = opt_co4_wrap env sym rep r co2
 
 opt_co4 env sym rep r (CoVarCo cv)
   | Just co <- lookupCoVar (lcTCvSubst env) cv

@@ -43,16 +43,18 @@ module TcRnTypes(
         IdBindingInfo(..),
         IsGroupClosed(..),
         SelfBootInfo(..),
-        pprTcTyThingCategory, pprPECategory,
+        pprTcTyThingCategory, pprPECategory, CompleteMatch(..),
 
         -- Desugaring types
         DsM, DsLclEnv(..), DsGblEnv(..), PArrBuiltin(..),
-        DsMetaEnv, DsMetaVal(..),
+        DsMetaEnv, DsMetaVal(..), CompleteMatchMap,
+        mkCompleteMatchMap, extendCompleteMatchMap,
 
         -- Template Haskell
         ThStage(..), SpliceType(..), PendingStuff(..),
         topStage, topAnnStage, topSpliceStage,
         ThLevel, impLevel, outerLevel, thLevel,
+        ForeignSrcLang(..),
 
         -- Arrows
         ArrowCtxt(..),
@@ -81,7 +83,7 @@ module TcRnTypes(
 
         WantedConstraints(..), insolubleWC, emptyWC, isEmptyWC,
         andWC, unionsWC, mkSimpleWC, mkImplicWC,
-        addInsols, getInsolubles, addSimples, addImplics,
+        addInsols, getInsolubles, insolublesOnly, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
         tyCoVarsOfWCList,
         isDroppableDerivedLoc, insolubleImplic,
@@ -94,7 +96,7 @@ module TcRnTypes(
         ctLocTypeOrKind_maybe,
         ctLocDepth, bumpCtLocDepth,
         setCtLocOrigin, setCtLocEnv, setCtLocSpan,
-        CtOrigin(..), exprCtOrigin, matchesCtOrigin, grhssCtOrigin,
+        CtOrigin(..), exprCtOrigin, lexprCtOrigin, matchesCtOrigin, grhssCtOrigin,
         ErrorThing(..), mkErrorThing, errorThingNumArgs_maybe,
         TypeOrKind(..), isTypeLevel, isKindLevel,
         pprCtOrigin, pprCtLoc,
@@ -180,8 +182,9 @@ import Control.Monad (ap, liftM, msum)
 import qualified Control.Monad.Fail as MonadFail
 #endif
 import Data.Set      ( Set )
+import qualified Data.Set as S
 
-import Data.Map      ( Map )
+import Data.Map ( Map )
 import Data.Dynamic  ( Dynamic )
 import Data.Typeable ( TypeRep )
 import GHCi.Message
@@ -321,6 +324,13 @@ data IfLclEnv
 
         if_nsubst :: Maybe NameShape,
 
+        -- This field is used to make sure "implicit" declarations
+        -- (anything that cannot be exported in mi_exports) get
+        -- wired up correctly in typecheckIfacesForMerging.  Most
+        -- of the time it's @Nothing@.  See Note [Resolving never-exported Names in TcIface]
+        -- in TcIface.
+        if_implicits_env :: Maybe TypeEnv,
+
         if_tv_env  :: FastStringEnv TyVar,     -- Nested tyvar bindings
         if_id_env  :: FastStringEnv Id         -- Nested id binding
     }
@@ -369,6 +379,8 @@ data DsGblEnv
                                                 -- exported entities of 'Data.Array.Parallel' iff
                                                 -- '-XParallelArrays' was given; otherwise, empty
         , ds_parr_bi :: PArrBuiltin             -- desugarar names for '-XParallelArrays'
+        , ds_complete_matches :: CompleteMatchMap
+           -- Additional complete pattern matches
         }
 
 instance ContainsModule DsGblEnv where
@@ -455,7 +467,10 @@ data FrontendResult
 --        in the home library we are compiling.  (See LoadIface.)
 --        Similarly, in RnNames we check for self-imports using
 --        identity modules, to allow signatures to import their implementor.
-
+--
+--      - For recompilation avoidance, you want the identity module,
+--        since that will actually say the specific interface you
+--        want to track (and recompile if it changes)
 
 -- | 'TcGblEnv' describes the top-level of the module at the
 -- point at which the typechecker is finished work.
@@ -588,6 +603,9 @@ data TcGblEnv
         tcg_th_topdecls :: TcRef [LHsDecl RdrName],
         -- ^ Top-level declarations from addTopDecls
 
+        tcg_th_foreign_files :: TcRef [(ForeignSrcLang, String)],
+        -- ^ Foreign files emitted from TH.
+
         tcg_th_topnames :: TcRef NameSet,
         -- ^ Exact names bound in top-level declarations in tcg_th_topdecls
 
@@ -644,9 +662,10 @@ data TcGblEnv
         tcg_top_loc :: RealSrcSpan,
         -- ^ The RealSrcSpan this module came from
 
-        tcg_static_wc :: TcRef WantedConstraints
-        -- ^ Wanted constraints of static forms.
+        tcg_static_wc :: TcRef WantedConstraints,
+          -- ^ Wanted constraints of static forms.
         -- See Note [Constraints in static forms].
+        tcg_complete_matches :: [CompleteMatch]
     }
 
 -- NB: topModIdentity, not topModSemantic!
@@ -836,7 +855,7 @@ type TcIdBinderStack = [TcIdBinder]
 data TcIdBinder
   = TcIdBndr
        TcId
-       TopLevelFlag    -- Tells whether the bindind is syntactically top-level
+       TopLevelFlag    -- Tells whether the binding is syntactically top-level
                        -- (The monomorphic Ids for a recursive group count
                        --  as not-top-level for this purpose.)
   | TcIdBndr_ExpType  -- Variant that allows the type to be specified as
@@ -1201,12 +1220,12 @@ data ImportAvails
           -- compiling M might not need to consult X.hi, but X
           -- is still listed in M's dependencies.
 
-        imp_dep_pkgs :: [InstalledUnitId],
+        imp_dep_pkgs :: Set InstalledUnitId,
           -- ^ Packages needed by the module being compiled, whether directly,
           -- or via other modules in this package, or via modules imported
           -- from other packages.
 
-        imp_trust_pkgs :: [InstalledUnitId],
+        imp_trust_pkgs :: Set InstalledUnitId,
           -- ^ This is strictly a subset of imp_dep_pkgs and records the
           -- packages the current module needs to trust for Safe Haskell
           -- compilation to succeed. A package is required to be trusted if
@@ -1241,8 +1260,8 @@ mkModDeps deps = foldl add emptyUDFM deps
 emptyImportAvails :: ImportAvails
 emptyImportAvails = ImportAvails { imp_mods          = emptyModuleEnv,
                                    imp_dep_mods      = emptyUDFM,
-                                   imp_dep_pkgs      = [],
-                                   imp_trust_pkgs    = [],
+                                   imp_dep_pkgs      = S.empty,
+                                   imp_trust_pkgs    = S.empty,
                                    imp_trust_own_pkg = False,
                                    imp_orphs         = [],
                                    imp_finsts        = [] }
@@ -1264,8 +1283,8 @@ plusImportAvails
                   imp_orphs = orphs2, imp_finsts = finsts2 })
   = ImportAvails { imp_mods          = plusModuleEnv_C (++) mods1 mods2,
                    imp_dep_mods      = plusUDFM_C plus_mod_dep dmods1 dmods2,
-                   imp_dep_pkgs      = dpkgs1 `unionLists` dpkgs2,
-                   imp_trust_pkgs    = tpkgs1 `unionLists` tpkgs2,
+                   imp_dep_pkgs      = dpkgs1 `S.union` dpkgs2,
+                   imp_trust_pkgs    = tpkgs1 `S.union` tpkgs2,
                    imp_trust_own_pkg = tself1 || tself2,
                    imp_orphs         = orphs1 `unionLists` orphs2,
                    imp_finsts        = finsts1 `unionLists` finsts2 }
@@ -1737,8 +1756,9 @@ tyCoFVsOfWC (WC { wc_simple = simple, wc_impl = implic, wc_insol = insol })
 tyCoFVsOfImplic :: Implication -> FV
 -- Only called on *zonked* things, hence no need to worry about flatten-skolems
 tyCoFVsOfImplic (Implic { ic_skols = skols
-                         , ic_given = givens, ic_wanted = wanted })
-  = FV.delFVs (mkVarSet skols)
+                        , ic_given = givens
+                        , ic_wanted = wanted })
+  = FV.delFVs (mkVarSet skols `unionVarSet` mkVarSet givens)
       (tyCoFVsOfWC wanted `unionFV` tyCoFVsOfTypes (map evVarPred givens))
 
 tyCoFVsOfBag :: (a -> FV) -> Bag a -> FV
@@ -2099,6 +2119,10 @@ addInsols wc cts
 
 getInsolubles :: WantedConstraints -> Cts
 getInsolubles = wc_insol
+
+insolublesOnly :: WantedConstraints -> WantedConstraints
+-- Keep only the insolubles
+insolublesOnly wc = wc { wc_simple = emptyBag, wc_impl = emptyBag }
 
 dropDerivedWC :: WantedConstraints -> WantedConstraints
 -- See Note [Dropping derived constraints]
@@ -2554,8 +2578,8 @@ Consider f1 = (Given, ReprEq)
           f = (Derived, ReprEq)
 
 I thought maybe we could never get Derived ReprEq constraints, but
-we can; straight from the Wanteds during improvment. And from a Derived
-ReprEq we could conceivably get a Derived NomEq improvment (by decomposing
+we can; straight from the Wanteds during improvement. And from a Derived
+ReprEq we could conceivably get a Derived NomEq improvement (by decomposing
 a type constructor with Nomninal role), and hence unify.
 -}
 
@@ -2912,7 +2936,7 @@ pprPatSkolInfo (RealDataCon dc)
   = sep [ text "a pattern with constructor:"
         , nest 2 $ ppr dc <+> dcolon
           <+> pprType (dataConUserType dc) <> comma ]
-          -- pprType prints forall's regardless of -fprint-explict-foralls
+          -- pprType prints forall's regardless of -fprint-explicit-foralls
           -- which is what we want here, since we might be saying
           -- type variable 't' is bound by ...
 
@@ -3022,7 +3046,7 @@ data CtOrigin
                                 -- actual desugaring to MonadFail.fail is live.
   | Shouldn'tHappenOrigin String
                             -- the user should never see this one,
-                            -- unlesss ImpredicativeTypes is on, where all
+                            -- unless ImpredicativeTypes is on, where all
                             -- bets are off
   | InstProvidedOrigin Module ClsInst
         -- Skolem variable arose when we were testing if an instance
@@ -3069,22 +3093,26 @@ ctoHerald :: SDoc
 ctoHerald = text "arising from"
 
 -- | Extract a suitable CtOrigin from a HsExpr
+lexprCtOrigin :: LHsExpr Name -> CtOrigin
+lexprCtOrigin (L _ e) = exprCtOrigin e
+
 exprCtOrigin :: HsExpr Name -> CtOrigin
 exprCtOrigin (HsVar (L _ name)) = OccurrenceOf name
 exprCtOrigin (HsUnboundVar uv)  = UnboundOccurrenceOf (unboundVarOcc uv)
+exprCtOrigin (HsConLikeOut {})  = panic "exprCtOrigin HsConLikeOut"
 exprCtOrigin (HsRecFld f)       = OccurrenceOfRecSel (rdrNameAmbiguousFieldOcc f)
-exprCtOrigin (HsOverLabel l)    = OverLabelOrigin l
+exprCtOrigin (HsOverLabel _ l)  = OverLabelOrigin l
 exprCtOrigin (HsIPVar ip)       = IPOccOrigin ip
 exprCtOrigin (HsOverLit lit)    = LiteralOrigin lit
 exprCtOrigin (HsLit {})         = Shouldn'tHappenOrigin "concrete literal"
 exprCtOrigin (HsLam matches)    = matchesCtOrigin matches
 exprCtOrigin (HsLamCase ms)     = matchesCtOrigin ms
-exprCtOrigin (HsApp (L _ e1) _) = exprCtOrigin e1
-exprCtOrigin (HsAppType (L _ e1) _) = exprCtOrigin e1
-exprCtOrigin (HsAppTypeOut {})      = panic "exprCtOrigin HsAppTypeOut"
-exprCtOrigin (OpApp _ (L _ op) _ _) = exprCtOrigin op
-exprCtOrigin (NegApp (L _ e) _) = exprCtOrigin e
-exprCtOrigin (HsPar (L _ e))    = exprCtOrigin e
+exprCtOrigin (HsApp e1 _)       = lexprCtOrigin e1
+exprCtOrigin (HsAppType e1 _)   = lexprCtOrigin e1
+exprCtOrigin (HsAppTypeOut {})  = panic "exprCtOrigin HsAppTypeOut"
+exprCtOrigin (OpApp _ op _ _)   = lexprCtOrigin op
+exprCtOrigin (NegApp e _)       = lexprCtOrigin e
+exprCtOrigin (HsPar e)          = lexprCtOrigin e
 exprCtOrigin (SectionL _ _)     = SectionOrigin
 exprCtOrigin (SectionR _ _)     = SectionOrigin
 exprCtOrigin (ExplicitTuple {}) = Shouldn'tHappenOrigin "explicit tuple"
@@ -3093,7 +3121,7 @@ exprCtOrigin (HsCase _ matches) = matchesCtOrigin matches
 exprCtOrigin (HsIf (Just syn) _ _ _) = exprCtOrigin (syn_expr syn)
 exprCtOrigin (HsIf {})          = Shouldn'tHappenOrigin "if expression"
 exprCtOrigin (HsMultiIf _ rhs)  = lGRHSCtOrigin rhs
-exprCtOrigin (HsLet _ (L _ e))  = exprCtOrigin e
+exprCtOrigin (HsLet _ e)        = lexprCtOrigin e
 exprCtOrigin (HsDo _ _ _)       = DoOrigin
 exprCtOrigin (ExplicitList {})  = Shouldn'tHappenOrigin "list"
 exprCtOrigin (ExplicitPArr {})  = Shouldn'tHappenOrigin "parallel array"
@@ -3103,8 +3131,8 @@ exprCtOrigin (ExprWithTySig {}) = ExprSigOrigin
 exprCtOrigin (ExprWithTySigOut {}) = panic "exprCtOrigin ExprWithTySigOut"
 exprCtOrigin (ArithSeq {})      = Shouldn'tHappenOrigin "arithmetic sequence"
 exprCtOrigin (PArrSeq {})       = Shouldn'tHappenOrigin "parallel array sequence"
-exprCtOrigin (HsSCC _ _ (L _ e))= exprCtOrigin e
-exprCtOrigin (HsCoreAnn _ _ (L _ e)) = exprCtOrigin e
+exprCtOrigin (HsSCC _ _ e)      = lexprCtOrigin e
+exprCtOrigin (HsCoreAnn _ _ e)  = lexprCtOrigin e
 exprCtOrigin (HsBracket {})     = Shouldn'tHappenOrigin "TH bracket"
 exprCtOrigin (HsRnBracketOut {})= Shouldn'tHappenOrigin "HsRnBracketOut"
 exprCtOrigin (HsTcBracketOut {})= panic "exprCtOrigin HsTcBracketOut"
@@ -3113,9 +3141,9 @@ exprCtOrigin (HsProc {})        = Shouldn'tHappenOrigin "proc"
 exprCtOrigin (HsStatic {})      = Shouldn'tHappenOrigin "static expression"
 exprCtOrigin (HsArrApp {})      = panic "exprCtOrigin HsArrApp"
 exprCtOrigin (HsArrForm {})     = panic "exprCtOrigin HsArrForm"
-exprCtOrigin (HsTick _ (L _ e)) = exprCtOrigin e
-exprCtOrigin (HsBinTick _ _ (L _ e)) = exprCtOrigin e
-exprCtOrigin (HsTickPragma _ _ _ (L _ e)) = exprCtOrigin e
+exprCtOrigin (HsTick _ e)       = lexprCtOrigin e
+exprCtOrigin (HsBinTick _ _ e)  = lexprCtOrigin e
+exprCtOrigin (HsTickPragma _ _ _ e) = lexprCtOrigin e
 exprCtOrigin EWildPat           = panic "exprCtOrigin EWildPat"
 exprCtOrigin (EAsPat {})        = panic "exprCtOrigin EAsPat"
 exprCtOrigin (EViewPat {})      = panic "exprCtOrigin EViewPat"

@@ -8,23 +8,28 @@ module Kind (
         -- ** Predicates on Kinds
         isLiftedTypeKind, isUnliftedTypeKind,
         isConstraintKind,
+        isTYPEApp,
         returnsTyCon, returnsConstraintKind,
         isConstraintKindCon,
         okArrowArgKind, okArrowResultKind,
 
         classifiesTypeWithValues,
         isStarKind, isStarKindSynonymTyCon,
-        isLevityPolymorphic
+        isKindLevPoly
        ) where
 
 #include "HsVersions.h"
 
-import {-# SOURCE #-} Type       ( typeKind, coreViewOneStarKind )
+import {-# SOURCE #-} Type    ( typeKind, coreViewOneStarKind
+                              , splitTyConApp_maybe )
+import {-# SOURCE #-} DataCon ( DataCon )
 
 import TyCoRep
 import TyCon
-import VarSet ( isEmptyVarSet )
 import PrelNames
+
+import Outputable
+import Util
 
 {-
 ************************************************************************
@@ -66,6 +71,15 @@ isConstraintKindCon   tc = tyConUnique tc == constraintKindTyConKey
 isConstraintKind (TyConApp tc _) = isConstraintKindCon tc
 isConstraintKind _               = False
 
+isTYPEApp :: Kind -> Maybe DataCon
+isTYPEApp (TyConApp tc args)
+  | tc `hasKey` tYPETyConKey
+  , [arg] <- args
+  , Just (tc, []) <- splitTyConApp_maybe arg
+  , Just dc <- isPromotedDataCon_maybe tc
+  = Just dc
+isTYPEApp _ = Nothing
+
 -- | Does the given type "end" in the given tycon? For example @k -> [a] -> *@
 -- ends in @*@ and @Maybe a -> [a]@ ends in @[]@.
 returnsTyCon :: Unique -> Type -> Bool
@@ -77,11 +91,29 @@ returnsTyCon _  _                  = False
 returnsConstraintKind :: Kind -> Bool
 returnsConstraintKind = returnsTyCon constraintKindTyConKey
 
--- | Tests whether the given kind (which should look like "TYPE ...")
--- has any free variables
-isLevityPolymorphic :: Kind -> Bool
-isLevityPolymorphic k
-  = not $ isEmptyVarSet $ tyCoVarsOfType k
+-- | Tests whether the given kind (which should look like @TYPE x@)
+-- is something other than a constructor tree (that is, constructors at every node).
+isKindLevPoly :: Kind -> Bool
+isKindLevPoly k = ASSERT2( isStarKind k || _is_type, ppr k )
+                      -- the isStarKind check is necessary b/c of Constraint
+                  go k
+  where
+    go ty | Just ty' <- coreViewOneStarKind ty = go ty'
+    go TyVarTy{}         = True
+    go AppTy{}           = True  -- it can't be a TyConApp
+    go (TyConApp tc tys) = isFamilyTyCon tc || any go tys
+    go ForAllTy{}        = True
+    go (FunTy t1 t2)     = go t1 || go t2
+    go LitTy{}           = False
+    go CastTy{}          = True
+    go CoercionTy{}      = True
+
+    _is_type
+      | TyConApp typ [_] <- k
+      = typ `hasKey` tYPETyConKey
+      | otherwise
+      = False
+
 
 --------------------------------------------
 --            Kinding for arrow (->)
@@ -114,7 +146,7 @@ isStarKind :: Kind -> Bool
 isStarKind k | Just k' <- coreViewOneStarKind k = isStarKind k'
 isStarKind (TyConApp tc [TyConApp ptr_rep []])
   =  tc      `hasKey` tYPETyConKey
-  && ptr_rep `hasKey` ptrRepLiftedDataConKey
+  && ptr_rep `hasKey` liftedRepDataConKey
 isStarKind _ = False
                               -- See Note [Kind Constraint and kind *]
 
@@ -137,8 +169,8 @@ Trac #12708):
   data T rep (a :: TYPE rep)
      = MkT (a -> Int)
 
-  x1 :: T LiftedPtrRep Int
-  x1 =  MkT LiftedPtrRep Int  (\x::Int -> 3)
+  x1 :: T LiftedRep Int
+  x1 =  MkT LiftedRep Int  (\x::Int -> 3)
 
   x2 :: T IntRep Int#
   x2 = MkT IntRep Int# (\x:Int# -> 3)

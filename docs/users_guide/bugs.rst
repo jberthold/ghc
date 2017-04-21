@@ -213,8 +213,8 @@ Numbers, basic types, and built-in classes
     -  Whenever you give a function, instance or class a ``Num t``
         constraint, also give it ``Show t`` and ``Eq t`` constraints.
 
-``Bits`` superclasses
-    The ``Bits`` class does not have a ``Num`` superclasses. It
+``Bits`` superclass
+    The ``Bits`` class does not have a ``Num`` superclass. It
     therefore does not have default methods for the ``bit``, ``testBit``
     and ``popCount`` methods.
 
@@ -238,6 +238,11 @@ Numbers, basic types, and built-in classes
     ``readsPrec`` that is defined in terms of ``readPrec``. GHC adds these two
     extra methods simply because ``ReadPrec`` is more efficient than ``ReadS``
     (the type on which ``readsPrec`` is based).
+
+``Monad`` superclass
+    The ``Monad`` class has an ``Applicative`` superclass. You cannot write
+    ``Monad`` instances that work for GHC and also for a Haskell 2010
+    implementation that does not define ``Applicative``.
 
 Extra instances
     The following extra instances are defined: ::
@@ -472,7 +477,7 @@ Bugs in GHC
    .. code-block:: none
 
        ghc: panic! (the 'impossible' happened)
-         (GHC version 7.10.1 for x86_64-unknown-linux):
+         (GHC version 8.2.1 for x86_64-unknown-linux):
            Simplifier ticks exhausted
          When trying UnfoldingDone x_alB
          To increase the limit, use -fsimpl-tick-factor=N (default 100)
@@ -539,6 +544,9 @@ Bugs in GHC
 -  Despite appearances ``*`` and ``Constraint`` aren't really distinct kinds
    in the compiler's internal representation and can be unified producing
    unexpected results. See :ghc-ticket:`11715` for one example.
+
+-  Because of a toolchain limitation we are unable to support full Unicode paths
+   on Windows. On Windows we support up to Latin-1. See :ghc-ticket:`12971` for more.
 
 .. _bugs-ghci:
 

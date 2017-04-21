@@ -65,7 +65,6 @@ import VarSet
 import TyCon
 import ConLike
 import DataCon
-import TysPrim ( tYPE )
 import Class
 import Name
 import NameEnv
@@ -321,7 +320,7 @@ tcLHsType ty = addTypeCtxt ty (tc_infer_lhs_type typeLevelMode ty)
 
 ---------------------------
 -- | Should we generalise the kind of this type signature?
--- We *should* generalise if the type is mentions no scoped type variables
+-- We *should* generalise if the type mentions no scoped type variables
 -- or if NoMonoLocalBinds is set. Otherwise, nope.
 decideKindGeneralisationPlan :: Type -> TcM Bool
 decideKindGeneralisationPlan ty
@@ -605,8 +604,11 @@ tc_hs_type mode (HsSumTy hs_tys) exp_kind
   = do { let arity = length hs_tys
        ; arg_kinds <- mapM (\_ -> newOpenTypeKind) hs_tys
        ; tau_tys   <- zipWithM (tc_lhs_type mode) hs_tys arg_kinds
-       ; let arg_tys = map (getRuntimeRepFromKind "tc_hs_type HsSumTy") arg_kinds ++ tau_tys
-       ; checkExpectedKind (mkTyConApp (sumTyCon arity) arg_tys) (tYPE unboxedSumRepDataConTy) exp_kind
+       ; let arg_reps = map (getRuntimeRepFromKind "tc_hs_type HsSumTy") arg_kinds
+             arg_tys  = arg_reps ++ tau_tys
+       ; checkExpectedKind (mkTyConApp (sumTyCon arity) arg_tys)
+                           (unboxedSumKind arg_reps)
+                           exp_kind
        }
 
 --------- Promoted lists and tuples
@@ -632,7 +634,7 @@ tc_hs_type mode (HsExplicitTupleTy _ tys) exp_kind
     arity = length tys
 
 --------- Constraint types
-tc_hs_type mode (HsIParamTy n ty) exp_kind
+tc_hs_type mode (HsIParamTy (L _ n) ty) exp_kind
   = do { MASSERT( isTypeLevel (mode_level mode) )
        ; ty' <- tc_lhs_type mode ty liftedTypeKind
        ; let n' = mkStrLitTy $ hsIPNameFS n
@@ -717,8 +719,7 @@ finish_tuple tup_sort tau_tys tau_kinds exp_kind
   = do { traceTc "finish_tuple" (ppr res_kind $$ ppr tau_kinds $$ ppr exp_kind)
        ; let arg_tys  = case tup_sort of
                    -- See also Note [Unboxed tuple RuntimeRep vars] in TyCon
-                 UnboxedTuple    -> map (getRuntimeRepFromKind "finish_tuple") tau_kinds
-                                    ++ tau_tys
+                 UnboxedTuple    -> tau_reps ++ tau_tys
                  BoxedTuple      -> tau_tys
                  ConstraintTuple -> tau_tys
        ; tycon <- case tup_sort of
@@ -733,10 +734,9 @@ finish_tuple tup_sort tau_tys tau_kinds exp_kind
        ; checkExpectedKind (mkTyConApp tycon arg_tys) res_kind exp_kind }
   where
     arity = length tau_tys
+    tau_reps = map (getRuntimeRepFromKind "finish_tuple") tau_kinds
     res_kind = case tup_sort of
-                 UnboxedTuple
-                   | arity == 0  -> tYPE voidRepDataConTy
-                   | otherwise   -> unboxedTupleKind
+                 UnboxedTuple    -> unboxedTupleKind tau_reps
                  BoxedTuple      -> liftedTypeKind
                  ConstraintTuple -> constraintKind
 
@@ -1061,7 +1061,7 @@ Trac #11554 shows this example, which made GHC loop:
   data A :: Type where
     B :: forall (a :: A). P a -> A
 
-In order to check the constructor B, we need have the promoted type A, but in
+In order to check the constructor B, we need to have the promoted type A, but in
 order to get that promoted type, B must first be checked. To prevent looping, a
 TyConPE promotion error is given when tcTyVar checks an ATcTyCon in kind mode.
 Any ATcTyCon is a TyCon being defined in the current recursive group (see data
@@ -1785,7 +1785,7 @@ tcHsPartialSigType
   -> LHsSigWcType Name        -- The type signature
   -> TcM ( [(Name, TcTyVar)]  -- Wildcards
          , Maybe TcTyVar      -- Extra-constraints wildcard
-         , [TcTyVar]          -- Implicitly and explicitly bound type varialbes
+         , [TcTyVar]          -- Implicitly and explicitly bound type variables
          , TcThetaType        -- Theta part
          , TcType )           -- Tau part
 tcHsPartialSigType ctxt sig_ty

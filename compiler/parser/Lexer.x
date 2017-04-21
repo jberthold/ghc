@@ -71,6 +71,7 @@ module Lexer (
    addWarning,
    lexTokenStream,
    addAnnotation,AddAnn,addAnnsAt,mkParensApiAnn,
+   commentToAnnotation,
    moveAnnotations
   ) where
 
@@ -636,6 +637,7 @@ data Token
   | ITunpack_prag       SourceText
   | ITnounpack_prag     SourceText
   | ITann_prag          SourceText
+  | ITcomplete_prag     SourceText
   | ITclose_prag
   | IToptions_prag String
   | ITinclude_prag String
@@ -2392,8 +2394,12 @@ srcParseErr options buf len
               $$ ppWhen (token == "=")
                         (text "Perhaps you need a 'let' in a 'do' block?"
                          $$ text "e.g. 'let x = 5' instead of 'x = 5'")
+              $$ ppWhen (not ps_enabled && pattern == "pattern") -- #12429
+                        (text "Perhaps you intended to use PatternSynonyms")
   where token = lexemeToString (offsetBytes (-len) buf) len
+        pattern = lexemeToString (offsetBytes (-len - 8) buf) 7
         th_enabled = extopt LangExt.TemplateHaskell options
+        ps_enabled = extopt LangExt.PatternSynonyms options
 
 -- Report a parse failure, giving the span of the previous token as
 -- the location of the error.  This is the entry point for errors
@@ -2716,7 +2722,7 @@ ignoredPrags = Map.fromList (map ignored pragmas)
                      -- CFILES is a hugs-only thing.
                      pragmas = options_pragmas ++ ["cfiles", "contract"]
 
-oneWordPrags = Map.fromList([
+oneWordPrags = Map.fromList [
      ("rules", rulePrag),
      ("inline",
          strtoken (\s -> (ITinline_prag (SourceText s) Inline FunLike))),
@@ -2744,7 +2750,9 @@ oneWordPrags = Map.fromList([
      ("overlappable", strtoken (\s -> IToverlappable_prag (SourceText s))),
      ("overlapping", strtoken (\s -> IToverlapping_prag (SourceText s))),
      ("incoherent", strtoken (\s -> ITincoherent_prag (SourceText s))),
-     ("ctype", strtoken (\s -> ITctype (SourceText s)))])
+     ("ctype", strtoken (\s -> ITctype (SourceText s))),
+     ("complete", strtoken (\s -> ITcomplete_prag (SourceText s)))
+     ]
 
 twoWordPrags = Map.fromList([
      ("inline conlike",
@@ -2796,7 +2804,7 @@ clean_pragma prag = canon_ws (map toLower (unprefix prag))
 
 -- | Encapsulated call to addAnnotation, requiring only the SrcSpan of
 --   the AST construct the annotation belongs to; together with the
---   AnnKeywordId, this is is the key of the annotation map
+--   AnnKeywordId, this is the key of the annotation map.
 --
 --   This type is useful for places in the parser where it is not yet
 --   known what SrcSpan an annotation should be added to.  The most

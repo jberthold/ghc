@@ -64,6 +64,7 @@ const RtsConfig defaultRtsConfig  = {
     .rts_opts = NULL,
     .rts_hs_main = false,
     .keep_cafs = false,
+    .eventlog_writer = &FileEventLogWriter,
     .defaultsHook = FlagDefaultsHook,
     .onExitHook = OnExitHook,
     .stackOverflowHook = StackOverflowHook,
@@ -153,7 +154,7 @@ void initRtsFlagsDefaults(void)
         maxStkSize = 8 * 1024 * 1024;
 
     RtsFlags.GcFlags.statsFile          = NULL;
-    RtsFlags.GcFlags.giveStats          = NO_GC_STATS;
+    RtsFlags.GcFlags.giveStats          = COLLECT_GC_STATS;
 
     RtsFlags.GcFlags.maxStkSize         = maxStkSize / sizeof(W_);
     RtsFlags.GcFlags.initialStkSize     = 1024 / sizeof(W_);
@@ -165,6 +166,7 @@ void initRtsFlagsDefaults(void)
     RtsFlags.GcFlags.nurseryChunkSize   = 0;
     RtsFlags.GcFlags.minOldGenSize      = (1024 * 1024)       / BLOCK_SIZE;
     RtsFlags.GcFlags.maxHeapSize        = 0;    /* off by default */
+    RtsFlags.GcFlags.heapLimitGrace     = (1024 * 1024);
     RtsFlags.GcFlags.heapSizeSuggestion = 0;    /* none */
     RtsFlags.GcFlags.heapSizeSuggestionAuto = false;
     RtsFlags.GcFlags.pcFreeHeap         = 3;    /* 3% */
@@ -327,13 +329,16 @@ usage_text[] = {
 "  -S[<file>] Detailed GC statistics (if <file> omitted, uses stderr)",
 "",
 "",
-"  -Z       Don't squeeze out update frames on stack overflow",
-"  -B       Sound the bell at the start of each garbage collection",
+"  -Z         Don't squeeze out update frames on stack overflow",
+"  -B         Sound the bell at the start of each garbage collection",
 #if defined(PROFILING)
 "",
-"  -p       Time/allocation profile        (output file <program>.prof)",
-"  -P       More detailed Time/Allocation profile",
-"  -Pa      Give information about *all* cost centres",
+"  -p         Time/allocation profile in tree format ",
+"             (output file <output prefix>.prof)",
+"  -po<file>  Override profiling output file name prefix (program name by default)",
+"  -P         More detailed Time/Allocation profile in tree format",
+"  -Pa        Give information about *all* cost centres in tree format",
+"  -pj        Output cost-center profile in JSON format",
 "",
 "  -h<break-down> Heap residency profile (hp2ps) (output file <program>.hp)",
 "     break-down: c = cost centre stack (default)",
@@ -490,6 +495,11 @@ usage_text[] = {
 "  -xq       The allocation limit given to a thread after it receives",
 "            an AllocationLimitExceeded exception. (default: 100k)",
 "",
+"  -Mgrace=<n>",
+"            The amount of allocation after the program receives a",
+"            HeapOverflow exception before the exception is thrown again, if",
+"            the program is still exceeding the heap limit.",
+"",
 "RTS options may also be specified using the GHCRTS environment variable.",
 "",
 "Other RTS options may be available for programs compiled a different way.",
@@ -566,6 +576,13 @@ static void errorRtsOptsDisabled(const char *s)
 
      - rtsConfig   (global) contains the supplied RtsConfig
 
+  On Windows getArgs ignores argv and instead takes the arguments directly
+  from the WinAPI and removes any which would have been parsed by the RTS.
+
+  If the handling of which arguments are passed to the Haskell side changes
+  these changes have to be synchronized with getArgs in base. See #13287 and
+  Note [Ignore hs_init argv] in System.Environment.
+
   -------------------------------------------------------------------------- */
 
 void setupRtsFlags (int *argc, char *argv[], RtsConfig rts_config)
@@ -620,7 +637,7 @@ void setupRtsFlags (int *argc, char *argv[], RtsConfig rts_config)
 
     // Split arguments (argv) into PGM (argv) and RTS (rts_argv) parts
     //   argv[0] must be PGM argument -- leave in argv
-
+    //
     for (mode = PGM; arg < total_arg; arg++) {
         // The '--RTS' argument disables all future +RTS ... -RTS processing.
         if (strequal("--RTS", argv[arg])) {
@@ -977,11 +994,16 @@ error = true;
 
               case 'M':
                   OPTION_UNSAFE;
-                  RtsFlags.GcFlags.maxHeapSize =
-                      decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX)
-                      / BLOCK_SIZE;
-                  /* user give size in *bytes* but "maxHeapSize" is in
-                   * *blocks* */
+                  if (0 == strncmp("grace=", rts_argv[arg] + 2, 6)) {
+                      RtsFlags.GcFlags.heapLimitGrace =
+                          decodeSize(rts_argv[arg], 8, BLOCK_SIZE, HS_WORD_MAX);
+                  } else {
+                      RtsFlags.GcFlags.maxHeapSize =
+                          decodeSize(rts_argv[arg], 2, BLOCK_SIZE, HS_WORD_MAX)
+                          / BLOCK_SIZE;
+                      // user give size in *bytes* but "maxHeapSize" is in
+                      // *blocks*
+                  }
                   break;
 
               case 'm':
@@ -1119,13 +1141,14 @@ error = true;
                       error = true;
                     }
                     break;
+                  case 'j':
+                      RtsFlags.CcFlags.doCostCentres = COST_CENTRES_JSON;
+                      break;
                   case '\0':
                       if (rts_argv[arg][1] == 'P') {
-                          RtsFlags.CcFlags.doCostCentres =
-                              COST_CENTRES_VERBOSE;
+                          RtsFlags.CcFlags.doCostCentres = COST_CENTRES_VERBOSE;
                       } else {
-                          RtsFlags.CcFlags.doCostCentres =
-                              COST_CENTRES_SUMMARY;
+                          RtsFlags.CcFlags.doCostCentres = COST_CENTRES_SUMMARY;
                       }
                       break;
                   default:

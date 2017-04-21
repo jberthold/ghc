@@ -1,3 +1,23 @@
+# T12791 and T5835 test that GHC uses top-level instances in places where using
+# a locally given solution would produce worse code.
+# See Note [Solving from instances when interacting Dicts]
+
+test('T5835',
+     [stats_num_field('max_bytes_used',
+           [(wordsize(64), 44312, 10)]),
+       only_ways(['normal'])
+       ],
+     compile_and_run,
+     ['-O'])
+
+test('T12791',
+     [stats_num_field('max_bytes_used',
+           [(wordsize(64), 44312, 10)]),
+       only_ways(['normal'])
+       ],
+     compile_and_run,
+     ['-O'])
+
 # Tests that newArray/newArray_ is being optimised correctly
 
 test('T10359',
@@ -50,10 +70,11 @@ test('T3245', [when(doing_ghci(), extra_hc_opts('-fobject-code'))],
 # a bug in hGetBufNonBlocking in 6.13 that triggered this.
 #
 test('lazy-bs-alloc',
-     [stats_num_field('peak_megabytes_allocated', (2, 1)),
+     [extra_files(['../../numeric/should_run/arith011.stdout']),
+      stats_num_field('peak_megabytes_allocated', (2, 1)),
                                  # expected value: 2 (amd64/Linux)
       stats_num_field('bytes allocated',
-          [(wordsize(64), 444720, 5),
+          [(wordsize(64), 421792, 5),
             #             489776 (amd64/Linux)
             # 2013-02-07: 429744 (amd64/Linux)
             # 2013-12-12: 425400 (amd64/Linux)
@@ -61,12 +82,15 @@ test('lazy-bs-alloc',
             # 2015-08-15: 431500 (Windows not good enough. avg of Windows&Linux)
             # 2015-12-15: 444720 (amd64/Linux, D1616)
             # 2015-12-17: 444720 (widen 3->5%, Windows is at 462688)
+            # 2017-01-30: 421792 (amd64/Linux, strangely Type-indexed Typeable)
            (wordsize(32), 429760, 2)]),
             # 2013-02-10: 421296 (x86/Windows)
             # 2013-02-10: 414180 (x86/OSX)
             # 2014-01-22: 411500 (x86/Linux)
             # 2014-01-28: Widen 1->2% (x86/Windows was at 425212)
             # 2016-04-06: 429760 (x86/Linux) no idea what happened
+            # 2017-02-14: 421448 Early inline patch
+
       only_ways(['normal']),
       extra_run_opts('arith011.stdout'),
       ignore_stdout,
@@ -112,10 +136,7 @@ test('T4321',
      omit_ways(['ghci']),
      compile_and_run, ['-O ' + sse2_opts])
 
-test('T3736',
-     extra_clean(['T3736.speed.f32']),
-     run_command,
-     ['$MAKE -s --no-print-directory T3736'])
+test('T3736', [], run_command, ['$MAKE -s --no-print-directory T3736'])
 test('T3738',
      [extra_clean(['T3738a.hi', 'T3738a.o']),
       stats_num_field('peak_megabytes_allocated', (2, 0)),
@@ -142,22 +163,14 @@ test('MethSharing',
                       [(wordsize(32), 360940756, 5),
                     # expected value: 2685858140 (x86/OS X)
                           # expected: 360940756 (x86/Linux)
-                       (wordsize(64), 640067672, 5)]),
-                          # expected: 640067672 (amd64/Linux)
+                       (wordsize(64), 480098192, 5)]),
+                          # expected:   640067672 (amd64/Linux)
+                          # 2017-01-31: 480098192 work/wrap noinline things
       only_ways(['normal'])
       ],
      compile_and_run,
      ['-O'])
-test('T2902',
-     extra_clean(['T2902_A',    'T2902_B',
-                  'T2902_A.hi', 'T2902_B.hi',
-                  'T2902_A.o',  'T2902_B.o',
-                  'T2902_A_PairingSum.hi', 'T2902_B_PairingSum.hi',
-                  'T2902_A_PairingSum.o',  'T2902_B_PairingSum.o',
-                  'T2902_Sum.hi',
-                  'T2902_Sum.o']),
-     run_command,
-     ['$MAKE -s --no-print-directory T2902'])
+test('T2902', [], run_command, ['$MAKE -s --no-print-directory T2902'])
 test('T149',
      [ # expect_broken(149),
        # working (2 Jul 2013, x86-64/Linux)
@@ -358,7 +371,7 @@ test('T7954',
      ['-O'])
 
 test('T7850',
-     [stats_num_field('peak_megabytes_allocated', 
+     [stats_num_field('peak_megabytes_allocated',
                       [(wordsize(32), 2, 10),
                        (wordsize(64), 4, 10)]),
       only_ways(['normal'])],
@@ -389,7 +402,7 @@ test('T4267',
 test('T7619',
      [stats_num_field('bytes allocated',
                       [ (wordsize(32), 36012, 10)
-                      # 32-bit close to 64-bit value; most of this very 
+                      # 32-bit close to 64-bit value; most of this very
                       # small number is standard start-up boilerplate I think
                       , (wordsize(64), 40992, 10) ]),
                       # previously, it was >400000 bytes
@@ -409,7 +422,7 @@ test('InlineByteArrayAlloc',
      [stats_num_field('bytes allocated',
                       [ (wordsize(32), 1360036012, 5)
                       , (wordsize(64), 1440040960, 5) ]),
-         # 32 and 64 bit not so different, because 
+         # 32 and 64 bit not so different, because
          # we are allocating *byte* arrays
       only_ways(['normal'])],
      compile_and_run,
@@ -417,7 +430,7 @@ test('InlineByteArrayAlloc',
 
 test('InlineCloneArrayAlloc',
      [stats_num_field('bytes allocated',
-                      [ (wordsize(32), 800041120, 5) 
+                      [ (wordsize(32), 800041120, 5)
                       , (wordsize(64), 1600041120, 5) ]),
       only_ways(['normal'])],
      compile_and_run,
@@ -428,10 +441,11 @@ test('T9203',
                       [ (wordsize(32), 84345136 , 5)
                       # was
                       # 2016-04-06     84345136 (i386/Debian) not sure
-                      , (wordsize(64), 95451192, 5) ]),
+                      , (wordsize(64), 84620888, 5) ]),
                       # was            95747304
                       # 2019-09-10     94547280 post-AMP cleanup
                       # 2015-10-28     95451192 emit Typeable at definition site
+                      # 2016-12-19     84620888 Join points
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])
@@ -439,9 +453,25 @@ test('T9203',
 test('T9339',
      [stats_num_field('bytes allocated',
                       [ (wordsize(32),    40046844, 5)
-                      , (wordsize(64),    80050760, 5) ]),
+                      # is this number correct? Seems very high.
+
+                      , (platform('x86_64-unknown-mingw32'), 47088, 7)
+                      # 2017-02-19                           47088 (x64/Windows) - Unknown
+
+                      , (wordsize(64),       50728, 5) ]),
                       # w/o fusing last: 320005080
                       # 2014-07-22:       80050760
+                      # 2016-08-17:          50728 Join points (#12988)
+      only_ways(['normal'])],
+     compile_and_run,
+     ['-O2 -fspec-constr-keen'])
+     # For the -fspec-constr-keen see Note [Making SpecConstr keener] in SpecConstr
+
+
+test('T8472',
+     [stats_num_field('bytes allocated',
+                      [ (wordsize(32),    50000, 80)
+                      , (wordsize(64),    51424, 80) ]),
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])
@@ -452,3 +482,35 @@ test('T12996',
       only_ways(['normal'])],
      compile_and_run,
      ['-O2'])
+
+test('T13001',
+     [stats_num_field('bytes allocated',
+                      [ (wordsize(32),    46728, 20)
+                      , (wordsize(64),    50600, 20) ]),
+      only_ways(['normal'])],
+     compile_and_run,
+     ['-O2'])
+
+test('T12990',
+    [stats_num_field('bytes allocated',
+                     [ (wordsize(64), 20040936, 5) ]),
+                     # 2017-01-03     34440936  w/o inlining unsaturated
+                     #                          constructor wrappers
+                     # 2017-01-03     21640904 inline wrappers
+                     # 2017-01-31     20040936 work/wrap noinline things
+     only_ways(['normal'])],
+    compile_and_run,
+    ['-O2'])
+
+test('T13218',
+    [stats_num_field('bytes allocated',
+                     [ (wordsize(64), 82040056, 5) ]),
+                     # 8.1 with default <$  163644216
+                     # 8.1 with derived <$   82040056
+     stats_num_field('max_bytes_used',
+                     [ (wordsize(64), 359128, 10) ]),
+                     # 8.1 with default <$  64408248
+                     # 8.1 with derived <$    359128
+     only_ways(['normal'])],
+    compile_and_run,
+    ['-O'])

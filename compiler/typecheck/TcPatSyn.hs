@@ -34,7 +34,7 @@ import FastString
 import Var
 import VarEnv( emptyTidyEnv, mkInScopeSet )
 import Id
-import IdInfo( RecSelParent(..))
+import IdInfo( RecSelParent(..), setLevityInfoWithType )
 import TcBinds
 import BasicTypes
 import TcSimplify
@@ -160,7 +160,7 @@ tcCheckPatSynDecl psb@PSB{ psb_id = lname@(L _ name), psb_args = details
               ; traceTc "tcpatsyn2" (vcat [ ppr v <+> dcolon <+> ppr (tyVarKind v) | v <- ex_tvs'])
               ; let prov_theta' = substTheta subst prov_theta
                   -- Add univ_tvs to the in_scope set to
-                  -- satisfy the substition invariant. There's no need to
+                  -- satisfy the substitution invariant. There's no need to
                   -- add 'ex_tvs' as they are already in the domain of the
                   -- substitution.
                   -- See also Note [The substitution invariant] in TyCoRep.
@@ -330,7 +330,6 @@ tc_patsyn_finish lname dir is_infix lpat'
                                          (args, arg_tys)
                                          pat_ty
 
-
        -- Make the 'builder'
        ; builder_id <- mkPatSynBuilderId dir lname
                                          univ_tvs req_theta
@@ -342,6 +341,7 @@ tc_patsyn_finish lname dir is_infix lpat'
                                             , flIsOverloaded = False
                                             , flSelector = name }
              field_labels' = map mkFieldLabel field_labels
+
 
        -- Make the PatSyn itself
        ; let patSyn = mkPatSyn (unLoc lname) is_infix
@@ -429,7 +429,7 @@ tcPatSynMatcher (L loc name) lpat
                      HsLam $
                      MG{ mg_alts = noLoc [mkSimpleMatch LambdaExpr
                                                         args body]
-                       , mg_arg_tys = [pat_ty, cont_ty, res_ty]
+                       , mg_arg_tys = [pat_ty, cont_ty, fail_ty]
                        , mg_res_ty = res_ty
                        , mg_origin = Generated
                        }
@@ -500,7 +500,9 @@ mkPatSynBuilderId dir (L _ name)
              builder_id     = mkExportedVanillaId builder_name builder_sigma
               -- See Note [Exported LocalIds] in Id
 
-       ; return (Just (builder_id, need_dummy_arg)) }
+             builder_id'    = modifyIdInfo (`setLevityInfoWithType` pat_ty) builder_id
+
+       ; return (Just (builder_id', need_dummy_arg)) }
   where
 
 tcPatSynBuilderBind :: PatSynBind Name Name
@@ -571,11 +573,12 @@ tcPatSynBuilderOcc :: PatSyn -> TcM (HsExpr TcId, TcSigmaType)
 -- monadic only for failure
 tcPatSynBuilderOcc ps
   | Just (builder_id, add_void_arg) <- builder
-  , let builder_expr = HsVar (noLoc builder_id)
+  , let builder_expr = HsConLikeOut (PatSynCon ps)
         builder_ty   = idType builder_id
   = return $
     if add_void_arg
-    then ( HsApp (noLoc $ builder_expr) (nlHsVar voidPrimId)
+    then ( builder_expr   -- still just return builder_expr; the void# arg is added
+                          -- by dsConLike in the desugarer
          , tcFunResultTy builder_ty )
     else (builder_expr, builder_ty)
 

@@ -15,6 +15,10 @@
 #define RTS_FLAGS_H
 
 #include <stdio.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include "stg/Types.h"
+#include "Time.h"
 
 /* For defaults, see the @initRtsFlagsDefaults@ routine. */
 
@@ -71,6 +75,12 @@ typedef struct _GC_FLAGS {
                                  * to handle the exception before we
                                  * raise it again.
                                  */
+    StgWord heapLimitGrace;     /* units: *blocks*
+                                 * After a HeapOverflow exception has
+                                 * been raised, how much extra space is
+                                 * given to the thread to handle the
+                                 * exception before we raise it again.
+                                 */
 
     bool numa;                   /* Use NUMA */
     StgWord numaMask;
@@ -105,10 +115,11 @@ typedef struct _COST_CENTRE_FLAGS {
 # define COST_CENTRES_SUMMARY	1
 # define COST_CENTRES_VERBOSE	2 /* incl. serial time profile */
 # define COST_CENTRES_ALL	3
-# define COST_CENTRES_XML       4
+# define COST_CENTRES_JSON      4
 
     int	    profilerTicks;   /* derived */
     int	    msecsPerTick;    /* derived */
+    char const *outputFileNameStem;
 } COST_CENTRE_FLAGS;
 
 /* See Note [Synchronization of flags and base APIs] */
@@ -126,7 +137,7 @@ typedef struct _PROFILING_FLAGS {
 
     Time        heapProfileInterval; /* time between samples */
     uint32_t    heapProfileIntervalTicks; /* ticks between samples (derived) */
-    bool     includeTSOs;
+    bool        includeTSOs;
 
 
     bool		showCCSOnException;

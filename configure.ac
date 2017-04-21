@@ -120,7 +120,7 @@ AC_ARG_VAR(CC_STAGE0, [C compiler command (bootstrap)])
 if test "$WithGhc" != ""; then
   FPTOOLS_GHC_VERSION([GhcVersion], [GhcMajVersion], [GhcMinVersion], [GhcPatchLevel])dnl
 
-  if test "$GhcMajVersion" = "unknown" -o "$GhcMinVersion" = "unknown"; then
+  if test "$GhcMajVersion" = "unknown" || test "$GhcMinVersion" = "unknown"; then
      AC_MSG_ERROR([Cannot determine the version of $WithGhc.  Is it really GHC?])
   fi
 
@@ -399,24 +399,6 @@ FP_CURSES
 
 XCODE_VERSION()
 
-SplitObjsBroken=NO
-if test "$TargetOS_CPP" = "darwin"
-then
-    # Split objects is broken (#4013) with XCode < 3.2
-    if test "$XCodeVersion1" -lt 3
-    then
-        SplitObjsBroken=YES
-    else
-        if test "$XCodeVersion1" -eq 3
-        then
-            if test "$XCodeVersion2" -lt 2
-            then
-                SplitObjsBroken=YES
-            fi
-        fi
-    fi
-fi
-AC_SUBST([SplitObjsBroken])
 
 dnl ** Building a cross compiler?
 dnl --------------------------------------------------------------
@@ -452,8 +434,25 @@ fi
 # Despite its similarity in name to TargetPlatform, TargetPlatformFull is used
 # in calls to subproject configure scripts and thus must be set to the autoconf
 # triple, not the normalized GHC triple that TargetPlatform is set to.
-# It may be better to just do away with the GHC triples all together.
-TargetPlatformFull="${target}"
+#
+# We use the non-canonicalized triple, target_alias, here since the subproject
+# configure scripts will use this triple to construct the names of the toolchain
+# executables. If we instead passed down the triple produced by
+# AC_CANONICAL_TARGET then it may look for the target toolchain under the wrong
+# name (this is a known problem in the case of the Android NDK, which has
+# slightly odd triples).
+#
+# It may be better to just do away with the GHC triples altogether. This would
+# all be taken care of for us if we configured the subprojects using
+# AC_CONFIG_DIR, but unfortunately Cabal needs to be the one to do the
+# configuration.
+if test -z "${target_alias}"
+then
+  # --target wasn't given; use result from AC_CANONICAL_TARGET
+  TargetPlatformFull="${target}"
+else
+  TargetPlatformFull="${target_alias}"
+fi
 AC_SUBST(CrossCompiling)
 AC_SUBST(CrossCompilePrefix)
 AC_SUBST(TargetPlatformFull)
@@ -600,23 +599,25 @@ AC_SUBST([GhcLibsWithUnix])
 dnl ** does #! work?
 AC_SYS_INTERPRETER()
 
+# Check for split-objs
+SplitObjsBroken=NO
 dnl ** look for `perl'
 case $HostOS_CPP in
 cygwin32|mingw32)
-    PerlCmd=$hardtop/inplace/perl/perl
-    ;;
+  PerlCmd=$hardtop/inplace/perl/perl
+  ;;
 *)
-    AC_PATH_PROG(PerlCmd,perl)
+    AC_PATH_PROG([PerlCmd],[perl])
     if test -z "$PerlCmd"
     then
-        echo "You must install perl before you can continue"
-        echo "Perhaps it is already installed, but not in your PATH?"
-        exit 1
+        AC_MSG_WARN([No Perl on PATH, disabling split object support])
+        SplitObjsBroken=YES
     else
         FPTOOLS_CHECK_PERL_VERSION
     fi
     ;;
 esac
+AC_SUBST([SplitObjsBroken])
 
 dnl ** look for GCC and find out which version
 dnl     Figure out which C compiler to use.  Gcc is preferred.
@@ -962,6 +963,31 @@ AC_TRY_LINK_FUNC(printf\$LDBLStub,
             [Define to 1 if we have printf$LDBLStub (Apple Mac OS >= 10.4, PPC).])
     ])
 
+dnl Some platforms (e.g. Android's Bionic) have pthreads support available
+dnl without linking against libpthread. Check whether -lpthread is necessary
+dnl to use pthreads.
+dnl
+dnl Note that it is important that this happens before we AC_CHECK_LIB(thread)
+AC_MSG_CHECKING(whether -lpthread is needed for pthreads)
+AC_CHECK_FUNC(pthread_create,
+    [
+        AC_MSG_RESULT(no)
+        need_lpthread=0
+    ],
+    [
+        AC_CHECK_LIB(pthread, pthread_create,
+            [
+                AC_MSG_RESULT(yes)
+                need_lpthread=1
+            ],
+            [
+                AC_MSG_RESULT([no pthreads support found.])
+                need_lpthread=0
+            ])
+    ])
+AC_DEFINE_UNQUOTED([NEED_PTHREAD_LIB], [$need_lpthread],
+    [Define 1 if we need to link code using pthreads with -lpthread])
+
 dnl ** pthread_setname_np is a recent addition to glibc, and OS X has
 dnl    a different single-argument version.
 AC_CHECK_LIB(pthread, pthread_setname_np)
@@ -1278,6 +1304,7 @@ fi;
 LIBRARY_VERSION(base)
 LIBRARY_VERSION(Cabal, Cabal/Cabal)
 LIBRARY_VERSION(ghc-prim)
+LIBRARY_VERSION(ghc-compact)
 LIBRARY_ghc_VERSION="$ProjectVersion"
 AC_SUBST(LIBRARY_ghc_VERSION)
 
@@ -1313,9 +1340,9 @@ checkMake380() {
 checkMake380 make
 checkMake380 gmake
 
-AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt distrib/configure.ac])
+AC_CONFIG_FILES([mk/config.mk mk/install.mk mk/project.mk compiler/ghc.cabal ghc/ghc-bin.cabal utils/runghc/runghc.cabal libraries/ghc-boot/ghc-boot.cabal libraries/ghc-boot-th/ghc-boot-th.cabal libraries/ghci/ghci.cabal settings docs/users_guide/ghc_config.py docs/index.html libraries/prologue.txt utils/mkUserGuidePart/mkUserGuidePart.cabal distrib/configure.ac])
 AC_OUTPUT
-
+[
 if test "$print_make_warning" = "true"; then
    echo
    echo "WARNING: It looks like \"$MakeCmd\" is GNU make 3.80."
@@ -1323,7 +1350,7 @@ if test "$print_make_warning" = "true"; then
    echo "Please use GNU make >= 3.81."
 fi
 
-echo ["
+echo "
 ----------------------------------------------------------------------
 Configure completed successfully.
 
@@ -1333,12 +1360,12 @@ Configure completed successfully.
    Build platform        : $BuildPlatform
    Host platform         : $HostPlatform
    Target platform       : $TargetPlatform
-"]
+"
 
-echo ["\
+echo "\
    Bootstrapping using   : $WithGhc
       which is version   : $GhcVersion
-"]
+"
 
 if test "x$CC_LLVM_BACKEND" = "x1"; then
     if test "x$CC_CLANG_BACKEND" = "x1"; then
@@ -1350,7 +1377,7 @@ else
     CompilerName="gcc          "
 fi
 
-echo ["\
+echo "\
    Using (for bootstrapping) : $CC_STAGE0
    Using $CompilerName       : $CC
       which is version       : $GccVersion
@@ -1369,24 +1396,24 @@ echo ["\
 
    Using LLVM tools
       llc   : $LlcCmd
-      opt   : $OptCmd"]
+      opt   : $OptCmd"
 
 if test "$HSCOLOUR" = ""; then
-echo ["
+echo "
    HsColour was not found; documentation will not contain source links
-"]
+"
 else
-echo ["\
+echo "\
    HsColour : $HSCOLOUR
-"]
+"
 fi
 
-echo ["\
+echo "\
    Tools to build Sphinx HTML documentation available: $BUILD_SPHINX_HTML
-   Tools to build Sphinx PDF documentation available: $BUILD_SPHINX_PDF"]
+   Tools to build Sphinx PDF documentation available: $BUILD_SPHINX_PDF"
 
-echo ["----------------------------------------------------------------------
-"]
+echo "----------------------------------------------------------------------
+"
 
 if test "$ParallelRts" = "YES"; then
 echo ["\
@@ -1407,4 +1434,4 @@ mk/build.mk.sample to mk/build.mk, and edit the settings in there.
 
 For more information on how to configure your GHC build, see
    http://ghc.haskell.org/trac/ghc/wiki/Building
-"
+"]

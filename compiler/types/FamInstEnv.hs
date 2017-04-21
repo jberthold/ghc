@@ -11,8 +11,8 @@ module FamInstEnv (
         mkImportedFamInst,
 
         FamInstEnvs, FamInstEnv, emptyFamInstEnv, emptyFamInstEnvs,
-        extendFamInstEnv, deleteFromFamInstEnv, extendFamInstEnvList,
-        identicalFamInstHead, famInstEnvElts, familyInstances,
+        extendFamInstEnv, extendFamInstEnvList,
+        famInstEnvElts, famInstEnvSize, familyInstances,
 
         -- * CoAxioms
         mkCoAxBranch, mkBranchedCoAxiom, mkUnbranchedCoAxiom, mkSingleCoAxiom,
@@ -31,6 +31,7 @@ module FamInstEnv (
         topNormaliseType, topNormaliseType_maybe,
         normaliseType, normaliseTcApp,
         reduceTyFamApp_maybe,
+        pmTopNormaliseType_maybe,
 
         -- Flattening
         flattenTys
@@ -42,6 +43,7 @@ import Unify
 import Type
 import TyCoRep
 import TyCon
+import DataCon (DataCon)
 import Coercion
 import CoAxiom
 import VarSet
@@ -60,8 +62,7 @@ import SrcLoc
 import FastString
 import MonadUtils
 import Control.Monad
-import Data.Function ( on )
-import Data.List( mapAccumL )
+import Data.List( mapAccumL, find )
 
 {-
 ************************************************************************
@@ -400,6 +401,11 @@ famInstEnvElts :: FamInstEnv -> [FamInst]
 famInstEnvElts fi = [elt | FamIE elts <- eltsUDFM fi, elt <- elts]
   -- See Note [FamInstEnv determinism]
 
+famInstEnvSize :: FamInstEnv -> Int
+famInstEnvSize = nonDetFoldUDFM (\(FamIE elt) sum -> sum + length elt) 0
+  -- It's OK to use nonDetFoldUDFM here since we're just computing the
+  -- size.
+
 familyInstances :: (FamInstEnv, FamInstEnv) -> TyCon -> [FamInst]
 familyInstances (pkg_fie, home_fie) fam
   = get home_fie ++ get pkg_fie
@@ -417,33 +423,6 @@ extendFamInstEnv inst_env
   = addToUDFM_C add inst_env cls_nm (FamIE [ins_item])
   where
     add (FamIE items) _ = FamIE (ins_item:items)
-
-deleteFromFamInstEnv :: FamInstEnv -> FamInst -> FamInstEnv
--- Used only for overriding in GHCi
-deleteFromFamInstEnv inst_env fam_inst@(FamInst {fi_fam = fam_nm})
- = adjustUDFM adjust inst_env fam_nm
- where
-   adjust :: FamilyInstEnv -> FamilyInstEnv
-   adjust (FamIE items)
-     = FamIE (filterOut (identicalFamInstHead fam_inst) items)
-
-identicalFamInstHead :: FamInst -> FamInst -> Bool
--- ^ True when the LHSs are identical
--- Used for overriding in GHCi
-identicalFamInstHead (FamInst { fi_axiom = ax1 }) (FamInst { fi_axiom = ax2 })
-  =  coAxiomTyCon ax1 == coAxiomTyCon ax2
-  && numBranches brs1 == numBranches brs2
-  && and ((zipWith identical_branch `on` fromBranches) brs1 brs2)
-  where
-    brs1 = coAxiomBranches ax1
-    brs2 = coAxiomBranches ax2
-
-    identical_branch br1 br2
-      =  isJust (tcMatchTys lhs1 lhs2)
-      && isJust (tcMatchTys lhs2 lhs1)
-      where
-        lhs1 = coAxBranchLHS br1
-        lhs2 = coAxBranchLHS br2
 
 {-
 ************************************************************************
@@ -1227,22 +1206,20 @@ topNormaliseType_maybe :: FamInstEnvs -> Type -> Maybe (Coercion, Type)
 --      * data family redex
 --      * newtypes
 -- returning an appropriate Representational coercion.  Specifically, if
---   topNormaliseType_maybe env ty = Maybe (co, ty')
+--   topNormaliseType_maybe env ty = Just (co, ty')
 -- then
 --   (a) co :: ty ~R ty'
 --   (b) ty' is not a newtype, and is not a type-family or data-family redex
 --
 -- However, ty' can be something like (Maybe (F ty)), where
 -- (F ty) is a redex.
---
--- Its a bit like Type.repType, but handles type families too
 
 topNormaliseType_maybe env ty
   = topNormaliseTypeX stepper mkTransCo ty
   where
     stepper = unwrapNewTypeStepper `composeSteppers` tyFamStepper
 
-    tyFamStepper rec_nts tc tys  -- Try to step a type/data familiy
+    tyFamStepper rec_nts tc tys  -- Try to step a type/data family
       = let (args_co, ntys) = normaliseTcArgs env Representational tc tys in
           -- NB: It's OK to use normaliseTcArgs here instead of
           -- normalise_tc_args (which takes the LiftingContext described
@@ -1253,6 +1230,114 @@ topNormaliseType_maybe env ty
         case reduceTyFamApp_maybe env Representational tc ntys of
           Just (co, rhs) -> NS_Step rec_nts rhs (args_co `mkTransCo` co)
           _              -> NS_Done
+
+---------------
+pmTopNormaliseType_maybe :: FamInstEnvs -> Type -> Maybe (Type, [DataCon], Type)
+-- ^ Get rid of *outermost* (or toplevel)
+--      * type function redex
+--      * data family redex
+--      * newtypes
+--
+-- Behaves exactly like `topNormaliseType_maybe`, but instead of returning a
+-- coercion, it returns useful information for issuing pattern matching
+-- warnings. See Note [Type normalisation for EmptyCase] for details.
+pmTopNormaliseType_maybe env typ
+  = do ((ty_f,tm_f), ty) <- topNormaliseTypeX stepper comb typ
+       return (eq_src_ty ty (typ : ty_f [ty]), tm_f [], ty)
+  where
+    -- Find the first type in the sequence of rewrites that is a data type,
+    -- newtype, or a data family application (not the representation tycon!).
+    -- This is the one that is equal (in source Haskell) to the initial type.
+    -- If none is found in the list, then all of them are type family
+    -- applications, so we simply return the last one, which is the *simplest*.
+    eq_src_ty :: Type -> [Type] -> Type
+    eq_src_ty ty tys = maybe ty id (find is_alg_or_data_family tys)
+
+    is_alg_or_data_family :: Type -> Bool
+    is_alg_or_data_family ty = isClosedAlgType ty || isDataFamilyAppType ty
+
+    -- For efficiency, represent both lists as difference lists.
+    -- comb performs the concatenation, for both lists.
+    comb (tyf1, tmf1) (tyf2, tmf2) = (tyf1 . tyf2, tmf1 . tmf2)
+
+    stepper = newTypeStepper `composeSteppers` tyFamStepper
+
+    -- A 'NormaliseStepper' that unwraps newtypes, careful not to fall into
+    -- a loop. If it would fall into a loop, it produces 'NS_Abort'.
+    newTypeStepper :: NormaliseStepper ([Type] -> [Type],[DataCon] -> [DataCon])
+    newTypeStepper rec_nts tc tys
+      | Just (ty', _co) <- instNewTyCon_maybe tc tys
+      = case checkRecTc rec_nts tc of
+          Just rec_nts' -> let tyf = ((TyConApp tc tys):)
+                               tmf = ((tyConSingleDataCon tc):)
+                           in  NS_Step rec_nts' ty' (tyf, tmf)
+          Nothing       -> NS_Abort
+      | otherwise
+      = NS_Done
+
+    tyFamStepper :: NormaliseStepper ([Type] -> [Type], [DataCon] -> [DataCon])
+    tyFamStepper rec_nts tc tys  -- Try to step a type/data family
+      = let (_args_co, ntys) = normaliseTcArgs env Representational tc tys in
+          -- NB: It's OK to use normaliseTcArgs here instead of
+          -- normalise_tc_args (which takes the LiftingContext described
+          -- in Note [Normalising types]) because the reduceTyFamApp below
+          -- works only at top level. We'll never recur in this function
+          -- after reducing the kind of a bound tyvar.
+
+        case reduceTyFamApp_maybe env Representational tc ntys of
+          Just (_co, rhs) -> NS_Step rec_nts rhs ((rhs:), id)
+          _               -> NS_Done
+
+{- Note [Type normalisation for EmptyCase]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+EmptyCase is an exception for pattern matching, since it is strict. This means
+that it boils down to checking whether the type of the scrutinee is inhabited.
+Function pmTopNormaliseType_maybe gets rid of the outermost type function/data
+family redex and newtypes, in search of an algebraic type constructor, which is
+easier to check for inhabitation.
+
+It returns 3 results instead of one, because there are 2 subtle points:
+1. Newtypes are isomorphic to the underlying type in core but not in the source
+   language,
+2. The representational data family tycon is used internally but should not be
+   shown to the user
+
+Hence, if pmTopNormaliseType_maybe env ty = Just (src_ty, dcs, core_ty), then
+  (a) src_ty is the rewritten type which we can show to the user. That is, the
+      type we get if we rewrite type families but not data families or
+      newtypes.
+  (b) dcs is the list of data constructors "skipped", every time we normalise a
+      newtype to it's core representation, we keep track of the source data
+      constructor.
+  (c) core_ty is the rewritten type. That is,
+        pmTopNormaliseType_maybe env ty = Just (src_ty, dcs, core_ty)
+      implies
+        topNormaliseType_maybe env ty = Just (co, core_ty)
+      for some coercion co.
+
+To see how all cases come into play, consider the following example:
+
+  data family T a :: *
+  data instance T Int = T1 | T2 Bool
+  -- Which gives rise to FC:
+  --   data T a
+  --   data R:TInt = T1 | T2 Bool
+  --   axiom ax_ti : T Int ~R R:TInt
+
+  newtype G1 = MkG1 (T Int)
+  newtype G2 = MkG2 G1
+
+  type instance F Int  = F Char
+  type instance F Char = G2
+
+In this case pmTopNormaliseType_maybe env (F Int) results in
+
+  Just (G2, [MkG2,MkG1], R:TInt)
+
+Which means that in source Haskell:
+  - G2 is equivalent to F Int (in contrast, G1 isn't).
+  - if (x : R:TInt) then (MkG2 (MkG1 x) : F Int).
+-}
 
 ---------------
 normaliseTcApp :: FamInstEnvs -> Role -> TyCon -> [Type] -> (Coercion, Type)
@@ -1608,6 +1693,7 @@ allTyVarsInTy = go
     go_co (AppCo co arg)        = go_co co `unionVarSet` go_co arg
     go_co (ForAllCo tv h co)
       = unionVarSets [unitVarSet tv, go_co co, go_co h]
+    go_co (FunCo _ c1 c2)       = go_co c1 `unionVarSet` go_co c2
     go_co (CoVarCo cv)          = unitVarSet cv
     go_co (AxiomInstCo _ _ cos) = go_cos cos
     go_co (UnivCo p _ t1 t2)    = go_prov p `unionVarSet` go t1 `unionVarSet` go t2

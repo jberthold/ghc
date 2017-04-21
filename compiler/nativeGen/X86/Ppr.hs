@@ -37,7 +37,7 @@ import BasicTypes       (Alignment)
 import DynFlags
 import Cmm              hiding (topInfoTable)
 import CLabel
-import Unique           ( pprUnique, Uniquable(..) )
+import Unique           ( pprUniqueAlways, Uniquable(..) )
 import Platform
 import FastString
 import Outputable
@@ -220,11 +220,11 @@ pprReg f r
           if target32Bit platform then ppr32_reg_no f i
                                   else ppr64_reg_no f i
       RegReal    (RealRegPair _ _) -> panic "X86.Ppr: no reg pairs on this arch"
-      RegVirtual (VirtualRegI  u)  -> text "%vI_" <> pprUnique u
-      RegVirtual (VirtualRegHi u)  -> text "%vHi_" <> pprUnique u
-      RegVirtual (VirtualRegF  u)  -> text "%vF_" <> pprUnique u
-      RegVirtual (VirtualRegD  u)  -> text "%vD_" <> pprUnique u
-      RegVirtual (VirtualRegSSE  u) -> text "%vSSE_" <> pprUnique u
+      RegVirtual (VirtualRegI  u)  -> text "%vI_"   <> pprUniqueAlways u
+      RegVirtual (VirtualRegHi u)  -> text "%vHi_"  <> pprUniqueAlways u
+      RegVirtual (VirtualRegF  u)  -> text "%vF_"   <> pprUniqueAlways u
+      RegVirtual (VirtualRegD  u)  -> text "%vD_"   <> pprUniqueAlways u
+      RegVirtual (VirtualRegSSE u) -> text "%vSSE_" <> pprUniqueAlways u
   where
     ppr32_reg_no :: Format -> Int -> SDoc
     ppr32_reg_no II8   = ppr32_reg_byte
@@ -514,22 +514,26 @@ pprDataItem' dflags lit
                 = panic "X86.Ppr.ppr_item: no match"
 
 
+asmComment :: SDoc -> SDoc
+asmComment c = ifPprDebug $ text "# " <> c
 
 pprInstr :: Instr -> SDoc
 
-pprInstr (COMMENT _) = empty -- nuke 'em
-{-
-pprInstr (COMMENT s) = text "# " <> ftext s
--}
+pprInstr (COMMENT s)
+   = asmComment (ftext s)
 
 pprInstr (LOCATION file line col _name)
    = text "\t.loc " <> ppr file <+> ppr line <+> ppr col
 
 pprInstr (DELTA d)
-   = pprInstr (COMMENT (mkFastString ("\tdelta = " ++ show d)))
+   = asmComment $ text ("\tdelta = " ++ show d)
 
 pprInstr (NEWBLOCK _)
    = panic "PprMach.pprInstr: NEWBLOCK"
+
+pprInstr (UNWIND lbl d)
+   = asmComment (text "\tunwind = " <> ppr d)
+     $$ ppr lbl <> colon
 
 pprInstr (LDATA _ _)
    = panic "PprMach.pprInstr: LDATA"
@@ -627,6 +631,8 @@ pprInstr (SUB_CC format src dst)
 pprInstr (AND II64 src@(OpImm (ImmInteger mask)) dst)
   | 0 <= mask && mask < 0xffffffff
     = pprInstr (AND II32 src dst)
+pprInstr (AND FF32 src dst) = pprOpOp (sLit "andps") FF32 src dst
+pprInstr (AND FF64 src dst) = pprOpOp (sLit "andpd") FF64 src dst
 pprInstr (AND format src dst) = pprFormatOpOp (sLit "and") format src dst
 pprInstr (OR  format src dst) = pprFormatOpOp (sLit "or")  format src dst
 

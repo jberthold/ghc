@@ -15,7 +15,6 @@ module InteractiveEval (
         runDecls, runDeclsWithLocation,
         isStmt, hasImport, isImport, isDecl,
         parseImportDecl, SingleStep(..),
-        resume,
         abandon, abandonAll,
         getResumeContext,
         getHistorySpan,
@@ -36,9 +35,7 @@ module InteractiveEval (
         parseExpr, compileParsedExpr,
         compileExpr, dynCompileExpr,
         compileExprRemote, compileParsedExprRemote,
-        Term(..), obtainTermFromId, obtainTermFromVal, reconstructType,
-        -- * Depcreated API (remove in GHC 7.14)
-        RunResult(..), runStmt, runStmtWithLocation,
+        Term(..), obtainTermFromId, obtainTermFromVal, reconstructType
         ) where
 
 #include "HsVersions.h"
@@ -66,7 +63,6 @@ import Name             hiding ( varName )
 import NameSet
 import Avail
 import RdrName
-import VarSet
 import VarEnv
 import ByteCodeTypes
 import Linker
@@ -97,7 +93,6 @@ import Control.Monad
 import GHC.Exts
 import Data.Array
 import Exception
-import Control.Concurrent
 
 -- -----------------------------------------------------------------------------
 -- running a statement interactively
@@ -121,7 +116,7 @@ getHistorySpan hsc_env History{..} =
 getModBreaks :: HomeModInfo -> ModBreaks
 getModBreaks hmi
   | Just linkable <- hm_linkable hmi,
-    [BCOs cbc] <- linkableUnlinked linkable
+    [BCOs cbc _] <- linkableUnlinked linkable
   = fromMaybe emptyModBreaks (bc_breaks cbc)
   | otherwise
   = emptyModBreaks -- probably object code
@@ -195,38 +190,6 @@ execStmt stmt ExecOptions{..} = do
         handleRunStatus execSingleStep stmt bindings ids
                         status (emptyHistory size)
 
--- | The type returned by the deprecated 'runStmt' and
--- 'runStmtWithLocation' API
-data RunResult
-  = RunOk [Name]                -- ^ names bound by this evaluation
-  | RunException SomeException  -- ^ statement raised an exception
-  | RunBreak ThreadId [Name] (Maybe BreakInfo)
-
--- | Conver the old result type to the new result type
-execResultToRunResult :: ExecResult -> RunResult
-execResultToRunResult r =
-  case r of
-    ExecComplete{ execResult = Left ex } -> RunException ex
-    ExecComplete{ execResult = Right names } -> RunOk names
-    ExecBreak{..} -> RunBreak (error "no breakThreadId") breakNames breakInfo
-
--- Remove in GHC 7.14
-{-# DEPRECATED runStmt "use execStmt" #-}
--- | Run a statement in the current interactive context.  Statement
--- may bind multple values.
-runStmt :: GhcMonad m => String -> SingleStep -> m RunResult
-runStmt stmt step =
-  execResultToRunResult <$> execStmt stmt execOptions { execSingleStep = step }
-
--- Remove in GHC 7.14
-{-# DEPRECATED runStmtWithLocation "use execStmtWithLocation" #-}
-runStmtWithLocation :: GhcMonad m => String -> Int ->
-                       String -> SingleStep -> m RunResult
-runStmtWithLocation source linenumber expr step = do
-  execResultToRunResult <$>
-     execStmt expr execOptions { execSingleStep = step
-                               , execSourceFile = source
-                               , execLineNumber = linenumber }
 
 runDecls :: GhcMonad m => String -> m [Name]
 runDecls = runDeclsWithLocation "<interactive>" 1
@@ -375,9 +338,6 @@ handleRunStatus step expr bindings final_ids status history
     = panic "not_tracing" -- actually exhaustive, but GHC can't tell
 
 
-resume :: GhcMonad m => (SrcSpan->Bool) -> SingleStep -> m RunResult
-resume canLogSpan step = execResultToRunResult <$> resumeExec canLogSpan step
-
 resumeExec :: GhcMonad m => (SrcSpan->Bool) -> SingleStep -> m ExecResult
 resumeExec canLogSpan step
  = do
@@ -520,9 +480,9 @@ bindLocalsAtBreakpoint hsc_env apStack_fhv (Just BreakInfo{..}) = do
            -- Filter out any unboxed ids;
            -- we can't bind these at the prompt
        pointers = filter (\(id,_) -> isPointer id) vars
-       isPointer id | UnaryRep ty <- repType (idType id)
-                    , PtrRep <- typePrimRep ty = True
-                    | otherwise                = False
+       isPointer id | [rep] <- typePrimRep (idType id)
+                    , isGcPtrRep rep                   = True
+                    | otherwise                        = False
 
        (ids, offsets) = unzip pointers
 
@@ -590,7 +550,7 @@ rttiEnvironment hsc_env@HscEnv{hsc_IC=ic} = do
    hsc_env' <- foldM improveTypes hsc_env (map idName incompletelyTypedIds)
    return hsc_env'
     where
-     noSkolems = isEmptyVarSet . tyCoVarsOfType . idType
+     noSkolems = noFreeVarsOfType . idType
      improveTypes hsc_env@HscEnv{hsc_IC=ic} name = do
       let tmp_ids = [id | AnId id <- ic_tythings ic]
           Just id = find (\i -> idName i == name) tmp_ids

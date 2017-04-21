@@ -23,7 +23,8 @@ module CoreUnfold (
         noUnfolding, mkImplicitUnfolding,
         mkUnfolding, mkCoreUnfolding,
         mkTopUnfolding, mkSimpleUnfolding, mkWorkerUnfolding,
-        mkInlineUnfolding, mkInlinableUnfolding, mkWwInlineRule,
+        mkInlineUnfolding, mkInlineUnfoldingWithArity,
+        mkInlinableUnfolding, mkWwInlineRule,
         mkCompulsoryUnfolding, mkDFunUnfolding,
         specUnfolding,
 
@@ -49,11 +50,12 @@ import CoreSubst hiding( substTy )
 import CoreArity       ( manifestArity )
 import CoreUtils
 import Id
+import Demand          ( isBottomingSig )
 import DataCon
 import Literal
 import PrimOp
 import IdInfo
-import BasicTypes       ( Arity )
+import BasicTypes       ( Arity, InlineSpec(..), inlinePragmaSpec )
 import Type
 import PrelNames
 import TysPrim          ( realWorldStatePrimTy )
@@ -96,7 +98,7 @@ mkDFunUnfolding bndrs con ops
   = DFunUnfolding { df_bndrs = bndrs
                   , df_con = con
                   , df_args = map occurAnalyseExpr ops }
-                  -- See Note [Occurrrence analysis of unfoldings]
+                  -- See Note [Occurrence analysis of unfoldings]
 
 mkWwInlineRule :: CoreExpr -> Arity -> Unfolding
 mkWwInlineRule expr arity
@@ -125,20 +127,34 @@ mkWorkerUnfolding dflags work_fn
 
 mkWorkerUnfolding _ _ _ = noUnfolding
 
-mkInlineUnfolding :: Maybe Arity -> CoreExpr -> Unfolding
-mkInlineUnfolding mb_arity expr
+-- | Make an unfolding that may be used unsaturated
+-- (ug_unsat_ok = unSaturatedOk) and that is reported as having its
+-- manifest arity (the number of outer lambdas applications will
+-- resolve before doing any work).
+mkInlineUnfolding :: CoreExpr -> Unfolding
+mkInlineUnfolding expr
   = mkCoreUnfolding InlineStable
                     True         -- Note [Top-level flag on inline rules]
                     expr' guide
   where
     expr' = simpleOptExpr expr
-    guide = case mb_arity of
-              Nothing    -> UnfWhen { ug_arity = manifestArity expr'
-                                    , ug_unsat_ok = unSaturatedOk
-                                    , ug_boring_ok = boring_ok }
-              Just arity -> UnfWhen { ug_arity = arity
-                                    , ug_unsat_ok = needSaturated
-                                    , ug_boring_ok = boring_ok }
+    guide = UnfWhen { ug_arity = manifestArity expr'
+                    , ug_unsat_ok = unSaturatedOk
+                    , ug_boring_ok = boring_ok }
+    boring_ok = inlineBoringOk expr'
+
+-- | Make an unfolding that will be used once the RHS has been saturated
+-- to the given arity.
+mkInlineUnfoldingWithArity :: Arity -> CoreExpr -> Unfolding
+mkInlineUnfoldingWithArity arity expr
+  = mkCoreUnfolding InlineStable
+                    True         -- Note [Top-level flag on inline rules]
+                    expr' guide
+  where
+    expr' = simpleOptExpr expr
+    guide = UnfWhen { ug_arity = arity
+                    , ug_unsat_ok = needSaturated
+                    , ug_boring_ok = boring_ok }
     boring_ok = inlineBoringOk expr'
 
 mkInlinableUnfolding :: DynFlags -> CoreExpr -> Unfolding
@@ -222,7 +238,7 @@ mkCoreUnfolding :: UnfoldingSource -> Bool -> CoreExpr
 -- Occurrence-analyses the expression before capturing it
 mkCoreUnfolding src top_lvl expr guidance
   = CoreUnfolding { uf_tmpl         = occurAnalyseExpr expr,
-                      -- See Note [Occurrrence analysis of unfoldings]
+                      -- See Note [Occurrence analysis of unfoldings]
                     uf_src          = src,
                     uf_is_top       = top_lvl,
                     uf_is_value     = exprIsHNF        expr,
@@ -241,7 +257,7 @@ mkUnfolding :: DynFlags -> UnfoldingSource
 -- Occurrence-analyses the expression before capturing it
 mkUnfolding dflags src is_top_lvl is_bottoming expr
   = CoreUnfolding { uf_tmpl         = occurAnalyseExpr expr,
-                      -- See Note [Occurrrence analysis of unfoldings]
+                      -- See Note [Occurrence analysis of unfoldings]
                     uf_src          = src,
                     uf_is_top       = is_top_lvl,
                     uf_is_value     = exprIsHNF        expr,
@@ -508,18 +524,21 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
       | otherwise = size_up e
 
     size_up (Let (NonRec binder rhs) body)
-      = size_up rhs             `addSizeNSD`
-        size_up body            `addSizeN`
-        (if isUnliftedType (idType binder) then 0 else 10)
-                -- For the allocation
-                -- If the binder has an unlifted type there is no allocation
+      = size_up_rhs (binder, rhs) `addSizeNSD`
+        size_up body              `addSizeN`
+        size_up_alloc binder
 
     size_up (Let (Rec pairs) body)
-      = foldr (addSizeNSD . size_up . snd)
-              (size_up body `addSizeN` (10 * length pairs))     -- (length pairs) for the allocation
+      = foldr (addSizeNSD . size_up_rhs)
+              (size_up body `addSizeN` sum (map (size_up_alloc . fst) pairs))
               pairs
 
     size_up (Case e _ _ alts)
+        | null alts
+        = size_up e    -- case e of {} never returns, so take size of scrutinee
+
+    size_up (Case e _ _ alts)
+        -- Now alts is non-empty
         | Just v <- is_top_arg e -- We are scrutinising an argument variable
         = let
             alt_sizes = map size_up_alt alts
@@ -544,8 +563,8 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
 
             alts_size tot_size _ = tot_size
           in
-          alts_size (foldr addAltSize sizeZero alt_sizes)
-                    (foldr maxSize    sizeZero alt_sizes)
+          alts_size (foldr1 addAltSize alt_sizes)  -- alts is non-empty
+                    (foldr1 maxSize    alt_sizes)
                 -- Good to inline if an arg is scrutinised, because
                 -- that may eliminate allocation in the caller
                 -- And it eliminates the case itself
@@ -591,6 +610,14 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
               | otherwise
                 = False
 
+    size_up_rhs (bndr, rhs)
+      | Just join_arity <- isJoinId_maybe bndr
+        -- Skip arguments to join point
+      , (_bndrs, body) <- collectNBinders join_arity rhs
+      = size_up body
+      | otherwise
+      = size_up rhs
+
     ------------
     -- size_up_app is used when there's ONE OR MORE value args
     size_up_app (App fun arg) args voids
@@ -624,7 +651,17 @@ sizeExpr dflags bOMB_OUT_SIZE top_args expr
         --
         -- IMPORATANT: *do* charge 1 for the alternative, else we
         -- find that giant case nests are treated as practically free
-        -- A good example is Foreign.C.Error.errrnoToIOError
+        -- A good example is Foreign.C.Error.errnoToIOError
+
+    ------------
+    -- Cost to allocate binding with given binder
+    size_up_alloc bndr
+      |  isTyVar bndr                 -- Doesn't exist at runtime
+      || isJoinId bndr                -- Not allocated at all
+      || isUnliftedType (idType bndr) -- Doesn't live in heap
+      = 0
+      | otherwise
+      = 10
 
     ------------
         -- These addSize things have to be here because
@@ -690,6 +727,20 @@ callSize
  -> Int  -- ^ number of value args that are void
  -> Int
 callSize n_val_args voids = 10 * (1 + n_val_args - voids)
+        -- The 1+ is for the function itself
+        -- Add 1 for each non-trivial arg;
+        -- the allocation cost, as in let(rec)
+
+-- | The size of a jump to a join point
+jumpSize
+ :: Int  -- ^ number of value args
+ -> Int  -- ^ number of value args that are void
+ -> Int
+jumpSize n_val_args voids = 2 * (1 + n_val_args - voids)
+  -- A jump is 20% the size of a function call. Making jumps free reopens
+  -- bug #6048, but making them any more expensive loses a 21% improvement in
+  -- spectral/puzzle. TODO Perhaps adjusting the default threshold would be a
+  -- better solution?
 
 funSize :: DynFlags -> [Id] -> Id -> Int -> Int -> ExprSize
 -- Size for functions that are not constructors or primops
@@ -700,12 +751,11 @@ funSize dflags top_args fun n_val_args voids
   | otherwise = SizeIs size arg_discount res_discount
   where
     some_val_args = n_val_args > 0
+    is_join = isJoinId fun
 
-    size | some_val_args = callSize n_val_args voids
-         | otherwise     = 0
-        -- The 1+ is for the function itself
-        -- Add 1 for each non-trivial arg;
-        -- the allocation cost, as in let(rec)
+    size | is_join              = jumpSize n_val_args voids
+         | not some_val_args    = 0
+         | otherwise            = callSize n_val_args voids
 
         --                  DISCOUNTS
         --  See Note [Function and non-function discounts]
@@ -718,6 +768,7 @@ funSize dflags top_args fun n_val_args voids
     res_discount | idArity fun > n_val_args = ufFunAppDiscount dflags
                  | otherwise                = 0
         -- If the function is partially applied, show a result discount
+-- XXX maybe behave like ConSize for eval'd variable
 
 conSize :: DataCon -> Int -> ExprSize
 conSize dc n_val_args
@@ -728,6 +779,8 @@ conSize dc n_val_args
 
 -- See Note [Constructor size and result discount]
   | otherwise = SizeIs 10 emptyBag (10 * (1 + n_val_args))
+
+-- XXX still looks to large to me
 
 {-
 Note [Constructor size and result discount]
@@ -793,7 +846,7 @@ Conclusion:
 Note [Literal integer size]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Literal integers *can* be big (mkInteger [...coefficients...]), but
-need not be (S# n).  We just use an aribitrary big-ish constant here
+need not be (S# n).  We just use an arbitrary big-ish constant here
 so that, in particular, we don't inline top-level defns like
    n = S# 5
 There's no point in doing so -- any optimisations will see the S#
@@ -868,6 +921,11 @@ ufFunAppDiscount
 
 ufDearOp
      The size of a foreign call or not-dupable PrimOp
+
+ufVeryAggressive
+     If True, the compiler ignores all the thresholds and inlines very
+     aggressively. It still adheres to arity, simplifier phase control and
+     loop breakers.
 
 
 Note [Function applications]
@@ -982,6 +1040,13 @@ certainlyWillInline dflags fn_info
         --    See Note [certainlyWillInline: INLINABLE]
     do_cunf expr (UnfIfGoodArgs { ug_size = size, ug_args = args })
       | not (null args)  -- See Note [certainlyWillInline: be careful of thunks]
+      , case inlinePragmaSpec (inlinePragInfo fn_info) of
+          NoInline -> False -- NOINLINE; do not say certainlyWillInline!
+          _        -> True  -- INLINE, INLINABLE, or nothing
+      , not (isBottomingSig (strictnessInfo fn_info))
+              -- Do not unconditionally inline a bottoming functions even if
+              -- it seems smallish. We've carefully lifted it out to top level,
+              -- so we don't want to re-inline it.
       , let arity = length args
       , size - (10 * (arity + 1)) <= ufUseThreshold dflags
       = Just (fn_unf { uf_src      = InlineStable
@@ -1111,7 +1176,7 @@ tryUnfolding dflags id lone_variable
      UnfNever -> traceInline dflags str (text "UnfNever") Nothing
 
      UnfWhen { ug_arity = uf_arity, ug_unsat_ok = unsat_ok, ug_boring_ok = boring_ok }
-        | enough_args && (boring_ok || some_benefit)
+        | enough_args && (boring_ok || some_benefit || ufVeryAggressive dflags)
                 -- See Note [INLINE for small functions (3)]
         -> traceInline dflags str (mk_doc some_benefit empty True) (Just unf_template)
         | otherwise
@@ -1121,6 +1186,8 @@ tryUnfolding dflags id lone_variable
           enough_args = (n_val_args >= uf_arity) || (unsat_ok && n_val_args > 0)
 
      UnfIfGoodArgs { ug_args = arg_discounts, ug_res = res_discount, ug_size = size }
+        | ufVeryAggressive dflags
+        -> traceInline dflags str (mk_doc some_benefit extra_doc True) (Just unf_template)
         | is_wf && some_benefit && small_enough
         -> traceInline dflags str (mk_doc some_benefit extra_doc True) (Just unf_template)
         | otherwise
@@ -1302,7 +1369,7 @@ AND
         it is bound to a cheap expression
 
 then we should not inline it (unless there is some other reason,
-e.g. is is the sole occurrence).  That is what is happening at
+e.g. it is the sole occurrence).  That is what is happening at
 the use of 'lone_variable' in 'interesting_call'.
 
 Why?  At least in the case-scrutinee situation, turning
@@ -1354,7 +1421,7 @@ However, watch out:
 Note [Interaction of exprIsWorkFree and lone variables]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 The lone-variable test says "don't inline if a case expression
-scrutines a lone variable whose unfolding is cheap".  It's very
+scrutinises a lone variable whose unfolding is cheap".  It's very
 important that, under these circumstances, exprIsConApp_maybe
 can spot a constructor application. So, for example, we don't
 consider

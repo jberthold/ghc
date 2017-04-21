@@ -275,10 +275,11 @@ layout dflags procpoints liveness entry entry_args final_stackmaps final_sp_high
        --
        let middle_pre = blockToList $ foldl blockSnoc middle1 middle2
 
-           final_blocks = manifestSp dflags final_stackmaps stack0 sp0 final_sp_high entry0
-                              middle_pre sp_off last1 fixup_blocks
+       let final_blocks =
+               manifestSp dflags final_stackmaps stack0 sp0 final_sp_high
+                          entry0 middle_pre sp_off last1 fixup_blocks
 
-           acc_stackmaps' = mapUnion acc_stackmaps out
+       let acc_stackmaps' = mapUnion acc_stackmaps out
 
            -- If this block jumps to the GC, then we do not take its
            -- stack usage into account for the high-water mark.
@@ -527,8 +528,16 @@ makeFixupBlock dflags sp0 l stack tscope assigs
   | otherwise = do
     tmp_lbl <- newBlockId
     let sp_off = sp0 - sm_sp stack
+        maybeAddUnwind block
+          | debugLevel dflags > 0
+          = block `blockSnoc` CmmUnwind [(Sp, Just unwind_val)]
+          | otherwise
+          = block
+          where unwind_val = cmmOffset dflags (CmmReg spReg) (sm_sp stack)
         block = blockJoin (CmmEntry tmp_lbl tscope)
-                          (maybeAddSpAdj dflags sp_off (blockFromList assigs))
+                          (  maybeAddSpAdj dflags sp_off
+                           $ maybeAddUnwind
+                           $ blockFromList assigs )
                           (CmmBranch l)
     return (tmp_lbl, [block])
 
@@ -793,19 +802,32 @@ manifestSp dflags stackmaps stack0 sp0 sp_high
     adj_pre_sp  = mapExpDeep (areaToSp dflags sp0            sp_high area_off)
     adj_post_sp = mapExpDeep (areaToSp dflags (sp0 - sp_off) sp_high area_off)
 
-    -- Add unwind pseudo-instructions to document Sp level for debugging
-    add_unwind_info block
-      | debugLevel dflags > 0 = CmmUnwind Sp sp_unwind : block
-      | otherwise             = block
-    sp_unwind = CmmRegOff (CmmGlobal Sp) (sp0 - wORD_SIZE dflags)
+    -- Add unwind pseudo-instruction at the beginning of each block to
+    -- document Sp level for debugging
+    add_initial_unwind block
+      | debugLevel dflags > 0
+      = CmmUnwind [(Sp, Just sp_unwind)] `blockCons` block
+      | otherwise
+      = block
+      where sp_unwind = CmmRegOff spReg (sp0 - wORD_SIZE dflags)
 
-    final_middle = maybeAddSpAdj dflags sp_off $
-                   blockFromList $
-                   add_unwind_info $
-                   map adj_pre_sp $
-                   elimStackStores stack0 stackmaps area_off $
-                   middle_pre
+    -- Add unwind pseudo-instruction right before the Sp adjustment
+    -- if there is one.
+    add_adj_unwind block
+      | debugLevel dflags > 0
+      , sp_off /= 0
+      = block `blockSnoc` CmmUnwind [(Sp, Just sp_unwind)]
+      | otherwise
+      = block
+      where sp_unwind = CmmRegOff spReg (sp0 - wORD_SIZE dflags - sp_off)
 
+    final_middle = maybeAddSpAdj dflags sp_off
+                 . add_adj_unwind
+                 . add_initial_unwind
+                 . blockFromList
+                 . map adj_pre_sp
+                 . elimStackStores stack0 stackmaps area_off
+                 $ middle_pre
     final_last    = optStackCheck (adj_post_sp last)
 
     final_block   = blockJoin first final_middle final_last
@@ -823,9 +845,9 @@ getAreaOff stackmaps (Young l) =
 
 maybeAddSpAdj :: DynFlags -> ByteOff -> Block CmmNode O O -> Block CmmNode O O
 maybeAddSpAdj _      0      block = block
-maybeAddSpAdj dflags sp_off block
-   = block `blockSnoc` CmmAssign spReg (cmmOffset dflags (CmmReg spReg) sp_off)
-
+maybeAddSpAdj dflags sp_off block = block `blockSnoc` adj
+  where
+    adj = CmmAssign spReg (cmmOffset dflags (CmmReg spReg) sp_off)
 
 {-
 Sp(L) is the Sp offset on entry to block L relative to the base of the
@@ -1003,7 +1025,7 @@ live across the call.  Our job now is to expand the call so we get
    ...
 
 Note the copyOut, which saves the results in the places that L1 is
-expecting them (see Note {safe foreign call convention]). Note also
+expecting them (see Note [safe foreign call convention]). Note also
 that safe foreign call is replace by an unsafe one in the Cmm graph.
 -}
 

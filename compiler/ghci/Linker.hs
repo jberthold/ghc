@@ -62,11 +62,7 @@ import System.Directory
 
 import Exception
 
-#if __GLASGOW_HASKELL__ >= 709
-import Foreign
-#else
-import Foreign.Safe
-#endif
+import Foreign (Ptr) -- needed for 2nd stage
 
 {- **********************************************************************
 
@@ -247,7 +243,8 @@ withExtendedLinkEnv new_env action
 showLinkerState :: DynFlags -> IO ()
 showLinkerState dflags
   = do pls <- readIORef v_PersistentLinkerState >>= readMVar
-       log_action dflags dflags NoReason SevDump noSrcSpan defaultDumpStyle
+       log_action dflags dflags NoReason SevDump noSrcSpan
+          (defaultDumpStyle dflags)
                  (vcat [text "----- Linker state -----",
                         text "Pkgs:" <+> ppr (pkgs_loaded pls),
                         text "Objs:" <+> ppr (objs_loaded pls),
@@ -315,7 +312,19 @@ linkCmdLineLibs' hsc_env pls =
                            , libraryPaths = lib_paths}) = hsc_dflags hsc_env
 
       -- (c) Link libraries from the command-line
-      let minus_ls = [ lib | Option ('-':'l':lib) <- cmdline_ld_inputs ]
+      let minus_ls_1 = [ lib | Option ('-':'l':lib) <- cmdline_ld_inputs ]
+
+      -- On Windows we want to add libpthread by default just as GCC would.
+      -- However because we don't know the actual name of pthread's dll we
+      -- need to defer this to the locateLib call so we can't initialize it
+      -- inside of the rts. Instead we do it here to be able to find the
+      -- import library for pthreads. See Trac #13210.
+      let platform = targetPlatform dflags
+          os       = platformOS platform
+          minus_ls = case os of
+                       OSMinGW32 -> "pthread" : minus_ls_1
+                       _         -> minus_ls_1
+
       libspecs <- mapM (locateLib hsc_env False lib_paths) minus_ls
 
       -- (d) Link .o files from the command-line
@@ -336,8 +345,10 @@ linkCmdLineLibs' hsc_env pls =
       if null cmdline_lib_specs then return pls
                                 else do
 
-      -- Add directories to library search paths
-      let all_paths = let paths = framework_paths
+      -- Add directories to library search paths, this only has an effect
+      -- on Windows. On Unix OSes this function is a NOP.
+      let all_paths = let paths = takeDirectory (fst $ sPgm_c $ settings dflags)
+                                : framework_paths
                                ++ lib_paths
                                ++ [ takeDirectory dll | DLLPath dll <- libspecs ]
                       in nub $ map normalise paths
@@ -386,7 +397,8 @@ classifyLdInput dflags f
   | isObjectFilename platform f = return (Just (Object f))
   | isDynLibFilename platform f = return (Just (DLLPath f))
   | otherwise          = do
-        log_action dflags dflags NoReason SevInfo noSrcSpan defaultUserStyle
+        log_action dflags dflags NoReason SevInfo noSrcSpan
+            (defaultUserStyle dflags)
             (text ("Warning: ignoring unrecognised input `" ++ f ++ "'"))
         return Nothing
     where platform = targetPlatform dflags
@@ -884,18 +896,23 @@ dynLoadObjs hsc_env pls objs = do
                         concatMap
                             (\(lp, l) ->
                                  [ Option ("-L" ++ lp)
-                                 , Option ("-Wl,-rpath")
-                                 , Option ("-Wl," ++ lp)
+                                 , Option "-Xlinker"
+                                 , Option "-rpath"
+                                 , Option "-Xlinker"
+                                 , Option lp
                                  , Option ("-l" ++  l)
                                  ])
                             (temp_sos pls)
                         ++ concatMap
                              (\lp ->
                                  [ Option ("-L" ++ lp)
-                                 , Option ("-Wl,-rpath")
-                                 , Option ("-Wl," ++ lp)
+                                 , Option "-Xlinker"
+                                 , Option "-rpath"
+                                 , Option "-Xlinker"
+                                 , Option lp
                                  ])
                              minus_big_ls
+                        -- See Note [-Xlinker -rpath vs -Wl,-rpath]
                         ++ map (\l -> Option ("-l" ++ l)) minus_ls,
                       -- Add -l options and -L options from dflags.
                       --
@@ -1349,13 +1366,17 @@ locateLib hsc_env is_hs dirs lib
 
      obj_file     = lib <.> "o"
      dyn_obj_file = lib <.> "dyn_o"
-     arch_file = "lib" ++ lib ++ lib_tag <.> "a"
+     arch_files = [ "lib" ++ lib ++ lib_tag <.> "a"
+                  , lib <.> "a" -- native code has no lib_tag
+                  ]
      lib_tag = if is_hs && loading_profiled_hs_libs then "_p" else ""
 
      loading_profiled_hs_libs = interpreterProfiled dflags
      loading_dynamic_hs_libs  = interpreterDynamic dflags
 
-     import_libs  = [lib <.> "lib", "lib" ++ lib <.> "lib", "lib" ++ lib <.> "dll.a"]
+     import_libs  = [ lib <.> "lib"           , "lib" ++ lib <.> "lib"
+                    , "lib" ++ lib <.> "dll.a", lib <.> "dll.a"
+                    ]
 
      hs_dyn_lib_name = lib ++ '-':programName dflags ++ projectVersion dflags
      hs_dyn_lib_file = mkHsSOName platform hs_dyn_lib_name
@@ -1368,9 +1389,10 @@ locateLib hsc_env is_hs dirs lib
 
      findObject    = liftM (fmap Object)  $ findFile dirs obj_file
      findDynObject = liftM (fmap Object)  $ findFile dirs dyn_obj_file
-     findArchive   = let local  = liftM (fmap Archive) $ findFile dirs arch_file
-                         linked = liftM (fmap Archive) $ searchForLibUsingGcc dflags arch_file dirs
-                     in liftM2 (<|>) local linked
+     findArchive   = let local  name = liftM (fmap Archive) $ findFile dirs name
+                         linked name = liftM (fmap Archive) $ searchForLibUsingGcc dflags name dirs
+                         check name = apply [local name, linked name]
+                     in  apply (map check arch_files)
      findHSDll     = liftM (fmap DLLPath) $ findFile dirs hs_dyn_lib_file
      findDll       = liftM (fmap DLLPath) $ findFile dirs dyn_lib_file
      findSysDll    = fmap (fmap $ DLL . dropExtension . takeFileName) $ findSystemLibrary hsc_env so_name
@@ -1447,7 +1469,7 @@ maybePutStr dflags s
                  NoReason
                  SevInteractive
                  noSrcSpan
-                 defaultUserStyle
+                 (defaultUserStyle dflags)
                  (text s)
 
 maybePutStrLn :: DynFlags -> String -> IO ()

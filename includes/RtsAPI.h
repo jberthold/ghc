@@ -18,6 +18,7 @@ extern "C" {
 
 #include "HsFFI.h"
 #include "rts/Time.h"
+#include "rts/EventLogWriter.h"
 
 /*
  * Running the scheduler
@@ -78,6 +79,9 @@ typedef struct {
 
     // Whether to retain CAFs (default: false)
     HsBool keep_cafs;
+
+    // Writer a for eventlog.
+    const EventLogWriter *eventlog_writer;
 
     // Called before processing command-line flags, so that default
     // settings for RtsFlags can be provided.
@@ -176,7 +180,7 @@ typedef struct _RTSStats {
 
   // -----------------------------------
   // Cumulative stats about time use
-  // (we use signed values here because due to inacuracies in timers
+  // (we use signed values here because due to inaccuracies in timers
   // the values can occasionally go slightly negative)
 
     // Total CPU time used by the mutator

@@ -138,7 +138,7 @@ type Assignment = (LocalReg, CmmExpr, AbsMem)
   -- the RHS of the assignment.
 
 type Assignments = [Assignment]
-  -- A sequence of assignements; kept in *reverse* order
+  -- A sequence of assignments; kept in *reverse* order
   -- So the list [ x=e1, y=e2 ] means the sequence of assignments
   --     y = e2
   --     x = e1
@@ -336,7 +336,7 @@ shouldSink _ _other = Nothing
 
 --
 -- discard dead assignments.  This doesn't do as good a job as
--- removeDeadAsssignments, because it would need multiple passes
+-- removeDeadAssignments, because it would need multiple passes
 -- to get all the dead code, but it catches the common case of
 -- superfluous reloads from the stack that the stack allocator
 -- leaves behind.

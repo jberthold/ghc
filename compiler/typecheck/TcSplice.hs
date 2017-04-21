@@ -516,7 +516,7 @@ spliceCtxtDoc splice
 spliceResultDoc :: LHsExpr Name -> SDoc
 spliceResultDoc expr
   = sep [ text "In the result of the splice:"
-        , nest 2 (char '$' <> pprParendLExpr expr)
+        , nest 2 (char '$' <> ppr expr)
         , text "To see what the splice expanded to, use -ddump-splices"]
 
 -------------------
@@ -677,7 +677,7 @@ defaultRunMeta (MetaD r)
 defaultRunMeta (MetaAW r)
   = fmap r . runMeta' False (const empty) (const convertAnnotationWrapper)
     -- We turn off showing the code in meta-level exceptions because doing so exposes
-    -- the toAnnotationWrapper function that we slap around the users code
+    -- the toAnnotationWrapper function that we slap around the user's code
 
 ----------------
 runMetaAW :: LHsExpr Id         -- Of type AnnotationWrapper
@@ -909,6 +909,10 @@ instance TH.Quasi TcM where
           hang (text "The binder" <+> quotes (ppr name) <+> ptext (sLit "is not a NameU."))
              2 (text "Probable cause: you used mkName instead of newName to generate a binding.")
 
+  qAddForeignFile lang str = do
+    var <- fmap tcg_th_foreign_files getGblEnv
+    updTcRef var ((lang, str) :)
+
   qAddModFinalizer fin = do
       r <- liftIO $ mkRemoteRef fin
       fref <- liftIO $ mkForeignRef r (freeRemoteRef r)
@@ -1100,6 +1104,7 @@ handleTHMessage msg = case msg of
     hsc_env <- env_top <$> getEnv
     wrapTHResult $ liftIO (mkFinalizedHValue hsc_env r) >>= addModFinalizerRef
   AddTopDecls decs -> wrapTHResult $ TH.qAddTopDecls decs
+  AddForeignFile lang str -> wrapTHResult $ TH.qAddForeignFile lang str
   IsExtEnabled ext -> wrapTHResult $ TH.qIsExtEnabled ext
   ExtsEnabled -> wrapTHResult $ TH.qExtsEnabled
   _ -> panic ("handleTHMessage: unexpected message " ++ show msg)
@@ -1195,7 +1200,8 @@ lookupName is_type_name s
 
     occ :: OccName
     occ | is_type_name
-        = if isLexCon occ_fs then mkTcOccFS    occ_fs
+        = if isLexVarSym occ_fs || isLexCon occ_fs
+                             then mkTcOccFS    occ_fs
                              else mkTyVarOccFS occ_fs
         | otherwise
         = if isLexCon occ_fs then mkDataOccFS occ_fs

@@ -19,14 +19,10 @@ test('simpl016', normal, compile, ['-dsuppress-uniques'])
 test('simpl017', normal, compile_fail, [''])
 test('simpl018', normal, compile, [''])
 test('simpl019', normal, compile, [''])
-test('simpl020',
-     extra_clean(['Simpl020_A.hi', 'Simpl020_A.o']),
-     multimod_compile,
-     ['simpl020', '-v0'])
+test('simpl020', [extra_files(['Simpl020_A.hs'])], multimod_compile, ['simpl020', '-v0'])
 
 test('simpl-T1370', normal, compile, [''])
 test('T2520', normal, compile, [''])
-
 
 test('spec001', when(fast(), skip), compile, [''])
 test('spec002', normal, compile, [''])
@@ -67,10 +63,7 @@ test('T4930', only_ways(['optasm']),
               compile,
               ['-O -ddump-simpl -dsuppress-uniques'])
 
-test('T3055',
-     extra_clean(['T3055.hi', 'T3055.o', 'T3055.simpl']),
-     run_command,
-     ['$MAKE -s --no-print-directory T3055'])
+test('T3055', [], run_command, ['$MAKE -s --no-print-directory T3055'])
 
 test('T4306',
      normal,
@@ -96,22 +89,16 @@ test('T3831', normal, compile, [''])
 test('T4345', normal, compile, [''])
 test('T4398', normal, compile, ['-dsuppress-uniques'])
 
-test('T4903',
-     extra_clean(['T4903a.hi', 'T4903a.o']),
-     run_command,
-     ['$MAKE -s --no-print-directory T4903'])
+test('T4903', [], run_command, ['$MAKE -s --no-print-directory T4903'])
 
-test('T4918',
-     extra_clean(['T4918a.hi', 'T4918a.o']),
-     run_command,
-     ['$MAKE -s --no-print-directory T4918'])
+test('T4918', [], run_command, ['$MAKE -s --no-print-directory T4918'])
 
 # This test flips too and fro about whether it passes
 # I'm not sure why it is so delicate, but it greps the
 # result of -ddump-simpl, which is never advertised to
 # be very stable
 test('T4945',
-     expect_broken(4945),
+     normal,
      run_command,
      ['$MAKE -s --no-print-directory T4945'])
 
@@ -131,14 +118,11 @@ test('T5342', normal, compile, [''])   # Lint error with -prof
 test('T5359a', normal, compile, [''])  # Lint error with -O (OccurAnal)
 test('T5359b', normal, compile, [''])  # Lint error with -O (OccurAnal)
 test('T5458', normal, compile, [''])
-test('simpl021',
-     extra_clean(['Simpl021A.hi', 'Simpl021A.o',
-                  'Simpl021B.hi', 'Simpl021B.o']),
-     run_command,
-     ['$MAKE -s --no-print-directory simpl021'])
+test('simpl021', [extra_files(['Simpl021A.hs', 'Simpl021B.hs'])], run_command, ['$MAKE -s --no-print-directory simpl021'])
 test('T5327', normal, run_command, ['$MAKE -s --no-print-directory T5327'])
 test('T5615', normal, run_command, ['$MAKE -s --no-print-directory T5615'])
 test('T5623', normal, run_command, ['$MAKE -s --no-print-directory T5623'])
+test('T13155', normal, run_command, ['$MAKE -s --no-print-directory T13155'])
 test('T5658b',
      normal,
      run_command,
@@ -147,31 +131,23 @@ test('T5776',
      normal,
      run_command,
      ['$MAKE -s --no-print-directory T5776'])
-test('T4138',
-     extra_clean(['T4138_A.hi', 'T4138_A.o', 'T4138.simpl']),
-     run_command,
-     ['$MAKE -s --no-print-directory T4138'])
+test('T4138', [], run_command, ['$MAKE -s --no-print-directory T4138'])
 test('T7088', normal, compile, [''])
 test('T6082-RULE', normal, compile, [''])
-test('T7165',
-     extra_clean(['T7165a.hi', 'T7165a.o']),
-     run_command,
-     ['$MAKE -s --no-print-directory T7165'])
+test('T7165', [], run_command, ['$MAKE -s --no-print-directory T7165'])
 test('T7287', normal, compile, [''])
 test('T7360', only_ways(['optasm']), compile, ['-ddump-simpl -dsuppress-uniques'])
 test('T5366',
      normal,
      run_command,
      ['$MAKE -s --no-print-directory T5366'])
-test('T7796',
-     extra_clean(['T7796.prep']),
-     run_command,
-     ['$MAKE -s --no-print-directory T7796'])
+test('T7796', [], run_command, ['$MAKE -s --no-print-directory T7796'])
 test('T5550', omit_ways(prof_ways), compile, [''])
 test('T7865', normal, run_command, ['$MAKE -s --no-print-directory T7865'])
 test('T7785', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T7702', 
-     [pre_cmd('$MAKE -s --no-print-directory -C T7702plugin package.T7702 TOP={top}'),
+     [extra_files(['T7702plugin']),
+      pre_cmd('$MAKE -s --no-print-directory -C T7702plugin package.T7702 TOP={top}'),
       clean_cmd('$MAKE -s --no-print-directory -C T7702plugin clean.T7702'), 
       # we say 18mb peak allocated +/- 70% because other compiler flags have 
       # a large effect on allocation which is hard to separate from the 
@@ -191,10 +167,7 @@ test('T7995',
 
 test('T8196', normal, compile, [''])
 test('T8221b', normal, compile, [''])
-test('T8221',
-     extra_clean(['T8221a.hi', 'T8221a.o']),
-     run_command,
-     ['$MAKE -s --no-print-directory T8221'])
+test('T8221', [], run_command, ['$MAKE -s --no-print-directory T8221'])
 test('T8274', normal, run_command, ['$MAKE -s --no-print-directory T8274'])
 test('T8329', only_ways(['optasm']), multimod_compile, ['T8329','-v0 -O'])
 test('T5996',
@@ -207,7 +180,9 @@ test('T8832',
      run_command,
      ['$MAKE -s --no-print-directory T8832 T8832_WORDSIZE_OPTS=' +
       ('-DT8832_WORDSIZE_64' if wordsize(64) else '')])
-test('T8848', only_ways(['optasm']), compile, ['-ddump-rule-firings -dsuppress-uniques'])
+test('T8848', normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T8848'])
 test('T8848a', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T8331', only_ways(['optasm']), compile, ['-ddump-rules'])
 test('T6056', only_ways(['optasm']), multimod_compile, ['T6056', '-v0 -ddump-rule-firings'])
@@ -219,7 +194,7 @@ test('T10176', only_ways(['optasm']), compile, [''])
 test('T10180', only_ways(['optasm']), compile, [''])
 test('T10602', only_ways(['optasm']), multimod_compile, ['T10602','-v0'])
 test('T10627', only_ways(['optasm']), compile, [''])
-test('T10181', [expect_broken(10181), only_ways(['optasm'])], compile, [''])
+test('T10181', [only_ways(['optasm'])], compile, [''])
 test('T10083',
      normal,
      run_command,
@@ -238,7 +213,7 @@ test('T3990',
      run_command,
      ['$MAKE -s --no-print-directory T3990'])
 
-test('T12076', extra_clean(['T12076a.hi', 'T12076a.o']), multimod_compile, ['T12076', '-v0'])
+test('T12076', [], multimod_compile, ['T12076', '-v0'])
 test('T12076lit', normal, compile, ['-O'])
 test('T12076sat', normal, compile, ['-O'])
 test('T12212', normal, compile, ['-O'])
@@ -260,4 +235,18 @@ test('T13025',
      normal,
      run_command,
      ['$MAKE -s --no-print-directory T13025'])
-
+test('T13143', normal, compile, ['-O -ddump-simpl -dsuppress-uniques'])
+test('T13156', normal, run_command, ['$MAKE -s --no-print-directory T13156'])
+test('T11444', normal, compile, [''])
+test('str-rules',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory str-rules'])
+test('T13170', only_ways(['optasm']), compile, ['-dcore-lint'])
+test('T13317',
+     normal,
+     run_command,
+     ['$MAKE -s --no-print-directory T13317'])
+test('T13340', normal, run_command, ['$MAKE -s --no-print-directory T13340'])
+test('T13338', only_ways(['optasm']), compile, ['-dcore-lint'])
+test('T13367', normal, run_command, ['$MAKE -s --no-print-directory T13367'])

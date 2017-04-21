@@ -59,7 +59,6 @@ import CoreSyn
 import HscTypes
 import Module
 import DynFlags
-import StaticFlags
 import BasicTypes       ( CompilerPhase(..) )
 import Annotations
 
@@ -84,6 +83,7 @@ import Data.Dynamic
 import Data.IORef
 import Data.Map (Map)
 import qualified Data.Map as Map
+import qualified Data.Map.Strict as MapStrict
 import Data.Word
 import Control.Monad
 import Control.Applicative ( Alternative(..) )
@@ -133,6 +133,7 @@ data CoreToDo           -- These are diff core-to-core passes,
 
   | CoreTidy
   | CorePrep
+  | CoreOccurAnal
 
 instance Outputable CoreToDo where
   ppr (CoreDoSimplify _ _)     = text "Simplifier"
@@ -152,6 +153,7 @@ instance Outputable CoreToDo where
   ppr CoreDesugarOpt           = text "Desugar (after optimization)"
   ppr CoreTidy                 = text "Tidy Core"
   ppr CorePrep                 = text "CorePrep"
+  ppr CoreOccurAnal            = text "Occurrence analysis"
   ppr CoreDoPrintCore          = text "Print core"
   ppr (CoreDoRuleCheck {})     = text "Rule check"
   ppr CoreDoNothing            = text "CoreDoNothing"
@@ -249,8 +251,8 @@ bindsOnlyPass pass guts
 ************************************************************************
 -}
 
-verboseSimplStats :: Bool
-verboseSimplStats = opt_PprStyle_Debug          -- For now, anyway
+getVerboseSimplStats :: (Bool -> SDoc) -> SDoc
+getVerboseSimplStats = sdocWithPprDebug          -- For now, anyway
 
 zeroSimplCount     :: DynFlags -> SimplCount
 isZeroSimplCount   :: SimplCount -> Bool
@@ -310,19 +312,13 @@ doSimplTick dflags tick
 doSimplTick _ _ (VerySimplCount n) = VerySimplCount (n+1)
 
 
--- Don't use Map.unionWith because that's lazy, and we want to
--- be pretty strict here!
 addTick :: TickCounts -> Tick -> TickCounts
-addTick fm tick = case Map.lookup tick fm of
-                        Nothing -> Map.insert tick 1 fm
-                        Just n  -> n1 `seq` Map.insert tick n1 fm
-                                where
-                                   n1 = n+1
-
+addTick fm tick = MapStrict.insertWith (+) tick 1 fm
 
 plusSimplCount sc1@(SimplCount { ticks = tks1, details = dts1 })
                sc2@(SimplCount { ticks = tks2, details = dts2 })
-  = log_base { ticks = tks1 + tks2, details = Map.unionWith (+) dts1 dts2 }
+  = log_base { ticks = tks1 + tks2
+             , details = MapStrict.unionWith (+) dts1 dts2 }
   where
         -- A hackish way of getting recent log info
     log_base | null (log1 sc2) = sc1    -- Nothing at all in sc2
@@ -338,7 +334,8 @@ pprSimplCount (SimplCount { ticks = tks, details = dts, log1 = l1, log2 = l2 })
   = vcat [text "Total ticks:    " <+> int tks,
           blankLine,
           pprTickCounts dts,
-          if verboseSimplStats then
+          getVerboseSimplStats $ \dbg -> if dbg
+          then
                 vcat [blankLine,
                       text "Log (most recent first)",
                       nest 4 (vcat (map ppr l1) $$ vcat (map ppr l2))]
@@ -738,8 +735,8 @@ msg sev doc
                      SevDump    -> dump_sty
                      _          -> user_sty
              err_sty  = mkErrStyle dflags unqual
-             user_sty = mkUserStyle unqual AllTheWay
-             dump_sty = mkDumpStyle unqual
+             user_sty = mkUserStyle dflags unqual AllTheWay
+             dump_sty = mkDumpStyle dflags unqual
        ; liftIO $
          (log_action dflags) dflags NoReason sev loc sty doc }
 
@@ -809,7 +806,7 @@ instance MonadThings CoreM where
 -- | Attempt to convert a Template Haskell name to one that GHC can
 -- understand. Original TH names such as those you get when you use
 -- the @'foo@ syntax will be translated to their equivalent GHC name
--- exactly. Qualified or unqualifed TH names will be dynamically bound
+-- exactly. Qualified or unqualified TH names will be dynamically bound
 -- to names in the module being compiled, if possible. Exact TH names
 -- will be bound to the name they represent, exactly.
 thNameToGhcName :: TH.Name -> CoreM (Maybe Name)

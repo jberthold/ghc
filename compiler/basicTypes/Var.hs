@@ -34,7 +34,7 @@
 
 module Var (
         -- * The main data type and synonyms
-        Var, CoVar, Id, NcId, DictId, DFunId, EvVar, EqVar, EvId, IpId,
+        Var, CoVar, Id, NcId, DictId, DFunId, EvVar, EqVar, EvId, IpId, JoinId,
         TyVar, TypeVar, KindVar, TKVar, TyCoVar,
 
         -- * In and Out variants
@@ -83,7 +83,8 @@ module Var (
 
 import {-# SOURCE #-}   TyCoRep( Type, Kind, pprKind )
 import {-# SOURCE #-}   TcType( TcTyVarDetails, pprTcTyVarDetails, vanillaSkolemTv )
-import {-# SOURCE #-}   IdInfo( IdDetails, IdInfo, coVarDetails, isCoVarDetails, vanillaIdInfo, pprIdDetails )
+import {-# SOURCE #-}   IdInfo( IdDetails, IdInfo, coVarDetails, isCoVarDetails,
+                                vanillaIdInfo, pprIdDetails )
 
 import Name hiding (varName)
 import Unique ( Uniquable, Unique, getKey, getUnique
@@ -149,6 +150,7 @@ type IpId   = EvId      -- A term-level implicit parameter
 
 -- | Equality Variable
 type EqVar  = EvId      -- Boxed equality evidence
+type JoinId = Id        -- A join variable
 
 -- | Type or Coercion Variable
 type TyCoVar = Id       -- Type, *or* coercion variable

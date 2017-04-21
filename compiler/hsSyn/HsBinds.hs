@@ -63,6 +63,9 @@ Global bindings (where clauses)
 -- | Haskell Local Bindings
 type HsLocalBinds id = HsLocalBindsLR id id
 
+-- | Located Haskell local bindings
+type LHsLocalBinds id = Located (HsLocalBinds id)
+
 -- | Haskell Local Bindings with separate Left and Right identifier types
 --
 -- Bindings in a 'let' expression
@@ -81,6 +84,8 @@ data HsLocalBindsLR idL idR
 
   | EmptyLocalBinds
       -- ^ Empty Local Bindings
+
+type LHsLocalBindsLR idL idR = Located (HsLocalBindsLR idL idR)
 
 deriving instance (DataId idL, DataId idR)
   => Data (HsLocalBindsLR idL idR)
@@ -847,7 +852,15 @@ data Sig name
 
   | SCCFunSig  SourceText      -- Note [Pragma source text] in BasicTypes
                (Located name)  -- Function name
-               (Maybe StringLiteral)
+               (Maybe (Located StringLiteral))
+       -- | A complete match pragma
+       --
+       -- > {-# COMPLETE C, D [:: T] #-}
+       --
+       -- Used to inform the pattern match checker about additional
+       -- complete matchings which, for example, arise from pattern
+       -- synonym definitions.
+  | CompleteMatchSig SourceText (Located [Located name]) (Maybe (Located name))
 
 deriving instance (DataId name) => Data (Sig name)
 
@@ -915,6 +928,7 @@ isPragLSig :: LSig name -> Bool
 isPragLSig (L _ (SpecSig {}))   = True
 isPragLSig (L _ (InlineSig {})) = True
 isPragLSig (L _ (SCCFunSig {})) = True
+isPragLSig (L _ (CompleteMatchSig {})) = True
 isPragLSig _                    = False
 
 isInlineLSig :: LSig name -> Bool
@@ -930,6 +944,10 @@ isSCCFunSig :: LSig name -> Bool
 isSCCFunSig (L _ (SCCFunSig {})) = True
 isSCCFunSig _                    = False
 
+isCompleteMatchSig :: LSig name -> Bool
+isCompleteMatchSig (L _ (CompleteMatchSig {} )) = True
+isCompleteMatchSig _                            = False
+
 hsSigDoc :: Sig name -> SDoc
 hsSigDoc (TypeSig {})           = text "type signature"
 hsSigDoc (PatSynSig {})         = text "pattern synonym signature"
@@ -943,6 +961,7 @@ hsSigDoc (SpecInstSig {})       = text "SPECIALISE instance pragma"
 hsSigDoc (FixSig {})            = text "fixity declaration"
 hsSigDoc (MinimalSig {})        = text "MINIMAL pragma"
 hsSigDoc (SCCFunSig {})         = text "SCC pragma"
+hsSigDoc (CompleteMatchSig {})  = text "COMPLETE pragma"
 
 {-
 Check if signatures overlap; this is used when checking for duplicate
@@ -978,6 +997,12 @@ ppr_sig (PatSynSig names sig_ty)
   = text "pattern" <+> pprVarSig (map unLoc names) (ppr sig_ty)
 ppr_sig (SCCFunSig src fn mlabel)
   = pragSrcBrackets src "{-# SCC" (ppr fn <+> maybe empty ppr mlabel )
+ppr_sig (CompleteMatchSig src cs mty)
+  = pragSrcBrackets src "{-# COMPLETE"
+      ((hsep (punctuate comma (map ppr (unLoc cs))))
+        <+> opt_sig)
+  where
+    opt_sig = maybe empty ((\t -> dcolon <+> ppr t) . unLoc) mty
 
 instance OutputableBndr name => Outputable (FixitySig name) where
   ppr (FixitySig names fixity) = sep [ppr fixity, pprops]

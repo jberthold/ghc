@@ -24,7 +24,7 @@ module BasicTypes(
 
         ConTag, ConTagZ, fIRST_TAG,
 
-        Arity, RepArity,
+        Arity, RepArity, JoinArity,
 
         Alignment,
 
@@ -64,13 +64,15 @@ module BasicTypes(
         noOneShotInfo, hasNoOneShotInfo, isOneShotInfo,
         bestOneShot, worstOneShot,
 
-        OccInfo(..), seqOccInfo, zapFragileOcc, isOneOcc,
-        isDeadOcc, isStrongLoopBreaker, isWeakLoopBreaker, isNoOcc,
+        OccInfo(..), noOccInfo, seqOccInfo, zapFragileOcc, isOneOcc,
+        isDeadOcc, isStrongLoopBreaker, isWeakLoopBreaker, isManyOccs,
         strongLoopBreaker, weakLoopBreaker,
 
         InsideLam, insideLam, notInsideLam,
         OneBranch, oneBranch, notOneBranch,
         InterestingCxt,
+        TailCallInfo(..), tailCallInfo, zapOccTailCallInfo,
+        isAlwaysTailCalled,
 
         EP(..),
 
@@ -107,7 +109,6 @@ module BasicTypes(
 import FastString
 import Outputable
 import SrcLoc ( Located,unLoc )
-import StaticFlags( opt_PprStyle_Debug )
 import Data.Data hiding (Fixity, Prefix, Infix)
 import Data.Function (on)
 
@@ -153,6 +154,12 @@ type Arity = Int
 --  \x -> fib x                has representation arity 1
 --  \(# x, y #) -> fib (x + y) has representation arity 2
 type RepArity = Int
+
+-- | The number of arguments that a join point takes. Unlike the arity of a
+-- function, this is a purely syntactic property and is fixed when the join
+-- point is created (or converted from a value). Both type and value arguments
+-- are counted.
+type JoinArity = Int
 
 {-
 ************************************************************************
@@ -203,8 +210,6 @@ type Alignment = Int -- align to next N-byte boundary (N must be a power of 2).
 -- work.
 data OneShotInfo
   = NoOneShotInfo -- ^ No information
-  | ProbOneShot   -- ^ The lambda is probably applied at most once
-                  -- See Note [Computing one-shot info, and ProbOneShot] in Demand
   | OneShotLam    -- ^ The lambda is applied at most once.
   deriving (Eq)
 
@@ -221,18 +226,13 @@ hasNoOneShotInfo _             = False
 
 worstOneShot, bestOneShot :: OneShotInfo -> OneShotInfo -> OneShotInfo
 worstOneShot NoOneShotInfo _             = NoOneShotInfo
-worstOneShot ProbOneShot   NoOneShotInfo = NoOneShotInfo
-worstOneShot ProbOneShot   _             = ProbOneShot
 worstOneShot OneShotLam    os            = os
 
 bestOneShot NoOneShotInfo os         = os
-bestOneShot ProbOneShot   OneShotLam = OneShotLam
-bestOneShot ProbOneShot   _          = ProbOneShot
 bestOneShot OneShotLam    _          = OneShotLam
 
 pprOneShotInfo :: OneShotInfo -> SDoc
 pprOneShotInfo NoOneShotInfo = empty
-pprOneShotInfo ProbOneShot   = text "ProbOneShot"
 pprOneShotInfo OneShotLam    = text "OneShot"
 
 instance Outputable OneShotInfo where
@@ -414,7 +414,7 @@ Consider
 \begin{verbatim}
         a `op1` b `op2` c
 \end{verbatim}
-@(compareFixity op1 op2)@ tells which way to arrange appication, or
+@(compareFixity op1 op2)@ tells which way to arrange application, or
 whether there's an error.
 -}
 
@@ -731,8 +731,9 @@ tupleParens :: TupleSort -> SDoc -> SDoc
 tupleParens BoxedTuple      p = parens p
 tupleParens UnboxedTuple    p = text "(#" <+> p <+> ptext (sLit "#)")
 tupleParens ConstraintTuple p   -- In debug-style write (% Eq a, Ord b %)
-  | opt_PprStyle_Debug        = text "(%" <+> p <+> ptext (sLit "%)")
-  | otherwise                 = parens p
+  = sdocWithPprDebug $ \dbg -> if dbg
+      then text "(%" <+> p <+> ptext (sLit "%)")
+      else parens p
 
 {-
 ************************************************************************
@@ -753,7 +754,7 @@ pprAlternative :: (a -> SDoc) -- ^ The pretty printing function to use
                -> SDoc        -- ^ 'SDoc' where the alternative havs been pretty
                               -- printed and finally packed into a paragraph.
 pprAlternative pp x alt arity =
-    fsep (replicate (alt - 1) vbar ++ [pp x] ++ replicate (arity - alt - 1) vbar)
+    fsep (replicate (alt - 1) vbar ++ [pp x] ++ replicate (arity - alt) vbar)
 
 {-
 ************************************************************************
@@ -808,20 +809,23 @@ defn of OccInfo here, safely at the bottom
 
 -- | identifier Occurrence Information
 data OccInfo
-  = NoOccInfo           -- ^ There are many occurrences, or unknown occurrences
+  = ManyOccs        { occ_tail    :: !TailCallInfo }
+                        -- ^ There are many occurrences, or unknown occurrences
 
   | IAmDead             -- ^ Marks unused variables.  Sometimes useful for
                         -- lambda and case-bound variables.
 
-  | OneOcc
-        !InsideLam
-        !OneBranch
-        !InterestingCxt -- ^ Occurs exactly once, not inside a rule
+  | OneOcc          { occ_in_lam  :: !InsideLam
+                    , occ_one_br  :: !OneBranch
+                    , occ_int_cxt :: !InterestingCxt
+                    , occ_tail    :: !TailCallInfo }
+                        -- ^ Occurs exactly once (per branch), not inside a rule
 
   -- | This identifier breaks a loop of mutually recursive functions. The field
   -- marks whether it is only a loop breaker due to a reference in a rule
-  | IAmALoopBreaker     -- Note [LoopBreaker OccInfo]
-        !RulesOnly
+  | IAmALoopBreaker { occ_rules_only :: !RulesOnly
+                    , occ_tail       :: !TailCallInfo }
+                        -- Note [LoopBreaker OccInfo]
 
   deriving (Eq)
 
@@ -839,9 +843,12 @@ Note [LoopBreaker OccInfo]
 See OccurAnal Note [Weak loop breakers]
 -}
 
-isNoOcc :: OccInfo -> Bool
-isNoOcc NoOccInfo = True
-isNoOcc _         = False
+noOccInfo :: OccInfo
+noOccInfo = ManyOccs { occ_tail = NoTailCallInfo }
+
+isManyOccs :: OccInfo -> Bool
+isManyOccs ManyOccs{} = True
+isManyOccs _          = False
 
 seqOccInfo :: OccInfo -> ()
 seqOccInfo occ = occ `seq` ()
@@ -868,17 +875,41 @@ oneBranch, notOneBranch :: OneBranch
 oneBranch    = True
 notOneBranch = False
 
+-----------------
+data TailCallInfo = AlwaysTailCalled JoinArity -- See Note [TailCallInfo]
+                  | NoTailCallInfo
+  deriving (Eq)
+
+tailCallInfo :: OccInfo -> TailCallInfo
+tailCallInfo IAmDead   = NoTailCallInfo
+tailCallInfo other     = occ_tail other
+
+zapOccTailCallInfo :: OccInfo -> OccInfo
+zapOccTailCallInfo IAmDead   = IAmDead
+zapOccTailCallInfo occ       = occ { occ_tail = NoTailCallInfo }
+
+isAlwaysTailCalled :: OccInfo -> Bool
+isAlwaysTailCalled occ
+  = case tailCallInfo occ of AlwaysTailCalled{} -> True
+                             NoTailCallInfo     -> False
+
+instance Outputable TailCallInfo where
+  ppr (AlwaysTailCalled ar) = sep [ text "Tail", int ar ]
+  ppr _                     = empty
+
+-----------------
 strongLoopBreaker, weakLoopBreaker :: OccInfo
-strongLoopBreaker = IAmALoopBreaker False
-weakLoopBreaker   = IAmALoopBreaker True
+strongLoopBreaker = IAmALoopBreaker False NoTailCallInfo
+weakLoopBreaker   = IAmALoopBreaker True  NoTailCallInfo
 
 isWeakLoopBreaker :: OccInfo -> Bool
-isWeakLoopBreaker (IAmALoopBreaker _) = True
+isWeakLoopBreaker (IAmALoopBreaker{}) = True
 isWeakLoopBreaker _                   = False
 
 isStrongLoopBreaker :: OccInfo -> Bool
-isStrongLoopBreaker (IAmALoopBreaker False) = True   -- Loop-breaker that breaks a non-rule cycle
-isStrongLoopBreaker _                       = False
+isStrongLoopBreaker (IAmALoopBreaker { occ_rules_only = False }) = True
+  -- Loop-breaker that breaks a non-rule cycle
+isStrongLoopBreaker _                                            = False
 
 isDeadOcc :: OccInfo -> Bool
 isDeadOcc IAmDead = True
@@ -889,16 +920,21 @@ isOneOcc (OneOcc {}) = True
 isOneOcc _           = False
 
 zapFragileOcc :: OccInfo -> OccInfo
-zapFragileOcc (OneOcc {}) = NoOccInfo
-zapFragileOcc occ         = occ
+-- Keep only the most robust data: deadness, loop-breaker-hood
+zapFragileOcc (OneOcc {}) = noOccInfo
+zapFragileOcc occ         = zapOccTailCallInfo occ
 
 instance Outputable OccInfo where
   -- only used for debugging; never parsed.  KSW 1999-07
-  ppr NoOccInfo            = empty
-  ppr (IAmALoopBreaker ro) = text "LoopBreaker" <> if ro then char '!' else empty
+  ppr (ManyOccs tails)     = pprShortTailCallInfo tails
   ppr IAmDead              = text "Dead"
-  ppr (OneOcc inside_lam one_branch int_cxt)
-        = text "Once" <> pp_lam <> pp_br <> pp_args
+  ppr (IAmALoopBreaker rule_only tails)
+        = text "LoopBreaker" <> pp_ro <> pprShortTailCallInfo tails
+        where
+          pp_ro | rule_only = char '!'
+                | otherwise = empty
+  ppr (OneOcc inside_lam one_branch int_cxt tail_info)
+        = text "Once" <> pp_lam <> pp_br <> pp_args <> pp_tail
         where
           pp_lam | inside_lam = char 'L'
                  | otherwise  = empty
@@ -906,11 +942,46 @@ instance Outputable OccInfo where
                  | otherwise  = char '*'
           pp_args | int_cxt   = char '!'
                   | otherwise = empty
+          pp_tail             = pprShortTailCallInfo tail_info
+
+pprShortTailCallInfo :: TailCallInfo -> SDoc
+pprShortTailCallInfo (AlwaysTailCalled ar) = char 'T' <> brackets (int ar)
+pprShortTailCallInfo NoTailCallInfo        = empty
 
 {-
+Note [TailCallInfo]
+~~~~~~~~~~~~~~~~~~~
+The occurrence analyser determines what can be made into a join point, but it
+doesn't change the binder into a JoinId because then it would be inconsistent
+with the occurrences. Thus it's left to the simplifier (or to simpleOptExpr) to
+change the IdDetails.
+
+The AlwaysTailCalled marker actually means slightly more than simply that the
+function is always tail-called. See Note [Invariants on join points].
+
+This info is quite fragile and should not be relied upon unless the occurrence
+analyser has *just* run. Use 'Id.isJoinId_maybe' for the permanent state of
+the join-point-hood of a binder; a join id itself will not be marked
+AlwaysTailCalled.
+
+Note that there is a 'TailCallInfo' on a 'ManyOccs' value. One might expect that
+being tail-called would mean that the variable could only appear once per branch
+(thus getting a `OneOcc { occ_one_br = True }` occurrence info), but a join
+point can also be invoked from other join points, not just from case branches:
+
+  let j1 x = ...
+      j2 y = ... j1 z {- tail call -} ...
+  in case w of
+       A -> j1 v
+       B -> j2 u
+       C -> j2 q
+
+Here both 'j1' and 'j2' will get marked AlwaysTailCalled, but j1 will get
+ManyOccs and j2 will get `OneOcc { occ_one_br = True }`.
+
 ************************************************************************
 *                                                                      *
-                Default method specfication
+                Default method specification
 *                                                                      *
 ************************************************************************
 
@@ -1073,7 +1144,7 @@ data RuleMatchInfo = ConLike                    -- See Note [CONLIKE pragma]
 data InlinePragma            -- Note [InlinePragma]
   = InlinePragma
       { inl_src    :: SourceText -- Note [Pragma source text]
-      , inl_inline :: InlineSpec
+      , inl_inline :: InlineSpec -- See Note [inl_inline and inl_act]
 
       , inl_sat    :: Maybe Arity    -- Just n <=> Inline only when applied to n
                                      --            explicit (non-type, non-dictionary) args
@@ -1083,6 +1154,7 @@ data InlinePragma            -- Note [InlinePragma]
                                      --   the Unfolding, and don't look at inl_sat further
 
       , inl_act    :: Activation     -- Says during which phases inlining is allowed
+                                     -- See Note [inl_inline and inl_act]
 
       , inl_rule   :: RuleMatchInfo  -- Should the function be treated like a constructor?
     } deriving( Eq, Data )
@@ -1097,9 +1169,8 @@ data InlineSpec   -- What the user's INLINE pragma looked like
   deriving( Eq, Data, Show )
         -- Show needed for Lexer.x
 
-{-
-Note [InlinePragma]
-~~~~~~~~~~~~~~~~~~~
+{- Note [InlinePragma]
+~~~~~~~~~~~~~~~~~~~~~~
 This data type mirrors what you can write in an INLINE or NOINLINE pragma in
 the source program.
 
@@ -1114,6 +1185,23 @@ if an Id has defaultInlinePragma it means the user didn't specify anything.
 If inl_inline = Inline or Inlineable, then the Id should have an InlineRule unfolding.
 
 If you want to know where InlinePragmas take effect: Look in DsBinds.makeCorePair
+
+Note [inl_inline and inl_act]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+* inl_inline says what the user wrote: did she say INLINE, NOINLINE,
+  INLINABLE, or nothing at all
+
+* inl_act says in what phases the unfolding is active or inactive
+  E.g  If you write INLINE[1]    then inl_act will be set to ActiveAfter 1
+       If you write NOINLINE[1]  then inl_act will be set to ActiveBefore 1
+       If you write NOINLINE[~1] then inl_act will be set to ActiveAfter 1
+  So note that inl_act does not say what pragma you wrote: it just
+  expresses its consequences
+
+* inl_act just says when the unfolding is active; it doesn't say what
+  to inline.  If you say INLINE f, then f's inl_act will be AlwaysActive,
+  but in addition f will get a "stable unfolding" with UnfoldingGuidance
+  that tells the inliner to be pretty eager about it.
 
 Note [CONLIKE pragma]
 ~~~~~~~~~~~~~~~~~~~~~

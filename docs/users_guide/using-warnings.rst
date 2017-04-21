@@ -49,6 +49,7 @@ The following flags are simple ways to select standard "packages" of warnings:
         * :ghc-flag:`-Wincomplete-patterns`
         * :ghc-flag:`-Wdodgy-exports`
         * :ghc-flag:`-Wdodgy-imports`
+        * :ghc-flag:`-Wunbanged-strict-patterns`
 
 .. ghc-flag:: -Wall
 
@@ -65,7 +66,9 @@ The following flags are simple ways to select standard "packages" of warnings:
         * :ghc-flag:`-Wmissing-local-signatures`
         * :ghc-flag:`-Wmissing-exported-signatures`
         * :ghc-flag:`-Wmissing-import-lists`
+        * :ghc-flag:`-Wmissing-home-modules`
         * :ghc-flag:`-Widentities`
+        * :ghc-flag:`-Wredundant-constraints`
 
 .. ghc-flag:: -Wcompat
 
@@ -833,7 +836,7 @@ of ``-W(no-)*``.
     Will raise two warnings because ``Zero`` and ``Succ`` are not
     written as ``'Zero`` and ``'Succ``.
 
-    This warning is is enabled by default in :ghc-flag:`-Wall` mode.
+    This warning is enabled by default in :ghc-flag:`-Wall` mode.
 
 .. ghc-flag:: -Wunused-binds
 
@@ -1029,6 +1032,22 @@ of ``-W(no-)*``.
     This flag passes ``-Wundef`` to the C pre-processor (if its being used)
     which causes the pre-processor to warn on uses of the `#if` directive on
     undefined identifiers.
+
+.. ghc-flag:: -Wunbanged-strict-patterns
+
+    This flag warns whenever you write a pattern that binds a variable whose
+    type is unlifted, and yet the pattern is not a bang pattern nor a bare variable.
+    See :ref:`glasgow-unboxed` for information about unlifted types.
+
+.. ghc-flag:: -Wmissing-home-modules
+
+    :since: 8.2
+
+    When a module provided by the package currently being compiled
+    (i.e. the "home" package) is imported, but not explicitly listed in
+    command line as a target. Useful for Cabal to ensure GHC won't
+    pick up modules, not listed neither in ``exposed-modules``, nor in
+    ``other-modules``.
 
 If you're feeling really paranoid, the :ghc-flag:`-dcore-lint` option is a good choice.
 It turns on heavyweight intra-pass sanity-checking within GHC. (It checks GHC's

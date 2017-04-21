@@ -18,7 +18,7 @@ module TcSMonad (
     runTcSEqualities,
     nestTcS, nestImplicTcS, setEvBindsTcS,
 
-    runTcPluginTcS, addUsedGREs, deferTcSForAllEq,
+    runTcPluginTcS, addUsedGRE, addUsedGREs, deferTcSForAllEq,
 
     -- Tracing etc
     panicTcS, traceTcS,
@@ -30,7 +30,7 @@ module TcSMonad (
 
     newTcEvBinds,
     newWantedEq, emitNewWantedEq,
-    newWanted, newWantedEvVar, newWantedEvVarNC, newDerivedNC,
+    newWanted, newWantedEvVar, newWantedNC, newWantedEvVarNC, newDerivedNC,
     newBoundEvVarId,
     unifyTyVar, unflattenFmv, reportUnifications,
     setEvBind, setWantedEq, setEqIfWanted,
@@ -44,6 +44,7 @@ module TcSMonad (
     getTcEvBindsVar, getTcLevel,
     getTcEvBindsAndTCVs, getTcEvBindsMap,
     tcLookupClass,
+    tcLookupId,
 
     -- Inerts
     InertSet(..), InertCans(..),
@@ -67,8 +68,8 @@ module TcSMonad (
     getSafeOverlapFailures,
 
     -- Inert CDictCans
-    lookupInertDict, findDictsByClass, addDict, addDictsByClass,
-    delDict, foldDicts, filterDicts,
+    DictMap, emptyDictMap, lookupInertDict, findDictsByClass, addDict,
+    addDictsByClass, delDict, foldDicts, filterDicts, findDict,
 
     -- Inert CTyEqCans
     EqualCtList, findTyEqs, foldTyEqs, isInInertEqs,
@@ -90,8 +91,9 @@ module TcSMonad (
     instDFunType,                              -- Instantiation
 
     -- MetaTyVars
-    newFlexiTcSTy, instFlexiTcS,
+    newFlexiTcSTy, instFlexi, instFlexiX,
     cloneMetaTyVar, demoteUnfilledFmv,
+    tcInstType,
 
     TcLevel, isTouchableMetaTyVarTcS,
     isFilledMetaTyVar_maybe, isFilledMetaTyVar,
@@ -125,7 +127,7 @@ import FamInstEnv
 import qualified TcRnMonad as TcM
 import qualified TcMType as TcM
 import qualified TcEnv as TcM
-       ( checkWellStaged, topIdLvl, tcGetDefaultTys, tcLookupClass )
+       ( checkWellStaged, topIdLvl, tcGetDefaultTys, tcLookupClass, tcLookupId )
 import PrelNames( heqTyConKey, eqTyConKey )
 import Kind
 import TcType
@@ -156,7 +158,6 @@ import UniqFM
 import UniqDFM
 import Maybes
 
-import StaticFlags( opt_PprStyle_Debug )
 import TrieMap
 import Control.Monad
 #if __GLASGOW_HASKELL__ > 710
@@ -168,6 +169,7 @@ import Data.List ( foldl', partition )
 
 #ifdef DEBUG
 import Digraph
+import UniqSet
 #endif
 
 {-
@@ -211,7 +213,7 @@ example.
 
 So we arrange to put these particular class constraints in the wl_eqs.
 
-  NB: since we do not currently apply the substition to the
+  NB: since we do not currently apply the substitution to the
   inert_solved_dicts, the knot-tying still seems a bit fragile.
   But this makes it better.
 -}
@@ -283,7 +285,7 @@ extendWorkListCt :: Ct -> WorkList -> WorkList
 extendWorkListCt ct wl
  = case classifyPredType (ctPred ct) of
      EqPred NomEq ty1 _
-       | Just (tc,_) <- tcSplitTyConApp_maybe ty1
+       | Just tc <- tcTyConAppTyCon_maybe ty1
        , isTypeFamilyTyCon tc
        -> extendWorkListFunEq ct wl
 
@@ -362,7 +364,8 @@ instance Outputable WorkList where
           , ppUnless (null ders) $
             text "Derived =" <+> vcat (map ppr ders)
           , ppUnless (isEmptyBag implics) $
-            if opt_PprStyle_Debug  -- Typically we only want the work list for this level
+            sdocWithPprDebug $ \dbg ->
+            if dbg  -- Typically we only want the work list for this level
             then text "Implics =" <+> vcat (map ppr (bagToList implics))
             else text "(Implics omitted)"
           ])
@@ -423,7 +426,7 @@ emptyInert
 
 {- Note [Solved dictionaries]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When we apply a top-level instance declararation, we add the "solved"
+When we apply a top-level instance declaration, we add the "solved"
 dictionary to the inert_solved_dicts.  In general, we use it to avoid
 creating a new EvVar when we have a new goal that we have solved in
 the past.
@@ -793,11 +796,11 @@ Theorem [Stability under extension]
                 a not in s, OR
                 the path from the top of s to a includes at least one non-newtype
 
-   then the extended substition T = S+(a -fw-> t)
+   then the extended substitution T = S+(a -fw-> t)
    is an inert generalised substitution.
 
 Conditions (T1-T3) are established by the canonicaliser
-Conditions (K1-K3) are established by TcSMonad.kickOutRewriteable
+Conditions (K1-K3) are established by TcSMonad.kickOutRewritable
 
 The idea is that
 * (T1-2) are guaranteed by exhaustively rewriting the work-item
@@ -840,7 +843,7 @@ The idea is that
 
 * (K2) is about inertness.  Intuitively, any infinite chain T^0(f,t),
   T^1(f,t), T^2(f,T).... must pass through the new work item infnitely
-  often, since the substution without the work item is inert; and must
+  often, since the substitution without the work item is inert; and must
   pass through at least one of the triples in S infnitely often.
 
   - (K2a): if not(fs>=fs) then there is no f that fs can rewrite (fs>=f),
@@ -855,7 +858,7 @@ The idea is that
   - (K2c): If this holds, we can't pass through this triple infinitely
     often, because if we did then fs>=f, fw>=f, hence by (R2)
       * either fw>=fs, contradicting K2c
-      * or fs>=fw; so by the agument in K2b we can't have a loop
+      * or fs>=fw; so by the argument in K2b we can't have a loop
 
   - (K2d): if a not in s, we hae no further opportunity to apply the
     work item, similar to (K2b)
@@ -1043,7 +1046,8 @@ can rewrite it.  Then:
                [WD] fmv ~ Maybe e   -- (C)
                [WD] Foo ee ~ fmv
 
-Now the work item is rewritten by (C) and we soon get ee := e.
+See Note [Splitting WD constraints].  Now the work item is rewritten
+by (C) and we soon get ee := e.
 
 Additional notes:
 
@@ -1065,6 +1069,39 @@ Additional notes:
     * efficiency: silly to process the same thing twice
     * inert_funeqs, inert_dicts is a finite map keyed by
       the type; it's inconvenient for it to map to TWO constraints
+
+Note [Splitting WD constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+We are about to add a [WD] constraint to the inert set; and we
+know that the inert set has fully rewritten it.  Should we split
+it into [W] and [D], and put the [D] in the work list for further
+work?
+
+* CDictCan (C tys) or CFunEqCan (F tys ~ fsk):
+  Yes if the inert set could rewrite tys to make the class constraint,
+  or type family, fire.  That is, yes if the inert_eqs intersects
+  with the free vars of tys.  For this test we use
+  (anyRewritableTyVar True) which ignores casts and coercions in tys,
+  because rewriting the casts or coercions won't make the thing fire
+  more often.
+
+* CTyEqCan (a ~ ty): Yes if the inert set could rewrite 'a' or 'ty'.
+  We need to check both 'a' and 'ty' against the inert set:
+    - Inert set contains  [D] a ~ ty2
+      Then we want to put [D] a ~ ty in the worklist, so we'll
+      get [D] ty ~ ty2 with consequent good things
+
+    - Inert set contains [D] b ~ a, where b is in ty.
+      We can't just add [WD] a ~ ty[b] to the inert set, because
+      that breaks the inert-set invariants.  If we tried to
+      canonicalise another [D] constraint mentioning 'a', we'd
+      get an infinite loop
+
+  Moreover we must use (anyRewritableTyVar False) for the RHS,
+  because even tyvars in the casts and coercions could give
+  an infinite loop if we don't expose it
+
+* Others: nothing is gained by splitting.
 
 Note [Examples of how Derived shadows helps completeness]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1211,25 +1248,32 @@ shouldSplitWD :: InertEqs -> Ct -> Bool
 -- Precondition: 'ct' is [WD], and is inert
 -- True <=> we should split ct ito [W] and [D] because
 --          the inert_eqs can make progress on the [D]
+-- See Note [Splitting WD constraints]
 
 shouldSplitWD inert_eqs (CFunEqCan { cc_tyargs = tys })
-  = inert_eqs `intersects_with` rewritableTyVarsOfTypes tys
+  = should_split_match_args inert_eqs tys
     -- We don't need to split if the tv is the RHS fsk
 
-shouldSplitWD inert_eqs ct
-  = inert_eqs `intersects_with` rewritableTyVarsOfType (ctPred ct)
-    -- Otherwise split if the tv is mentioned at all
+shouldSplitWD inert_eqs (CDictCan { cc_tyargs = tys })
+  = should_split_match_args inert_eqs tys
+    -- NB True: ignore coercions
+    -- See Note [Splitting WD constraints]
 
-intersects_with :: InertEqs -> TcTyVarSet -> Bool
-intersects_with inert_eqs free_vars
-  = not (disjointUdfmUfm inert_eqs free_vars)
-      -- Test whether the inert equalities could rewrite
-      -- a derived version of this constraint
-      -- The low-level use of disjointUFM might seem surprising.
-      -- InertEqs = TyVarEnv EqualCtList, and we want to see if its domain
-      -- is disjoint from that of a TcTyCoVarSet.  So we drop down
-      -- to the underlying UniqFM.  A bit yukky, but efficient.
+shouldSplitWD inert_eqs (CTyEqCan { cc_tyvar = tv, cc_rhs = ty })
+  =  tv `elemDVarEnv` inert_eqs
+  || anyRewritableTyVar False (`elemDVarEnv` inert_eqs) ty
+  -- NB False: do not ignore casts and coercions
+  -- See Note [Splitting WD constraints]
 
+shouldSplitWD _ _ = False   -- No point in splitting otherwise
+
+should_split_match_args :: InertEqs -> [TcType] -> Bool
+-- True if the inert_eqs can rewrite anything in the argument
+-- types, ignoring casts and coercions
+should_split_match_args inert_eqs tys
+  = any (anyRewritableTyVar True (`elemDVarEnv` inert_eqs)) tys
+    -- NB True: ignore casts coercions
+    -- See Note [Splitting WD constraints]
 
 isImprovable :: CtEvidence -> Bool
 -- See Note [Do not do improvement for WOnly]
@@ -1279,7 +1323,7 @@ lookupFlattenTyVar ieqs ftv
 
 {- Note [lookupFlattenTyVar]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Supppose we have an injective function F and
+Suppose we have an injective function F and
   inert_funeqs:   F t1 ~ fsk1
                   F t2 ~ fsk2
   inert_eqs:      fsk1 ~ fsk2
@@ -1454,23 +1498,19 @@ kick_out_rewritable new_fr new_tv ics@(IC { inert_eqs      = tv_eqs
     (dicts_out,  dicts_in)  = partitionDicts   kick_out_ct dictmap
     (irs_out,    irs_in)    = partitionBag     kick_out_ct irreds
     (insols_out, insols_in) = partitionBag     kick_out_ct insols
-      -- Kick out even insolubles; see Note [Kick out insolubles]
+      -- Kick out even insolubles: See Note [Kick out insolubles]
 
     fr_may_rewrite :: CtFlavourRole -> Bool
     fr_may_rewrite fs = new_fr `eqMayRewriteFR` fs
         -- Can the new item rewrite the inert item?
 
     kick_out_ct :: Ct -> Bool
-    -- Kick it out if the new CTyEqCan can rewrite the inert
-    -- one. See Note [kickOutRewritable]
-    -- Or if it has no shadow and the shadow
-    kick_out_ct ct = kick_out_ev (ctEvidence ct)
-
-    kick_out_ev :: CtEvidence -> Bool
-    -- Kick it out if the new CTyEqCan can rewrite the inert
-    -- one. See Note [kickOutRewritable]
-    kick_out_ev ev = fr_may_rewrite (ctEvFlavourRole ev)
-                  && new_tv `elemVarSet` rewritableTyVarsOfType (ctEvPred ev)
+    -- Kick it out if the new CTyEqCan can rewrite the inert one
+    -- See Note [kickOutRewritable]
+    kick_out_ct ct | let ev = ctEvidence ct
+                   = fr_may_rewrite (ctEvFlavourRole ev)
+                   && anyRewritableTyVar False (== new_tv) (ctEvPred ev)
+                  -- False: ignore casts and coercions
                   -- NB: this includes the fsk of a CFunEqCan.  It can't
                   --     actually be rewritten, but we need to kick it out
                   --     so we get to take advantage of injectivity
@@ -2383,7 +2423,7 @@ checkForCyclicBinds ev_binds_map
     is_co_bind (EvBind { eb_lhs = b }) = isEqPred (varType b)
 
     edges :: [(EvBind, EvVar, [EvVar])]
-    edges = [ (bind, bndr, nonDetEltsUFM (evVarsOfTerm rhs))
+    edges = [ (bind, bndr, nonDetEltsUniqSet (evVarsOfTerm rhs))
             | bind@(EvBind { eb_lhs = bndr, eb_rhs = rhs}) <- bagToList ev_binds ]
             -- It's OK to use nonDetEltsUFM here as
             -- stronglyConnCompFromEdgedVertices is still deterministic even
@@ -2612,11 +2652,18 @@ getLclEnv = wrapTcS $ TcM.getLclEnv
 tcLookupClass :: Name -> TcS Class
 tcLookupClass c = wrapTcS $ TcM.tcLookupClass c
 
+tcLookupId :: Name -> TcS Id
+tcLookupId n = wrapTcS $ TcM.tcLookupId n
+
 -- Setting names as used (used in the deriving of Coercible evidence)
 -- Too hackish to expose it to TcS? In that case somehow extract the used
 -- constructors from the result of solveInteract
 addUsedGREs :: [GlobalRdrElt] -> TcS ()
 addUsedGREs gres = wrapTcS  $ TcM.addUsedGREs gres
+
+addUsedGRE :: Bool -> GlobalRdrElt -> TcS ()
+addUsedGRE warn_if_deprec gre = wrapTcS $ TcM.addUsedGRE warn_if_deprec gre
+
 
 -- Various smaller utilities [TODO, maybe will be absorbed in the instance matcher]
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -2790,20 +2837,28 @@ demoteUnfilledFmv fmv
                    do { tv_ty <- TcM.newFlexiTyVarTy (tyVarKind fmv)
                       ; TcM.writeMetaTyVar fmv tv_ty } }
 
-instFlexiTcS :: [TKVar] -> TcS (TCvSubst, [TcType])
-instFlexiTcS tvs = wrapTcS (mapAccumLM inst_one emptyTCvSubst tvs)
-  where
-     inst_one subst tv
-         = do { ty' <- instFlexiTcSHelper (tyVarName tv)
-                                          (substTyUnchecked subst (tyVarKind tv))
-              ; return (extendTvSubst subst tv ty', ty') }
+instFlexi :: [TKVar] -> TcS TCvSubst
+instFlexi = instFlexiX emptyTCvSubst
 
-instFlexiTcSHelper :: Name -> Kind -> TcM TcType
-instFlexiTcSHelper tvname kind
+instFlexiX :: TCvSubst -> [TKVar] -> TcS TCvSubst
+instFlexiX subst tvs
+  = wrapTcS (foldlM instFlexiHelper subst tvs)
+
+instFlexiHelper :: TCvSubst -> TKVar -> TcM TCvSubst
+instFlexiHelper subst tv
   = do { uniq <- TcM.newUnique
        ; details <- TcM.newMetaDetails TauTv
-       ; let name = setNameUnique tvname uniq
-       ; return (mkTyVarTy (mkTcTyVar name kind details)) }
+       ; let name = setNameUnique (tyVarName tv) uniq
+             kind = substTyUnchecked subst (tyVarKind tv)
+             ty'  = mkTyVarTy (mkTcTyVar name kind details)
+       ; return (extendTvSubst subst tv ty') }
+
+tcInstType :: ([TyVar] -> TcM (TCvSubst, [TcTyVar]))
+                   -- ^ How to instantiate the type variables
+           -> Id   -- ^ Type to instantiate
+           -> TcS ([(Name, TcTyVar)], TcThetaType, TcType) -- ^ Result
+                -- (type vars, preds (incl equalities), rho)
+tcInstType inst_tyvars id = wrapTcS (TcM.tcInstType inst_tyvars id)
 
 
 
@@ -2914,7 +2969,7 @@ newWantedEq loc role ty1 ty2
   where
     pty = mkPrimEqPredRole role ty1 ty2
 
--- no equalities here. Use newWantedEqNC instead
+-- no equalities here. Use newWantedEq instead
 newWantedEvVarNC :: CtLoc -> TcPredType -> TcS CtEvidence
 -- Don't look up in the solved/inerts; we know it's not there
 newWantedEvVarNC loc pty
@@ -2945,6 +3000,14 @@ newWanted loc pty
   = Fresh . fst <$> newWantedEq loc role ty1 ty2
   | otherwise
   = newWantedEvVar loc pty
+
+-- deals with both equalities and non equalities. Doesn't do any cache lookups.
+newWantedNC :: CtLoc -> PredType -> TcS CtEvidence
+newWantedNC loc pty
+  | Just (role, ty1, ty2) <- getEqPredTys_maybe pty
+  = fst <$> newWantedEq loc role ty1 ty2
+  | otherwise
+  = newWantedEvVarNC loc pty
 
 emitNewDerived :: CtLoc -> TcPredType -> TcS ()
 emitNewDerived loc pred
