@@ -135,12 +135,12 @@ static void printAndClearEventBuf (EventsBuf *eventsBuf);
 
 static void postEventType(EventsBuf *eb, EventType *et);
 
-static void postLogMsgF(EventsBuf *eb, EventTypeNum type, char *msg, ...);
 static void postLogMsg(EventsBuf *eb, EventTypeNum type, char *msg, va_list ap);
 
 static void postBlockMarker(EventsBuf *eb);
 static void closeBlockMarker(EventsBuf *ebuf);
 
+// XXX meeh, StgBool
 static StgBool hasRoomForEvent(EventsBuf *eb, EventTypeNum eNum);
 static StgBool hasRoomForVariableEvent(EventsBuf *eb, uint32_t payload_bytes);
 
@@ -1083,14 +1083,6 @@ postEventAtTimestamp (Capability *cap, EventTimestamp ts, EventTypeNum tag)
     postWord64(eb, ts);
 }
 
-void postLogMsgF(EventsBuf *eb, EventTypeNum type, char *msg, ...)
-{
-    va_list ap;
-    va_start(ap,msg);
-    postLogMsg(eb, type, msg, ap);
-    va_end(ap);
-}
-
 #define BUF 512
 
 void postLogMsg(EventsBuf *eb, EventTypeNum type, char *msg, va_list ap)
@@ -1130,6 +1122,7 @@ void postUserEvent(Capability *cap, EventTypeNum type, char *msg)
 
     eb = &capEventBuf[cap->no];
 
+    // XXX should be size + 1
     if (!hasRoomForVariableEvent(eb, size)){
         printAndClearEventBuf(eb);
 
@@ -1154,6 +1147,7 @@ void postThreadLabel(Capability    *cap,
 
     eb = &capEventBuf[cap->no];
 
+    // XXX size + 1
     if (!hasRoomForVariableEvent(eb, size)){
         printAndClearEventBuf(eb);
 
@@ -1203,15 +1197,32 @@ void postBlockMarker (EventsBuf *eb)
 
 void postVersion(char *version)
 {
+    int len = 1 + strlen(version);
+
     ACQUIRE_LOCK(&eventBufMutex);
-    postLogMsgF(&eventBuf, EVENT_VERSION, version);
+    if (0 != ensureRoomForVariableEvent(&eventBuf, len)) return;
+        // skip this, the version is too long. (not sure how anything
+        // that follows would work then, but we cross that bridge...)
+        // btw who figured out to return 1 here??? but nowhere checked
+
+    postEventHeader(&eventBuf, EVENT_VERSION);
+    postPayloadSize(&eventBuf, len);
+    postString(&eventBuf, version);
+
     RELEASE_LOCK(&eventBufMutex);
 }
 
 void postProgramInvocation(char *commandline)
 {
+    int len = 1 + strlen(commandline);
+
     ACQUIRE_LOCK(&eventBufMutex);
-    postLogMsgF(&eventBuf, EVENT_PROGRAM_INVOCATION, commandline);
+    if (0 != ensureRoomForVariableEvent(&eventBuf, len)) return;
+
+    postEventHeader(&eventBuf, EVENT_PROGRAM_INVOCATION);
+    postPayloadSize(&eventBuf, len);
+    postString(&eventBuf, commandline);
+
     RELEASE_LOCK(&eventBufMutex);
 }
 
