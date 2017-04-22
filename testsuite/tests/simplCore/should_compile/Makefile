@@ -2,6 +2,12 @@ TOP=../../..
 include $(TOP)/mk/boilerplate.mk
 include $(TOP)/mk/test.mk
 
+T13468:
+	$(RM) -f T13468.o T13468.hi
+	-'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl T13468.hs | grep 'Error'
+        # Expecting no output from the grep, hence "-"
+        # If the case branch is not eliminated, we get a patError
+
 T3990:
 	$(RM) -f T3990.o T3990.hi
 	'$(TEST_HC)' $(TEST_HC_OPTS) -O -c -ddump-simpl T3990.hs | grep 'test_case'
@@ -211,4 +217,4 @@ str-rules:
 # g should have been collapsed into one defininition by CSE.
 .PHONY: T13340
 T13340:
-	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13340.hs -ddump-simpl -dsuppress-all | grep '\+#' | wc -l
+	'$(TEST_HC)' $(TEST_HC_OPTS) -c -O T13340.hs -ddump-simpl -dsuppress-all | grep -c '\+#'

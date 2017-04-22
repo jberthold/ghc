@@ -62,17 +62,13 @@ import Data.Array.ST
 -- --------------------------------------------------------------------------
 -- Top level
 
-pprCs :: DynFlags -> [RawCmmGroup] -> SDoc
-pprCs dflags cmms
- = pprCode CStyle (vcat $ map (\c -> split_marker $$ pprC c) cmms)
- where
-   split_marker
-     | gopt Opt_SplitObjs dflags = text "__STG_SPLIT_MARKER"
-     | otherwise                 = empty
+pprCs :: [RawCmmGroup] -> SDoc
+pprCs cmms
+ = pprCode CStyle (vcat $ map pprC cmms)
 
 writeCs :: DynFlags -> Handle -> [RawCmmGroup] -> IO ()
 writeCs dflags handle cmms
-  = printForC dflags handle (pprCs dflags cmms)
+  = printForC dflags handle (pprCs cmms)
 
 -- --------------------------------------------------------------------------
 -- Now do some real work
@@ -754,7 +750,7 @@ pprCallishMachOp_for_C mop
         MO_F64_Log      -> text "log"
         MO_F64_Exp      -> text "exp"
         MO_F64_Sqrt     -> text "sqrt"
-        MO_F64_Fabs     -> unsupported
+        MO_F64_Fabs     -> text "fabs"
         MO_F32_Pwr      -> text "powf"
         MO_F32_Sin      -> text "sinf"
         MO_F32_Cos      -> text "cosf"
@@ -768,7 +764,7 @@ pprCallishMachOp_for_C mop
         MO_F32_Log      -> text "logf"
         MO_F32_Exp      -> text "expf"
         MO_F32_Sqrt     -> text "sqrtf"
-        MO_F32_Fabs     -> unsupported
+        MO_F32_Fabs     -> text "fabsf"
         MO_WriteBarrier -> text "write_barrier"
         MO_Memcpy _     -> text "memcpy"
         MO_Memset _     -> text "memset"

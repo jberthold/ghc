@@ -35,7 +35,8 @@ import PprCore          ( pprCoreExpr )
 import CoreUnfold
 import CoreUtils
 import CoreArity
-import CoreSubst        ( pushCoTyArg, pushCoValArg )
+import CoreOpt          ( pushCoTyArg, pushCoValArg
+                        , joinPointBinding_maybe, joinPointBindings_maybe )
 --import PrimOp           ( tagToEnumKey ) -- temporalily commented out. See #8326
 import Rules            ( mkRuleInfo, lookupRule, getRules )
 --import TysPrim          ( intPrimTy ) -- temporalily commented out. See #8326
@@ -50,6 +51,7 @@ import FastString
 import Pair
 import Util
 import ErrUtils
+import Module          ( moduleName, pprModuleName )
 
 {-
 The guts of the simplifier is in this module, but the driver loop for
@@ -353,10 +355,12 @@ simplBind :: SimplEnv
           -> TopLevelFlag -> RecFlag -> Maybe SimplCont
           -> InId -> OutId      -- Binder, both pre-and post simpl
                                 -- The OutId has IdInfo, except arity, unfolding
+                                -- Ids only, no TyVars
           -> InExpr -> SimplEnv -- The RHS and its environment
           -> SimplM SimplEnv
 simplBind env top_lvl is_rec mb_cont bndr bndr1 rhs rhs_se
-  | isJoinId bndr1
+  | ASSERT( isId bndr1 )
+    isJoinId bndr1
   = ASSERT(isNotTopLevel top_lvl && isJust mb_cont)
     simplJoinBind env is_rec (fromJust mb_cont) bndr bndr1 rhs rhs_se
   | otherwise
@@ -366,12 +370,14 @@ simplLazyBind :: SimplEnv
               -> TopLevelFlag -> RecFlag
               -> InId -> OutId          -- Binder, both pre-and post simpl
                                         -- The OutId has IdInfo, except arity, unfolding
+                                        -- Ids only, no TyVars
               -> InExpr -> SimplEnv     -- The RHS and its environment
               -> SimplM SimplEnv
 -- Precondition: rhs obeys the let/app invariant
 -- NOT used for JoinIds
 simplLazyBind env top_lvl is_rec bndr bndr1 rhs rhs_se
-  = ASSERT2( not (isJoinId bndr), ppr bndr )
+  = ASSERT( isId bndr )
+    ASSERT2( not (isJoinId bndr), ppr bndr )
     -- pprTrace "simplLazyBind" ((ppr bndr <+> ppr bndr1) $$ ppr rhs $$ ppr (seIdSubst rhs_se)) $
     do  { let   rhs_env     = rhs_se `setInScopeAndZapFloats` env
                 (tvs, body) = case collectTyAndValBinders rhs of
@@ -484,7 +490,7 @@ completeNonRecX top_lvl env is_strict old_bndr new_bndr new_rhs
 {-
 {- No, no, no!  Do not try preInlineUnconditionally in completeNonRecX
    Doing so risks exponential behaviour, because new_rhs has been simplified once already
-   In the cases described by the folowing commment, postInlineUnconditionally will
+   In the cases described by the following comment, postInlineUnconditionally will
    catch many of the relevant cases.
         -- This happens; for example, the case_bndr during case of
         -- known constructor:  case (a,b) of x { (p,q) -> ... }
@@ -802,7 +808,12 @@ completeBind env top_lvl is_rec mb_cont old_bndr new_bndr new_rhs
                   | otherwise
                   = info2
 
-            final_id = new_bndr `setIdInfo` info3
+              -- Zap call arity info. We have used it by now (via
+              -- `tryEtaExpandRhs`), and the simplifier can invalidate this
+              -- information, leading to broken code later (e.g. #13479)
+            info4 = zapCallArityInfo info3
+
+            final_id = new_bndr `setIdInfo` info4
 
       ; -- pprTrace "Binding" (ppr final_id <+> ppr new_unfolding) $
         return (addNonRec env final_id final_rhs) } }
@@ -962,12 +973,22 @@ might do the same again.
 -}
 
 simplExpr :: SimplEnv -> CoreExpr -> SimplM CoreExpr
-simplExpr env expr = simplExprC env expr (mkBoringStop expr_out_ty)
+simplExpr env (Type ty)
+  = do { ty' <- simplType env ty  -- See Note [Avoiding space leaks in OutType]
+       ; return (Type ty') }
+
+simplExpr env expr
+  = simplExprC env expr (mkBoringStop expr_out_ty)
   where
     expr_out_ty :: OutType
     expr_out_ty = substTy env (exprType expr)
+    -- NB: Since 'expr' is term-valued, not (Type ty), this call
+    --     to exprType will succeed.  exprType fails on (Type ty).
 
-simplExprC :: SimplEnv -> CoreExpr -> SimplCont -> SimplM CoreExpr
+simplExprC :: SimplEnv
+           -> InExpr     -- A term-valued expression, never (Type ty)
+           -> SimplCont
+           -> SimplM OutExpr
         -- Simplify an expression, given a continuation
 simplExprC env expr cont
   = -- pprTrace "simplExprC" (ppr expr $$ ppr cont {- $$ ppr (seIdSubst env) -} $$ ppr (seFloats env) ) $
@@ -978,7 +999,9 @@ simplExprC env expr cont
           return (wrapFloats env' expr') }
 
 --------------------------------------------------
-simplExprF :: SimplEnv -> InExpr -> SimplCont
+simplExprF :: SimplEnv
+           -> InExpr     -- A term-valued expression, never (Type ty)
+           -> SimplCont
            -> SimplM (SimplEnv, OutExpr)
 
 simplExprF env e cont
@@ -995,21 +1018,37 @@ simplExprF env e cont
 
 simplExprF1 :: SimplEnv -> InExpr -> SimplCont
             -> SimplM (SimplEnv, OutExpr)
+
+simplExprF1 _ (Type ty) _
+  = pprPanic "simplExprF: type" (ppr ty)
+    -- simplExprF does only with term-valued expressions
+    -- The (Type ty) case is handled separately by simplExpr
+    -- and by the other callers of simplExprF
+
 simplExprF1 env (Var v)        cont = simplIdF env v cont
 simplExprF1 env (Lit lit)      cont = rebuild env (Lit lit) cont
 simplExprF1 env (Tick t expr)  cont = simplTick env t expr cont
 simplExprF1 env (Cast body co) cont = simplCast env body co cont
 simplExprF1 env (Coercion co)  cont = simplCoercionF env co cont
-simplExprF1 env (Type ty)      cont = ASSERT( contIsRhsOrArg cont )
-                                      rebuild env (Type (substTy env ty)) cont
 
 simplExprF1 env (App fun arg) cont
-  = simplExprF env fun $
-    case arg of
-      Type ty -> ApplyToTy  { sc_arg_ty  = substTy env ty
-                            , sc_hole_ty = substTy env (exprType fun)
-                            , sc_cont    = cont }
-      _       -> ApplyToVal { sc_arg = arg, sc_env = env
+  = case arg of
+      Type ty -> do { -- The argument type will (almost) certainly be used
+                      -- in the output program, so just force it now.
+                      -- See Note [Avoiding space leaks in OutType]
+                      arg' <- simplType env ty
+
+                      -- But use substTy, not simplType, to avoid forcing
+                      -- the hole type; it will likely not be needed.
+                      -- See Note [The hole type in ApplyToTy]
+                    ; let hole' = substTy env (exprType fun)
+
+                    ; simplExprF env fun $
+                      ApplyToTy { sc_arg_ty  = arg'
+                                , sc_hole_ty = hole'
+                                , sc_cont    = cont } }
+      _       -> simplExprF env fun $
+                 ApplyToVal { sc_arg = arg, sc_env = env
                             , sc_dup = NoDup, sc_cont = cont }
 
 simplExprF1 env expr@(Lam {}) cont
@@ -1043,7 +1082,57 @@ simplExprF1 env (Let (Rec pairs) body) cont
   = simplRecE env pairs body cont
 
 simplExprF1 env (Let (NonRec bndr rhs) body) cont
+  | Type ty <- rhs    -- First deal with type lets (let a = Type ty in e)
+  = ASSERT( isTyVar bndr )
+    do { ty' <- simplType env ty
+       ; simplExprF (extendTvSubst env bndr ty') body cont }
+
+  | otherwise
   = simplNonRecE env bndr (rhs, env) ([], body) cont
+
+{- Note [Avoiding space leaks in OutType]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Since the simplifier is run for multiple iterations, we need to ensure
+that any thunks in the output of one simplifier iteration are forced
+by the evaluation of the next simplifier iteration. Otherwise we may
+retain multiple copies of the Core program and leak a terrible amount
+of memory (as in #13426).
+
+The simplifier is naturally strict in the entire "Expr part" of the
+input Core program, because any expression may contain binders, which
+we must find in order to extend the SimplEnv accordingly. But types
+do not contain binders and so it is tempting to write things like
+
+    simplExpr env (Type ty) = return (Type (substTy env ty))   -- Bad!
+
+This is Bad because the result includes a thunk (substTy env ty) which
+retains a reference to the whole simplifier environment; and the next
+simplifier iteration will not force this thunk either, because the
+line above is not strict in ty.
+
+So instead our strategy is for the simplifier to fully evaluate
+OutTypes when it emits them into the output Core program, for example
+
+    simplExpr env (Type ty) = do { ty' <- simplType env ty     -- Good
+                                 ; return (Type ty') }
+
+where the only difference from above is that simplType calls seqType
+on the result of substTy.
+
+However, SimplCont can also contain OutTypes and it's not necessarily
+a good idea to force types on the way in to SimplCont, because they
+may end up not being used and forcing them could be a lot of wasted
+work. T5631 is a good example of this.
+
+- For ApplyToTy's sc_arg_ty, we force the type on the way in because
+  the type will almost certainly appear as a type argument in the
+  output program.
+
+- For the hole types in Stop and ApplyToTy, we force the type when we
+  emit it into the output program, after obtaining it from
+  contResultType. (The hole type in ApplyToTy is only directly used
+  to form the result type in a new Stop continuation.)
+-}
 
 ---------------------------------
 -- Simplify a join point, adding the context.
@@ -1066,6 +1155,7 @@ simplJoinRhs env bndr expr cont
 ---------------------------------
 simplType :: SimplEnv -> InType -> SimplM OutType
         -- Kept monadic just so we can do the seqType
+        -- See Note [Avoiding space leaks in OutType]
 simplType env ty
   = -- pprTrace "simplType" (ppr ty $$ ppr (seTvSubst env)) $
     seqType new_ty `seq` return new_ty
@@ -1369,13 +1459,8 @@ simplLam env (bndr:bndrs) body (ApplyToTy { sc_arg_ty = arg_ty, sc_cont = cont }
 simplLam env (bndr:bndrs) body (ApplyToVal { sc_arg = arg, sc_env = arg_se
                                            , sc_cont = cont })
   = do  { tick (BetaReduction bndr)
-        ; simplNonRecE env' (zap_unfolding bndr) (arg, arg_se) (bndrs, body) cont }
+        ; simplNonRecE env (zap_unfolding bndr) (arg, arg_se) (bndrs, body) cont }
   where
-    env' | Coercion co <- arg
-         = extendCvSubst env bndr co
-         | otherwise
-         = env
-
     zap_unfolding bndr  -- See Note [Zap unfolding when beta-reducing]
       | isId bndr, isStableUnfolding (realIdUnfolding bndr)
       = setIdUnfolding bndr NoUnfolding
@@ -1421,7 +1506,7 @@ simplLamBndr env bndr
 
 ------------------
 simplNonRecE :: SimplEnv
-             -> InBndr                  -- The binder
+             -> InId                    -- The binder, always an Id for simplNonRecE
              -> (InExpr, SimplEnv)      -- Rhs of binding (or arg of lambda)
              -> ([InBndr], InExpr)      -- Body of the let/lambda
                                         --      \xs.e
@@ -1443,15 +1528,9 @@ simplNonRecE :: SimplEnv
 -- Why?  Because of the binder-occ-info-zapping done before
 --       the call to simplLam in simplExprF (Lam ...)
 
-        -- First deal with type applications and type lets
-        --   (/\a. e) (Type ty)   and   (let a = Type ty in e)
-simplNonRecE env bndr (Type ty_arg, rhs_se) (bndrs, body) cont
-  = ASSERT( isTyVar bndr )
-    do  { ty_arg' <- simplType (rhs_se `setInScopeAndZapFloats` env) ty_arg
-        ; simplLam (extendTvSubst env bndr ty_arg') bndrs body cont }
-
 simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
-  = do dflags <- getDynFlags
+  = ASSERT( isId bndr )
+    do dflags <- getDynFlags
        case () of
          _ | preInlineUnconditionally dflags env NotTopLevel bndr rhs
            -> do { tick (PreInlineUnconditionally bndr)
@@ -1462,7 +1541,7 @@ simplNonRecE env bndr (rhs, rhs_se) (bndrs, body) cont
            -> simplExprF (rhs_se `setFloats` env) rhs
                          (StrictBind bndr bndrs body env cont)
 
-           | Just (bndr', rhs') <- matchOrConvertToJoinPoint bndr rhs
+           | Just (bndr', rhs') <- joinPointBinding_maybe bndr rhs
            -> do { let cont_dup_res_ty = resultTypeOfDupableCont (getMode env)
                                            [bndr'] cont
                  ; (env1, bndr1) <- simplNonRecJoinBndr env
@@ -1498,7 +1577,7 @@ simplRecE :: SimplEnv
 -- simplRecE is used for
 --  * non-top-level recursive lets in expressions
 simplRecE env pairs body cont
-  | Just pairs' <- matchOrConvertToJoinPoints pairs
+  | Just pairs' <- joinPointBindings_maybe pairs
   = do  { let bndrs' = map fst pairs'
               cont_dup_res_ty = resultTypeOfDupableCont (getMode env)
                                                         bndrs' cont
@@ -1525,29 +1604,6 @@ simplRecE env pairs body cont
         ; env2 <- simplRecBind env1 NotTopLevel (Just cont) pairs
         ; simplExprF env2 body cont }
 
--- | Returns Just (bndr,rhs) if the binding is a join point:
--- If it's a JoinId, just return it
--- If it's not yet a JoinId but is always tail-called,
---    make it into a JoinId and return it.
-matchOrConvertToJoinPoint :: InBndr -> InExpr -> Maybe (InBndr, InExpr)
-matchOrConvertToJoinPoint bndr rhs
-  | not (isId bndr)
-  = Nothing
-
-  | isJoinId bndr
-  = -- No point in keeping tailCallInfo around; very fragile
-    Just (bndr, rhs)
-
-  | AlwaysTailCalled join_arity <- tailCallInfo (idOccInfo bndr)
-  , (bndrs, body) <- etaExpandToJoinPoint join_arity rhs
-  = Just (bndr `asJoinId` join_arity, mkLams bndrs body)
-
-  | otherwise
-  = Nothing
-
-matchOrConvertToJoinPoints :: [(InBndr, InExpr)] -> Maybe [(InBndr, InExpr)]
-matchOrConvertToJoinPoints bndrs
-  = mapM (uncurry matchOrConvertToJoinPoint) bndrs
 
 {-
 ************************************************************************
@@ -1658,8 +1714,11 @@ rebuildCall env (ArgInfo { ai_fun = fun, ai_args = rev_args, ai_strs = [] }) con
   -- the continuation, leaving just the bottoming expression.  But the
   -- type might not be right, so we may have to add a coerce.
   | not (contIsTrivial cont)     -- Only do this if there is a non-trivial
-  = return (env, castBottomExpr res cont_ty)  -- continuation to discard, else we do it
-  where                                       -- again and again!
+                                 -- continuation to discard, else we do it
+                                 -- again and again!
+  = seqType cont_ty `seq`        -- See Note [Avoiding space leaks in OutType]
+    return (env, castBottomExpr res cont_ty)
+  where
     res     = argInfoExpr fun rev_args
     cont_ty = contResultType cont
 
@@ -1704,11 +1763,9 @@ rebuildCall env (ArgInfo { ai_fun = fun, ai_args = rev_args, ai_rules = rules })
   = do {  -- We've accumulated a simplified call in <fun,rev_args>
           -- so try rewrite rules; see Note [RULEs apply to simplified arguments]
           -- See also Note [Rules for recursive functions]
-        ; let env' = zapSubstEnv env  -- See Note [zapSubstEnv];
-                                      -- and NB that 'rev_args' are all fully simplified
-        ; mb_rule <- tryRules env' rules fun (reverse rev_args) cont
+          mb_rule <- tryRules env rules fun (reverse rev_args) cont
         ; case mb_rule of {
-             Just (rule_rhs, cont') -> simplExprF env' rule_rhs cont'
+             Just (env', rule_rhs, cont') -> simplExprF env' rule_rhs cont'
 
                  -- Rules don't match
            ; Nothing -> rebuild env (argInfoExpr fun rev_args) cont      -- No rules
@@ -1770,9 +1827,9 @@ all this at once is TOO HARD!
 -}
 
 tryRules :: SimplEnv -> [CoreRule]
-         -> Id -> [ArgSpec] -> SimplCont
-         -> SimplM (Maybe (CoreExpr, SimplCont))
--- The SimplEnv already has zapSubstEnv applied to it
+         -> Id -> [ArgSpec]
+         -> SimplCont
+         -> SimplM (Maybe (SimplEnv, CoreExpr, SimplCont))
 
 tryRules env rules fn args call_cont
   | null rules
@@ -1806,8 +1863,8 @@ tryRules env rules fn args call_cont
              do { nodump dflags  -- This ensures that an empty file is written
                 ; return Nothing } ;  -- No rule matches
            Just (rule, rule_rhs) ->
-             do { checkedTick (RuleFired (ru_name rule))
-                ; let cont' = pushSimplifiedArgs env
+             do { checkedTick (RuleFired (ruleName rule))
+                ; let cont' = pushSimplifiedArgs zapped_env
                                                  (drop (ruleArity rule) args)
                                                  call_cont
                               -- (ruleArity rule) says how
@@ -1816,19 +1873,29 @@ tryRules env rules fn args call_cont
                       occ_anald_rhs = occurAnalyseExpr rule_rhs
                           -- See Note [Occurrence-analyse after rule firing]
                 ; dump dflags rule rule_rhs
-                ; return (Just (occ_anald_rhs, cont')) }}}
+                ; return (Just (zapped_env, occ_anald_rhs, cont')) }}}
+                     -- The occ_anald_rhs and cont' are all Out things
+                     -- hence zapping the environment
   where
+    zapped_env = zapSubstEnv env  -- See Note [zapSubstEnv]
+
+    printRuleModule rule =
+      parens
+        (maybe (text "BUILTIN") (pprModuleName . moduleName) (ruleModule rule))
+
     dump dflags rule rule_rhs
       | dopt Opt_D_dump_rule_rewrites dflags
       = log_rule dflags Opt_D_dump_rule_rewrites "Rule fired" $ vcat
-          [ text "Rule:" <+> ftext (ru_name rule)
+          [ text "Rule:" <+> ftext (ruleName rule)
+          , text "Module:" <+>  printRuleModule rule
           , text "Before:" <+> hang (ppr fn) 2 (sep (map ppr args))
           , text "After: " <+> pprCoreExpr rule_rhs
           , text "Cont:  " <+> ppr call_cont ]
 
       | dopt Opt_D_dump_rule_firings dflags
       = log_rule dflags Opt_D_dump_rule_firings "Rule fired:" $
-          ftext (ru_name rule)
+          ftext (ruleName rule)
+            <+> printRuleModule rule
 
       | otherwise
       = return ()
@@ -1847,7 +1914,48 @@ tryRules env rules fn args call_cont
       = liftIO . dumpSDoc dflags alwaysQualify flag "" $
                    sep [text hdr, nest 4 details]
 
-{- Note [Occurrence-analyse after rule firing]
+trySeqRules :: SimplEnv
+            -> OutExpr -> InExpr   -- Scrutinee and RHS
+            -> SimplCont
+            -> SimplM (Maybe (SimplEnv, CoreExpr, SimplCont))
+-- See Note [User-defined RULES for seq]
+trySeqRules in_env scrut rhs cont
+  = do { rule_base <- getSimplRules
+       ; tryRules in_env (getRules rule_base seqId) seqId out_args rule_cont }
+  where
+    no_cast_scrut = drop_casts scrut
+    scrut_ty  = exprType no_cast_scrut
+    seq_id_ty = idType seqId
+    rhs_ty    = substTy in_env (exprType rhs)
+    out_args  = [ TyArg { as_arg_ty  = scrut_ty
+                        , as_hole_ty = seq_id_ty }
+                , TyArg { as_arg_ty  = rhs_ty
+                       , as_hole_ty  = piResultTy seq_id_ty scrut_ty }
+                , ValArg no_cast_scrut]
+    rule_cont = ApplyToVal { sc_dup = NoDup, sc_arg = rhs
+                           , sc_env = in_env, sc_cont = cont }
+    -- Lazily evaluated, so we don't do most of this
+
+    drop_casts (Cast e _) = drop_casts e
+    drop_casts e          = e
+
+{- Note [User-defined RULES for seq]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Given
+   case (scrut |> co) of _ -> rhs
+look for rules that match the expression
+   seq @t1 @t2 scrut
+where scrut :: t1
+      rhs   :: t2
+
+If you find a match, rewrite it, and apply to 'rhs'.
+
+Notice that we can simply drop casts on the fly here, which
+makes it more likely that a rule will match.
+
+See Note [User-defined RULES for seq] in MkId.
+
+Note [Occurrence-analyse after rule firing]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 After firing a rule, we occurrence-analyse the instantiated RHS before
 simplifying it.  Usually this doesn't make much difference, but it can
@@ -2196,28 +2304,14 @@ rebuildCase env scrut case_bndr alts@[(_, bndrs, rhs)] cont
   --     b) a rule for seq applies
   -- See Note [User-defined RULES for seq] in MkId
   | is_plain_seq
-  = do { let scrut_ty = exprType scrut
-             rhs_ty   = substTy env (exprType rhs)
-             out_args = [ TyArg { as_arg_ty  = scrut_ty
-                                , as_hole_ty = seq_id_ty }
-                        , TyArg { as_arg_ty  = rhs_ty
-                                , as_hole_ty = piResultTy seq_id_ty scrut_ty }
-                        , ValArg scrut]
-             rule_cont = ApplyToVal { sc_dup = NoDup, sc_arg = rhs
-                                    , sc_env = env, sc_cont = cont }
-             env' = zapSubstEnv env
-             -- Lazily evaluated, so we don't do most of this
-
-       ; rule_base <- getSimplRules
-       ; mb_rule <- tryRules env' (getRules rule_base seqId) seqId out_args rule_cont
+  = do { mb_rule <- trySeqRules env scrut rhs cont
        ; case mb_rule of
-           Just (rule_rhs, cont') -> simplExprF env' rule_rhs cont'
-           Nothing                -> reallyRebuildCase env scrut case_bndr alts cont }
+           Just (env', rule_rhs, cont') -> simplExprF env' rule_rhs cont'
+           Nothing                      -> reallyRebuildCase env scrut case_bndr alts cont }
   where
     is_unlifted        = isUnliftedType (idType case_bndr)
     all_dead_bndrs     = all isDeadBinder bndrs       -- bndrs are [InId]
     is_plain_seq       = all_dead_bndrs && isDeadBinder case_bndr -- Evaluation *only* for effect
-    seq_id_ty          = idType seqId
 
     scrut_is_demanded_var :: CoreExpr -> Bool
             -- See Note [Eliminating redundant seqs]
@@ -2244,7 +2338,9 @@ reallyRebuildCase env scrut case_bndr alts cont
 
         ; dflags <- getDynFlags
         ; let alts_ty' = contResultType dup_cont
-        ; case_expr <- mkCase dflags scrut' case_bndr' alts_ty' alts'
+        -- See Note [Avoiding space leaks in OutType]
+        ; case_expr <- seqType alts_ty' `seq`
+                       mkCase dflags scrut' case_bndr' alts_ty' alts'
 
         -- Notice that rebuild gets the in-scope set from env', not alt_env
         -- (which in any case is only build in simplAlts)
@@ -2260,7 +2356,7 @@ inlined.
 
 Historical note: we use to do the "case binder swap" in the Simplifier
 so there were additional complications if the scrutinee was a variable.
-Now the binder-swap stuff is done in the occurrence analyer; see
+Now the binder-swap stuff is done in the occurrence analyser; see
 OccurAnal Note [Binder swap].
 
 Note [knownCon occ info]
@@ -2289,37 +2385,33 @@ Consider
         type family F :: * -> *
         type instance F Int = Int
 
-        ... case e of x { DEFAULT -> rhs } ...
-
-where x::F Int.  Then we'd like to rewrite (F Int) to Int, getting
-
-        case e `cast` co of x'::Int
+We'd like to transform
+        case e of (x :: F Int) { DEFAULT -> rhs }
+===>
+        case e `cast` co of (x'::Int)
            I# x# -> let x = x' `cast` sym co
                     in rhs
 
-so that 'rhs' can take advantage of the form of x'.
+so that 'rhs' can take advantage of the form of x'.  Notice that Note
+[Case of cast] (in OccurAnal) may then apply to the result.
 
-Notice that Note [Case of cast] (in OccurAnal) may then apply to the result.
+We'd also like to eliminate empty types (Trac #13468). So if
 
-Nota Bene: We only do the [Improving seq] transformation if the
-case binder 'x' is actually used in the rhs; that is, if the case
-is *not* a *pure* seq.
-  a) There is no point in adding the cast to a pure seq.
-  b) There is a good reason not to: doing so would interfere
-     with seq rules (Note [Built-in RULES for seq] in MkId).
-     In particular, this [Improving seq] thing *adds* a cast
-     while [Built-in RULES for seq] *removes* one, so they
-     just flip-flop.
+    data Void
+    type instance F Bool = Void
 
-You might worry about
-   case v of x { __DEFAULT ->
-      ... case (v `cast` co) of y { I# -> ... }}
-This is a pure seq (since x is unused), so [Improving seq] won't happen.
-But it's ok: the simplifier will replace 'v' by 'x' in the rhs to get
-   case v of x { __DEFAULT ->
-      ... case (x `cast` co) of y { I# -> ... }}
-Now the outer case is not a pure seq, so [Improving seq] will happen,
-and then the inner case will disappear.
+then we'd like to transform
+        case (x :: F Bool) of { _ -> error "urk" }
+===>
+        case (x |> co) of (x' :: Void) of {}
+
+Nota Bene: we used to have a built-in rule for 'seq' that dropped
+casts, so that
+    case (x |> co) of { _ -> blah }
+dropped the cast; in order to improve the chances of trySeqRules
+firing.  But that works in the /opposite/ direction to Note [Improving
+seq] so there's a danger of flip/flopping.  Better to make trySeqRules
+insensitive to the cast, which is now is.
 
 The need for [Improving seq] showed up in Roman's experiments.  Example:
   foo :: F Int -> Int -> Int
@@ -2372,8 +2464,7 @@ improveSeq :: (FamInstEnv, FamInstEnv) -> SimplEnv
            -> SimplM (SimplEnv, OutExpr, OutId)
 -- Note [Improving seq]
 improveSeq fam_envs env scrut case_bndr case_bndr1 [(DEFAULT,_,_)]
-  | not (isDeadBinder case_bndr) -- Not a pure seq!  See Note [Improving seq]
-  , Just (co, ty2) <- topNormaliseType_maybe fam_envs (idType case_bndr1)
+  | Just (co, ty2) <- topNormaliseType_maybe fam_envs (idType case_bndr1)
   = do { case_bndr2 <- newId (fsLit "nt") ty2
         ; let rhs  = DoneEx (Var case_bndr2 `Cast` mkSymCo co)
               env2 = extendIdSubst env case_bndr rhs
@@ -2627,7 +2718,9 @@ missingAlt :: SimplEnv -> Id -> [InAlt] -> SimplCont -> SimplM (SimplEnv, OutExp
                 -- inaccessible.  So we simply put an error case here instead.
 missingAlt env case_bndr _ cont
   = WARN( True, text "missingAlt" <+> ppr case_bndr )
-    return (env, mkImpossibleExpr (contResultType cont))
+    -- See Note [Avoiding space leaks in OutType]
+    let cont_ty = contResultType cont
+    in seqType cont_ty `seq` return (env, mkImpossibleExpr cont_ty)
 
 {-
 ************************************************************************

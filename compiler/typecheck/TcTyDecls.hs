@@ -29,7 +29,6 @@ module TcTyDecls(
 import TcRnMonad
 import TcEnv
 import TcBinds( tcRecSelBinds )
-import RnEnv( RoleAnnotEnv, lookupRoleAnnot )
 import TyCoRep( Type(..), Coercion(..), UnivCoProvenance(..) )
 import TcType
 import TysWiredIn( unitTy )
@@ -49,7 +48,6 @@ import Id
 import IdInfo
 import VarEnv
 import VarSet
-import NameSet  ( NameSet, unitNameSet, extendNameSet, elemNameSet )
 import Coercion ( ltRole )
 import BasicTypes
 import SrcLoc

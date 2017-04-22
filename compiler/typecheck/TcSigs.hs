@@ -470,7 +470,7 @@ the signature types for f and g, we'll end up unifying 'a' and 'b'
 So we instantiate f and g's signature with SigTv skolems
 (newMetaSigTyVars) that can unify with each other.  If too much
 unification takes place, we'll find out when we do the final
-impedence-matching check in TcBinds.mkExport
+impedance-matching check in TcBinds.mkExport
 
 See Note [Signature skolems] in TcType
 
@@ -754,7 +754,7 @@ tcImpPrags prags
     -- Ignore SPECIALISE pragmas for imported things
     -- when we aren't specialising, or when we aren't generating
     -- code.  The latter happens when Haddocking the base library;
-    -- we don't wnat complaints about lack of INLINABLE pragmas
+    -- we don't want complaints about lack of INLINABLE pragmas
     not_specialising dflags
       | not (gopt Opt_Specialise dflags) = True
       | otherwise = case hscTarget dflags of

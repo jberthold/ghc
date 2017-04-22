@@ -44,6 +44,11 @@ import HsSyn
 import TcRnMonad
 import TcHsSyn             ( hsOverLitName )
 import RnEnv
+import RnFixity
+import RnUtils             ( HsDocContext(..), newLocalBndrRn, bindLocalNames
+                           , warnUnusedMatches, newLocalBndrRn
+                           , checkDupAndShadowedNames, checkTupSize
+                           , unknownSubordinateErr )
 import RnTypes
 import PrelNames
 import TyCon               ( tyConName )
@@ -249,7 +254,8 @@ report unused variables at the binding level. So we must use bindLocalNames
 here, *not* bindLocalNameFV.  Trac #3943.
 
 
-Note: [Don't report shadowing for pattern synonyms]
+Note [Don't report shadowing for pattern synonyms]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 There is one special context where a pattern doesn't introduce any new binders -
 pattern synonym declarations. Therefore we don't check to see if pattern
 variables shadow existing identifiers as they are never bound to anything

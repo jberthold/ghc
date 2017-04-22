@@ -64,7 +64,7 @@ import SrcLoc
 import qualified Lexer
 
 import StringBuffer
-import Outputable hiding ( printForUser, printForUserPartWay, bold )
+import Outputable hiding ( printForUser, printForUserPartWay )
 
 -- Other random utilities
 import BasicTypes hiding ( isTopLevel )
@@ -920,7 +920,7 @@ runCommands' eh sourceErrorHandler gCmd = gmask $ \unmask -> do
 -- A result of Nothing means there was no more input to process.
 -- Otherwise the result is Just b where b is True if the command succeeded;
 -- this is relevant only to ghc -e, which will exit with status 1
--- if the commmand was unsuccessful. GHCi will continue in either case.
+-- if the command was unsuccessful. GHCi will continue in either case.
 runOneCommand :: (SomeException -> GHCi Bool) -> InputT GHCi (Maybe String)
             -> InputT GHCi (Maybe Bool)
 runOneCommand eh gCmd = do
@@ -1409,6 +1409,11 @@ changeDirectory dir = do
   GHC.workingDirectoryChanged
   dir' <- expandPath dir
   liftIO $ setCurrentDirectory dir'
+  dflags <- getDynFlags
+  -- With -fexternal-interpreter, we have to change the directory of the subprocess too.
+  -- (this gives consistent behaviour with and without -fexternal-interpreter)
+  when (gopt Opt_ExternalInterpreter dflags) $
+    lift $ enqueueCommands ["System.Directory.setCurrentDirectory " ++ show dir']
 
 trySuccess :: GHC.GhcMonad m => m SuccessFlag -> m SuccessFlag
 trySuccess act =
@@ -2593,13 +2598,6 @@ setOptions wds =
       -- then, dynamic flags
       when (not (null minus_opts)) $ newDynFlags False minus_opts
 
-packageFlagsChanged :: DynFlags -> DynFlags -> Bool
-packageFlagsChanged idflags1 idflags0 =
-    packageFlags idflags1 /= packageFlags idflags0 ||
-    ignorePackageFlags idflags1 /= ignorePackageFlags idflags0 ||
-    pluginPackageFlags idflags1 /= pluginPackageFlags idflags0 ||
-    trustFlags idflags1 /= trustFlags idflags0
-
 newDynFlags :: Bool -> [String] -> GHCi ()
 newDynFlags interactive_only minus_opts = do
       let lopts = map noLoc minus_opts
@@ -3527,8 +3525,7 @@ listAround pan do_highlight = do
           prefixed = zipWith ($) highlighted bs_line_nos
           output   = BS.intercalate (BS.pack "\n") prefixed
 
-      utf8Decoded <- liftIO $ BS.useAsCStringLen output
-                        $ \(p,n) -> utf8DecodeString (castPtr p) n
+      let utf8Decoded = utf8DecodeByteString output
       liftIO $ putStrLn utf8Decoded
   where
         file  = GHC.srcSpanFile pan

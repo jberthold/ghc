@@ -5,12 +5,13 @@
 static HsInt GenSymCounter = 0;
 static HsInt GenSymInc = 1;
 
+#define UNIQUE_BITS (sizeof (HsInt) * 8 - UNIQUE_TAG_BITS)
 #define UNIQUE_MASK ((1ULL << UNIQUE_BITS) - 1)
 
 STATIC_INLINE void checkUniqueRange(HsInt u STG_UNUSED) {
 #if DEBUG
     // Uh oh! We will overflow next time a unique is requested.
-    assert(h != UNIQUE_MASK);
+    assert(u != UNIQUE_MASK);
 #endif
 }
 

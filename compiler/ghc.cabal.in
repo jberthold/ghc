@@ -236,6 +236,7 @@ Library
         CmmType
         CmmUtils
         CmmLayoutStack
+        EnumSet
         MkGraph
         PprBase
         PprC
@@ -276,6 +277,7 @@ Library
         CoreLint
         CorePrep
         CoreSubst
+        CoreOpt
         CoreSyn
         TrieMap
         CoreTidy
@@ -386,6 +388,9 @@ Library
         RnSource
         RnSplice
         RnTypes
+        RnFixity
+        RnUtils
+        RnUnbound
         CoreMonad
         CSE
         FloatIn
@@ -499,6 +504,7 @@ Library
         Outputable
         Pair
         Panic
+        PprColour
         Pretty
         State
         Stream
@@ -506,6 +512,7 @@ Library
         UniqDFM
         UniqDSet
         UniqFM
+        UniqMap
         UniqSet
         Util
         Vectorise.Builtins.Base

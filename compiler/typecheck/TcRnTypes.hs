@@ -128,7 +128,11 @@ module TcRnTypes(
         -- Misc other types
         TcId, TcIdSet,
         Hole(..), holeOcc,
-        NameShape(..)
+        NameShape(..),
+
+        -- Role annotations
+        RoleAnnotEnv, emptyRoleAnnotEnv, mkRoleAnnotEnv,
+        lookupRoleAnnot, getRoleAnnots,
 
   ) where
 
@@ -176,6 +180,7 @@ import FastString
 import qualified GHC.LanguageExtensions as LangExt
 import Fingerprint
 import Util
+import PrelNames ( isUnboundName )
 
 import Control.Monad (ap, liftM, msum)
 #if __GLASGOW_HASKELL__ > 710
@@ -187,6 +192,7 @@ import qualified Data.Set as S
 import Data.Map ( Map )
 import Data.Dynamic  ( Dynamic )
 import Data.Typeable ( TypeRep )
+import Data.Maybe    ( mapMaybe )
 import GHCi.Message
 import GHCi.RemoteTypes
 
@@ -531,7 +537,31 @@ data TcGblEnv
         tcg_imports :: ImportAvails,
           -- ^ Information about what was imported from where, including
           -- things bound in this module. Also store Safe Haskell info
-          -- here about transative trusted packaage requirements.
+          -- here about transitive trusted package requirements.
+          --
+          -- There are not many uses of this field, so you can grep for
+          -- all them.
+          --
+          -- The ImportAvails records information about the following
+          -- things:
+          --
+          --    1. All of the modules you directly imported (tcRnImports)
+          --    2. The orphans (only!) of all imported modules in a GHCi
+          --       session (runTcInteractive)
+          --    3. The module that instantiated a signature
+          --    4. Each of the signatures that merged in
+          --
+          -- It is used in the following ways:
+          --    - imp_orphs is used to determine what orphan modules should be
+          --      visible in the context (tcVisibleOrphanMods)
+          --    - imp_finsts is used to determine what family instances should
+          --      be visible (tcExtendLocalFamInstEnv)
+          --    - To resolve the meaning of the export list of a module
+          --      (tcRnExports)
+          --    - imp_mods is used to compute usage info (mkIfaceTc, deSugar)
+          --    - imp_trust_own_pkg is used for Safe Haskell in interfaces
+          --      (mkIfaceTc, as well as in HscMain)
+          --    - To create the Dependencies field in interface (mkDependencies)
 
         tcg_dus       :: DefUses,   -- ^ What is defined in this module and what is used.
         tcg_used_gres :: TcRef [GlobalRdrElt],  -- ^ Records occurrences of imported entities
@@ -1374,7 +1404,7 @@ data TcIdSigInst
   = TISI { sig_inst_sig :: TcIdSigInfo
 
          , sig_inst_skols :: [(Name, TcTyVar)]
-               -- Instantiated type and kind variables SKOLEMS
+               -- Instantiated type and kind variables, SigTvs
                -- The Name is the Name that the renamer chose;
                --   but the TcTyVar may come from instantiating
                --   the type and hence have a different unique.
@@ -1424,7 +1454,7 @@ Moreover the kind of a wildcard in sig_inst_wcs may mention
 the universally-quantified tyvars sig_inst_skols
 e.g.   f :: t a -> t _
 Here we get
-   sig_inst_skole = [k:*, (t::k ->*), (a::k)]
+   sig_inst_skols = [k:*, (t::k ->*), (a::k)]
    sig_inst_tau   = t a -> t _22
    sig_inst_wcs   = [ _22::k ]
 -}
@@ -1792,31 +1822,36 @@ dropDerivedInsols insols = filterBag keep insols
       | otherwise      = True
 
 isDroppableDerivedLoc :: CtLoc -> Bool
--- Note [Dropping derived constraints]
+-- See Note [Dropping derived constraints]
 isDroppableDerivedLoc loc
   = case ctLocOrigin loc of
       HoleOrigin {}    -> False
       KindEqOrigin {}  -> False
       GivenOrigin {}   -> False
-      FunDepOrigin1 {} -> False
+
+      -- See Note [Dropping derived constraints]
+      -- For fundeps, drop wanted/wanted interactions
       FunDepOrigin2 {} -> False
-      _                -> True
+      FunDepOrigin1 _ loc1 _ loc2
+        | isGivenLoc loc1 || isGivenLoc loc2 -> False
+        | otherwise                          -> True
+      _ -> True
 
 arisesFromGivens :: Ct -> Bool
 arisesFromGivens ct
   = case ctEvidence ct of
-      CtGiven {} -> True
-      CtWanted {} -> False
-      CtDerived { ctev_loc = loc } -> from_given loc
-  where
-   from_given :: CtLoc -> Bool
-   from_given loc = from_given_origin (ctLocOrigin loc)
+      CtGiven {}                   -> True
+      CtWanted {}                  -> False
+      CtDerived { ctev_loc = loc } -> isGivenLoc loc
 
-   from_given_origin :: CtOrigin -> Bool
-   from_given_origin (GivenOrigin {})          = True
-   from_given_origin (FunDepOrigin1 _ l1 _ l2) = from_given l1 && from_given l2
-   from_given_origin (FunDepOrigin2 _ o1 _ _)  = from_given_origin o1
-   from_given_origin _                         = False
+isGivenLoc :: CtLoc -> Bool
+isGivenLoc loc = isGivenOrigin (ctLocOrigin loc)
+
+isGivenOrigin :: CtOrigin -> Bool
+isGivenOrigin (GivenOrigin {})          = True
+isGivenOrigin (FunDepOrigin1 _ l1 _ l2) = isGivenLoc l1 && isGivenLoc l2
+isGivenOrigin (FunDepOrigin2 _ o1 _ _)  = isGivenOrigin o1
+isGivenOrigin _                         = False
 
 {- Note [Dropping derived constraints]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1832,19 +1867,19 @@ see dropDerivedWC.  For example
 
 But (tiresomely) we do keep *some* Derived insolubles:
 
- * Insoluble kind equalities (e.g. [D] * ~ (* -> *)) may arise from
-   a type equality a ~ Int#, say.  In future they'll be Wanted, not Derived,
-   but at the moment they are Derived.
+ * Type holes are derived constraints, because they have no evidence
+   and we want to keep them, so we get the error report
 
  * Insoluble derived equalities (e.g. [D] Int ~ Bool) may arise from
-   functional dependency interactions, either between Givens or
-   Wanteds.  It seems sensible to retain these:
-   - For Givens they reflect unreachable code
-   - For Wanteds it is arguably better to get a fundep error than
-     a no-instance error (Trac #9612)
+   functional dependency interactions:
+      - Given or Wanted interacting with an instance declaration (FunDepOrigin2)
+      - Given/Given interactions (FunDepOrigin1); this reflects unreachable code
+      - Given/Wanted interactions (FunDepOrigin1); see Trac #9612
 
- * Type holes are derived constraints because they have no evidence
-   and we want to keep them so we get the error report
+   But for Wanted/Wanted interactions we do /not/ want to report an
+   error (Trac #13506).  Consider [W] C Int Int, [W] C Int Bool, with
+   a fundep on class C.  We don't want to report an insoluble Int~Bool;
+   c.f. "wanteds do not rewrite wanteds".
 
 Moreover, we keep *all* derived insolubles under some circumstances:
 
@@ -1852,7 +1887,7 @@ Moreover, we keep *all* derived insolubles under some circumstances:
     generalise.  Example: [W] a ~ Int, [W] a ~ Bool
     We get [D] Int ~ Bool, and indeed the constraints are insoluble,
     and we want simplifyInfer to see that, even though we don't
-    ultimately want to generate an (inexplicable) error message from
+    ultimately want to generate an (inexplicable) error message from it
 
 To distinguish these cases we use the CtOrigin.
 
@@ -2153,7 +2188,7 @@ trulyInsoluble :: Ct -> Bool
 --   a) type holes, arising from PartialTypeSignatures,
 --   b) "true" expression holes arising from TypedHoles
 --
--- A "expression hole" or "type hole" constraint isn't really an error
+-- An "expression hole" or "type hole" constraint isn't really an error
 -- at all; it's a report saying "_ :: Int" here.  But an out-of-scope
 -- variable masquerading as expression holes IS treated as truly
 -- insoluble, so that it trumps other errors during error reporting.
@@ -2841,9 +2876,14 @@ pushErrCtxtSameOrigin err loc@(CtLoc { ctl_env = lcl })
 --   a) type variables are skolemised
 --   b) an implication constraint is generated
 data SkolemInfo
-  = SigSkol UserTypeCtxt        -- A skolem that is created by instantiating
-            TcType              -- a programmer-supplied type signature
-                                -- Location of the binding site is on the TyVar
+  = SigSkol -- A skolem that is created by instantiating
+            -- a programmer-supplied type signature
+            -- Location of the binding site is on the TyVar
+            -- See Note [SigSkol SkolemInfo]
+       UserTypeCtxt        -- What sort of signature
+       TcType              -- Original type signature (before skolemisation)
+       [(Name,TcTyVar)]    -- Maps the original name of the skolemised tyvar
+                           -- to its instantiated version
 
   | ClsSkol Class       -- Bound at a class decl
 
@@ -2898,9 +2938,9 @@ termEvidenceAllowed _                    = True
 
 pprSkolInfo :: SkolemInfo -> SDoc
 -- Complete the sentence "is a rigid type variable bound by..."
-pprSkolInfo (SigSkol ctxt ty) = pprSigSkolInfo ctxt ty
+pprSkolInfo (SigSkol cx ty _) = pprSigSkolInfo cx ty
 pprSkolInfo (IPSkol ips)      = text "the implicit-parameter binding" <> plural ips <+> text "for"
-                                <+> pprWithCommas ppr ips
+                                 <+> pprWithCommas ppr ips
 pprSkolInfo (ClsSkol cls)     = text "the class declaration for" <+> quotes (ppr cls)
 pprSkolInfo (DerivSkol pred)  = text "the deriving clause for" <+> quotes (ppr pred)
 pprSkolInfo InstSkol          = text "the instance declaration"
@@ -2923,6 +2963,7 @@ pprSkolInfo (UnifyForAllSkol ty) = text "the type" <+> ppr ty
 pprSkolInfo UnkSkol = WARN( True, text "pprSkolInfo: UnkSkol" ) text "UnkSkol"
 
 pprSigSkolInfo :: UserTypeCtxt -> TcType -> SDoc
+-- The type is already tidied
 pprSigSkolInfo ctxt ty
   = case ctxt of
        FunSigCtxt f _ -> vcat [ text "the type signature for:"
@@ -2948,12 +2989,37 @@ pprPatSkolInfo (PatSynCon ps)
 {- Note [Skolem info for pattern synonyms]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 For pattern synonym SkolemInfo we have
-   SigSkol (PatSynCtxt p) ty
+   SigSkol (PatSynCtxt p) ty _
 but the type 'ty' is not very helpful.  The full pattern-synonym type
-is has the provided and required pieces, which it is inconvenient to
+has the provided and required pieces, which it is inconvenient to
 record and display here. So we simply don't display the type at all,
 contenting outselves with just the name of the pattern synonym, which
 is fine.  We could do more, but it doesn't seem worth it.
+
+Note [SigSkol SkolemInfo]
+~~~~~~~~~~~~~~~~~~~~~~~~~
+Suppose we (deeply) skolemise a type
+   f :: forall a. a -> forall b. b -> a
+Then we'll instantiate [a :-> a', b :-> b'], and with the instantiated
+      a' -> b' -> a.
+But when, in an error message, we report that "b is a rigid type
+variable bound by the type signature for f", we want to show the foralls
+in the right place.  So we proceed as follows:
+
+* In SigSkol we record
+    - the original signature forall a. a -> forall b. b -> a
+    - the instantiation mapping [a :-> a', b :-> b']
+
+* Then when tidying in TcMType.tidySkolemInfo, we first tidy a' to
+  whatever it tidies to, say a''; and then we walk over the type
+  replacing the binder a by the tidied version a'', to give
+       forall a''. a'' -> forall b''. b'' -> a''
+  We need to do this under function arrows, to match what deeplySkolemise
+  does.
+
+* Typically a'' will have a nice pretty name like "a", but the point is
+  that the foral-bound variables of the signature we report line up with
+  the instantiated skolems lying  around in other types.
 
 
 ************************************************************************
@@ -3362,3 +3428,31 @@ data TcPluginResult
     -- and the evidence for them is recorded.
     -- The second field contains new work, that should be processed by
     -- the constraint solver.
+
+{- *********************************************************************
+*                                                                      *
+                        Role annotations
+*                                                                      *
+********************************************************************* -}
+
+type RoleAnnotEnv = NameEnv (LRoleAnnotDecl Name)
+
+mkRoleAnnotEnv :: [LRoleAnnotDecl Name] -> RoleAnnotEnv
+mkRoleAnnotEnv role_annot_decls
+ = mkNameEnv [ (name, ra_decl)
+             | ra_decl <- role_annot_decls
+             , let name = roleAnnotDeclName (unLoc ra_decl)
+             , not (isUnboundName name) ]
+       -- Some of the role annots will be unbound;
+       -- we don't wish to include these
+
+emptyRoleAnnotEnv :: RoleAnnotEnv
+emptyRoleAnnotEnv = emptyNameEnv
+
+lookupRoleAnnot :: RoleAnnotEnv -> Name -> Maybe (LRoleAnnotDecl Name)
+lookupRoleAnnot = lookupNameEnv
+
+getRoleAnnots :: [Name] -> RoleAnnotEnv -> ([LRoleAnnotDecl Name], RoleAnnotEnv)
+getRoleAnnots bndrs role_env
+  = ( mapMaybe (lookupRoleAnnot role_env) bndrs
+    , delListFromNameEnv role_env bndrs )

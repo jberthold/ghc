@@ -24,7 +24,7 @@ module DynFlags (
         WarningFlag(..), WarnReason(..),
         Language(..),
         PlatformConstants(..),
-        FatalMessager, LogAction, FlushOut(..), FlushErr(..),
+        FatalMessager, LogAction, LogFinaliser, FlushOut(..), FlushErr(..),
         ProfAuto(..),
         glasgowExtsFlags,
         warningGroups, warningHierarchies,
@@ -42,15 +42,15 @@ module DynFlags (
         DynFlags(..),
         FlagSpec(..),
         HasDynFlags(..), ContainsDynFlags(..),
-        OverridingBool(..), overrideWith,
         RtsOptsEnabled(..),
         HscTarget(..), isObjectTarget, defaultObjectTarget,
         targetRetainsAllBindings,
         GhcMode(..), isOneShot,
         GhcLink(..), isNoLink,
         PackageFlag(..), PackageArg(..), ModRenaming(..),
+        packageFlagsChanged,
         IgnorePackageFlag(..), TrustFlag(..),
-        PkgConfRef(..),
+        PackageDBFlag(..), PkgConfRef(..),
         Option(..), showOpt,
         DynLibLoader(..),
         fFlags, fLangFlags, xFlags,
@@ -58,11 +58,15 @@ module DynFlags (
         dynFlagDependencies,
         tablesNextToCode, mkTablesNextToCode,
         makeDynFlagsConsistent,
+        shouldUseColor,
 
         Way(..), mkBuildTag, wayRTSOnly, addWay', updateWays,
         wayGeneralFlags, wayUnsetGeneralFlags,
 
         thisPackage, thisComponentId, thisUnitIdInsts,
+
+        -- ** Log output
+        putLogMsg,
 
         -- ** Safe Haskell
         SafeHaskellMode(..),
@@ -167,6 +171,7 @@ import Config
 import CmdLineParser
 import Constants
 import Panic
+import qualified PprColour as Col
 import Util
 import Maybes
 import MonadUtils
@@ -204,14 +209,14 @@ import qualified Data.Set as Set
 import Data.Word
 import System.FilePath
 import System.Directory
-import System.Environment (getEnv)
+import System.Environment (getEnv, lookupEnv)
 import System.IO
 import System.IO.Error
 import Text.ParserCombinators.ReadP hiding (char)
 import Text.ParserCombinators.ReadP as R
 
-import Data.IntSet (IntSet)
-import qualified Data.IntSet as IntSet
+import EnumSet (EnumSet)
+import qualified EnumSet
 
 import GHC.Foreign (withCString, peekCString)
 import qualified GHC.LanguageExtensions as LangExt
@@ -704,6 +709,8 @@ data DynFlags = DynFlags {
 
   maxRelevantBinds      :: Maybe Int,   -- ^ Maximum number of bindings from the type envt
                                         --   to show in type error messages
+  maxValidSubstitutions :: Maybe Int,   -- ^ Maximum number of substitutions
+                                        --   to show in type error messages
   maxUncoveredPatterns  :: Int,         -- ^ Maximum number of unmatched patterns to show
                                         --   in non-exhaustiveness warnings
   simplTickFactor       :: Int,         -- ^ Multiplier for simplifier ticks
@@ -800,18 +807,25 @@ data DynFlags = DynFlags {
   depSuffixes           :: [String],
 
   --  Package flags
-  extraPkgConfs         :: [PkgConfRef] -> [PkgConfRef],
-        -- ^ The @-package-db@ flags given on the command line, in the order
-        -- they appeared.
+  packageDBFlags        :: [PackageDBFlag],
+        -- ^ The @-package-db@ flags given on the command line, In
+        -- *reverse* order that they're specified on the command line.
+        -- This is intended to be applied with the list of "initial"
+        -- package databases derived from @GHC_PACKAGE_PATH@; see
+        -- 'getPackageConfRefs'.
 
   ignorePackageFlags    :: [IgnorePackageFlag],
-        -- ^ The @-ignore-package@ flags from the command line
+        -- ^ The @-ignore-package@ flags from the command line.
+        -- In *reverse* order that they're specified on the command line.
   packageFlags          :: [PackageFlag],
-        -- ^ The @-package@ and @-hide-package@ flags from the command-line
+        -- ^ The @-package@ and @-hide-package@ flags from the command-line.
+        -- In *reverse* order that they're specified on the command line.
   pluginPackageFlags    :: [PackageFlag],
-        -- ^ The @-plugin-package-id@ flags from command line
+        -- ^ The @-plugin-package-id@ flags from command line.
+        -- In *reverse* order that they're specified on the command line.
   trustFlags            :: [TrustFlag],
-        -- ^ The @-trust@ and @-distrust@ flags
+        -- ^ The @-trust@ and @-distrust@ flags.
+        -- In *reverse* order that they're specified on the command line.
   packageEnv            :: Maybe FilePath,
         -- ^ Filepath to the package environment file (if overriding default)
 
@@ -836,10 +850,10 @@ data DynFlags = DynFlags {
   generatedDumps        :: IORef (Set FilePath),
 
   -- hsc dynamic flags
-  dumpFlags             :: IntSet,
-  generalFlags          :: IntSet,
-  warningFlags          :: IntSet,
-  fatalWarningFlags     :: IntSet,
+  dumpFlags             :: EnumSet DumpFlag,
+  generalFlags          :: EnumSet GeneralFlag,
+  warningFlags          :: EnumSet WarningFlag,
+  fatalWarningFlags     :: EnumSet WarningFlag,
   -- Don't change this without updating extensionFlags:
   language              :: Maybe Language,
   -- | Safe Haskell mode
@@ -863,7 +877,7 @@ data DynFlags = DynFlags {
   --     flattenExtensionFlags language extensions
   -- LangExt.Extension is defined in libraries/ghc-boot so that it can be used
   -- by template-haskell
-  extensionFlags        :: IntSet,
+  extensionFlags        :: EnumSet LangExt.Extension,
 
   -- Unfolding control
   -- See Note [Discounts and thresholds] in CoreUnfold
@@ -898,6 +912,7 @@ data DynFlags = DynFlags {
   useUnicode            :: Bool,
   useColor              :: OverridingBool,
   canUseColor           :: Bool,
+  colScheme             :: Col.Scheme,
 
   -- | what kind of {-# SCC #-} to add automatically
   profAuto              :: ProfAuto,
@@ -935,7 +950,10 @@ data DynFlags = DynFlags {
   maxInlineMemsetInsns  :: Int,
 
   -- | Reverse the order of error messages in GHC/GHCi
-  reverseErrors :: Bool,
+  reverseErrors         :: Bool,
+
+  -- | Limit the maximum number of errors to show
+  maxErrors             :: Maybe Int,
 
   -- | Unique supply configuration for testing build determinism
   initialUnique         :: Int,
@@ -1236,9 +1254,28 @@ data TrustFlag
 data PackageFlag
   = ExposePackage   String PackageArg ModRenaming -- ^ @-package@, @-package-id@
   | HidePackage     String -- ^ @-hide-package@
+  deriving (Eq) -- NB: equality instance is used by packageFlagsChanged
+
+data PackageDBFlag
+  = PackageDB PkgConfRef
+  | NoUserPackageDB
+  | NoGlobalPackageDB
+  | ClearPackageDBs
   deriving (Eq)
--- NB: equality instance is used by InteractiveUI to test if
--- package flags have changed.
+
+packageFlagsChanged :: DynFlags -> DynFlags -> Bool
+packageFlagsChanged idflags1 idflags0 =
+  packageFlags idflags1 /= packageFlags idflags0 ||
+  ignorePackageFlags idflags1 /= ignorePackageFlags idflags0 ||
+  pluginPackageFlags idflags1 /= pluginPackageFlags idflags0 ||
+  trustFlags idflags1 /= trustFlags idflags0 ||
+  packageDBFlags idflags1 /= packageDBFlags idflags0 ||
+  packageGFlags idflags1 /= packageGFlags idflags0
+ where
+   packageGFlags dflags = map (`gopt` dflags)
+     [ Opt_HideAllPackages
+     , Opt_HideAllPluginPackages
+     , Opt_AutoLinkPackages ]
 
 instance Outputable PackageFlag where
     ppr (ExposePackage n arg rn) = text n <> braces (ppr arg <+> ppr rn)
@@ -1275,16 +1312,8 @@ data DynLibLoader
 data RtsOptsEnabled = RtsOptsNone | RtsOptsSafeOnly | RtsOptsAll
   deriving (Show)
 
-data OverridingBool
-  = Auto
-  | Always
-  | Never
-  deriving Show
-
-overrideWith :: Bool -> OverridingBool -> Bool
-overrideWith b Auto   = b
-overrideWith _ Always = True
-overrideWith _ Never  = False
+shouldUseColor :: DynFlags -> Bool
+shouldUseColor dflags = overrideWith (canUseColor dflags) (useColor dflags)
 
 -----------------------------------------------------------------------------
 -- Ways
@@ -1536,6 +1565,13 @@ initDynFlags dflags = do
                              return (str == str'))
                          `catchIOError` \_ -> return False
  canUseColor <- stderrSupportsAnsiColors
+ maybeGhcColorsEnv  <- lookupEnv "GHC_COLORS"
+ maybeGhcColoursEnv <- lookupEnv "GHC_COLOURS"
+ let adjustCols (Just env) = Col.parseScheme env
+     adjustCols Nothing    = id
+ let (useColor', colScheme') =
+       (adjustCols maybeGhcColoursEnv . adjustCols maybeGhcColorsEnv)
+       (useColor dflags, colScheme dflags)
  return dflags{
         canGenerateDynamicToo = refCanGenerateDynamicToo,
         nextTempSuffix = refNextTempSuffix,
@@ -1545,7 +1581,9 @@ initDynFlags dflags = do
         generatedDumps = refGeneratedDumps,
         nextWrapperNum = wrapperNum,
         useUnicode    = canUseUnicode,
+        useColor      = useColor',
         canUseColor   = canUseColor,
+        colScheme     = colScheme',
         rtldInfo      = refRtldInfo,
         rtccInfo      = refRtccInfo
         }
@@ -1567,6 +1605,7 @@ defaultDynFlags mySettings =
         maxPmCheckIterations    = 2000000,
         ruleCheck               = Nothing,
         maxRelevantBinds        = Just 6,
+        maxValidSubstitutions   = Just 6,
         maxUncoveredPatterns    = 4,
         simplTickFactor         = 100,
         specConstrThreshold     = Just 2000,
@@ -1632,7 +1671,7 @@ defaultDynFlags mySettings =
 
         hpcDir                  = ".hpc",
 
-        extraPkgConfs           = id,
+        packageDBFlags          = [],
         packageFlags            = [],
         pluginPackageFlags      = [],
         ignorePackageFlags      = [],
@@ -1658,10 +1697,10 @@ defaultDynFlags mySettings =
         filesToNotIntermediateClean = panic "defaultDynFlags: No filesToNotIntermediateClean",
         generatedDumps = panic "defaultDynFlags: No generatedDumps",
         haddockOptions = Nothing,
-        dumpFlags = IntSet.empty,
-        generalFlags = IntSet.fromList (map fromEnum (defaultFlags mySettings)),
-        warningFlags = IntSet.fromList (map fromEnum standardWarnings),
-        fatalWarningFlags = IntSet.empty,
+        dumpFlags = EnumSet.empty,
+        generalFlags = EnumSet.fromList (defaultFlags mySettings),
+        warningFlags = EnumSet.fromList standardWarnings,
+        fatalWarningFlags = EnumSet.empty,
         ghciScripts = [],
         language = Nothing,
         safeHaskell = Sf_None,
@@ -1711,6 +1750,7 @@ defaultDynFlags mySettings =
         useUnicode = False,
         useColor = Auto,
         canUseColor = False,
+        colScheme = Col.defaultScheme,
         profAuto = NoProfAuto,
         interactivePrint = Nothing,
         nextWrapperNum = panic "defaultDynFlags: No nextWrapperNum",
@@ -1731,7 +1771,8 @@ defaultDynFlags mySettings =
         initialUnique = 0,
         uniqueIncrement = 1,
 
-        reverseErrors = False
+        reverseErrors = False,
+        maxErrors     = Nothing
       }
 
 defaultWays :: Settings -> [Way]
@@ -1904,11 +1945,11 @@ instance Outputable a => Outputable (OnOff a) where
 
 -- OnOffs accumulate in reverse order, so we use foldr in order to
 -- process them in the right order
-flattenExtensionFlags :: Maybe Language -> [OnOff LangExt.Extension] -> IntSet
+flattenExtensionFlags :: Maybe Language -> [OnOff LangExt.Extension] -> EnumSet LangExt.Extension
 flattenExtensionFlags ml = foldr f defaultExtensionFlags
-    where f (On f)  flags = IntSet.insert (fromEnum f) flags
-          f (Off f) flags = IntSet.delete (fromEnum f) flags
-          defaultExtensionFlags = IntSet.fromList (map fromEnum (languageExtensions ml))
+    where f (On f)  flags = EnumSet.insert f flags
+          f (Off f) flags = EnumSet.delete f flags
+          defaultExtensionFlags = EnumSet.fromList (languageExtensions ml)
 
 languageExtensions :: Maybe Language -> [LangExt.Extension]
 
@@ -1963,7 +2004,7 @@ hasNoOptCoercion = gopt Opt_G_NoOptCoercion
 
 -- | Test whether a 'DumpFlag' is set
 dopt :: DumpFlag -> DynFlags -> Bool
-dopt f dflags = (fromEnum f `IntSet.member` dumpFlags dflags)
+dopt f dflags = (f `EnumSet.member` dumpFlags dflags)
              || (verbosity dflags >= 4 && enableIfVerbose f)
     where enableIfVerbose Opt_D_dump_tc_trace               = False
           enableIfVerbose Opt_D_dump_rn_trace               = False
@@ -1997,55 +2038,53 @@ dopt f dflags = (fromEnum f `IntSet.member` dumpFlags dflags)
 
 -- | Set a 'DumpFlag'
 dopt_set :: DynFlags -> DumpFlag -> DynFlags
-dopt_set dfs f = dfs{ dumpFlags = IntSet.insert (fromEnum f) (dumpFlags dfs) }
+dopt_set dfs f = dfs{ dumpFlags = EnumSet.insert f (dumpFlags dfs) }
 
 -- | Unset a 'DumpFlag'
 dopt_unset :: DynFlags -> DumpFlag -> DynFlags
-dopt_unset dfs f = dfs{ dumpFlags = IntSet.delete (fromEnum f) (dumpFlags dfs) }
+dopt_unset dfs f = dfs{ dumpFlags = EnumSet.delete f (dumpFlags dfs) }
 
 -- | Test whether a 'GeneralFlag' is set
 gopt :: GeneralFlag -> DynFlags -> Bool
-gopt f dflags  = fromEnum f `IntSet.member` generalFlags dflags
+gopt f dflags  = f `EnumSet.member` generalFlags dflags
 
 -- | Set a 'GeneralFlag'
 gopt_set :: DynFlags -> GeneralFlag -> DynFlags
-gopt_set dfs f = dfs{ generalFlags = IntSet.insert (fromEnum f) (generalFlags dfs) }
+gopt_set dfs f = dfs{ generalFlags = EnumSet.insert f (generalFlags dfs) }
 
 -- | Unset a 'GeneralFlag'
 gopt_unset :: DynFlags -> GeneralFlag -> DynFlags
-gopt_unset dfs f = dfs{ generalFlags = IntSet.delete (fromEnum f) (generalFlags dfs) }
+gopt_unset dfs f = dfs{ generalFlags = EnumSet.delete f (generalFlags dfs) }
 
 -- | Test whether a 'WarningFlag' is set
 wopt :: WarningFlag -> DynFlags -> Bool
-wopt f dflags  = fromEnum f `IntSet.member` warningFlags dflags
+wopt f dflags  = f `EnumSet.member` warningFlags dflags
 
 -- | Set a 'WarningFlag'
 wopt_set :: DynFlags -> WarningFlag -> DynFlags
-wopt_set dfs f = dfs{ warningFlags = IntSet.insert (fromEnum f) (warningFlags dfs) }
+wopt_set dfs f = dfs{ warningFlags = EnumSet.insert f (warningFlags dfs) }
 
 -- | Unset a 'WarningFlag'
 wopt_unset :: DynFlags -> WarningFlag -> DynFlags
-wopt_unset dfs f = dfs{ warningFlags = IntSet.delete (fromEnum f) (warningFlags dfs) }
+wopt_unset dfs f = dfs{ warningFlags = EnumSet.delete f (warningFlags dfs) }
 
 -- | Test whether a 'WarningFlag' is set as fatal
 wopt_fatal :: WarningFlag -> DynFlags -> Bool
-wopt_fatal f dflags = fromEnum f `IntSet.member` fatalWarningFlags dflags
+wopt_fatal f dflags = f `EnumSet.member` fatalWarningFlags dflags
 
 -- | Mark a 'WarningFlag' as fatal (do not set the flag)
 wopt_set_fatal :: DynFlags -> WarningFlag -> DynFlags
 wopt_set_fatal dfs f
-    = dfs { fatalWarningFlags =
-              IntSet.insert (fromEnum f) (fatalWarningFlags dfs) }
+    = dfs { fatalWarningFlags = EnumSet.insert f (fatalWarningFlags dfs) }
 
 -- | Mark a 'WarningFlag' as not fatal
 wopt_unset_fatal :: DynFlags -> WarningFlag -> DynFlags
 wopt_unset_fatal dfs f
-    = dfs { fatalWarningFlags =
-              IntSet.delete (fromEnum f) (fatalWarningFlags dfs) }
+    = dfs { fatalWarningFlags = EnumSet.delete f (fatalWarningFlags dfs) }
 
 -- | Test whether a 'LangExt.Extension' is set
 xopt :: LangExt.Extension -> DynFlags -> Bool
-xopt f dflags = fromEnum f `IntSet.member` extensionFlags dflags
+xopt f dflags = f `EnumSet.member` extensionFlags dflags
 
 -- | Set a 'LangExt.Extension'
 xopt_set :: DynFlags -> LangExt.Extension -> DynFlags
@@ -2451,6 +2490,10 @@ setLogAction dflags = do
               })
          mlogger
 
+-- | Write an error or warning to the 'LogOutput'.
+putLogMsg :: DynFlags -> WarnReason -> Severity -> SrcSpan -> PprStyle
+          -> MsgDoc -> IO ()
+putLogMsg dflags = log_action dflags dflags
 
 updateWays :: DynFlags -> DynFlags
 updateWays dflags
@@ -2711,7 +2754,7 @@ dynamic_flags_deps = [
   , make_ord_flag defGhcFlag "split-objs"
       (NoArg (if can_split
                 then setGeneralFlag Opt_SplitObjs
-                else addWarn "ignoring -fsplit-objs"))
+                else addWarn "ignoring -split-objs"))
 
   , make_ord_flag defGhcFlag "split-sections"
       (noArgM (\dflags -> do
@@ -2850,6 +2893,10 @@ dynamic_flags_deps = [
              "Use -fno-force-recomp instead"
   , make_dep_flag defGhcFlag "no-recomp"
         (NoArg $ setGeneralFlag Opt_ForceRecomp) "Use -fforce-recomp instead"
+  , make_ord_flag defFlag "fmax-errors"
+      (intSuffix (\n d -> d { maxErrors = Just (max 1 n) }))
+  , make_ord_flag defFlag "fno-max-errors"
+      (noArg (\d -> d { maxErrors = Nothing }))
   , make_ord_flag defFlag "freverse-errors"
         (noArg (\d -> d {reverseErrors = True} ))
   , make_ord_flag defFlag "fno-reverse-errors"
@@ -3107,10 +3154,10 @@ dynamic_flags_deps = [
                           -- Opt_WarnIsError is still needed to pass -Werror
                           -- to CPP; see runCpp in SysTools
   , make_dep_flag defFlag "Wnot"    (NoArg (upd (\d ->
-                                              d {warningFlags = IntSet.empty})))
+                                              d {warningFlags = EnumSet.empty})))
                                              "Use -w or -Wno-everything instead"
   , make_ord_flag defFlag "w"       (NoArg (upd (\d ->
-                                              d {warningFlags = IntSet.empty})))
+                                              d {warningFlags = EnumSet.empty})))
 
      -- New-style uniform warning sets
      --
@@ -3118,7 +3165,7 @@ dynamic_flags_deps = [
   , make_ord_flag defFlag "Weverything"    (NoArg (mapM_
                                            setWarningFlag minusWeverythingOpts))
   , make_ord_flag defFlag "Wno-everything"
-                           (NoArg (upd (\d -> d {warningFlags = IntSet.empty})))
+                           (NoArg (upd (\d -> d {warningFlags = EnumSet.empty})))
 
   , make_ord_flag defFlag "Wall"           (NoArg (mapM_
                                                   setWarningFlag minusWallOpts))
@@ -3146,7 +3193,6 @@ dynamic_flags_deps = [
   , make_ord_flag defGhcFlag "ffrontend-opt" (hasArg addFrontendPluginOption)
 
         ------ Optimisation flags ------------------------------------------
-  , make_ord_flag defGhcFlag "O"      (noArgM (setOptLevel 1))
   , make_dep_flag defGhcFlag "Onot"   (noArgM $ setOptLevel 0 )
                                                             "Use -O0 instead"
   , make_ord_flag defGhcFlag "Odph"   (noArgM setDPHOpt)
@@ -3159,6 +3205,10 @@ dynamic_flags_deps = [
       (intSuffix (\n d -> d { maxRelevantBinds = Just n }))
   , make_ord_flag defFlag "fno-max-relevant-binds"
       (noArg (\d -> d { maxRelevantBinds = Nothing }))
+  , make_ord_flag defFlag "fmax-valid-substitutions"
+      (intSuffix (\n d -> d { maxValidSubstitutions = Just n }))
+  , make_ord_flag defFlag "fno-max-valid-substitutions"
+      (noArg (\d -> d { maxValidSubstitutions = Nothing }))
   , make_ord_flag defFlag "fmax-uncovered-patterns"
       (intSuffix (\n d -> d { maxUncoveredPatterns = n }))
   , make_ord_flag defFlag "fsimplifier-phases"
@@ -3521,9 +3571,9 @@ deprecatedForExtension lang turn_on
       flag | turn_on   = lang
            | otherwise = "No" ++ lang
 
-useInstead :: String -> TurnOnFlag -> String
-useInstead flag turn_on
-  = "Use -f" ++ no ++ flag ++ " instead"
+useInstead :: String -> String -> TurnOnFlag -> String
+useInstead prefix flag turn_on
+  = "Use " ++ prefix ++ no ++ flag ++ " instead"
   where
     no = if turn_on then "" else "no-"
 
@@ -3643,7 +3693,7 @@ dFlagsDeps = [
 -- Please keep the list of flags below sorted alphabetically
   flagSpec "ppr-case-as-let"            Opt_PprCaseAsLet,
   depFlagSpec' "ppr-ticks"              Opt_PprShowTicks
-     (\turn_on -> useInstead "suppress-ticks" (not turn_on)),
+     (\turn_on -> useInstead "-d" "suppress-ticks" (not turn_on)),
   flagSpec "suppress-ticks"             Opt_SuppressTicks,
   flagSpec "suppress-coercions"         Opt_SuppressCoercions,
   flagSpec "suppress-idinfo"            Opt_SuppressIdInfo,
@@ -3735,7 +3785,7 @@ fFlagsDeps = [
   flagSpec "regs-graph"                       Opt_RegsGraph,
   flagSpec "regs-iterative"                   Opt_RegsIterative,
   depFlagSpec' "rewrite-rules"                Opt_EnableRewriteRules
-   (useInstead "enable-rewrite-rules"),
+   (useInstead "-f" "enable-rewrite-rules"),
   flagSpec "shared-implib"                    Opt_SharedImplib,
   flagSpec "spec-constr"                      Opt_SpecConstr,
   flagSpec "spec-constr-keen"                 Opt_SpecConstrKeen,
@@ -4556,24 +4606,23 @@ data PkgConfRef
   = GlobalPkgConf
   | UserPkgConf
   | PkgConfFile FilePath
+  deriving Eq
 
 addPkgConfRef :: PkgConfRef -> DynP ()
-addPkgConfRef p = upd $ \s -> s { extraPkgConfs = (p:) . extraPkgConfs s }
+addPkgConfRef p = upd $ \s ->
+  s { packageDBFlags = PackageDB p : packageDBFlags s }
 
 removeUserPkgConf :: DynP ()
-removeUserPkgConf = upd $ \s -> s { extraPkgConfs = filter isNotUser . extraPkgConfs s }
-  where
-    isNotUser UserPkgConf = False
-    isNotUser _ = True
+removeUserPkgConf = upd $ \s ->
+  s { packageDBFlags = NoUserPackageDB : packageDBFlags s }
 
 removeGlobalPkgConf :: DynP ()
-removeGlobalPkgConf = upd $ \s -> s { extraPkgConfs = filter isNotGlobal . extraPkgConfs s }
-  where
-    isNotGlobal GlobalPkgConf = False
-    isNotGlobal _ = True
+removeGlobalPkgConf = upd $ \s ->
+ s { packageDBFlags = NoGlobalPackageDB : packageDBFlags s }
 
 clearPkgConf :: DynP ()
-clearPkgConf = upd $ \s -> s { extraPkgConfs = const [] }
+clearPkgConf = upd $ \s ->
+  s { packageDBFlags = ClearPackageDBs : packageDBFlags s }
 
 parsePackageFlag :: String                 -- the flag
                  -> ReadP PackageArg       -- type of argument
@@ -5169,7 +5218,7 @@ makeDynFlagsConsistent dflags
     = let dflags' = gopt_unset dflags Opt_Hpc
           warn = "Hpc can't be used with byte-code interpreter. Ignoring -fhpc."
       in loop dflags' warn
- | hscTarget dflags == HscAsm &&
+ | hscTarget dflags `elem` [HscAsm, HscLlvm] &&
    platformUnregisterised (targetPlatform dflags)
     = loop (dflags { hscTarget = HscC })
            "Compiler unregisterised, so compiling via C"
@@ -5178,15 +5227,6 @@ makeDynFlagsConsistent dflags
       = let dflags' = dflags { hscTarget = HscLlvm }
             warn = "No native code generator, so using LLVM"
         in loop dflags' warn
- | hscTarget dflags == HscLlvm &&
-   not ((arch == ArchX86_64) && (os == OSLinux || os == OSDarwin || os == OSFreeBSD)) &&
-   not ((isARM arch) && (os == OSLinux)) &&
-   (gopt Opt_PIC dflags || WayDyn `elem` ways dflags)
-    = if cGhcWithNativeCodeGen == "YES"
-      then let dflags' = dflags { hscTarget = HscAsm }
-               warn = "Using native code generator rather than LLVM, as LLVM is incompatible with -fPIC and -dynamic on this platform"
-           in loop dflags' warn
-      else throwGhcException $ CmdLineError "Can't use -fPIC or -dynamic on this platform"
  | os == OSDarwin &&
    arch == ArchX86_64 &&
    not (gopt Opt_PIC dflags)

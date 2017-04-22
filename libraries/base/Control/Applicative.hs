@@ -59,7 +59,7 @@ import Data.Functor.Const (Const(..))
 
 import GHC.Base
 import GHC.Generics
-import GHC.List (repeat, zipWith)
+import GHC.List (repeat, zipWith, drop)
 import GHC.Read (Read)
 import GHC.Show (Show)
 
@@ -99,19 +99,32 @@ instance (ArrowZero a, ArrowPlus a) => Alternative (WrappedArrow a b) where
     empty = WrapArrow zeroArrow
     WrapArrow u <|> WrapArrow v = WrapArrow (u <+> v)
 
--- | Lists, but with an 'Applicative' functor based on zipping, so that
---
--- @f '<$>' 'ZipList' xs1 '<*>' ... '<*>' 'ZipList' xsn = 'ZipList' (zipWithn f xs1 ... xsn)@
---
+-- | Lists, but with an 'Applicative' functor based on zipping.
 newtype ZipList a = ZipList { getZipList :: [a] }
                   deriving ( Show, Eq, Ord, Read, Functor
                            , Foldable, Generic, Generic1)
 -- See Data.Traversable for Traversable instance due to import loops
 
--- | @since 2.01
+-- |
+-- > f '<$>' 'ZipList' xs1 '<*>' ... '<*>' 'ZipList' xsN
+--       = 'ZipList' (zipWithN f xs1 ... xsN)
+--
+-- where @zipWithN@ refers to the @zipWith@ function of the appropriate arity
+-- (@zipWith@, @zipWith3@, @zipWith4@, ...). For example:
+--
+-- > (\a b c -> stimes c [a, b]) <$> ZipList "abcd" <*> ZipList "567" <*> ZipList [1..]
+-- >     = ZipList (zipWith3 (\a b c -> stimes c [a, b]) "abcd" "567" [1..])
+-- >     = ZipList {getZipList = ["a5","b6b6","c7c7c7"]}
+--
+-- @since 2.01
 instance Applicative ZipList where
     pure x = ZipList (repeat x)
     liftA2 f (ZipList xs) (ZipList ys) = ZipList (zipWith f xs ys)
+
+-- | @since 4.11.0.0
+instance Alternative ZipList where
+   empty = ZipList []
+   ZipList xs <|> ZipList ys = ZipList (xs ++ drop (length xs) ys)
 
 -- extra functions
 

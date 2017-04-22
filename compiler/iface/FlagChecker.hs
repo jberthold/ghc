@@ -16,7 +16,7 @@ import Fingerprint
 import BinFingerprint
 -- import Outputable
 
-import qualified Data.IntSet as IntSet
+import qualified EnumSet
 import System.FilePath (normalise)
 
 -- | Produce a fingerprint of a @DynFlags@ value. We only base
@@ -39,7 +39,7 @@ fingerprintDynFlags dflags@DynFlags{..} this_mod nameio =
 
         -- *all* the extension flags and the language
         lang = (fmap fromEnum language,
-                IntSet.toList $ extensionFlags)
+                map fromEnum $ EnumSet.toList extensionFlags)
 
         -- -I, -D and -U flags affect CPP
         cpp = (map normalise includePaths, opt_P dflags ++ picPOpts dflags)
@@ -57,9 +57,15 @@ fingerprintDynFlags dflags@DynFlags{..} this_mod nameio =
                  then 0
                  else optLevel
 
-    in -- pprTrace "flags" (ppr (mainis, safeHs, lang, cpp, paths, prof, opt)) $
-       computeFingerprint nameio (mainis, safeHs, lang, cpp, paths, prof, opt)
+        -- -fhpc, see https://ghc.haskell.org/trac/ghc/ticket/11798
+        -- hpcDir is output-only, so we should recompile if it changes
+        hpc = if gopt Opt_Hpc dflags then Just hpcDir else Nothing
 
+        -- Nesting just to avoid ever more Binary tuple instances
+        flags = (mainis, safeHs, lang, cpp, paths, (prof, opt, hpc))
+
+    in -- pprTrace "flags" (ppr flags) $
+       computeFingerprint nameio flags
 
 {- Note [path flags and recompilation]
 

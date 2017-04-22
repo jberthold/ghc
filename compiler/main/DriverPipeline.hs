@@ -254,7 +254,15 @@ compileOne' m_tc_result mHscMessage
        -- imports a _stub.h file that we created here.
        current_dir = takeDirectory basename
        old_paths   = includePaths dflags1
-       dflags      = dflags1 { includePaths = current_dir : old_paths }
+       prevailing_dflags = hsc_dflags hsc_env0
+       dflags =
+          dflags1 { includePaths = current_dir : old_paths
+                  , log_action = log_action prevailing_dflags
+                  , log_finaliser = log_finaliser prevailing_dflags }
+                  -- use the prevailing log_action / log_finaliser,
+                  -- not the one cached in the summary.  This is so
+                  -- that we can change the log_action without having
+                  -- to re-summarize all the source files.
        hsc_env     = hsc_env0 {hsc_dflags = dflags}
 
        -- Figure out what lang we're generating
@@ -372,7 +380,7 @@ link' dflags batch_attempt_linking hpt
         let
             staticLink = case ghcLink dflags of
                           LinkStaticLib -> True
-                          _ -> platformBinariesAreStaticLibs (targetPlatform dflags)
+                          _ -> False
 
             home_mod_infos = eltsHpt hpt
 
@@ -1142,10 +1150,6 @@ runPhase (RealPhase cc_phase) input_fn dflags
                                  (cmdlineFrameworkPaths ++ pkgFrameworkPaths)
             else return []
 
-        let split_objs = gopt Opt_SplitObjs dflags
-            split_opt | hcc && split_objs = [ "-DUSE_SPLIT_MARKERS" ]
-                      | otherwise         = [ ]
-
         let cc_opt | optLevel dflags >= 2 = [ "-O2" ]
                    | optLevel dflags >= 1 = [ "-O" ]
                    | otherwise            = []
@@ -1224,7 +1228,6 @@ runPhase (RealPhase cc_phase) input_fn dflags
                        ++ cc_opt
                        ++ [ "-include", ghcVersionH ]
                        ++ framework_paths
-                       ++ split_opt
                        ++ include_paths
                        ++ pkg_extra_cc_opts
                        ))
@@ -1699,7 +1702,7 @@ mkExtraObj dflags extn xs
 mkExtraObjToLinkIntoBinary :: DynFlags -> IO FilePath
 mkExtraObjToLinkIntoBinary dflags = do
    when (gopt Opt_NoHsMain dflags && haveRtsOptsFlags dflags) $ do
-      log_action dflags dflags NoReason SevInfo noSrcSpan
+      putLogMsg dflags NoReason SevInfo noSrcSpan
           (defaultUserStyle dflags)
           (text "Warning: -rtsopts and -with-rtsopts have no effect with -no-hs-main." $$
            text "    Call hs_init_ghc() from your main() function to set these options.")
@@ -2111,7 +2114,7 @@ linkBinary' staticLink dflags o_files dep_packages = do
     let thread_opts
          | WayThreaded `elem` ways dflags =
             let os = platformOS (targetPlatform dflags)
-            in if os `elem` [OSMinGW32, OSFreeBSD, OSOpenBSD,
+            in if os `elem` [OSMinGW32, OSFreeBSD, OSOpenBSD, OSAndroid,
                              OSNetBSD, OSHaiku, OSQNXNTO, OSiOS, OSDarwin]
                then []
                else ["-lpthread"]
@@ -2177,13 +2180,6 @@ linkBinary' staticLink dflags o_files dep_packages = do
                                ArchARM64  -> True
                                _ -> False
                           then ["-Wl,-no_compact_unwind"]
-                          else [])
-
-                      -- '-no_pie'
-                      -- iOS uses 'dynamic-no-pic', so we must pass this to ld to suppress a warning; see #7722
-                      ++ (if platformOS platform == OSiOS &&
-                             not staticLink
-                          then ["-Wl,-no_pie"]
                           else [])
 
                       -- '-Wl,-read_only_relocs,suppress'
@@ -2309,7 +2305,7 @@ linkDynLibCheck :: DynFlags -> [String] -> [InstalledUnitId] -> IO ()
 linkDynLibCheck dflags o_files dep_packages
  = do
     when (haveRtsOptsFlags dflags) $ do
-      log_action dflags dflags NoReason SevInfo noSrcSpan
+      putLogMsg dflags NoReason SevInfo noSrcSpan
           (defaultUserStyle dflags)
           (text "Warning: -rtsopts and -with-rtsopts have no effect with -shared." $$
            text "    Call hs_init_ghc() from your main() function to set these options.")

@@ -343,9 +343,6 @@ RTS_FUN_DECL(stg_returnToSchedNotPaused);
 RTS_FUN_DECL(stg_returnToSchedButFirst);
 RTS_FUN_DECL(stg_threadFinished);
 
-RTS_FUN_DECL(stg_init_finish);
-RTS_FUN_DECL(stg_init);
-
 RTS_FUN_DECL(StgReturn);
 
 /* -----------------------------------------------------------------------------

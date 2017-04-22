@@ -39,7 +39,6 @@ import Coercion ( eqCoercion )
 import TcType ( toTcTypeBag )
 import TyCon( isNewTyCon )
 import TysWiredIn
-import ListSetOps
 import SrcLoc
 import Maybes
 import Util
@@ -52,6 +51,7 @@ import UniqDFM
 
 import Control.Monad( when, unless )
 import qualified Data.Map as Map
+import Data.List (groupBy)
 
 {-
 ************************************************************************
@@ -159,7 +159,7 @@ corresponds roughly to @matchVarCon@.
 
 Note [Match Ids]
 ~~~~~~~~~~~~~~~~
-Most of the matching fuctions take an Id or [Id] as argument.  This Id
+Most of the matching functions take an Id or [Id] as argument.  This Id
 is the scrutinee(s) of the match. The desugared expression may
 sometimes use that Id in a local binding or as a case binder.  So it
 should not have an External name; Lint rejects non-top-level binders
@@ -662,7 +662,7 @@ is collected here, in @matchWrapper@.  This function takes as
 arguments:
 \begin{itemize}
 \item
-Typchecked @Matches@ (of a function definition, or a case or lambda
+Typechecked @Matches@ (of a function definition, or a case or lambda
 expression)---the main input;
 \item
 An error message to be inserted into any (runtime) pattern-matching
@@ -755,7 +755,7 @@ matchWrapper ctxt mb_scr (MG { mg_alts = L _ matches
            ; tm_cs <- genCaseTmCs2 mb_scr upats vars
            ; match_result <- addDictsDs dicts $ -- See Note [Type and Term Equality Propagation]
                              addTmCsDs tm_cs  $ -- See Note [Type and Term Equality Propagation]
-                             dsGRHSs ctxt upats grhss rhs_ty
+                             dsGRHSs ctxt grhss rhs_ty
            ; return (EqnInfo { eqn_pats = upats, eqn_rhs  = match_result}) }
 
     handleWarnings = if isGenerated origin
@@ -887,7 +887,7 @@ groupEquations :: DynFlags -> [EquationInfo] -> [[(PatGroup, EquationInfo)]]
 -- (b) none of the gi are empty
 -- The ordering of equations is unchanged
 groupEquations dflags eqns
-  = runs same_gp [(patGroup dflags (firstPat eqn), eqn) | eqn <- eqns]
+  = groupBy same_gp [(patGroup dflags (firstPat eqn), eqn) | eqn <- eqns]
   where
     same_gp :: (PatGroup,EquationInfo) -> (PatGroup,EquationInfo) -> Bool
     (pg1,_) `same_gp` (pg2,_) = pg1 `sameGroup` pg2

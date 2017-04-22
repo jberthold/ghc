@@ -519,7 +519,7 @@ ruleCheckPass current_phase pat guts =
     { rb <- getRuleBase
     ; dflags <- getDynFlags
     ; vis_orphs <- getVisibleOrphanMods
-    ; liftIO $ log_action dflags dflags NoReason Err.SevDump noSrcSpan
+    ; liftIO $ putLogMsg dflags NoReason Err.SevDump noSrcSpan
                    (defaultDumpStyle dflags)
                    (ruleCheckProgram current_phase pat
                       (RuleEnv rb vis_orphs) (mg_binds guts))
@@ -738,7 +738,6 @@ simplifyPgmIO pass@(CoreDoSimplify max_iterations mode)
                } ;
            Err.dumpIfSet_dyn dflags Opt_D_dump_occur_anal "Occurrence analysis"
                      (pprCoreBindings tagged_binds);
-           lintPassResult hsc_env CoreOccurAnal tagged_binds;
 
                 -- Get any new rules, and extend the rule base
                 -- See Note [Overall plumbing for rules] in Rules.hs

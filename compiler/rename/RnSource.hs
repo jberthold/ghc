@@ -21,6 +21,11 @@ import RdrName
 import RnTypes
 import RnBinds
 import RnEnv
+import RnUtils          ( HsDocContext(..), mapFvRn, bindLocalNames
+                        , checkDupRdrNames, inHsDocContext, bindLocalNamesFV
+                        , checkShadowedRdrNames, warnUnusedTypePatterns
+                        , extendTyVarEnvFVRn, newLocalBndrsRn )
+import RnUnbound        ( mkUnboundName )
 import RnNames
 import RnHsDoc          ( rnHsDoc, rnMbLHsDoc )
 import TcAnnotations    ( annCtxt )
@@ -49,7 +54,7 @@ import DynFlags
 import Util             ( debugIsOn, lengthExceeds, partitionWith )
 import HscTypes         ( HscEnv, hsc_dflags )
 import ListSetOps       ( findDupsEq, removeDups, equivClasses )
-import Digraph          ( SCC, flattenSCC, flattenSCCs
+import Digraph          ( SCC, flattenSCC, flattenSCCs, Node(..)
                         , stronglyConnCompFromEdgedVerticesUniq )
 import UniqSet
 import qualified GHC.LanguageExtensions as LangExt
@@ -777,7 +782,8 @@ rnFamInstDecl doc mb_cls tycon (HsIB { hsib_body = pats }) payload rnPayload
 
        ; return (tycon',
                  HsIB { hsib_body = pats'
-                      , hsib_vars = all_ibs },
+                      , hsib_vars = all_ibs
+                      , hsib_closed = True },
                  payload',
                  all_fvs) }
              -- type instance => use, hence addOneFV
@@ -1348,7 +1354,8 @@ depAnalTyClDecls :: GlobalRdrEnv
 depAnalTyClDecls rdr_env ds_w_fvs
   = stronglyConnCompFromEdgedVerticesUniq edges
   where
-    edges = [ (d, tcdName (unLoc d), map (getParent rdr_env) (nonDetEltsUniqSet fvs))
+    edges :: [ Node Name (LTyClDecl Name) ]
+    edges = [ DigraphNode d (tcdName (unLoc d)) (map (getParent rdr_env) (nonDetEltsUniqSet fvs))
             | (d, fvs) <- ds_w_fvs ]
             -- It's OK to use nonDetEltsUFM here as
             -- stronglyConnCompFromEdgedVertices is still deterministic

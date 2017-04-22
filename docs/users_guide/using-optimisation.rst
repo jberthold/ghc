@@ -395,6 +395,16 @@ list.
     they may be numerous), but ``-fno-max-relevant-bindings`` includes
     them too.
 
+.. ghc-flag:: -fmax-valid-substitutions=<n>
+              -fno-max-valid-substitutions
+
+    :default: 6
+
+    The type checker sometimes displays a list of valid substitutions
+    for typed holes in error messages, but only up to some maximum number,
+    set by this flag. Turning it off with
+    ``-fno-max-valid-substitutions`` gives an unlimited number.
+
 .. ghc-flag:: -fmax-uncovered-patterns=<n>
 
     :default: 4
@@ -584,8 +594,8 @@ list.
 
     :default: off
 
-    If this flag is on, call-patten specialision will specialise a call
-    ``(f (Just x))`` with an explicit constructor agument, even if the argument
+    If this flag is on, call-pattern specialisation will specialise a call
+    ``(f (Just x))`` with an explicit constructor argument, even if the argument
     is not scrutinised in the body of the function. This is sometimes
     beneficial; e.g. the argument might be given to some other function
     that can itself be specialised.
@@ -678,11 +688,8 @@ list.
 
     :default: on
 
-    Switch on the strictness analyser. There is a very
-    old paper about GHC's strictness analyser, `Measuring the
-    effectiveness of a simple strictness
-    analyser <http://research.microsoft.com/en-us/um/people/simonpj/papers/simple-strictnes-analyser.ps.gz>`__,
-    but the current one is quite a bit different.
+    Switch on the strictness analyser. The
+    implementation is described in the paper `Theory and Practice of Demand Analysis in Haskell`<https://www.microsoft.com/en-us/research/wp-content/uploads/2017/03/demand-jfp-draft.pdf>`__.
 
     The strictness analyser figures out when arguments and variables in
     a function can be treated 'strictly' (that is they are always

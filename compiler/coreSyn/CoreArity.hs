@@ -10,9 +10,10 @@
 
 -- | Arity and eta expansion
 module CoreArity (
-        manifestArity, exprArity, typeArity, exprBotStrictness_maybe,
+        manifestArity, joinRhsArity, exprArity, typeArity,
         exprEtaExpandArity, findRhsArity, CheapFun, etaExpand,
-        etaExpandToJoinPoint, etaExpandToJoinPointRule
+        etaExpandToJoinPoint, etaExpandToJoinPointRule,
+        exprBotStrictness_maybe
     ) where
 
 #include "HsVersions.h"
@@ -76,6 +77,14 @@ manifestArity (Lam v e) | isId v        = 1 + manifestArity e
 manifestArity (Tick t e) | not (tickishIsCode t) =  manifestArity e
 manifestArity (Cast e _)                = manifestArity e
 manifestArity _                         = 0
+
+joinRhsArity :: CoreExpr -> JoinArity
+-- Join points are supposed to have manifestly-visible
+-- lambdas at the top: no ticks, no casts, nothing
+-- Moreover, type lambdas count in JoinArity
+joinRhsArity (Lam _ e) = 1 + joinRhsArity e
+joinRhsArity _         = 0
+
 
 ---------------
 exprArity :: CoreExpr -> Arity
@@ -475,6 +484,10 @@ data ArityType = ATop [OneShotInfo] | ABot Arity
      -- There is always an explicit lambda
      -- to justify the [OneShot], or the Arity
 
+instance Outputable ArityType where
+  ppr (ATop os) = text "ATop" <> parens (ppr (length os))
+  ppr (ABot n)  = text "ABot" <> parens (ppr n)
+
 vanillaArityType :: ArityType
 vanillaArityType = ATop []      -- Totally uninformative
 
@@ -499,9 +512,9 @@ getBotArity _        = Nothing
 mk_cheap_fn :: DynFlags -> CheapAppFun -> CheapFun
 mk_cheap_fn dflags cheap_app
   | not (gopt Opt_DictsCheap dflags)
-  = \e _     -> exprIsOk cheap_app e
+  = \e _     -> exprIsCheapX cheap_app e
   | otherwise
-  = \e mb_ty -> exprIsOk cheap_app e
+  = \e mb_ty -> exprIsCheapX cheap_app e
              || case mb_ty of
                   Nothing -> False
                   Just ty -> isDictLikeTy ty

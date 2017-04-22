@@ -149,13 +149,11 @@ tcCheckPatSynDecl psb@PSB{ psb_id = lname@(L _ name), psb_args = details
            pushLevelAndCaptureConstraints            $
            tcExtendTyVarEnv univ_tvs                 $
            tcPat PatSyn lpat (mkCheckExpType pat_ty) $
-           do { let new_tv | isUnidirectional dir = newMetaTyVarX
-                           | otherwise            = newMetaSigTyVarX
-                    in_scope    = mkInScopeSet (mkVarSet univ_tvs)
+           do { let in_scope    = mkInScopeSet (mkVarSet univ_tvs)
                     empty_subst = mkEmptyTCvSubst in_scope
-              ; (subst, ex_tvs') <- mapAccumLM new_tv empty_subst ex_tvs
-                    -- See the "Existential type variables" part of
-                    -- Note [Checking against a pattern signature]
+              ; (subst, ex_tvs') <- mapAccumLM newMetaTyVarX empty_subst ex_tvs
+                    -- newMetaTyVarX: see the "Existential type variables"
+                    -- part of Note [Checking against a pattern signature]
               ; traceTc "tcpatsyn1" (vcat [ ppr v <+> dcolon <+> ppr (tyVarKind v) | v <- ex_tvs])
               ; traceTc "tcpatsyn2" (vcat [ ppr v <+> dcolon <+> ppr (tyVarKind v) | v <- ex_tvs'])
               ; let prov_theta' = substTheta subst prov_theta
@@ -168,7 +166,7 @@ tcCheckPatSynDecl psb@PSB{ psb_id = lname@(L _ name), psb_args = details
               ; args'      <- zipWithM (tc_arg subst) arg_names arg_tys
               ; return (ex_tvs', prov_dicts, args') }
 
-       ; let skol_info = SigSkol (PatSynCtxt name) (mkPhiTy req_theta pat_ty)
+       ; let skol_info = SigSkol (PatSynCtxt name) pat_ty []
                          -- The type here is a bit bogus, but we do not print
                          -- the type for PatSynCtxt, so it doesn't matter
                          -- See TcRnTypes Note [Skolem info for pattern synonyms]
@@ -176,10 +174,7 @@ tcCheckPatSynDecl psb@PSB{ psb_id = lname@(L _ name), psb_args = details
 
        -- Solve the constraints now, because we are about to make a PatSyn,
        -- which should not contain unification variables and the like (Trac #10997)
-       ; empty_binds <- simplifyTop (mkImplicWC implics)
-
-       -- Since all the inputs are implications the returned bindings will be empty
-       ; MASSERT2( isEmptyBag empty_binds, ppr empty_binds )
+       ; simplifyTopImplic implics
 
        -- ToDo: in the bidirectional case, check that the ex_tvs' are all distinct
        -- Otherwise we may get a type error when typechecking the builder,
@@ -243,12 +238,26 @@ unify x := [a] during type checking, and then use the instantiating type
                                               dl = $dfunEqList d
                                           in k [a] dl ys
 
-This "concealing" story works for /uni-directional/ pattern synonyms,
-but obviously not for bidirectional ones.  So in the bidirectional case
-we use SigTv, rather than a generic TauTv, meta-tyvar so that.  And
-we should really check that those SigTvs don't get unified with each
-other.
+All this applies when type-checking the /matching/ side of
+a pattern synonym.  What about the /building/ side?
 
+* For Unidirectional, there is no builder
+
+* For ExplicitBidirectional, the builder is completely separate
+  code, typechecked in tcPatSynBuilderBind
+
+* For ImplicitBidirectional, the builder is still typechecked in
+  tcPatSynBuilderBind, by converting the pattern to an expression and
+  typechecking it.
+
+  At one point, for ImplicitBidirectional I used SigTvs (instead of
+  TauTvs) in tcCheckPatSynDecl.  But (a) strengthening the check here
+  is redundant since tcPatSynBuilderBind does the job, (b) it was
+  still incomplete (SigTvs can unify with each other), and (c) it
+  didn't even work (Trac #13441 was accepted with
+  ExplicitBidirectional, but rejected if expressed in
+  ImplicitBidirectional form.  Conclusion: trying to be too clever is
+  a bad idea.
 -}
 
 collectPatSynArgInfo :: HsPatSynDetails (Located Name) -> ([Name], [Name], Bool)
@@ -522,7 +531,6 @@ tcPatSynBuilderBind (PSB { psb_id = L loc name, psb_def = lpat
 
   | Right match_group <- mb_match_group  -- Bidirectional
   = do { patsyn <- tcLookupPatSyn name
-       ; traceTc "tcPatSynBuilderBind {" $ ppr patsyn
        ; let Just (builder_id, need_dummy_arg) = patSynBuilder patsyn
                    -- Bidirectional, so patSynBuilder returns Just
 
@@ -537,6 +545,8 @@ tcPatSynBuilderBind (PSB { psb_id = L loc name, psb_def = lpat
 
              sig = completeSigFromId (PatSynCtxt name) builder_id
 
+       ; traceTc "tcPatSynBuilderBind {" $
+         ppr patsyn $$ ppr builder_id <+> dcolon <+> ppr (idType builder_id)
        ; (builder_binds, _) <- tcPolyCheck emptyPragEnv sig (noLoc bind)
        ; traceTc "tcPatSynBuilderBind }" $ ppr builder_binds
        ; return builder_binds }

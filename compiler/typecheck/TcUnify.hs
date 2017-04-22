@@ -138,7 +138,7 @@ matchExpectedFunTys herald arity orig_ty thing_inside
            ; return (result, idHsWrapper) }
 
     go acc_arg_tys n ty
-      | Just ty' <- coreView ty = go acc_arg_tys n ty'
+      | Just ty' <- tcView ty = go acc_arg_tys n ty'
 
     go acc_arg_tys n (FunTy arg_ty res_ty)
       = ASSERT( not (isPredTy arg_ty) )
@@ -269,7 +269,7 @@ matchActualFunTysPart herald ct_orig mb_thing arity orig_ty
         (tvs, theta, _) = tcSplitSigmaTy ty
 
     go n acc_args ty
-      | Just ty' <- coreView ty = go n acc_args ty'
+      | Just ty' <- tcView ty = go n acc_args ty'
 
     go n acc_args (FunTy arg_ty res_ty)
       = ASSERT( not (isPredTy arg_ty) )
@@ -370,7 +370,7 @@ matchExpectedTyConApp tc orig_ty
   = ASSERT(tc /= funTyCon) go orig_ty
   where
     go ty
-       | Just ty' <- coreView ty
+       | Just ty' <- tcView ty
        = go ty'
 
     go ty@(TyConApp tycon args)
@@ -415,7 +415,7 @@ matchExpectedAppTy orig_ty
   = go orig_ty
   where
     go ty
-      | Just ty' <- coreView ty = go ty'
+      | Just ty' <- tcView ty = go ty'
 
       | Just (fun_ty, arg_ty) <- tcSplitAppTy_maybe ty
       = return (mkTcNomReflCo orig_ty, (fun_ty, arg_ty))
@@ -695,8 +695,8 @@ tc_sub_type_ds eq_orig inst_orig ctxt ty_actual ty_expected
               , text "ty_expected =" <+> ppr ty_expected ]
        ; go ty_actual ty_expected }
   where
-    go ty_a ty_e | Just ty_a' <- coreView ty_a = go ty_a' ty_e
-                 | Just ty_e' <- coreView ty_e = go ty_a  ty_e'
+    go ty_a ty_e | Just ty_a' <- tcView ty_a = go ty_a' ty_e
+                 | Just ty_e' <- tcView ty_e = go ty_a  ty_e'
 
     go (TyVarTy tv_a) ty_e
       = do { lookup_res <- lookupTcTyVar tv_a
@@ -719,15 +719,13 @@ tc_sub_type_ds eq_orig inst_orig ctxt ty_actual ty_expected
       | not (isPredTy act_arg)
       , not (isPredTy exp_arg)
       = -- See Note [Co/contra-variance of subsumption checking]
-        do { res_wrap <- tc_sub_type_ds eq_orig inst_orig ctxt act_res exp_res
-           ; arg_wrap
-               <- tc_sub_tc_type eq_orig (GivenOrigin
-                                          (SigSkol GenSigCtxt exp_arg))
-                                 ctxt exp_arg act_arg
+        do { res_wrap <- tc_sub_type_ds eq_orig inst_orig  ctxt act_res exp_res
+           ; arg_wrap <- tc_sub_tc_type eq_orig given_orig ctxt exp_arg act_arg
            ; return (mkWpFun arg_wrap res_wrap exp_arg exp_res doc) }
                -- arg_wrap :: exp_arg ~> act_arg
                -- res_wrap :: act-res ~> exp_res
       where
+        given_orig = GivenOrigin (SigSkol GenSigCtxt exp_arg [])
         doc = text "When checking that" <+> quotes (ppr ty_actual) <+>
               text "is more polymorphic than" <+> quotes (ppr ty_expected)
 
@@ -1040,14 +1038,14 @@ tcSkolemise ctxt expected_ty thing_inside
    -- We expect expected_ty to be a forall-type
    -- If not, the call is a no-op
   = do  { traceTc "tcSkolemise" Outputable.empty
-        ; (wrap, tvs', given, rho') <- deeplySkolemise expected_ty
+        ; (wrap, tv_prs, given, rho') <- deeplySkolemise expected_ty
 
         ; lvl <- getTcLevel
         ; when debugIsOn $
               traceTc "tcSkolemise" $ vcat [
                 ppr lvl,
                 text "expected_ty" <+> ppr expected_ty,
-                text "inst tyvars" <+> ppr tvs',
+                text "inst tyvars" <+> ppr tv_prs,
                 text "given"       <+> ppr given,
                 text "inst type"   <+> ppr rho' ]
 
@@ -1064,9 +1062,8 @@ tcSkolemise ctxt expected_ty thing_inside
         -- TcTyVars, all this is handled automatically with no need for
         -- extra faffing around
 
-        -- Use the *instantiated* type in the SkolemInfo
-        -- so that the names of displayed type variables line up
-        ; let skol_info = SigSkol ctxt (mkFunTys (map varType given) rho')
+        ; let tvs' = map snd tv_prs
+              skol_info = SigSkol ctxt expected_ty tv_prs
 
         ; (ev_binds, result) <- checkConstraints skol_info tvs' given $
                                 thing_inside tvs' rho'
@@ -1276,8 +1273,8 @@ uType origin t_or_k orig_ty1 orig_ty2
         -- we'll end up saying "can't match Foo with Bool"
         -- rather than "can't match "Int with Bool".  See Trac #4535.
     go ty1 ty2
-      | Just ty1' <- coreView ty1 = go ty1' ty2
-      | Just ty2' <- coreView ty2 = go ty1  ty2'
+      | Just ty1' <- tcView ty1 = go ty1' ty2
+      | Just ty2' <- tcView ty2 = go ty1  ty2'
 
     go (CastTy t1 co1) t2
       = do { co_tys <- go t1 t2
@@ -1771,7 +1768,7 @@ matchExpectedFunKind :: Arity           -- ^ # of args remaining, only for error
                                   -- ^ co :: old_kind ~ arg -> res
 matchExpectedFunKind num_args_remaining ty = go
   where
-    go k | Just k' <- coreView k = go k'
+    go k | Just k' <- tcView k = go k'
 
     go k@(TyVarTy kvar)
       | isTcTyVar kvar, isMetaTyVar kvar
@@ -1911,8 +1908,7 @@ metaTyVarUpdateOK :: DynFlags
                   -> TcType              -- ty :: k2
                   -> Maybe TcType        -- possibly-expanded ty
 -- (metaTyFVarUpdateOK tv ty)
--- We are about to update the meta-tyvar tv with ty, in
--- our on-the-flyh unifier
+-- We are about to update the meta-tyvar tv with ty
 -- Check (a) that tv doesn't occur in ty (occurs check)
 --       (b) that ty does not have any foralls
 --           (in the impredicative case), or type functions
@@ -2044,8 +2040,8 @@ occCheckExpand tv ty
     go env ty@(TyConApp tc tys)
       = case mapM (go env) tys of
           Just tys' -> return (mkTyConApp tc tys')
-          Nothing | Just ty' <- coreView ty -> go env ty'
-                  | otherwise               -> Nothing
+          Nothing | Just ty' <- tcView ty -> go env ty'
+                  | otherwise             -> Nothing
                       -- Failing that, try to expand a synonym
 
     go env (CastTy ty co) =  do { ty' <- go env ty

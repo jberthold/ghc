@@ -28,7 +28,7 @@ import DsUtils
 import HsSyn            -- lots of things
 import CoreSyn          -- lots of things
 import Literal          ( Literal(MachStr) )
-import CoreSubst
+import CoreOpt          ( simpleOptExpr )
 import OccurAnal        ( occurAnalyseExpr )
 import MkCore
 import CoreUtils
@@ -186,14 +186,13 @@ dsHsBind dflags
     addDictsDs (toTcTypeBag (listToBag dicts)) $
          -- addDictsDs: push type constraints deeper for pattern match check
     do { (_, bind_prs) <- dsLHsBinds binds
-       ; let core_bind = Rec bind_prs
        ; ds_binds <- dsTcEvBinds_s ev_binds
        ; core_wrap <- dsHsWrapper wrap -- Usually the identity
 
        ; let rhs = core_wrap $
                    mkLams tyvars $ mkLams dicts $
                    mkCoreLets ds_binds $
-                   mkLet core_bind $
+                   mkLetRec bind_prs $
                    Var local
        ; (spec_binds, rules) <- dsSpecs rhs prags
 
@@ -1136,8 +1135,10 @@ dsHsWrapper (WpFun c1 c2 t1 doc)
                                    ; w2 <- dsHsWrapper c2
                                    ; let app f a = mkCoreAppDs (text "dsHsWrapper") f a
                                          arg     = w1 (Var x)
-                                   ; dsNoLevPolyExpr arg doc
-                                   ; return (\e -> (Lam x (w2 (app e arg)))) }
+                                   ; (_, ok) <- askNoErrsDs $ dsNoLevPolyExpr arg doc
+                                   ; if ok
+                                     then return (\e -> (Lam x (w2 (app e arg))))
+                                     else return id }  -- this return is irrelevant
 dsHsWrapper (WpCast co)       = ASSERT(coercionRole co == Representational)
                                 return $ \e -> mkCastDs e co
 dsHsWrapper (WpEvApp tm)      = do { core_tm <- dsEvTerm tm

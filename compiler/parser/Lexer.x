@@ -86,8 +86,8 @@ import Data.List
 import Data.Maybe
 import Data.Word
 
-import Data.IntSet (IntSet)
-import qualified Data.IntSet as IntSet
+import EnumSet (EnumSet)
+import qualified EnumSet
 
 -- ghc-boot
 import qualified GHC.LanguageExtensions as LangExt
@@ -317,6 +317,10 @@ $tab          { warnTab }
 <line_prag2b> "#-}"|"-}"                { pop }
    -- NOTE: accept -} at the end of a LINE pragma, for compatibility
    -- with older versions of GHC which generated these.
+
+-- Haskell-style column pragmas, of the form
+--    {-# COLUMN <column> #-}
+<column_prag> @decimal $whitechar* "#-}" { setColumn }
 
 <0,option_prags> {
   "{-#" $whitechar* $pragmachar+
@@ -1390,6 +1394,17 @@ setLine code span buf len = do
   pushLexState code
   lexToken
 
+setColumn :: Action
+setColumn span buf len = do
+  let column =
+        case reads (lexemeToString buf len) of
+          [(column, _)] -> column
+          _ -> error "setColumn: expected integer" -- shouldn't happen
+  setSrcLoc (mkRealSrcLoc (srcSpanFile span) (srcSpanEndLine span)
+                          (fromIntegral (column :: Integer)))
+  _ <- popLexState
+  lexToken
+
 setFile :: Int -> Action
 setFile code span buf len = do
   let file = mkFastString (go (lexemeToString (stepOn buf) (len-2)))
@@ -1783,16 +1798,16 @@ data ParseResult a
 
 -- | Test whether a 'WarningFlag' is set
 warnopt :: WarningFlag -> ParserFlags -> Bool
-warnopt f options = fromEnum f `IntSet.member` pWarningFlags options
+warnopt f options = f `EnumSet.member` pWarningFlags options
 
 -- | Test whether a 'LangExt.Extension' is set
 extopt :: LangExt.Extension -> ParserFlags -> Bool
-extopt f options = fromEnum f `IntSet.member` pExtensionFlags options
+extopt f options = f `EnumSet.member` pExtensionFlags options
 
 -- | The subset of the 'DynFlags' used by the parser
 data ParserFlags = ParserFlags {
-    pWarningFlags   :: IntSet
-  , pExtensionFlags :: IntSet
+    pWarningFlags   :: EnumSet WarningFlag
+  , pExtensionFlags :: EnumSet LangExt.Extension
   , pThisPackage    :: UnitId      -- ^ key of package currently being compiled
   , pExtsBitmap     :: !ExtsBitmap -- ^ bitmap of permitted extensions
   }
@@ -2390,14 +2405,18 @@ srcParseErr options buf len
               $$ ppWhen (not th_enabled && token == "$") -- #7396
                         (text "Perhaps you intended to use TemplateHaskell")
               $$ ppWhen (token == "<-")
-                        (text "Perhaps this statement should be within a 'do' block?")
+                        (if mdoInLast100
+                           then text "Perhaps you intended to use RecursiveDo"
+                           else text "Perhaps this statement should be within a 'do' block?")
               $$ ppWhen (token == "=")
                         (text "Perhaps you need a 'let' in a 'do' block?"
                          $$ text "e.g. 'let x = 5' instead of 'x = 5'")
-              $$ ppWhen (not ps_enabled && pattern == "pattern") -- #12429
+              $$ ppWhen (not ps_enabled && pattern == "pattern ") -- #12429
                         (text "Perhaps you intended to use PatternSynonyms")
   where token = lexemeToString (offsetBytes (-len) buf) len
-        pattern = lexemeToString (offsetBytes (-len - 8) buf) 7
+        pattern = decodePrevNChars 8 buf
+        last100 = decodePrevNChars 100 buf
+        mdoInLast100 = "mdo" `isInfixOf` last100
         th_enabled = extopt LangExt.TemplateHaskell options
         ps_enabled = extopt LangExt.PatternSynonyms options
 
@@ -2751,7 +2770,8 @@ oneWordPrags = Map.fromList [
      ("overlapping", strtoken (\s -> IToverlapping_prag (SourceText s))),
      ("incoherent", strtoken (\s -> ITincoherent_prag (SourceText s))),
      ("ctype", strtoken (\s -> ITctype (SourceText s))),
-     ("complete", strtoken (\s -> ITcomplete_prag (SourceText s)))
+     ("complete", strtoken (\s -> ITcomplete_prag (SourceText s))),
+     ("column", begin column_prag)
      ]
 
 twoWordPrags = Map.fromList([

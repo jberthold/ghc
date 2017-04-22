@@ -31,7 +31,7 @@
 -- Since GHC 8.2, GHC has supported type-indexed type representations.
 -- "Data.Typeable" provides type representations which are qualified over this
 -- index, providing an interface very similar to the "Typeable" notion seen in
--- previous releases. For the type-indexed interface, see "Data.Reflection".
+-- previous releases. For the type-indexed interface, see "Type.Reflection".
 --
 -- Since GHC 7.8, 'Typeable' is poly-kinded. The changes required for this might
 -- break some old programs involving 'Typeable'. More details on this, including
@@ -45,7 +45,6 @@ module Data.Typeable
       Typeable
     , typeOf
     , typeRep
-    , I.withTypeable
 
       -- * Propositional equality
     , (:~:)(Refl)
@@ -74,7 +73,7 @@ module Data.Typeable
     , splitTyConApp
     , typeRepArgs
     , typeRepTyCon
-    , I.typeRepFingerprint
+    , typeRepFingerprint
 
       -- * Type constructors
     , I.TyCon          -- abstract, instance of: Eq, Show, Typeable
@@ -97,6 +96,7 @@ import Data.Type.Equality
 
 import Data.Maybe
 import Data.Proxy
+import GHC.Fingerprint.Type
 import GHC.Show
 import GHC.Base
 
@@ -105,17 +105,17 @@ type TypeRep = I.SomeTypeRep
 
 -- | Observe a type representation for the type of a value.
 typeOf :: forall a. Typeable a => a -> TypeRep
-typeOf _ = I.typeRepX (Proxy :: Proxy a)
+typeOf _ = I.someTypeRep (Proxy :: Proxy a)
 
 -- | Takes a value of type @a@ and returns a concrete representation
 -- of that type.
 --
 -- @since 4.7.0.0
 typeRep :: forall proxy a. Typeable a => proxy a -> TypeRep
-typeRep = I.typeRepX
+typeRep = I.someTypeRep
 
 -- | Show a type representation
-showsTypeRep :: I.SomeTypeRep -> ShowS
+showsTypeRep :: TypeRep -> ShowS
 showsTypeRep = shows
 
 -- | The type-safe cast operation
@@ -185,7 +185,14 @@ typeRepArgs ty = case splitTyConApp ty of (_, args) -> args
 
 -- | Observe the type constructor of a quantified type representation.
 typeRepTyCon :: TypeRep -> TyCon
-typeRepTyCon = I.typeRepXTyCon
+typeRepTyCon = I.someTypeRepTyCon
+
+-- | Takes a value of type @a@ and returns a concrete representation
+-- of that type.
+--
+-- @since 4.7.0.0
+typeRepFingerprint :: TypeRep -> Fingerprint
+typeRepFingerprint = I.someTypeRepFingerprint
 
 -- | Force a 'TypeRep' to normal form.
 rnfTypeRep :: TypeRep -> ()
@@ -194,30 +201,30 @@ rnfTypeRep = I.rnfSomeTypeRep
 
 -- Keeping backwards-compatibility
 typeOf1 :: forall t (a :: *). Typeable t => t a -> TypeRep
-typeOf1 _ = I.typeRepX (Proxy :: Proxy t)
+typeOf1 _ = I.someTypeRep (Proxy :: Proxy t)
 
 typeOf2 :: forall t (a :: *) (b :: *). Typeable t => t a b -> TypeRep
-typeOf2 _ = I.typeRepX (Proxy :: Proxy t)
+typeOf2 _ = I.someTypeRep (Proxy :: Proxy t)
 
 typeOf3 :: forall t (a :: *) (b :: *) (c :: *). Typeable t
         => t a b c -> TypeRep
-typeOf3 _ = I.typeRepX (Proxy :: Proxy t)
+typeOf3 _ = I.someTypeRep (Proxy :: Proxy t)
 
 typeOf4 :: forall t (a :: *) (b :: *) (c :: *) (d :: *). Typeable t
         => t a b c d -> TypeRep
-typeOf4 _ = I.typeRepX (Proxy :: Proxy t)
+typeOf4 _ = I.someTypeRep (Proxy :: Proxy t)
 
 typeOf5 :: forall t (a :: *) (b :: *) (c :: *) (d :: *) (e :: *). Typeable t
         => t a b c d e -> TypeRep
-typeOf5 _ = I.typeRepX (Proxy :: Proxy t)
+typeOf5 _ = I.someTypeRep (Proxy :: Proxy t)
 
 typeOf6 :: forall t (a :: *) (b :: *) (c :: *) (d :: *) (e :: *) (f :: *).
                 Typeable t => t a b c d e f -> TypeRep
-typeOf6 _ = I.typeRepX (Proxy :: Proxy t)
+typeOf6 _ = I.someTypeRep (Proxy :: Proxy t)
 
 typeOf7 :: forall t (a :: *) (b :: *) (c :: *) (d :: *) (e :: *) (f :: *)
                 (g :: *). Typeable t => t a b c d e f g -> TypeRep
-typeOf7 _ = I.typeRepX (Proxy :: Proxy t)
+typeOf7 _ = I.someTypeRep (Proxy :: Proxy t)
 
 type Typeable1 (a :: * -> *)                               = Typeable a
 type Typeable2 (a :: * -> * -> *)                          = Typeable a

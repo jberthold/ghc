@@ -336,11 +336,14 @@ initTcWithGbl hsc_env gbl_env loc do_this
                           Right res -> return (Just res)
                           Left _    -> return Nothing }
 
-        -- Check for unsolved constraints
+      -- Check for unsolved constraints
+      -- If we succeed (maybe_res = Just r), there should be
+      -- no unsolved constraints.  But if we exit via an
+      -- exception (maybe_res = Nothing), we may have skipped
+      -- solving, so don't panic then (Trac #13466)
       ; lie <- readIORef (tcl_lie lcl_env)
-      ; if isEmptyWC lie
-           then return ()
-           else pprPanic "initTc: unsolved constraints" (ppr lie)
+      ; when (isJust maybe_res && not (isEmptyWC lie)) $
+        pprPanic "initTc: unsolved constraints" (ppr lie)
 
         -- Collect any error messages
       ; msgs <- readIORef (tcl_errs lcl_env)
@@ -1774,7 +1777,7 @@ failIfM msg
   = do  { env <- getLclEnv
         ; let full_msg = (if_loc env <> colon) $$ nest 2 msg
         ; dflags <- getDynFlags
-        ; liftIO (log_action dflags dflags NoReason SevFatal
+        ; liftIO (putLogMsg dflags NoReason SevFatal
                    noSrcSpan (defaultErrStyle dflags) full_msg)
         ; failM }
 
@@ -1811,13 +1814,12 @@ forkM_maybe doc thing_inside
                           dflags <- getDynFlags
                           let msg = hang (text "forkM failed:" <+> doc)
                                        2 (text (show exn))
-                          liftIO $ log_action dflags
-                                              dflags
-                                              NoReason
-                                              SevFatal
-                                              noSrcSpan
-                                              (defaultErrStyle dflags)
-                                              msg
+                          liftIO $ putLogMsg dflags
+                                             NoReason
+                                             SevFatal
+                                             noSrcSpan
+                                             (defaultErrStyle dflags)
+                                             msg
 
                     ; traceIf (text "} ending fork (badly)" <+> doc)
                     ; return Nothing }

@@ -46,7 +46,7 @@ module ErrUtils (
         putMsg, printInfoForUser, printOutputForUser,
         logInfo, logOutput,
         errorMsg, warningMsg,
-        fatalErrorMsg, fatalErrorMsg', fatalErrorMsg'',
+        fatalErrorMsg, fatalErrorMsg'',
         compilationProgressMsg,
         showPass, withTiming,
         debugTraceMsg,
@@ -60,10 +60,11 @@ import Bag
 import Exception
 import Outputable
 import Panic
+import qualified PprColour as Col
 import SrcLoc
 import DynFlags
 import FastString (unpackFS)
-import StringBuffer (hGetStringBuffer, len, lexemeToString)
+import StringBuffer (atLine, hGetStringBuffer, len, lexemeToString)
 import Json
 
 import System.Directory
@@ -73,7 +74,6 @@ import Data.List
 import qualified Data.Set as Set
 import Data.IORef
 import Data.Maybe       ( fromMaybe )
-import Data.Monoid      ( mappend )
 import Data.Ord
 import Data.Time
 import Control.Monad
@@ -199,14 +199,22 @@ mkLocMessageAnn ann severity locn msg
       let locn' = if gopt Opt_ErrorSpans dflags
                   then ppr locn
                   else ppr (srcSpanStart locn)
+
+          sevColour = getSeverityColour severity (colScheme dflags)
+
+          -- Add optional information
+          optAnn = case ann of
+            Nothing -> text ""
+            Just i  -> text " [" <> coloured sevColour (text i) <> text "]"
+
           -- Add prefixes, like    Foo.hs:34: warning:
           --                           <the warning message>
           prefix = locn' <> colon <+>
                    coloured sevColour sevText <> optAnn
-      in bold (hang prefix 4 msg)
-  where
-    sevColour = colBold `mappend` getSeverityColour severity
 
+      in coloured (Col.sMessage (colScheme dflags)) (hang prefix 4 msg)
+
+  where
     sevText =
       case severity of
         SevWarning -> text "warning:"
@@ -214,50 +222,40 @@ mkLocMessageAnn ann severity locn msg
         SevFatal   -> text "fatal:"
         _          -> empty
 
-    -- Add optional information
-    optAnn = case ann of
-      Nothing -> text ""
-      Just i  -> text " [" <> coloured sevColour (text i) <> text "]"
-
-getSeverityColour :: Severity -> PprColour
-getSeverityColour SevWarning = colMagentaFg
-getSeverityColour SevError   = colRedFg
-getSeverityColour SevFatal   = colRedFg
-getSeverityColour _          = mempty
+getSeverityColour :: Severity -> Col.Scheme -> Col.PprColour
+getSeverityColour SevWarning = Col.sWarning
+getSeverityColour SevError   = Col.sError
+getSeverityColour SevFatal   = Col.sFatal
+getSeverityColour _          = const mempty
 
 getCaretDiagnostic :: Severity -> SrcSpan -> IO MsgDoc
 getCaretDiagnostic _ (UnhelpfulSpan _) = pure empty
 getCaretDiagnostic severity (RealSrcSpan span) = do
-  caretDiagnostic <$> getSrcLine (srcSpanFile span) (row - 1)
+  caretDiagnostic <$> getSrcLine (srcSpanFile span) row
 
   where
-
-    getSrcLine fn i = do
-      (getLine i <$> readFile' (unpackFS fn))
-        `catchIOError` \ _ ->
+    getSrcLine fn i =
+      getLine i (unpackFS fn)
+        `catchIOError` \_ ->
           pure Nothing
 
-    getLine i contents =
-      case drop i (lines contents) of
-        srcLine : _ -> Just srcLine
-        [] -> Nothing
-
-    readFile' fn = do
+    getLine i fn = do
       -- StringBuffer has advantages over readFile:
       -- (a) no lazy IO, otherwise IO exceptions may occur in pure code
       -- (b) always UTF-8, rather than some system-dependent encoding
       --     (Haskell source code must be UTF-8 anyway)
-      buf <- hGetStringBuffer fn
-      pure (fix <$> lexemeToString buf (len buf))
+      content <- hGetStringBuffer fn
+      case atLine i content of
+        Just at_line -> pure $
+          case lines (fix <$> lexemeToString at_line (len at_line)) of
+            srcLine : _ -> Just srcLine
+            _           -> Nothing
+        _ -> pure Nothing
 
     -- allow user to visibly see that their code is incorrectly encoded
     -- (StringBuffer.nextChar uses \0 to represent undecodable characters)
     fix '\0' = '\xfffd'
     fix c    = c
-
-    sevColour = colBold `mappend` getSeverityColour severity
-
-    marginColour = colBold `mappend` colBlueFg
 
     row = srcSpanStartLine span
     rowStr = show row
@@ -267,6 +265,10 @@ getCaretDiagnostic severity (RealSrcSpan span) = do
 
     caretDiagnostic Nothing = empty
     caretDiagnostic (Just srcLineWithNewline) =
+      sdocWithDynFlags $ \ dflags ->
+      let sevColour = getSeverityColour severity (colScheme dflags)
+          marginColour = Col.sMargin (colScheme dflags)
+      in
       coloured marginColour (text marginSpace) <>
       text ("\n") <>
       coloured marginColour (text marginRow) <>
@@ -347,7 +349,7 @@ errorsFound _dflags (_warns, errs) = not (isEmptyBag errs)
 printBagOfErrors :: DynFlags -> Bag ErrMsg -> IO ()
 printBagOfErrors dflags bag_of_errors
   = sequence_ [ let style = mkErrStyle dflags unqual
-                in log_action dflags dflags reason sev s style (formatErrDoc dflags doc)
+                in putLogMsg dflags reason sev s style (formatErrDoc dflags doc)
               | ErrMsg { errMsgSpan      = s,
                          errMsgDoc       = doc,
                          errMsgSeverity  = sev,
@@ -378,11 +380,15 @@ pprLocErrMsg (ErrMsg { errMsgSpan      = s
     mkLocMessage sev s (formatErrDoc dflags doc)
 
 sortMsgBag :: Maybe DynFlags -> Bag ErrMsg -> [ErrMsg]
-sortMsgBag dflags = sortBy (maybeFlip $ comparing errMsgSpan) . bagToList
+sortMsgBag dflags = maybeLimit . sortBy (maybeFlip cmp) . bagToList
   where maybeFlip :: (a -> a -> b) -> (a -> a -> b)
         maybeFlip
           | fromMaybe False (fmap reverseErrors dflags) = flip
           | otherwise                                   = id
+        cmp = comparing errMsgSpan
+        maybeLimit = case join (fmap maxErrors dflags) of
+          Nothing        -> id
+          Just err_limit -> take err_limit
 
 ghcExit :: DynFlags -> Int -> IO ()
 ghcExit dflags val
@@ -404,8 +410,7 @@ doIfSet_dyn dflags flag action | gopt flag dflags = action
 dumpIfSet :: DynFlags -> Bool -> String -> SDoc -> IO ()
 dumpIfSet dflags flag hdr doc
   | not flag   = return ()
-  | otherwise  = log_action dflags
-                            dflags
+  | otherwise  = putLogMsg  dflags
                             NoReason
                             SevDump
                             noSrcSpan
@@ -486,7 +491,7 @@ dumpSDoc dflags print_unqual flag hdr doc
               let (doc', severity)
                     | null hdr  = (doc, SevOutput)
                     | otherwise = (mkDumpDoc hdr doc, SevDump)
-              log_action dflags dflags NoReason severity noSrcSpan dump_style doc'
+              putLogMsg dflags NoReason severity noSrcSpan dump_style doc'
 
 
 -- | Choose where to put a dump file based on DynFlags
@@ -543,18 +548,15 @@ ifVerbose dflags val act
 
 errorMsg :: DynFlags -> MsgDoc -> IO ()
 errorMsg dflags msg
-   = log_action dflags dflags NoReason SevError noSrcSpan (defaultErrStyle dflags) msg
+   = putLogMsg dflags NoReason SevError noSrcSpan (defaultErrStyle dflags) msg
 
 warningMsg :: DynFlags -> MsgDoc -> IO ()
 warningMsg dflags msg
-   = log_action dflags dflags NoReason SevWarning noSrcSpan (defaultErrStyle dflags) msg
+   = putLogMsg dflags NoReason SevWarning noSrcSpan (defaultErrStyle dflags) msg
 
 fatalErrorMsg :: DynFlags -> MsgDoc -> IO ()
-fatalErrorMsg dflags msg = fatalErrorMsg' (log_action dflags) dflags msg
-
-fatalErrorMsg' :: LogAction -> DynFlags -> MsgDoc -> IO ()
-fatalErrorMsg' la dflags msg =
-    la dflags NoReason SevFatal noSrcSpan (defaultErrStyle dflags) msg
+fatalErrorMsg dflags msg =
+    putLogMsg dflags NoReason SevFatal noSrcSpan (defaultErrStyle dflags) msg
 
 fatalErrorMsg'' :: FatalMessager -> String -> IO ()
 fatalErrorMsg'' fm msg = fm msg
@@ -638,12 +640,12 @@ printOutputForUser dflags print_unqual msg
 
 logInfo :: DynFlags -> PprStyle -> MsgDoc -> IO ()
 logInfo dflags sty msg
-  = log_action dflags dflags NoReason SevInfo noSrcSpan sty msg
+  = putLogMsg dflags NoReason SevInfo noSrcSpan sty msg
 
 logOutput :: DynFlags -> PprStyle -> MsgDoc -> IO ()
 -- ^ Like 'logInfo' but with 'SevOutput' rather then 'SevInfo'
 logOutput dflags sty msg
-  = log_action dflags dflags NoReason SevOutput noSrcSpan sty msg
+  = putLogMsg dflags NoReason SevOutput noSrcSpan sty msg
 
 prettyPrintGhcErrors :: ExceptionMonad m => DynFlags -> m a -> m a
 prettyPrintGhcErrors dflags

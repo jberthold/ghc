@@ -41,7 +41,7 @@ import HsSyn            -- HsType
 import TcRnMonad        -- TcType, amongst others
 import TcEnv       ( tcGetInstEnvs )
 import FunDeps
-import InstEnv     ( ClsInst, lookupInstEnv, isOverlappable )
+import InstEnv     ( InstMatch, lookupInstEnv )
 import FamInstEnv  ( isDominatedBy, injectiveBranches,
                      InjectivityCheckResult(..) )
 import FamInst     ( makeInjectivityErrors )
@@ -118,7 +118,7 @@ and fail.
 
 So in fact we use this as our *definition* of ambiguity.  We use a
 very similar test for *inferred* types, to ensure that they are
-unambiguous. See Note [Impedence matching] in TcBinds.
+unambiguous. See Note [Impedance matching] in TcBinds.
 
 This test is very conveniently implemented by calling
     tcSubType <type> <type>
@@ -518,7 +518,7 @@ check_syn_tc_app env ctxt rank ty tc tys
                 mapM_ check_arg tys
 
           else  -- In the liberal case (only for closed syns), expand then check
-          case coreView ty of
+          case tcView ty of
              Just ty' -> check_type env ctxt rank ty'
              Nothing  -> pprPanic "check_tau_type" (ppr ty)  }
 
@@ -717,7 +717,7 @@ check_pred_help :: Bool    -- True <=> under a type synonym
                 -> DynFlags -> UserTypeCtxt
                 -> PredType -> TcM ()
 check_pred_help under_syn env dflags ctxt pred
-  | Just pred' <- coreView pred  -- Switch on under_syn when going under a
+  | Just pred' <- tcView pred  -- Switch on under_syn when going under a
                                  -- synonym (Trac #9838, yuk)
   = check_pred_help True env dflags ctxt pred'
   | otherwise
@@ -810,7 +810,8 @@ check_class_pred env dflags ctxt pred cls tys
 
   | otherwise
   = do { check_arity
-       ; check_simplifiable_class_constraint
+       ; warn_simp <- woptM Opt_WarnSimplifiableClassConstraints
+       ; when warn_simp check_simplifiable_class_constraint
        ; checkTcM arg_tys_ok (predTyVarErr env pred) }
   where
     check_arity = checkTc (classArity cls == length tys)
@@ -833,25 +834,22 @@ check_class_pred env dflags ctxt pred cls tys
        | DataTyCtxt {} <- ctxt   -- Don't do this check for the "stupid theta"
        = return ()               -- of a data type declaration
        | otherwise
-       = do { instEnvs <- tcGetInstEnvs
-            ; let (matches, _, _) = lookupInstEnv False instEnvs cls tys
-                  bad_matches = [ inst | (inst,_) <- matches
-                                       , not (isOverlappable inst) ]
-            ; warnIf (Reason Opt_WarnSimplifiableClassConstraints)
-                     (not (null bad_matches))
-                     (simplifiable_constraint_warn bad_matches) }
+       = do { envs <- tcGetInstEnvs
+            ; case lookupInstEnv False envs cls tys of
+                 ([m], [], _) -> addWarnTc (Reason Opt_WarnSimplifiableClassConstraints)
+                                           (simplifiable_constraint_warn m)
+                 _ -> return () }
 
-    simplifiable_constraint_warn :: [ClsInst] -> SDoc
-    simplifiable_constraint_warn (match : _)
+    simplifiable_constraint_warn :: InstMatch -> SDoc
+    simplifiable_constraint_warn (match, _)
      = vcat [ hang (text "The constraint" <+> quotes (ppr (tidyType env pred)))
                  2 (text "matches an instance declaration")
             , ppr match
             , hang (text "This makes type inference for inner bindings fragile;")
                  2 (text "either use MonoLocalBinds, or simplify it using the instance") ]
-    simplifiable_constraint_warn [] = pprPanic "check_class_pred" (ppr pred)
 
 {- Note [Simplifiable given constraints]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 A type signature like
    f :: Eq [(a,b)] => a -> b
 is very fragile, for reasons described at length in TcInteract
@@ -862,9 +860,27 @@ fragility. But if we /infer/ the type of a local let-binding, things
 can go wrong (Trac #11948 is an example, discussed in the Note).
 
 So this warning is switched on only if we have NoMonoLocalBinds; in
-that case the warning discourages uses from writing simplifiable class
-constraints, at least unless the top-level instance is explicitly
-declared as OVERLAPPABLE.
+that case the warning discourages users from writing simplifiable
+class constraints.
+
+The warning only fires if the constraint in the signature
+matches the top-level instances in only one way, and with no
+unifiers -- that is, under the same circumstances that
+TcInteract.matchInstEnv fires an interaction with the top
+level instances.  For example (Trac #13526), consider
+
+  instance {-# OVERLAPPABLE #-} Eq (T a) where ...
+  instance                   Eq (T Char) where ..
+  f :: Eq (T a) => ...
+
+We don't want to complain about this, even though the context
+(Eq (T a)) matches an instance, because the user may be
+deliberately deferring the choice so that the Eq (T Char)
+has a chance to fire when 'f' is called.  And the fragility
+only matters when there's a risk that the instance might
+fire instead of the local 'given'; and there is no such
+risk in this case.  Just use the same rules as for instance
+firing!
 -}
 
 -------------------------
@@ -1416,7 +1432,7 @@ With this class decl, if we have an instance decl
   instance C ty1 ty2 where ...
 then the type instance must look like
      type T ty1 v ty2 = ...
-with exactly 'ty1' for 'a', 'ty2' for 'b', and a variable for 'x'.
+with exactly 'ty1' for 'a', 'ty2' for 'b', and some type 'v' for 'x'.
 For example:
 
   instance C [p] Int
@@ -1443,20 +1459,40 @@ Note that
   on the LHS to establish the repeated pattern.  So to keep it simple
   we just require equality.
 
-* We also check that any non-class-tyvars are instantiated with
-  distinct tyvars.  That rules out
+* For variables in associated type families that are not bound by the class
+  itself, we do _not_ check if they are over-specific. In other words,
+  it's perfectly acceptable to have an instance like this:
+
     instance C [p] Int where
-      type T [p] Bool Int = p  -- Note Bool
-      type T [p] Char Int = p  -- Note Char
+      type T [p] (Maybe x) Int = x
 
-  and
-     instance C [p] Int where
-      type T [p] p Int = p     -- Note repeated 'p' on LHS
-  It's consistent to do this because we don't allow this kind of
-  instantiation for the class-tyvar arguments of the family.
+  While the first and third arguments to T are required to be exactly [p] and
+  Int, respectively, since they are bound by C, the second argument is allowed
+  to be more specific than just a type variable. Furthermore, it is permissible
+  to define multiple equations for T that differ only in the non-class-bound
+  argument:
 
-  Overall, we can have exactly one type instance for each
-  associated type.  If you wantmore, use an auxiliary family.
+    instance C [p] Int where
+      type T [p] (Maybe x)    Int = x
+      type T [p] (Either x y) Int = x -> y
+
+  We once considered requiring that non-class-bound variables in associated
+  type family instances be instantiated with distinct type variables. However,
+  that requirement proved too restrictive in practice, as there were examples
+  of extremely simple associated type family instances that this check would
+  reject, and fixing them required tiresome boilerplate in the form of
+  auxiliary type families. For instance, you would have to define the above
+  example as:
+
+    instance C [p] Int where
+      type T [p] x Int = CAux x
+
+    type family CAux x where
+      CAux (Maybe x)    = x
+      CAux (Either x y) = x -> y
+
+  We decided that this restriction wasn't buying us much, so we opted not
+  to pursue that design (see also GHC Trac #13398).
 
 Implementation
   * Form the mini-envt from the class type variables a,b
@@ -1466,7 +1502,8 @@ Implementation
     (it shares tyvars with the class C)
 
   * Apply the mini-evnt to them, and check that the result is
-    consistent with the instance types [p] y Int
+    consistent with the instance types [p] y Int. (where y can be any type, as
+    it is not scoped over the class type variables.
 
 We make all the instance type variables scope over the
 type instances, of course, which picks up non-obvious kinds.  Eg
@@ -1516,13 +1553,10 @@ checkConsistentFamInst (Just (clas, inst_tvs, mini_env)) fam_tc _at_tvs at_tys
 
        -- Check type args first (more comprehensible)
        ; checkTc (all check_arg type_shapes)   pp_wrong_at_arg
-       ; checkTc (check_poly_args type_shapes) pp_wrong_at_tyvars
 
        -- And now kind args
        ; checkTc (all check_arg kind_shapes)
                  (pp_wrong_at_arg $$ ppSuggestExplicitKinds)
-       ; checkTc (check_poly_args kind_shapes)
-                 (pp_wrong_at_tyvars $$ ppSuggestExplicitKinds)
 
        ; traceTc "cfi" (vcat [ ppr inst_tvs
                              , ppr arg_shapes
@@ -1538,19 +1572,9 @@ checkConsistentFamInst (Just (clas, inst_tvs, mini_env)) fam_tc _at_tvs at_tys
     check_arg (Just exp_ty, at_ty) = exp_ty `tcEqType` at_ty
     check_arg (Nothing,     _    ) = True -- Arg position does not correspond
                                           -- to a class variable
-    check_poly_args :: [(Maybe Type,Type)] -> Bool
-    check_poly_args arg_shapes
-      = allDistinctTyVars (mkVarSet inst_tvs)
-                          [ at_ty | (Nothing, at_ty) <- arg_shapes ]
 
     pp_wrong_at_arg
       = vcat [ text "Type indexes must match class instance head"
-             , pp_exp_act ]
-
-    pp_wrong_at_tyvars
-      = vcat [ text "Polymorphic type indexes of associated type" <+> quotes (ppr fam_tc)
-             , nest 2 $ vcat [ text "(i.e. ones independent of the class type variables)"
-                             , text "must be distinct type variables" ]
              , pp_exp_act ]
 
     pp_exp_act
@@ -1913,7 +1937,7 @@ checkValidInferredKinds orig_kvs out_of_scope extra
 
 -- Free variables of a type, retaining repetitions, and expanding synonyms
 fvType :: Type -> [TyCoVar]
-fvType ty | Just exp_ty <- coreView ty = fvType exp_ty
+fvType ty | Just exp_ty <- tcView ty = fvType exp_ty
 fvType (TyVarTy tv)          = [tv]
 fvType (TyConApp _ tys)      = fvTypes tys
 fvType (LitTy {})            = []
@@ -1956,7 +1980,7 @@ fvProv (HoleProv h)        = pprPanic "fvProv falls into a hole" (ppr h)
 
 sizeType :: Type -> Int
 -- Size of a type: the number of variables and constructors
-sizeType ty | Just exp_ty <- coreView ty = sizeType exp_ty
+sizeType ty | Just exp_ty <- tcView ty = sizeType exp_ty
 sizeType (TyVarTy {})      = 1
 sizeType (TyConApp _ tys)  = sizeTypes tys + 1
 sizeType (LitTy {})        = 1
@@ -1973,7 +1997,7 @@ sizeTypes = sum . map sizeType
 --
 -- We are considering whether class constraints terminate.
 -- Equality constraints and constraints for the implicit
--- parameter class always termiante so it is safe to say "size 0".
+-- parameter class always terminate so it is safe to say "size 0".
 -- (Implicit parameter constraints always terminate because
 -- there are no instances for them---they are only solved by
 -- "local instances" in expressions).

@@ -27,9 +27,8 @@ available = False
 #else
 
 import Data.Bits (Bits(..), FiniteBits(..))
-import qualified Data.Int as I
+import Data.Int
 import Data.Word (Word16, Word32)
-import Data.Int  (Int16)
 import Foreign.C.Error (throwErrnoIfMinus1, eINTR, eINVAL,
                         eNOTSUP, getErrno, throwErrno)
 import Foreign.C.Types
@@ -39,7 +38,7 @@ import Foreign.Storable (Storable(..))
 import GHC.Base
 import GHC.Enum (toEnum)
 import GHC.Num (Num(..))
-import GHC.Real (ceiling, floor, fromIntegral)
+import GHC.Real (quotRem, fromIntegral)
 import GHC.Show (Show(show))
 import GHC.Event.Internal (Timeout(..))
 import System.Posix.Internals (c_close)
@@ -189,9 +188,9 @@ newtype Flag = Flag Word16
  }
 
 #if SIZEOF_KEV_FILTER == 4 /*kevent.filter: int32_t or int16_t. */
-newtype Filter = Filter I.Int32
+newtype Filter = Filter Int32
 #else
-newtype Filter = Filter I.Int16
+newtype Filter = Filter Int16
 #endif
     deriving (Bits, FiniteBits, Eq, Num, Show, Storable)
 
@@ -266,13 +265,13 @@ withTimeSpec ts f
 
 fromTimeout :: Timeout -> TimeSpec
 fromTimeout Forever     = TimeSpec (-1) (-1)
-fromTimeout (Timeout s) = TimeSpec (toEnum sec) (toEnum nanosec)
+fromTimeout (Timeout s) = TimeSpec (toEnum sec') (toEnum nanosec')
   where
-    sec :: Int
-    sec     = floor s
+    (sec, nanosec) = s `quotRem` 1000000000
 
-    nanosec :: Int
-    nanosec = ceiling $ (s - fromIntegral sec) * 1000000000
+    nanosec', sec' :: Int
+    sec' = fromIntegral sec
+    nanosec' = fromIntegral nanosec
 
 toEvent :: Filter -> E.Event
 toEvent (Filter f)

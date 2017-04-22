@@ -139,7 +139,7 @@ Note [generating code for top-level string literal bindings]
 Here is a summary on how the byte code generator deals with top-level string
 literals:
 
-1. Top-level string literal bindings are spearted from the rest of the module.
+1. Top-level string literal bindings are separated from the rest of the module.
 
 2. The strings are allocated via iservCmd, in allocateTopStrings
 
@@ -180,7 +180,7 @@ coreExprToBCOs hsc_env this_mod expr
   where dflags = hsc_dflags hsc_env
 
 -- The regular freeVars function gives more information than is useful to
--- us here. simpleFreeVars does the impedence matching.
+-- us here. simpleFreeVars does the impedance matching.
 simpleFreeVars :: CoreExpr -> AnnExpr Id DVarSet
 simpleFreeVars = go . freeVars
   where

@@ -317,8 +317,8 @@ instance Monoid Ordering where
 -- <http://en.wikipedia.org/wiki/Monoid>: \"Any semigroup @S@ may be
 -- turned into a monoid simply by adjoining an element @e@ not in @S@
 -- and defining @e*e = e@ and @e*s = s = s*e@ for all @s ∈ S@.\" Since
--- there is no \"Semigroup\" typeclass providing just 'mappend', we
--- use 'Monoid' instead.
+-- there used to be no \"Semigroup\" typeclass providing just 'mappend',
+-- we use 'Monoid' instead.
 --
 -- @since 2.01
 instance Monoid a => Monoid (Maybe a) where
@@ -951,25 +951,40 @@ mapFB ::  (elt -> lst -> lst) -> (a -> elt) -> a -> lst -> lst
 {-# INLINE [0] mapFB #-} -- See Note [Inline FB functions] in GHC.List
 mapFB c f = \x ys -> c (f x) ys
 
--- The rules for map work like this.
---
--- Up to (but not including) phase 1, we use the "map" rule to
--- rewrite all saturated applications of map with its build/fold
--- form, hoping for fusion to happen.
--- In phase 1 and 0, we switch off that rule, inline build, and
--- switch on the "mapList" rule, which rewrites the foldr/mapFB
--- thing back into plain map.
---
--- It's important that these two rules aren't both active at once
--- (along with build's unfolding) else we'd get an infinite loop
--- in the rules.  Hence the activation control below.
---
--- This same pattern is followed by many other functions:
--- e.g. append, filter, iterate, repeat, etc.
---
--- The "mapFB" rule optimises compositions of map and
--- the "mapFB/id" rule get rids of 'map id' calls.
--- (Any similarity to the Functor laws for [] is expected.)
+{- Note [The rules for map]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+The rules for map work like this.
+
+* Up to (but not including) phase 1, we use the "map" rule to
+  rewrite all saturated applications of map with its build/fold
+  form, hoping for fusion to happen.
+
+  In phase 1 and 0, we switch off that rule, inline build, and
+  switch on the "mapList" rule, which rewrites the foldr/mapFB
+  thing back into plain map.
+
+  It's important that these two rules aren't both active at once
+  (along with build's unfolding) else we'd get an infinite loop
+  in the rules.  Hence the activation control below.
+
+* This same pattern is followed by many other functions:
+  e.g. append, filter, iterate, repeat, etc. in GHC.List
+
+  See also Note [Inline FB functions] in GHC.List
+
+* The "mapFB" rule optimises compositions of map
+
+* The "mapFB/id" rule gets rid of 'map id' calls.
+  You might think that (mapFB c id) will turn into c simply
+  when mapFB is inlined; but before that happens the "mapList"
+  rule turns
+     (foldr (mapFB (:) id) [] a
+  back into
+     map id
+  Which is not very clever.
+
+* Any similarity to the Functor laws for [] is expected.
+-}
 
 {-# RULES
 "map"       [~1] forall f xs.   map f xs                = build (\c n -> foldr (mapFB c f) n xs)

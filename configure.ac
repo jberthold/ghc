@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Parallel Haskell Compilation System], [8.1], [eden@mathematik.uni-marburg.de], [ghc-AC_PACKAGE_VERSION])
+AC_INIT([The Parallel Haskell Compilation System], [8.3], [eden@mathematik.uni-marburg.de], [ghc-AC_PACKAGE_VERSION])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=NO}
@@ -241,8 +241,8 @@ AC_SUBST(SOLARIS_BROKEN_SHLD)
 
 dnl ** Do an unregisterised build?
 dnl --------------------------------------------------------------
-case "$HostArch" in
-    i386|x86_64|powerpc|powerpc64|powerpc64le|arm)
+case "$TargetArch" in
+    i386|x86_64|powerpc|powerpc64|powerpc64le|arm|aarch64)
         UnregisterisedDefault=NO
         ;;
     *)
@@ -425,12 +425,6 @@ with a cross-compiler.  To cross-compile GHC itself, set TARGET: stage
 GHC.
 ])
 fi
-if test "$CrossCompiling" = "YES"
-then
-  CrossCompilePrefix="${target}-"
-else
-  CrossCompilePrefix=""
-fi
 # Despite its similarity in name to TargetPlatform, TargetPlatformFull is used
 # in calls to subproject configure scripts and thus must be set to the autoconf
 # triple, not the normalized GHC triple that TargetPlatform is set to.
@@ -446,12 +440,21 @@ fi
 # all be taken care of for us if we configured the subprojects using
 # AC_CONFIG_DIR, but unfortunately Cabal needs to be the one to do the
 # configuration.
+#
+# We also use non-canonicalized triple when install stage1 crosscompiler
 if test -z "${target_alias}"
 then
   # --target wasn't given; use result from AC_CANONICAL_TARGET
   TargetPlatformFull="${target}"
 else
   TargetPlatformFull="${target_alias}"
+fi
+if test "$CrossCompiling" = "YES"
+then
+  # Use value passed by user from --target=
+  CrossCompilePrefix="${TargetPlatformFull}-"
+else
+  CrossCompilePrefix=""
 fi
 AC_SUBST(CrossCompiling)
 AC_SUBST(CrossCompilePrefix)
@@ -701,6 +704,11 @@ AC_PATH_PROG(TimeCmd,time)
 dnl ** check for tar
 dnl   if GNU tar is named gtar, look for it first.
 AC_PATH_PROGS(TarCmd,gnutar gtar tar,tar)
+
+dnl ** check for compressors
+AC_PATH_PROGS(Bzip2Cmd,bzip2, bzip2)
+AC_PATH_PROGS(GzipCmd,gzip, gzip)
+AC_PATH_PROGS(XzCmd,pxz xz, xz)
 
 dnl ** check for patch
 dnl if GNU patch is named gpatch, look for it first
@@ -1076,10 +1084,10 @@ dnl ** Use MMAP in the runtime linker?
 dnl --------------------------------------------------------------
 
 case ${TargetOS} in
-    linux|freebsd|dragonfly|netbsd|openbsd|kfreebsdgnu|gnu|solaris2)
+    linux|linux-android|freebsd|dragonfly|netbsd|openbsd|kfreebsdgnu|gnu|solaris2)
         RtsLinkerUseMmap=1
         ;;
-    darwin)
+    darwin|ios)
         # Don't use mmap on powerpc/darwin as the mmap there doesn't support
         # reallocating. Reallocating is needed to allocate jump islands just
         # after each object image. Jumps to these jump islands use relative
@@ -1385,9 +1393,11 @@ echo "\
    Unregisterised            : $Unregisterised
    hs-cpp       : $HaskellCPPCmd
    hs-cpp-flags : $HaskellCPPArgs
+   ar           : $ArCmd
    ld           : $LdCmd
    nm           : $NmCmd
    objdump      : $ObjdumpCmd
+   ranlib       : $RanlibCmd
    Happy        : $HappyCmd ($HappyVersion)
    Alex         : $AlexCmd ($AlexVersion)
    Perl         : $PerlCmd

@@ -49,6 +49,8 @@ import Inst( deeplyInstantiate )
 import TcUnify( checkConstraints )
 import RnTypes
 import RnExpr
+import RnUtils ( HsDocContext(..) )
+import RnFixity ( lookupFixityRn )
 import MkId
 import TidyPgm    ( globaliseAndTidyId )
 import TysWiredIn ( unitTy, mkListTy )
@@ -1661,7 +1663,7 @@ check_main dflags tcg_env explicit_mod_hdr
         ; ioTyCon <- tcLookupTyCon ioTyConName
         ; res_ty <- newFlexiTyVarTy liftedTypeKind
         ; let io_ty = mkTyConApp ioTyCon [res_ty]
-              skol_info = SigSkol (FunSigCtxt main_name False) io_ty
+              skol_info = SigSkol (FunSigCtxt main_name False) io_ty []
         ; (ev_binds, main_expr)
                <- checkConstraints skol_info [] [] $
                   addErrCtxt mainCtxt    $
@@ -1877,6 +1879,9 @@ tcRnStmt hsc_env rdr_stmt
     zonked_expr <- zonkTopLExpr tc_expr ;
     zonked_ids  <- zonkTopBndrs bound_ids ;
 
+    failIfErrsM ;  -- we can't do the next step if there are levity polymorphism errors
+                   -- test case: ghci/scripts/T13202{,a}
+
         -- None of the Ids should be of unboxed type, because we
         -- cast them all to HValues in the end!
     mapM_ bad_unboxed (filter (isUnliftedType . idType) zonked_ids) ;
@@ -2009,7 +2014,7 @@ tcUserStmt (L loc (BodyStmt expr _ _ _))
                        ; when (isUnitTy $ it_ty) failM
                        ; return stuff },
 
-                        -- Plan B; a naked bind statment
+                        -- Plan B; a naked bind statement
                     tcGhciStmts [bind_stmt],
 
                         -- Plan C; check that the let-binding is typeable all by itself.

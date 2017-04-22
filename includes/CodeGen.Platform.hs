@@ -139,7 +139,7 @@ import Reg
 # define r31 31
 
 -- See note above. These aren't actually used for anything except satisfying the compiler for globalRegMaybe
--- so I'm unsure if they're the correct numberings, should they ever be attempted to be used in the NCG. 
+-- so I'm unsure if they're the correct numberings, should they ever be attempted to be used in the NCG.
 #if MACHREGS_aarch64 || MACHREGS_arm
 # define s0 32
 # define s1 33

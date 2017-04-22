@@ -1163,6 +1163,9 @@ void freeObjectCode (ObjectCode *oc)
                     break;
                 }
             }
+            if (oc->sections[i].info) {
+                stgFree(oc->sections[i].info);
+            }
         }
         stgFree(oc->sections);
     }
@@ -1171,7 +1174,7 @@ void freeObjectCode (ObjectCode *oc)
 
     /* Free symbol_extras.  On x86_64 Windows, symbol_extras are allocated
      * alongside the image, so we don't need to free. */
-#if NEED_SYMBOL_EXTRAS && (!defined(x86_64_HOST_ARCH) || !defined(mingw32_HOST_OS))
+#if defined(NEED_SYMBOL_EXTRAS) && (!defined(x86_64_HOST_ARCH) || !defined(mingw32_HOST_OS))
     if (RTS_LINKER_USE_MMAP) {
         if (!USE_CONTIGUOUS_MMAP && oc->symbol_extras != NULL) {
             m32_free(oc->symbol_extras,
@@ -1181,6 +1184,10 @@ void freeObjectCode (ObjectCode *oc)
     else {
         stgFree(oc->symbol_extras);
     }
+#endif
+
+#if defined(OBJECTFORMAT_MACHO)
+    ocDeinit_MachO(oc);
 #endif
 
     stgFree(oc->fileName);
@@ -1207,6 +1214,8 @@ mkOc( pathchar *path, char *image, int imageSize,
 
    IF_DEBUG(linker, debugBelch("mkOc: start\n"));
    oc = stgMallocBytes(sizeof(ObjectCode), "mkOc(oc)");
+
+   oc->info = NULL;
 
 #  if defined(OBJFORMAT_ELF)
    oc->formatName = "ELF";
@@ -1237,7 +1246,7 @@ mkOc( pathchar *path, char *image, int imageSize,
    oc->sections          = NULL;
    oc->proddables        = NULL;
    oc->stable_ptrs       = NULL;
-#if NEED_SYMBOL_EXTRAS
+#if defined(NEED_SYMBOL_EXTRAS)
    oc->symbol_extras     = NULL;
 #endif
    oc->imageMapped       = mapped;
@@ -1308,9 +1317,26 @@ preloadObjectFile (pathchar *path)
       return NULL;
    }
 
+   /* iOS does not permit to mmap with r+w+x, however while the comment for
+    * this function says this is not the final resting place, for some
+    * architectures / hosts (at least mach-o non-iOS -- see ocGetNames_MachO)
+    * the image mmaped here in fact ends up being the final resting place for
+    * the sections. And hence we need to leave r+w+x here for other hosts
+    * until all hosts have been made aware of the initial image being r+w only.
+    *
+    * See also the misalignment logic for darwin below.
+    */
+#if defined(ios_HOST_OS)
+   image = mmap(NULL, fileSize, PROT_READ|PROT_WRITE, MAP_PRIVATE, fd, 0);
+#else
    image = mmap(NULL, fileSize, PROT_READ|PROT_WRITE|PROT_EXEC,
                 MAP_PRIVATE, fd, 0);
-       // not 32-bit yet, we'll remap later
+#endif
+
+   if (image == MAP_FAILED) {
+       errorBelch("mmap: failed. errno = %d", errno);
+   }
+   // not 32-bit yet, we'll remap later
    close(fd);
 
 #else /* !RTS_LINKER_USE_MMAP */
@@ -1368,6 +1394,11 @@ preloadObjectFile (pathchar *path)
 #endif /* RTS_LINKER_USE_MMAP */
 
    oc = mkOc(path, image, fileSize, true, NULL, misalignment);
+
+#ifdef OBJFORMAT_MACHO
+   if (ocVerifyImage_MachO( oc ))
+       ocInit_MachO( oc );
+#endif
 
    return oc;
 }
@@ -1438,7 +1469,7 @@ HsInt loadOc (ObjectCode* oc)
        return r;
    }
 
-#if NEED_SYMBOL_EXTRAS
+#if defined(NEED_SYMBOL_EXTRAS)
 #  if defined(OBJFORMAT_MACHO)
    r = ocAllocateSymbolExtras_MachO ( oc );
    if (!r) {
@@ -1714,6 +1745,9 @@ addSection (Section *s, SectionKind kind, SectionAlloc alloc,
 
    s->mapped_start = mapped_start; /* start of mmap() block */
    s->mapped_size  = mapped_size;  /* size of mmap() block */
+
+   s->info = (SectionFormatInfo*)stgCallocBytes(1, sizeof(SectionFormatInfo),
+                                            "addSection(SectionFormatInfo)");
 
    IF_DEBUG(linker,
             debugBelch("addSection: %p-%p (size %" FMT_Word "), kind %d\n",

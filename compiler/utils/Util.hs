@@ -129,6 +129,10 @@ module Util (
         HasCallStack,
         HasDebugCallStack,
         prettyCurrentCallStack,
+
+        -- * Utils for flags
+        OverridingBool(..),
+        overrideWith,
     ) where
 
 #include "HsVersions.h"
@@ -163,6 +167,10 @@ import qualified Data.IntMap as IM
 import qualified Data.Set as Set
 
 import Data.Time
+
+#ifdef DEBUG
+import {-# SOURCE #-} Outputable ( warnPprTrace, text )
+#endif
 
 infixr 9 `thenCmp`
 
@@ -301,7 +309,7 @@ splitEithers (e : es) = case e of
     where (xs,ys) = splitEithers es
 
 chkAppend :: [a] -> [a] -> [a]
--- Checks for the second arguemnt being empty
+-- Checks for the second argument being empty
 -- Used in situations where that situation is common
 chkAppend xs ys
   | null ys   = xs
@@ -558,7 +566,7 @@ isIn msg x ys
     elem100 :: Eq a => Int -> a -> [a] -> Bool
     elem100 _ _ [] = False
     elem100 i x (y:ys)
-      | i > 100 = trace ("Over-long elem in " ++ msg) (x `elem` (y:ys))
+      | i > 100 = WARN(True, text ("Over-long elem in " ++ msg)) (x `elem` (y:ys))
       | otherwise = x == y || elem100 (i + 1) x ys
 
 isn'tIn msg x ys
@@ -567,7 +575,7 @@ isn'tIn msg x ys
     notElem100 :: Eq a => Int -> a -> [a] -> Bool
     notElem100 _ _ [] =  True
     notElem100 i x (y:ys)
-      | i > 100 = trace ("Over-long notElem in " ++ msg) (x `notElem` (y:ys))
+      | i > 100 = WARN(True, text ("Over-long notElem in " ++ msg)) (x `notElem` (y:ys))
       | otherwise = x /= y && notElem100 (i + 1) x ys
 # endif /* DEBUG */
 
@@ -1354,3 +1362,14 @@ prettyCurrentCallStack = GHC.Stack.showCallStack ?callStack
 prettyCurrentCallStack :: HasCallStack => String
 prettyCurrentCallStack = "Call stack unavailable"
 #endif
+
+data OverridingBool
+  = Auto
+  | Always
+  | Never
+  deriving Show
+
+overrideWith :: Bool -> OverridingBool -> Bool
+overrideWith b Auto   = b
+overrideWith _ Always = True
+overrideWith _ Never  = False

@@ -161,6 +161,7 @@ static void wakeup_gc_threads       (uint32_t me, bool idle_cap[]);
 static void shutdown_gc_threads     (uint32_t me, bool idle_cap[]);
 static void collect_gct_blocks      (void);
 static void collect_pinned_object_blocks (void);
+static void heapOverflow            (void);
 
 #if defined(DEBUG)
 static void gcCAFs                  (void);
@@ -819,6 +820,16 @@ GarbageCollect (uint32_t collect_gen,
   RELEASE_SM_LOCK;
 
   SET_GCT(saved_gct);
+}
+
+/* -----------------------------------------------------------------------------
+   Heap overflow is indicated by setting a flag that the caller of
+   GarbageCollect can check.  (not ideal, TODO: better)
+   -------------------------------------------------------------------------- */
+
+static void heapOverflow(void)
+{
+    heap_overflow = true;
 }
 
 /* -----------------------------------------------------------------------------

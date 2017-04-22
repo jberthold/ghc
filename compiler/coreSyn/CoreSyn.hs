@@ -4,6 +4,7 @@
 -}
 
 {-# LANGUAGE CPP, DeriveDataTypeable, FlexibleContexts #-}
+{-# LANGUAGE NamedFieldPuns #-}
 
 -- | CoreSyn holds all the main data types for use by for the Glasgow Haskell Compiler midsection
 module CoreSyn (
@@ -20,7 +21,7 @@ module CoreSyn (
                OutBndr, OutVar, OutCoercion, OutTyVar, OutCoVar,
 
         -- ** 'Expr' construction
-        mkLet, mkLets, mkLams,
+        mkLet, mkLets, mkLetNonRec, mkLetRec, mkLams,
         mkApps, mkTyApps, mkCoApps, mkVarApps, mkTyArg,
 
         mkIntLit, mkIntLitInt,
@@ -89,7 +90,7 @@ module CoreSyn (
 
         -- ** Operations on 'CoreRule's
         ruleArity, ruleName, ruleIdName, ruleActivation,
-        setRuleIdName,
+        setRuleIdName, ruleModule,
         isBuiltinRule, isLocalRule, isAutoRule,
 
         -- * Core vectorisation declarations data type
@@ -306,6 +307,20 @@ data AltCon
 
   | DEFAULT           -- ^ Trivial alternative: @case e of { _ -> ... }@
    deriving (Eq, Data)
+
+-- This instance is a bit shady. It can only be used to compare AltCons for
+-- a single type constructor. Fortunately, it seems quite unlikely that we'll
+-- ever need to compare AltCons for different type constructors.
+instance Ord AltCon where
+  compare (DataAlt con1) (DataAlt con2) =
+    ASSERT( dataConTyCon con1 == dataConTyCon con2 )
+    compare (dataConTag con1) (dataConTag con2)
+  compare (DataAlt _) _ = LT
+  compare _ (DataAlt _) = GT
+  compare (LitAlt l1) (LitAlt l2) = compare l1 l2
+  compare (LitAlt _) DEFAULT = LT
+  compare DEFAULT DEFAULT = EQ
+  compare DEFAULT _ = GT
 
 -- | Binding, used for top level bindings in a module and local bindings in a @let@.
 
@@ -575,6 +590,11 @@ Join points must follow these invariants:
      "join arity" (to distinguish from regular arity, which only counts values).
 
   2. For join arity n, the right-hand side must begin with at least n lambdas.
+     No ticks, no casts, just lambdas!  C.f. CoreUtils.joinRhsArity.
+
+  2a. Moreover, this same constraint applies to any unfolding of the binder.
+     Reason: if we want to push a continuation into the RHS we must push it
+     into the unfolding as well.
 
   3. If the binding is recursive, then all other bindings in the recursive group
      must also be join points.
@@ -1227,6 +1247,10 @@ ruleArity (Rule {ru_args = args})      = length args
 ruleName :: CoreRule -> RuleName
 ruleName = ru_name
 
+ruleModule :: CoreRule -> Maybe Module
+ruleModule Rule { ru_origin } = Just ru_origin
+ruleModule BuiltinRule {} = Nothing
+
 ruleActivation :: CoreRule -> Activation
 ruleActivation (BuiltinRule { })       = AlwaysActive
 ruleActivation (Rule { ru_act = act }) = act
@@ -1862,6 +1886,16 @@ mkLet :: Bind b -> Expr b -> Expr b
 -- which Lint rejects, so we kill it off right away
 mkLet (Rec []) body = body
 mkLet bind     body = Let bind body
+
+-- | @mkLetNonRec bndr rhs body@ wraps @body@ in a @let@ binding @bndr@.
+mkLetNonRec :: b -> Expr b -> Expr b -> Expr b
+mkLetNonRec b rhs body = Let (NonRec b rhs) body
+
+-- | @mkLetRec binds body@ wraps @body@ in a @let rec@ with the given set of
+-- @binds@ if binds is non-empty.
+mkLetRec :: [(b, Expr b)] -> Expr b -> Expr b
+mkLetRec [] body = body
+mkLetRec bs body = Let (Rec bs) body
 
 -- | Create a binding group where a type variable is bound to a type. Per "CoreSyn#type_let",
 -- this can only be used to bind something in a non-recursive @let@ expression

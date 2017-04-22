@@ -657,6 +657,18 @@ the interface file.
 The HsImplBangs passed are in 1-1 correspondence with the
 dataConOrigArgTys of the DataCon.
 
+Note [Data con wrappers and unlifted types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+   data T = MkT !Int#
+
+We certainly do not want to make a wrapper
+   $WMkT x = case x of y { DEFAULT -> MkT y }
+
+For a start, it's still to generate a no-op.  But worse, since wrappers
+are currently injected at TidyCore, we don't even optimise it away!
+So the stupid case expression stays there.  This actually happened for
+the Integer data type (see Trac #1600 comment:66)!
 -}
 
 -------------------------
@@ -673,7 +685,7 @@ dataConSrcToImplBang
    -> HsImplBang
 
 dataConSrcToImplBang dflags fam_envs arg_ty
-              (HsSrcBang ann unpk NoSrcStrict)
+                     (HsSrcBang ann unpk NoSrcStrict)
   | xopt LangExt.StrictData dflags -- StrictData => strict field
   = dataConSrcToImplBang dflags fam_envs arg_ty
                   (HsSrcBang ann unpk SrcStrict)
@@ -684,7 +696,11 @@ dataConSrcToImplBang _ _ _ (HsSrcBang _ _ SrcLazy)
   = HsLazy
 
 dataConSrcToImplBang dflags fam_envs arg_ty
-    (HsSrcBang _ unpk_prag SrcStrict)
+                     (HsSrcBang _ unpk_prag SrcStrict)
+  | isUnliftedType arg_ty
+  = HsLazy  -- For !Int#, say, use HsLazy
+            -- See Note [Data con wrappers and unlifted types]
+
   | not (gopt Opt_OmitInterfacePragmas dflags) -- Don't unpack if -fomit-iface-pragmas
           -- Don't unpack if we aren't optimising; rather arbitrarily,
           -- we use -fomit-iface-pragmas as the indication
@@ -1173,7 +1189,6 @@ seqId = pcMiscPrelId seqName ty info
   where
     info = noCafIdInfo `setInlinePragInfo` inline_prag
                        `setUnfoldingInfo`  mkCompulsoryUnfolding rhs
-                       `setRuleInfo`       mkRuleInfo [seq_cast_rule]
                        `setNeverLevPoly`   ty
 
     inline_prag
@@ -1189,28 +1204,6 @@ seqId = pcMiscPrelId seqName ty info
 
     [x,y] = mkTemplateLocals [alphaTy, betaTy]
     rhs = mkLams [alphaTyVar,betaTyVar,x,y] (Case (Var x) x betaTy [(DEFAULT, [], Var y)])
-
-    -- See Note [Built-in RULES for seq]
-    -- NB: ru_nargs = 3, not 4, to match the code in
-    --     Simplify.rebuildCase which tries to apply this rule
-    seq_cast_rule = BuiltinRule { ru_name  = fsLit "seq of cast"
-                                , ru_fn    = seqName
-                                , ru_nargs = 3
-                                , ru_try   = match_seq_of_cast }
-
-match_seq_of_cast :: RuleFun
-    -- See Note [Built-in RULES for seq]
-match_seq_of_cast _ _ _ [Type _, Type res_ty, Cast scrut co]
-  = Just (fun `App` scrut)
-  where
-    fun      = Lam x $ Lam y $
-               Case (Var x) x res_ty [(DEFAULT,[],Var y)]
-               -- Generate a Case directly, not a call to seq, which
-               -- might be ill-kinded if res_ty is unboxed
-    [x,y]    = mkTemplateLocals [scrut_ty, res_ty]
-    scrut_ty = pFst (coercionKind co)
-
-match_seq_of_cast _ _ _ _ = Nothing
 
 ------------------------------------------------
 lazyId :: Id    -- See Note [lazyId magic]
@@ -1356,7 +1349,7 @@ enough support that you can do this using a rewrite rule:
 
 You write that rule.  When GHC sees a case expression that discards
 its result, it mentally transforms it to a call to 'seq' and looks for
-a RULE.  (This is done in Simplify.rebuildCase.)  As usual, the
+a RULE.  (This is done in Simplify.trySeqRules.)  As usual, the
 correctness of the rule is up to you.
 
 VERY IMPORTANT: to make this work, we give the RULE an arity of 1, not 2.
@@ -1370,21 +1363,6 @@ with rule arity 2, then two bad things would happen:
 
   - The code in Simplify.rebuildCase would need to actually supply
     the value argument, which turns out to be awkward.
-
-Note [Built-in RULES for seq]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-We also have the following built-in rule for seq
-
-  seq (x `cast` co) y = seq x y
-
-This eliminates unnecessary casts and also allows other seq rules to
-match more often.  Notably,
-
-   seq (f x `cast` co) y  -->  seq (f x) y
-
-and now a user-defined rule for seq (see Note [User-defined RULES for seq])
-may fire.
-
 
 Note [lazyId magic]
 ~~~~~~~~~~~~~~~~~~~

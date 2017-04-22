@@ -32,8 +32,8 @@ import TcSigs           ( tcUserTypeSig, tcInstSig )
 import TcSimplify       ( simplifyInfer, InferMode(..) )
 import FamInst          ( tcGetFamInstEnvs, tcLookupDataFamInst )
 import FamInstEnv       ( FamInstEnvs )
-import RnEnv            ( addUsedGRE, addNameClashErrRn
-                        , unknownSubordinateErr )
+import RnEnv            ( addUsedGRE )
+import RnUtils          ( addNameClashErrRn, unknownSubordinateErr )
 import TcEnv
 import TcArrows
 import TcMatches
@@ -607,6 +607,12 @@ tcExpr (HsProc pat cmd) res_ty
 
 -- Typechecks the static form and wraps it with a call to 'fromStaticPtr'.
 -- See Note [Grand plan for static forms] in StaticPtrTable for an overview.
+-- To type check
+--      (static e) :: p a
+-- we want to check (e :: a),
+-- and wrap (static e) in a call to
+--    fromStaticPtr :: IsStatic p => StaticPtr a -> p a
+
 tcExpr (HsStatic fvs expr) res_ty
   = do  { res_ty          <- expTypeToType res_ty
         ; (co, (p_ty, expr_ty)) <- matchExpectedAppTy res_ty
@@ -615,6 +621,7 @@ tcExpr (HsStatic fvs expr) res_ty
                              2 (ppr expr)
                        ) $
             tcPolyExprNC expr expr_ty
+
         -- Check that the free variables of the static form are closed.
         -- It's OK to use nonDetEltsUniqSet here as the only side effects of
         -- checkClosedInStaticForm are error messages.
@@ -628,6 +635,7 @@ tcExpr (HsStatic fvs expr) res_ty
         ; _ <- emitWantedEvVar StaticOrigin $
                   mkTyConApp (classTyCon typeableClass)
                              [liftedTypeKind, expr_ty]
+
         -- Insert the constraints of the static form in a global list for later
         -- validation.
         ; emitStaticConstraints lie
@@ -1490,9 +1498,9 @@ in the other order, the extra signature in f2 is reqd.
 tcExprSig :: LHsExpr Name -> TcIdSigInfo -> TcM (LHsExpr TcId, TcType)
 tcExprSig expr (CompleteSig { sig_bndr = poly_id, sig_loc = loc })
   = setSrcSpan loc $   -- Sets the location for the implication constraint
-    do { (tv_prs, theta, tau) <- tcInstType (tcInstSigTyVars loc) poly_id
+    do { (tv_prs, theta, tau) <- tcInstType tcInstSkolTyVars poly_id
        ; given <- newEvVars theta
-       ; let skol_info = SigSkol ExprSigCtxt (mkPhiTy theta tau)
+       ; let skol_info = SigSkol ExprSigCtxt (idType poly_id) tv_prs
              skol_tvs  = map snd tv_prs
        ; (ev_binds, expr') <- checkConstraints skol_info skol_tvs given $
                               tcExtendTyVarEnv2 tv_prs $
@@ -1530,7 +1538,7 @@ tcExprSig expr sig@(PartialSig { psig_name = name, sig_loc = loc })
              my_sigma       = mkForAllTys binders (mkPhiTy  my_theta tau)
        ; wrap <- if inferred_sigma `eqType` my_sigma -- NB: eqType ignores vis.
                  then return idHsWrapper  -- Fast path; also avoids complaint when we infer
-                                          -- an ambiguouse type and have AllowAmbiguousType
+                                          -- an ambiguous type and have AllowAmbiguousType
                                           -- e..g infer  x :: forall a. F a -> Int
                  else tcSubType_NC ExprSigCtxt inferred_sigma my_sigma
 
