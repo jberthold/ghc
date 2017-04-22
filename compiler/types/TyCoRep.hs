@@ -112,7 +112,7 @@ module TyCoRep (
         substTyVar, substTyVars,
         substForAllCoBndr,
         substTyVarBndrCallback, substForAllCoBndrCallback,
-        substCoVarBndrCallback,
+        checkValidSubst, isValidTCvSubst,
 
         -- * Tidying type related things up for printing
         tidyType,      tidyTypes,
@@ -954,7 +954,7 @@ mentions the same name with different kinds, but it *is* well-kinded, noting
 that `(tv1:k2) |> sym kind_co` has kind k1.
 
 This all really would work storing just a Name in the ForAllCo. But we can't
-add Names to, e.g., VarSets, and there generally is just an impedence mismatch
+add Names to, e.g., VarSets, and there generally is just an impedance mismatch
 in a bunch of places. So we use tv1. When we need tv2, we can use
 setTyVarKind.
 
@@ -2118,7 +2118,8 @@ checkValidSubst subst@(TCvSubst in_scope tenv cenv) tys cos a
 substTy :: HasCallStack => TCvSubst -> Type  -> Type
 substTy subst ty
   | isEmptyTCvSubst subst = ty
-  | otherwise = checkValidSubst subst [ty] [] $ subst_ty subst ty
+  | otherwise             = checkValidSubst subst [ty] [] $
+                            subst_ty subst ty
 
 -- | Substitute within a 'Type' disabling the sanity checks.
 -- The problems that the sanity checks in substTy catch are described in
@@ -2366,21 +2367,13 @@ substTyVarBndrCallback subst_fn subst@(TCvSubst in_scope tenv cenv) old_var
         -- The uniqAway part makes sure the new variable is not already in scope
 
 substCoVarBndr :: TCvSubst -> CoVar -> (TCvSubst, CoVar)
-substCoVarBndr = substCoVarBndrCallback False substTy
-
-substCoVarBndrCallback :: Bool -- apply "sym" to the covar?
-                       -> (TCvSubst -> Type -> Type)
-                       -> TCvSubst -> CoVar -> (TCvSubst, CoVar)
-substCoVarBndrCallback sym subst_fun subst@(TCvSubst in_scope tenv cenv) old_var
+substCoVarBndr subst@(TCvSubst in_scope tenv cenv) old_var
   = ASSERT( isCoVar old_var )
     (TCvSubst (in_scope `extendInScopeSet` new_var) tenv new_cenv, new_var)
   where
-    -- When we substitute (co :: t1 ~ t2) we may get the identity (co :: t ~ t)
-    -- In that case, mkCoVarCo will return a ReflCoercion, and
-    -- we want to substitute that (not new_var) for old_var
-    new_co    = (if sym then mkSymCo else id) $ mkCoVarCo new_var
+    new_co         = mkCoVarCo new_var
     no_kind_change = all noFreeVarsOfType [t1, t2]
-    no_change = new_var == old_var && not (isReflCo new_co) && no_kind_change
+    no_change      = new_var == old_var && no_kind_change
 
     new_cenv | no_change = delVarEnv cenv old_var
              | otherwise = extendVarEnv cenv old_var new_co
@@ -2389,9 +2382,9 @@ substCoVarBndrCallback sym subst_fun subst@(TCvSubst in_scope tenv cenv) old_var
     subst_old_var = mkCoVar (varName old_var) new_var_type
 
     (_, _, t1, t2, role) = coVarKindsTypesRole old_var
-    t1' = subst_fun subst t1
-    t2' = subst_fun subst t2
-    new_var_type = uncurry (mkCoercionType role) (if sym then (t2', t1') else (t1', t2'))
+    t1' = substTy subst t1
+    t2' = substTy subst t2
+    new_var_type = mkCoercionType role t1' t2'
                   -- It's important to do the substitution for coercions,
                   -- because they can have free type variables
 

@@ -346,7 +346,7 @@ mkPrimTypeableTodos
 ghcPrimTypeableTyCons :: [TyCon]
 ghcPrimTypeableTyCons = concat
     [ [ runtimeRepTyCon, vecCountTyCon, vecElemTyCon
-      , funTyCon, tupleTyCon Unboxed 0]
+      , funTyCon, tupleTyCon Unboxed 0 ]
     , map (tupleTyCon Unboxed) [2..mAX_TUPLE_SIZE]
     , map sumTyCon [2..mAX_SUM_SIZE]
     , primTyCons
@@ -450,7 +450,7 @@ typeIsTypeable (CoercionTy{})       = panic "typeIsTypeable(Coercion)"
 type KindRepEnv = TypeMap (Id, Maybe (LHsExpr Id))
 
 -- | A monad within which we will generate 'KindRep's. Here we keep an
--- environments containing 'KindRep's which we've already generated so we can
+-- environment containing 'KindRep's which we've already generated so we can
 -- re-use them opportunistically.
 newtype KindRepM a = KindRepM { unKindRepM :: StateT KindRepEnv TcRn a }
                    deriving (Functor, Applicative, Monad)
@@ -523,7 +523,7 @@ getKindRep stuff@(Stuff {..}) in_scope = go
     go' :: Kind -> KindRepEnv -> TcRn (LHsExpr Id, KindRepEnv)
     go' k env
         -- Look through type synonyms
-      | Just k' <- coreView k = go' k' env
+      | Just k' <- tcView k = go' k' env
 
         -- We've already generated the needed KindRep
       | Just (id, _) <- lookupTypeMapWithScope env in_scope k

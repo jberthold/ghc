@@ -206,7 +206,8 @@ exports_from_avail (Just (L _ rdr_items)) rdr_env imports this_mod
 
 
     imported_modules = [ imv_name imv
-                       | xs <- moduleEnvElts $ imp_mods imports, imv <- xs ]
+                       | xs <- moduleEnvElts $ imp_mods imports
+                       , imv <- importedByUser xs ]
 
     exports_from_item :: ExportAccum -> LIE RdrName -> RnM ExportAccum
     exports_from_item acc@(ExportAccum ie_names occs exports)
@@ -474,7 +475,7 @@ lookupExportChild parent rdr_name
   | otherwise = do
   gre_env <- getGlobalRdrEnv
 
-  let original_gres = lookupGRE_RdrName rdr_name gre_env
+  let original_gres = lookupGlobalRdrEnv gre_env (rdrNameOcc rdr_name)
   -- Disambiguate the lookup based on the parent information.
   -- The remaining GREs are things that we *could* export here, note that
   -- this includes things which have `NoParent`. Those are sorted in

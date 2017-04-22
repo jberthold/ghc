@@ -7092,38 +7092,20 @@ keyword in the family instance: ::
       ...
 
 The data or type family instance for an assocated type must follow
-the following two rules:
+the rule that the type indexes corresponding to class parameters must have
+precisely the same as type given in the instance head. For example: ::
 
--  The type indexes corresponding to class parameters must have
-   precisely the same as type given in the instance head.
-   For example: ::
+    class Collects ce where
+      type Elem ce :: *
 
-       class Collects ce where
-         type Elem ce :: *
+    instance Eq (Elem [e]) => Collects [e] where
+      -- Choose one of the following alternatives:
+      type Elem [e] = e       -- OK
+      type Elem [x] = x       -- BAD; '[x]' is differnet to '[e]' from head
+      type Elem x   = x       -- BAD; 'x' is different to '[e]'
+      type Elem [Maybe x] = x -- BAD: '[Maybe x]' is different to '[e]'
 
-       instance Eq (Elem [e]) => Collects [e] where
-         -- Choose one of the following alternatives:
-         type Elem [e] = e       -- OK
-         type Elem [x] = x       -- BAD; '[x]' is differnet to '[e]' from head
-         type Elem x   = x       -- BAD; 'x' is different to '[e]'
-         type Elem [Maybe x] = x -- BAD: '[Maybe x]' is different to '[e]'
-
--  The type indexes of the type family that do *not* correspond to
-   class parameters must be distinct type variables, not mentioned
-   in the instance head.  For example: ::
-
-       class C b x where
-          type F a b c :: *
-
-       instance C [v] [w] where
-         -- Choose one of the following alternatives:
-         type C a [v] c = a->c  -- OK; a,c are tyvars
-         type C x [v] y = y->x  -- OK; x,y are tyvars
-         type C x [v] x = x     -- BAD: x is repeated
-         type C x [v] w = x     -- BAD: w is mentioned in instance head
-
-The effect of these two rules is that the type-family instance
-completely covers the cases covered by the instance head.
+Note the following points:
 
 -  An instance for an associated family can only appear as part of an
    instance declarations of the class in which the family was declared,
@@ -7138,9 +7120,9 @@ completely covers the cases covered by the instance head.
    inhabited; i.e., only diverging expressions, such as ``undefined``,
    can assume the type.
 
--  A historical note.  In the past (but no longer), GHC allowed you to
-   write *multiple* type or data family instances for a single
-   associated type.  For example: ::
+-  Although it is unusual, there (currently) can be *multiple* instances
+   for an associated family in a single instance declaration. For
+   example, this is legitimate: ::
 
        instance GMapKey Flob where
          data GMap Flob [v] = G1 v
@@ -7149,23 +7131,9 @@ completely covers the cases covered by the instance head.
 
    Here we give two data instance declarations, one in which the last
    parameter is ``[v]``, and one for which it is ``Int``. Since you
-   cannot give any *subsequent* instances for ``(GMap Flob ...)``,
-   this facility was not very useful, except perhaps when the free
-   indexed parameter has a fixed number of alternatives
-   (e.g. ``Bool``). But in that case it is better to define an auxiliary
-   closed type function like this: ::
-
-       class C a where
-         type F a (b :: Bool) :: *
-
-       instance C Int where
-         type F Int b = FInt b
-
-       type family FInt a b where
-         FInt True  = Char
-         FInt False = Bool
-
-    Here the auxiliary type function is ``FInt``.
+   cannot give any *subsequent* instances for ``(GMap Flob ...)``, this
+   facility is most useful when the free indexed parameter is of a kind
+   with a finite number of alternatives (unlike ``*``).
 
 .. _assoc-decl-defs:
 
@@ -9341,9 +9309,46 @@ Here are the details:
 
 - When printing types with :ghc-flag:`-fprint-explicit-foralls` enabled,
   type variables not available for visible type application are printed
-  in braces. Thus, if you write ``myLength = length`` without a type
-  signature, ``myLength``'s inferred type will be
-  ``forall {f} {a}. Foldable f => f a -> Int``.
+  in braces. We can observe this behavior in a GHCi session: ::
+
+    > :set -XTypeApplications -fprint-explicit-foralls
+    > let myLength1 :: Foldable f => f a -> Int; myLength1 = length
+    > :type +v myLength1
+    myLength1 :: forall (f :: * -> *) a. Foldable f => f a -> Int
+    > let myLength2 = length
+    > :type +v myLength2
+    myLength2 :: forall {a} {t :: * -> *}. Foldable t => t a -> Int
+    > :type +v myLength2 @[]
+
+    <interactive>:1:1: error:
+        • Cannot apply expression of type ‘t0 a0 -> Int’
+          to a visible type argument ‘[]’
+        • In the expression: myLength2 @[]
+
+  Notice that since ``myLength1`` was defined with an explicit type signature,
+  :ghci-cmd:`:type +v` reports that all of its type variables are available
+  for type application. On the other hand, ``myLength2`` was not given a type
+  signature. As a result, all of its type variables are surrounded with braces,
+  and trying to use visible type application with ``myLength2`` fails.
+
+  Also note the use of :ghci-cmd:`:type +v` in the GHCi session above instead
+  of :ghci-cmd:`:type`. This is because :ghci-cmd:`:type` gives you the type
+  that would be inferred for a variable assigned to the expression provided
+  (that is, the type of ``x`` in ``let x = <expr>``). As we saw above with
+  ``myLength2``, this type will have no variables available to visible type
+  application. On the other hand, :ghci-cmd:`:type +v` gives you the actual
+  type of the expression provided. To illustrate this: ::
+
+    > :type myLength1
+    myLength1 :: forall {a} {f :: * -> *}. Foldable f => f a -> Int
+    > :type myLength2
+    myLength2 :: forall {a} {t :: * -> *}. Foldable t => t a -> Int
+
+  Using :ghci-cmd:`:type` might lead one to conclude that none of the type
+  variables in ``myLength1``'s type signature are available for type
+  application. This isn't true, however! Be sure to use :ghci-cmd:`:type +v`
+  if you want the most accurate information with respect to visible type
+  application properties.
 
 - Data constructors declared with GADT syntax follow different rules
   for the time being; it is expected that these will be brought in line
@@ -10559,6 +10564,7 @@ Syntax
 
 .. ghc-flag:: -XTemplateHaskell
 
+    :since: 6.0. Typed splices introduced in GHC 7.8.1.
     :implies: :ghc-flag:`-XTemplateHaskellQuotes`
 
     Enable Template Haskell's splice and quotation syntax.
@@ -12001,7 +12007,7 @@ Replace the "Translation" there with the following one.  Given
     Replace any binding ``p = e``, where ``p`` is not a variable, with
     ``v = e; x1 = case v of p -> x1; ...; xn = case v of p -> xn``, where
     ``v`` is fresh and ``x1``.. ``xn`` are the bound variables of ``p``.
-    Again if ``e`` is a variable, you can optimised his by not introducing a
+    Again if ``e`` is a variable, this can be optimised by not introducing a
     fresh variable.
 
 The result will be a (possibly) recursive set of bindings, binding
@@ -12011,7 +12017,7 @@ non-recursive using ``fix``, but we do not do so in Core, and it only
 obfuscates matters, so we do not do so here.)
 
 The translation is carefully crafted to make bang patterns meaningful
-for reursive and polymorphic bindings as well as straightforward
+for recursive and polymorphic bindings as well as straightforward
 non-recursive bindings.
 
 Here are some examples of how this translation works. The first
@@ -12770,6 +12776,29 @@ pragma.
 position for the duration of the splice and are limited to the splice.
 Note that because Template Haskell splices abstract syntax, the file
 positions are not automatically advanced.
+
+.. _column-pragma:
+
+``COLUMN`` pragma
+-----------------
+
+.. index::
+   single: COLUMN; pragma
+   single: pragma; COLUMN
+
+This is the analogue of the ``LINE`` pragma and is likewise intended for
+use in automatically generated Haskell code. It lets you specify the
+column number of the original code; for example
+
+::
+
+    foo = do
+      {-# COLUMN 42 #-}pure ()
+      pure ()
+
+This adjusts all column numbers immediately after the pragma to start
+at 42.  The presence of this pragma only affects the quality of the
+diagnostics and does not change the syntax of the code itself.
 
 .. _rules:
 

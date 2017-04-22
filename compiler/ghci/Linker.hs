@@ -243,7 +243,7 @@ withExtendedLinkEnv new_env action
 showLinkerState :: DynFlags -> IO ()
 showLinkerState dflags
   = do pls <- readIORef v_PersistentLinkerState >>= readMVar
-       log_action dflags dflags NoReason SevDump noSrcSpan
+       putLogMsg dflags NoReason SevDump noSrcSpan
           (defaultDumpStyle dflags)
                  (vcat [text "----- Linker state -----",
                         text "Pkgs:" <+> ppr (pkgs_loaded pls),
@@ -397,7 +397,7 @@ classifyLdInput dflags f
   | isObjectFilename platform f = return (Just (Object f))
   | isDynLibFilename platform f = return (Just (DLLPath f))
   | otherwise          = do
-        log_action dflags dflags NoReason SevInfo noSrcSpan
+        putLogMsg dflags NoReason SevInfo noSrcSpan
             (defaultUserStyle dflags)
             (text ("Warning: ignoring unrecognised input `" ++ f ++ "'"))
         return Nothing
@@ -1422,7 +1422,7 @@ searchForLibUsingGcc :: DynFlags -> String -> [FilePath] -> IO (Maybe FilePath)
 searchForLibUsingGcc dflags so dirs = do
    -- GCC does not seem to extend the library search path (using -L) when using
    -- --print-file-name. So instead pass it a new base location.
-   str <- askCc dflags (map (FileOption "-B") dirs
+   str <- askLd dflags (map (FileOption "-B") dirs
                           ++ [Option "--print-file-name", Option so])
    let file = case lines str of
                 []  -> ""
@@ -1464,13 +1464,12 @@ loadFramework hsc_env extraPaths rootname
 maybePutStr :: DynFlags -> String -> IO ()
 maybePutStr dflags s
     = when (verbosity dflags > 1) $
-          do let act = log_action dflags
-             act dflags
-                 NoReason
-                 SevInteractive
-                 noSrcSpan
-                 (defaultUserStyle dflags)
-                 (text s)
+          putLogMsg dflags
+              NoReason
+              SevInteractive
+              noSrcSpan
+              (defaultUserStyle dflags)
+              (text s)
 
 maybePutStrLn :: DynFlags -> String -> IO ()
 maybePutStrLn dflags s = maybePutStr dflags (s ++ "\n")

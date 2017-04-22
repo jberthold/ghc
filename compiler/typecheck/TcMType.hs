@@ -57,8 +57,8 @@ module TcMType (
   newMetaSigTyVars, newMetaSigTyVarX,
   newSigTyVar, newWildCardX,
   tcInstType,
-  tcInstSkolTyVars, tcInstSuperSkolTyVarsX,
-  tcInstSigTyVars,
+  tcInstSkolTyVars,tcInstSkolTyVarsX,
+  tcInstSuperSkolTyVarsX,
   tcSkolDFunType, tcSuperSkolTyVars,
 
   instSkolTyCoVars, freshenTyVarBndrs, freshenCoVarBndrsX,
@@ -73,7 +73,7 @@ module TcMType (
   zonkTyCoVarsAndFV, zonkTcTypeAndFV,
   zonkTyCoVarsAndFVList,
   zonkTcTypeAndSplitDepVars, zonkTcTypesAndSplitDepVars,
-  zonkQuantifiedTyVar,
+  zonkQuantifiedTyVar, defaultTyVar,
   quantifyTyVars, quantifyZonkedTyVars,
   zonkTcTyCoVarBndr, zonkTcTyVarBinder,
   zonkTcType, zonkTcTypes, zonkCo,
@@ -108,6 +108,7 @@ import VarSet
 import TysWiredIn
 import TysPrim
 import VarEnv
+import NameEnv
 import PrelNames
 import Util
 import Outputable
@@ -478,7 +479,10 @@ tcSuperSkolTyVar subst tv
 -- skolems are non-overlappable; see Note [Overlap and deriving]
 -- for an example where this matters.
 tcInstSkolTyVars :: [TyVar] -> TcM (TCvSubst, [TcTyVar])
-tcInstSkolTyVars = tcInstSkolTyVars' False emptyTCvSubst
+tcInstSkolTyVars = tcInstSkolTyVarsX emptyTCvSubst
+
+tcInstSkolTyVarsX :: TCvSubst -> [TyVar] -> TcM (TCvSubst, [TcTyVar])
+tcInstSkolTyVarsX = tcInstSkolTyVars' False
 
 tcInstSuperSkolTyVars :: [TyVar] -> TcM (TCvSubst, [TcTyVar])
 tcInstSuperSkolTyVars = tcInstSuperSkolTyVarsX emptyTCvSubst
@@ -502,12 +506,6 @@ mkTcSkolTyVar lvl loc overlappable
   where
     details = SkolemTv (pushTcLevel lvl) overlappable
               -- NB: skolems bump the level
-
-tcInstSigTyVars :: SrcSpan -> [TyVar]
-                -> TcM (TCvSubst, [TcTyVar])
-tcInstSigTyVars loc tvs
-  = do { lvl <- getTcLevel
-       ; instSkolTyCoVars (mkTcSkolTyVar lvl loc False) tvs }
 
 ------------------
 freshenTyVarBndrs :: [TyVar] -> TcRnIf gbl lcl (TCvSubst, [TyVar])
@@ -902,7 +900,7 @@ interface file. One such example is inferred type signatures. They also affect
 the results of optimizations, for example worker-wrapper. This means that to
 get deterministic builds quantifyTyVars needs to be deterministic.
 
-To achieve this TcDepVars is backed by deterministic sets which allows them
+To achieve this CandidatesQTvs is backed by deterministic sets which allows them
 to be later converted to a list in a deterministic order.
 
 For more information about deterministic sets see
@@ -910,8 +908,8 @@ Note [Deterministic UniqFM] in UniqDFM.
 -}
 
 quantifyTyVars, quantifyZonkedTyVars
-  :: TcTyCoVarSet   -- global tvs
-  -> TcDepVars      -- See Note [Dependent type variables] in TcType
+  :: TcTyCoVarSet     -- global tvs
+  -> CandidatesQTvs   -- See Note [Dependent type variables] in TcType
   -> TcM [TcTyVar]
 -- See Note [quantifyTyVars]
 -- Can be given a mixture of TcTyVars and TyVars, in the case of
@@ -962,12 +960,12 @@ quantifyZonkedTyVars gbl_tvs dvs@(DV{ dv_kvs = dep_tkvs, dv_tvs = nondep_tkvs })
            -- mentioned in the kinds of the nondep_tvs'
            -- now refer to the dep_kvs'
 
-       ; traceTc "quantifyTyVars"
+       ; traceTc "quantifyZonkedTyVars"
            (vcat [ text "globals:" <+> ppr gbl_tvs
-                 , text "nondep:" <+> ppr nondep_tvs
-                 , text "dep:" <+> ppr dep_kvs
-                 , text "dep_kvs'" <+> ppr dep_kvs'
-                 , text "nondep_tvs'" <+> ppr nondep_tvs' ])
+                 , text "nondep:"  <+> pprTyVars nondep_tvs
+                 , text "dep:"     <+> pprTyVars dep_kvs
+                 , text "dep_kvs'" <+> pprTyVars dep_kvs'
+                 , text "nondep_tvs'" <+> pprTyVars nondep_tvs' ])
 
        ; return (dep_kvs' ++ nondep_tvs') }
   where
@@ -1005,51 +1003,53 @@ zonkQuantifiedTyVar default_kind tv
         -- It might be a skolem type variable,
         -- for example from a user type signature
 
-      MetaTv { mtv_ref = ref }
-        -> do { when debugIsOn (check_empty ref)
-              ; zonk_meta_tv tv }
+      MetaTv {}
+        -> do { mb_tv <- defaultTyVar default_kind tv
+              ; case mb_tv of
+                  True  -> return Nothing
+                  False -> do { tv' <- skolemiseUnboundMetaTyVar tv
+                              ; return (Just tv') } }
 
       _other -> pprPanic "zonkQuantifiedTyVar" (ppr tv) -- FlatSkol, RuntimeUnk
 
+defaultTyVar :: Bool      -- True <=> please default this kind variable to *
+             -> TcTyVar   -- Always an unbound meta tyvar
+             -> TcM Bool  -- True <=> defaulted away altogether
+
+defaultTyVar default_kind tv
+  | isRuntimeRepVar tv && not_sig_tv  -- We never quantify over a RuntimeRep var
+  = do { traceTc "Defaulting a RuntimeRep var to LiftedRep" (ppr tv)
+       ; writeMetaTyVar tv liftedRepTy
+       ; return True }
+
+  | default_kind && not_sig_tv        -- -XNoPolyKinds and this is a kind var
+  = do { default_kind_var tv          -- so default it to * if possible
+       ; return True }
+
+  | otherwise
+  = return False
+
   where
-    zonk_meta_tv :: TcTyVar -> TcM (Maybe TcTyVar)
-    zonk_meta_tv tv
-      | isRuntimeRepVar tv   -- Never quantify over a RuntimeRep var
-      = do { writeMetaTyVar tv liftedRepTy
-           ; return Nothing }
+    -- Do not default SigTvs. Doing so would violate the invariants
+    -- on SigTvs; see Note [Signature skolems] in TcType.
+    -- Trac #13343 is an example
+    not_sig_tv = not (isSigTyVar tv)
 
-      | default_kind         -- -XNoPolyKinds and this is a kind var
-      = do { _ <- default_kind_var tv
-           ; return Nothing }
-
-      | otherwise
-      = do { tv' <- skolemiseUnboundMetaTyVar tv
-           ; return (Just tv') }
-
-    default_kind_var :: TyVar -> TcM Type
+    default_kind_var :: TyVar -> TcM ()
        -- defaultKindVar is used exclusively with -XNoPolyKinds
        -- See Note [Defaulting with -XNoPolyKinds]
        -- It takes an (unconstrained) meta tyvar and defaults it.
        -- Works only on vars of type *; for other kinds, it issues an error.
     default_kind_var kv
       | isStarKind (tyVarKind kv)
-      = do { writeMetaTyVar kv liftedTypeKind
-           ; return liftedTypeKind }
+      = do { traceTc "Defaulting a kind var to *" (ppr kv)
+           ; writeMetaTyVar kv liftedTypeKind }
       | otherwise
-      = do { addErr (vcat [ text "Cannot default kind variable" <+> quotes (ppr kv')
-                          , text "of kind:" <+> ppr (tyVarKind kv')
-                          , text "Perhaps enable PolyKinds or add a kind signature" ])
-           ; return (mkTyVarTy kv) }
+      = addErr (vcat [ text "Cannot default kind variable" <+> quotes (ppr kv')
+                     , text "of kind:" <+> ppr (tyVarKind kv')
+                     , text "Perhaps enable PolyKinds or add a kind signature" ])
       where
         (_, kv') = tidyOpenTyCoVar emptyTidyEnv kv
-
-    check_empty ref       -- [Sept 04] Check for non-empty.
-      = when debugIsOn $  -- See note [Silly Type Synonym]
-        do { cts <- readMutVar ref
-           ; case cts of
-               Flexi       -> return ()
-               Indirect ty -> WARN( True, ppr tv $$ ppr ty )
-                              return () }
 
 skolemiseRuntimeUnk :: TcTyVar -> TcM TyVar
 skolemiseRuntimeUnk tv
@@ -1067,7 +1067,8 @@ skolemise_tv :: TcTyVar -> TcTyVarDetails -> TcM TyVar
 --   See Note [Zonking to Skolem]
 skolemise_tv tv details
   = ASSERT2( isMetaTyVar tv, ppr tv )
-    do  { span <- getSrcSpanM    -- Get the location from "here"
+    do  { when debugIsOn (check_empty tv)
+        ; span <- getSrcSpanM    -- Get the location from "here"
                                  -- ie where we are generalising
         ; kind <- zonkTcType (tyVarKind tv)
         ; let uniq        = getUnique tv
@@ -1081,6 +1082,15 @@ skolemise_tv tv details
         ; traceTc "Skolemising" (ppr tv <+> text ":=" <+> ppr final_tv)
         ; writeMetaTyVar tv (mkTyVarTy final_tv)
         ; return final_tv }
+
+  where
+    check_empty tv       -- [Sept 04] Check for non-empty.
+      = when debugIsOn $  -- See note [Silly Type Synonym]
+        do { cts <- readMetaTyVar tv
+           ; case cts of
+               Flexi       -> return ()
+               Indirect ty -> WARN( True, ppr tv $$ ppr ty )
+                              return () }
 
 {- Note [Defaulting with -XNoPolyKinds]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -1257,15 +1267,15 @@ zonkTcTypeAndFV :: TcType -> TcM DTyCoVarSet
 zonkTcTypeAndFV ty
   = tyCoVarsOfTypeDSet <$> zonkTcTypeInKnot ty
 
--- | Zonk a type and call 'splitDepVarsOfType' on it.
+-- | Zonk a type and call 'candidateQTyVarsOfType' on it.
 -- Works within the knot.
-zonkTcTypeAndSplitDepVars :: TcType -> TcM TcDepVars
+zonkTcTypeAndSplitDepVars :: TcType -> TcM CandidatesQTvs
 zonkTcTypeAndSplitDepVars ty
-  = splitDepVarsOfType <$> zonkTcTypeInKnot ty
+  = candidateQTyVarsOfType <$> zonkTcTypeInKnot ty
 
-zonkTcTypesAndSplitDepVars :: [TcType] -> TcM TcDepVars
+zonkTcTypesAndSplitDepVars :: [TcType] -> TcM CandidatesQTvs
 zonkTcTypesAndSplitDepVars tys
-  = splitDepVarsOfTypes <$> mapM zonkTcTypeInKnot tys
+  = candidateQTyVarsOfTypes <$> mapM zonkTcTypeInKnot tys
 
 zonkTyCoVar :: TyCoVar -> TcM TcType
 -- Works on TyVars and TcTyVars
@@ -1417,8 +1427,8 @@ zonkCtEvidence ctev@(CtDerived { ctev_pred = pred })
        ; return (ctev { ctev_pred = pred' }) }
 
 zonkSkolemInfo :: SkolemInfo -> TcM SkolemInfo
-zonkSkolemInfo (SigSkol cx ty)  = do { ty' <- zonkTcType ty
-                                     ; return (SigSkol cx ty') }
+zonkSkolemInfo (SigSkol cx ty tv_prs)  = do { ty' <- zonkTcType ty
+                                            ; return (SigSkol cx ty' tv_prs) }
 zonkSkolemInfo (InferSkol ntys) = do { ntys' <- mapM do_one ntys
                                      ; return (InferSkol ntys') }
   where
@@ -1606,11 +1616,39 @@ tidyEvVar env var = setVarType var (tidyType env (varType var))
 
 ----------------
 tidySkolemInfo :: TidyEnv -> SkolemInfo -> SkolemInfo
-tidySkolemInfo env (DerivSkol ty)       = DerivSkol (tidyType env ty)
-tidySkolemInfo env (SigSkol cx ty)      = SigSkol cx (tidyType env ty)
-tidySkolemInfo env (InferSkol ids)      = InferSkol (mapSnd (tidyType env) ids)
-tidySkolemInfo env (UnifyForAllSkol ty) = UnifyForAllSkol (tidyType env ty)
-tidySkolemInfo _   info                 = info
+tidySkolemInfo env (DerivSkol ty)         = DerivSkol (tidyType env ty)
+tidySkolemInfo env (SigSkol cx ty tv_prs) = tidySigSkol env cx ty tv_prs
+tidySkolemInfo env (InferSkol ids)        = InferSkol (mapSnd (tidyType env) ids)
+tidySkolemInfo env (UnifyForAllSkol ty)   = UnifyForAllSkol (tidyType env ty)
+tidySkolemInfo _   info                   = info
+
+tidySigSkol :: TidyEnv -> UserTypeCtxt
+            -> TcType -> [(Name,TcTyVar)] -> SkolemInfo
+-- We need to take special care when tidying SigSkol
+-- See Note [SigSkol SkolemInfo] in TcRnTypes
+tidySigSkol env cx ty tv_prs
+  = SigSkol cx (tidy_ty env ty) tv_prs'
+  where
+    tv_prs' = mapSnd (tidyTyVarOcc env) tv_prs
+    inst_env = mkNameEnv tv_prs'
+
+    tidy_ty env (ForAllTy (TvBndr tv vis) ty)
+      = ForAllTy (TvBndr tv' vis) (tidy_ty env' ty)
+      where
+        (env', tv') = tidy_tv_bndr env tv
+
+    tidy_ty env (FunTy arg res)
+      = FunTy (tidyType env arg) (tidy_ty env res)
+
+    tidy_ty env ty = tidyType env ty
+
+    tidy_tv_bndr :: TidyEnv -> TyVar -> (TidyEnv, TyVar)
+    tidy_tv_bndr env@(occ_env, subst) tv
+      | Just tv' <- lookupNameEnv inst_env (tyVarName tv)
+      = ((occ_env, extendVarEnv subst tv tv'), tv')
+
+      | otherwise
+      = tidyTyCoVarBndr env tv
 
 -------------------------------------------------------------------------
 {-

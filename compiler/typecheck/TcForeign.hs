@@ -122,7 +122,7 @@ normaliseFfiType' env ty0 = go initRecTc ty0
   where
     go :: RecTcChecker -> Type -> TcM (Coercion, Type, Bag GlobalRdrElt)
     go rec_nts ty
-      | Just ty' <- coreView ty     -- Expand synonyms
+      | Just ty' <- tcView ty     -- Expand synonyms
       = go rec_nts ty'
 
       | Just (tc, tys) <- splitTyConApp_maybe ty
@@ -240,7 +240,7 @@ tcFImport :: LForeignDecl Name -> TcM (Id, LForeignDecl Id, Bag GlobalRdrElt)
 tcFImport (L dloc fo@(ForeignImport { fd_name = L nloc nm, fd_sig_ty = hs_ty
                                     , fd_fi = imp_decl }))
   = setSrcSpan dloc $ addErrCtxt (foreignDeclCtxt fo)  $
-    do { sig_ty <- solveEqualities $ tcHsSigType (ForSigCtxt nm) hs_ty
+    do { sig_ty <- tcHsSigType (ForSigCtxt nm) hs_ty
        ; (norm_co, norm_sig_ty, gres) <- normaliseFfiType sig_ty
        ; let
            -- Drop the foralls before inspecting the

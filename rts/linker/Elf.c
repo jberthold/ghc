@@ -1,6 +1,10 @@
 #include "Rts.h"
 
-#if defined(linux_HOST_OS) || defined(solaris2_HOST_OS) || defined(freebsd_HOST_OS) || defined(kfreebsdgnu_HOST_OS) || defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) || defined(openbsd_HOST_OS) || defined(gnu_HOST_OS)
+#if defined(linux_HOST_OS) || defined(solaris2_HOST_OS) \
+|| defined(linux_android_HOST_OS) \
+|| defined(freebsd_HOST_OS) || defined(kfreebsdgnu_HOST_OS) \
+|| defined(dragonfly_HOST_OS) || defined(netbsd_HOST_OS) \
+|| defined(openbsd_HOST_OS) || defined(gnu_HOST_OS)
 
 #include "RtsUtils.h"
 #include "RtsSymbolInfo.h"
@@ -21,6 +25,9 @@
 #endif
 #ifdef HAVE_FCNTL_H
 #include <fcntl.h>
+#endif
+#if defined(dragonfly_HOST_OS)
+#include <sys/tls.h>
 #endif
 
 /* on x86_64 we have a problem with relocating symbol references in
@@ -399,10 +406,12 @@ ocVerifyImage_ELF ( ObjectCode* oc )
       case EM_IA_64: IF_DEBUG(linker,debugBelch( "ia64" )); break;
 #endif
       case EM_PPC:   IF_DEBUG(linker,debugBelch( "powerpc32" )); break;
+#ifdef EM_PPC64
       case EM_PPC64: IF_DEBUG(linker,debugBelch( "powerpc64" ));
           errorBelch("%s: RTS linker not implemented on PowerPC 64-bit",
                      oc->fileName);
           return 0;
+#endif
 #ifdef EM_X86_64
       case EM_X86_64: IF_DEBUG(linker,debugBelch( "x86_64" )); break;
 #elif defined(EM_AMD64)
@@ -611,13 +620,13 @@ static int getSectionKind_ELF( Elf_Shdr *hdr, int *is_bss )
         /* .rodata-style section */
         return SECTIONKIND_CODE_OR_RODATA;
     }
-#ifndef openbsd_HOST_OS
+#ifdef SHT_INIT_ARRAY
     if (hdr->sh_type == SHT_INIT_ARRAY
         && (hdr->sh_flags & SHF_ALLOC) && (hdr->sh_flags & SHF_WRITE)) {
        /* .init_array section */
         return SECTIONKIND_INIT_ARRAY;
     }
-#endif /* not OpenBSD */
+#endif /* not SHT_INIT_ARRAY */
     if (hdr->sh_type == SHT_NOBITS
         && (hdr->sh_flags & SHF_ALLOC) && (hdr->sh_flags & SHF_WRITE)) {
         /* .bss-style section */
@@ -986,15 +995,37 @@ do_Elf_Rel_relocations ( ObjectCode* oc, char* ehdrC,
          IF_DEBUG(linker,debugBelch( "`%s' resolves to %p\n", symbol, (void*)S ));
 
 #ifdef arm_HOST_ARCH
-         // Thumb instructions have bit 0 of symbol's st_value set
-         is_target_thm = S & 0x1;
-
-         T = sym.st_info & STT_FUNC && is_target_thm;
-
-         // Make sure we clear bit 0. Strictly speaking we should have done
-         // this to st_value above but I believe alignment requirements should
-         // ensure that no instructions start on an odd address
-         S &= ~1;
+          /*
+           * 4.5.3 Symbol Values
+           *
+           * In addition to the normal rules for symbol values the following
+           * rules shall also apply to symbols of type STT_FUNC:
+           * - If the symbol addresses an ARM instruction, its value is the
+           *   address of the instruction (in a relocatable object, the
+           *   offset of the instruction from the start of the section
+           *   containing it).
+           * - If the symbol addresses a Thumb instruction, its value is the
+           *   address of the instruction with bit zero set (in a relocatable
+           *   object, the section offset with bit zero set).
+           * - For the purposes of relocation the value used shall be the
+           *   address of the instruction (st_value & ~1).
+           *
+           *  Note: This allows a linker to distinguish ARM and Thumb code
+           *        symbols without having to refer to the map. An ARM symbol
+           *        will always have an even value, while a Thumb symbol will
+           *        always have an odd value. However, a linker should strip
+           *        the discriminating bit from the value before using it for
+           *        relocation.
+           *
+           * (source: ELF for the ARM Architecture
+           *          ARM IHI 0044F, current through ABI release 2.10
+           *          24th November 2015)
+           */
+          if(ELF_ST_TYPE(sym.st_info) == STT_FUNC) {
+              is_target_thm = S & 0x1;
+              T = is_target_thm;
+              S &= ~1;
+          }
 #endif
       }
 

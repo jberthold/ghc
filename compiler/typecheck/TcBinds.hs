@@ -321,8 +321,7 @@ tcHsBootSigs binds sigs
     tc_boot_sig (TypeSig lnames hs_ty) = mapM f lnames
       where
         f (L _ name)
-          = do { sigma_ty <- solveEqualities $
-                             tcHsSigWcType (FunSigCtxt name False) hs_ty
+          = do { sigma_ty <- tcHsSigWcType (FunSigCtxt name False) hs_ty
                ; return (mkVanillaGlobal name sigma_ty) }
         -- Notice that we make GlobalIds, not LocalIds
     tc_boot_sig s = pprPanic "tcHsBootSigs/tc_boot_sig" (ppr s)
@@ -687,13 +686,13 @@ tcPolyCheck prag_fn
                             , fun_matches = matches }))
   = setSrcSpan sig_loc $
     do { traceTc "tcPolyCheck" (ppr poly_id $$ ppr sig_loc)
-       ; (tv_prs, theta, tau) <- tcInstType (tcInstSigTyVars sig_loc) poly_id
+       ; (tv_prs, theta, tau) <- tcInstType tcInstSkolTyVars poly_id
                 -- See Note [Instantiate sig with fresh variables]
 
        ; mono_name <- newNameAt (nameOccName name) nm_loc
        ; ev_vars   <- newEvVars theta
        ; let mono_id   = mkLocalId mono_name tau
-             skol_info = SigSkol ctxt (mkPhiTy theta tau)
+             skol_info = SigSkol ctxt (idType poly_id) tv_prs
              skol_tvs  = map snd tv_prs
 
        ; (ev_binds, (co_fn, matches'))
@@ -831,7 +830,7 @@ mkExport prag_fn qtvs theta
         ; spec_prags <- tcSpecPrags poly_id prag_sigs
                 -- tcPrags requires a zonked poly_id
 
-        -- See Note [Impedence matching]
+        -- See Note [Impedance matching]
         -- NB: we have already done checkValidType, including an ambiguity check,
         --     on the type; either when we checked the sig or in mkInferredPolyId
         ; let poly_ty     = idType poly_id
@@ -843,7 +842,7 @@ mkExport prag_fn qtvs theta
                   then return idHsWrapper  -- Fast path; also avoids complaint when we infer
                                            -- an ambiguouse type and have AllowAmbiguousType
                                            -- e..g infer  x :: forall a. F a -> Int
-                  else addErrCtxtM (mk_impedence_match_msg mono_info sel_poly_ty poly_ty) $
+                  else addErrCtxtM (mk_impedance_match_msg mono_info sel_poly_ty poly_ty) $
                        tcSubType_NC sig_ctxt sel_poly_ty poly_ty
 
         ; warn_missing_sigs <- woptM Opt_WarnMissingLocalSignatures
@@ -869,7 +868,7 @@ mkInferredPolyId qtvs inferred_theta poly_name mb_sig_inst mono_ty
 
   | otherwise  -- Either no type sig or partial type sig
   = checkNoErrs $  -- The checkNoErrs ensures that if the type is ambiguous
-                   -- we don't carry on to the impedence matching, and generate
+                   -- we don't carry on to the impedance matching, and generate
                    -- a duplicate ambiguity error.  There is a similar
                    -- checkNoErrs for complete type signatures too.
     do { fam_envs <- tcGetFamInstEnvs
@@ -922,7 +921,8 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
        ; let free_tvs = closeOverKinds (tyCoVarsOfTypes annotated_theta
                                         `unionVarSet` tau_tvs)
        ; traceTc "ciq" (vcat [ ppr sig, ppr annotated_theta, ppr free_tvs])
-       ; return (mk_binders free_tvs, annotated_theta) }
+       ; psig_qtvs <- mk_psig_qtvs annotated_tvs
+       ; return (mk_final_qtvs psig_qtvs free_tvs, annotated_theta) }
 
   | Just wc_var <- wcx
   = do { annotated_theta <- zonkTcTypes annotated_theta
@@ -931,7 +931,11 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
                           -- Omitting this caused #12844
              seed_tvs = tyCoVarsOfTypes annotated_theta  -- These are put there
                         `unionVarSet` tau_tvs            --       by the user
-             my_theta = pickCapturedPreds free_tvs inferred_theta
+
+       ; psig_qtvs <- mk_psig_qtvs annotated_tvs
+       ; let my_qtvs  = mk_final_qtvs psig_qtvs free_tvs
+             keep_me  = psig_qtvs `unionVarSet` free_tvs
+             my_theta = pickCapturedPreds keep_me inferred_theta
 
        -- Report the inferred constraints for an extra-constraints wildcard/hole as
        -- an error message, unless the PartialTypeSignatures flag is enabled. In this
@@ -947,30 +951,35 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
                  , ppr annotated_theta, ppr inferred_theta
                  , ppr inferred_diff ]
 
-       ; return (mk_binders free_tvs, my_theta) }
+       ; return (my_qtvs, my_theta) }
 
   | otherwise  -- A complete type signature is dealt with in mkInferredPolyId
   = pprPanic "chooseInferredQuantifiers" (ppr sig)
 
   where
-    spec_tv_set = mkVarSet $ map snd annotated_tvs
-    mk_binders free_tvs
+    mk_final_qtvs psig_qtvs free_tvs
       = [ mkTyVarBinder vis tv
-        | tv <- qtvs
-        , tv `elemVarSet` free_tvs
-        , let vis | tv `elemVarSet` spec_tv_set = Specified
-                  | otherwise                   = Inferred ]
-                          -- Pulling from qtvs maintains original order
+        | tv <- qtvs -- Pulling from qtvs maintains original order
+        , tv `elemVarSet` keep_me
+        , let vis | tv `elemVarSet` psig_qtvs = Specified
+                  | otherwise                 = Inferred ]
+      where
+        keep_me = free_tvs `unionVarSet` psig_qtvs
 
     mk_ctuple [pred] = return pred
     mk_ctuple preds  = do { tc <- tcLookupTyCon (cTupleTyConName (length preds))
                           ; return (mkTyConApp tc preds) }
 
-mk_impedence_match_msg :: MonoBindInfo
+    mk_psig_qtvs :: [(Name,TcTyVar)] -> TcM TcTyVarSet
+    mk_psig_qtvs annotated_tvs
+       = do { psig_qtvs <- mapM (zonkTcTyVarToTyVar . snd) annotated_tvs
+            ; return (mkVarSet psig_qtvs) }
+
+mk_impedance_match_msg :: MonoBindInfo
                        -> TcType -> TcType
                        -> TidyEnv -> TcM (TidyEnv, SDoc)
 -- This is a rare but rather awkward error messages
-mk_impedence_match_msg (MBI { mbi_poly_name = name, mbi_sig = mb_sig })
+mk_impedance_match_msg (MBI { mbi_poly_name = name, mbi_sig = mb_sig })
                        inf_ty sig_ty tidy_env
  = do { (tidy_env1, inf_ty) <- zonkTidyTcType tidy_env  inf_ty
       ; (tidy_env2, sig_ty) <- zonkTidyTcType tidy_env1 sig_ty
@@ -1077,7 +1086,7 @@ Examples that might fail:
  - an inferred type that includes unboxed tuples
 
 
-Note [Impedence matching]
+Note [Impedance matching]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 Consider
    f 0 x = x

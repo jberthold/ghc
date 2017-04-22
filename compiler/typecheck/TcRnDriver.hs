@@ -1661,7 +1661,7 @@ check_main dflags tcg_env explicit_mod_hdr
         ; ioTyCon <- tcLookupTyCon ioTyConName
         ; res_ty <- newFlexiTyVarTy liftedTypeKind
         ; let io_ty = mkTyConApp ioTyCon [res_ty]
-              skol_info = SigSkol (FunSigCtxt main_name False) io_ty
+              skol_info = SigSkol (FunSigCtxt main_name False) io_ty []
         ; (ev_binds, main_expr)
                <- checkConstraints skol_info [] [] $
                   addErrCtxt mainCtxt    $
@@ -1876,6 +1876,9 @@ tcRnStmt hsc_env rdr_stmt
     ((bound_ids, tc_expr), fix_env) <- tcUserStmt rdr_stmt ;
     zonked_expr <- zonkTopLExpr tc_expr ;
     zonked_ids  <- zonkTopBndrs bound_ids ;
+
+    failIfErrsM ;  -- we can't do the next step if there are levity polymorphism errors
+                   -- test case: ghci/scripts/T13202{,a}
 
         -- None of the Ids should be of unboxed type, because we
         -- cast them all to HValues in the end!

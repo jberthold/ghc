@@ -387,6 +387,8 @@ It is important to note that top-level primitive string literals cannot be
 wrapped in Ticks, as is otherwise done with lifted bindings. CoreToStg expects
 to see just a plain (Lit (MachStr ...)) expression on the RHS of primitive
 string bindings; anything else and things break. CoreLint checks this invariant.
+To ensure that ticks don't sneak in CoreUtils.mkTick refuses to wrap any
+primitve string expression with a tick.
 
 Also see Note [Compilation plan for top-level string literals].
 
@@ -575,6 +577,11 @@ Join points must follow these invariants:
      "join arity" (to distinguish from regular arity, which only counts values).
 
   2. For join arity n, the right-hand side must begin with at least n lambdas.
+     No ticks, no casts, just lambdas!  C.f. CoreUtils.joinRhsArity.
+
+  2a. Moreover, this same constraint applies to any unfolding of the binder.
+     Reason: if we want to push a continuation into the RHS we must push it
+     into the unfolding as well.
 
   3. If the binding is recursive, then all other bindings in the recursive group
      must also be join points.
