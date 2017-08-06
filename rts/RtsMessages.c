@@ -321,7 +321,7 @@ rtsDebugMsgFn(const char *s, va_list ap)
  * would make an ifdef'ed solution very ugly.
  */
 
-void
+void GNU_ATTRIBUTE(__noreturn__)
 edenFatalInternalErrorFn(const char *s, va_list ap)
 {
 #if defined (mingw32_HOST_OS)
@@ -365,7 +365,7 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
   fflush(stderr);
 
   // The sequential system uses abort(); but we would like to shut down the
-  // entire system cleanly, using stg_exit.
+  // entire system cleanly, using stg_exit. (which calls exit, hence noreturn)
   stg_exit(EXIT_INTERNAL_ERROR);
     }
 }
