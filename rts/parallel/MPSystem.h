@@ -15,7 +15,7 @@
 #ifndef MPSYSTEM_H
 #define MPSYSTEM_H
 
-#ifdef PARALLEL_RTS /* whole file */
+#if defined(PARALLEL_RTS) /* whole file */
 
 /*
  * By including "Rts.h" here, we can use types like GlobalTaskId, etc.

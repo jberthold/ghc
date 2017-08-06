@@ -194,7 +194,7 @@ typedef struct _MISC_FLAGS {
                                   * for the linker, NULL ==> off */
 } MISC_FLAGS;
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
 typedef struct _PAR_DEBUG_FLAGS {
   /* flags to control debugging output in various subsystems */
   bool verbose    : 1; /* 2^0=1 */
@@ -216,7 +216,7 @@ typedef struct _PAR_DEBUG_FLAGS {
 /* See Note [Synchronization of flags and base APIs] */
 typedef struct _PAR_FLAGS {
   uint32_t      packBufferSize; // always active (serialisation support)
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
   PAR_DEBUG_FLAGS Debug;         /* debugging options */
   uint32_t      sendBufferSize;
   uint32_t      placement;

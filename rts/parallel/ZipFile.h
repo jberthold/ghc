@@ -15,7 +15,7 @@
 #ifndef ZIPFILE_H
 #define ZIPFILE_H
 
-#ifdef STANDALONE
+#if defined(STANDALONE)
 #include <stdint.h>
 #include <stdbool.h>
 

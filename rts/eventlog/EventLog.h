@@ -12,7 +12,7 @@
 #include "rts/EventLogWriter.h"
 #include "Capability.h"
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
 #include "Rts.h"
 #endif //PARALLEL_RTS
 
@@ -132,7 +132,7 @@ void postVersion(char *version);
 
 void postProgramInvocation(char *commandline);
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
 void postProcessEvent(EventProcessID pid, EventTypeNum tag);
 
 void postAssignThreadToProcessEvent(Capability *cap, EventThreadID tid, EventProcessID pid);

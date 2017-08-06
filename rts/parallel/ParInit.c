@@ -32,8 +32,8 @@ PEId nPEs   = 1;
 PEId thisPE = 1;
 #endif
 
-#ifdef PARALLEL_RTS /* whole rest of the file */
-#ifdef TRACING
+#if defined(PARALLEL_RTS) /* whole rest of the file */
+#if defined(TRACING)
 StgWord64 startupTicks;
 char *argvsave;
 char *pareventsName;
@@ -118,7 +118,7 @@ void emitStartupEvents(void){
   //edentrace:  traceProgramInvocation
   traceProgramInvocation(argvsave);
 
-#ifdef TRACING
+#if defined(TRACING)
   pes = nPEs; // and remember nPEs (shutdown will zero it)
 #endif
 }
@@ -138,7 +138,7 @@ void emitStartupEvents(void){
  */
 void zipTraceFiles(void) {
 
-#ifdef TRACING
+#if defined(TRACING)
 
   char **files, *prog;
   int i;
@@ -151,7 +151,7 @@ void zipTraceFiles(void) {
   // see rts/eventlog/EventLog.c, must match naming convention there
     prog = stgMallocBytes(strlen(prog_name) + 1, "initEventLogging");
     strcpy(prog, prog_name);
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
     // on Windows, drop the .exe suffix if there is one
     {
         char *suff;
@@ -229,7 +229,7 @@ startupParallelSystem(int* argc, char **argv[]) {
   // JB 11/2006: thisPE is still 0 at this moment, we cannot name the
   // trace file here => startup time is in reality sync time.
 //MD/TH 03/2010: workaround: store timestamp here, use it in synchroniseSystem
-#ifdef TRACING
+#if defined(TRACING)
   startupTicks = stat_getElapsedTime(); // see Stats.c, elapsed time from init
   gettimeofday(&startupTime,&startupTimeZone);
   //MD: copy argument list to string for traceProgramInvocation
@@ -246,7 +246,7 @@ startupParallelSystem(int* argc, char **argv[]) {
 
     strcat(argvsave,(*argv)[0]);
     strcat(pareventsName,(*argv)[0]);
-#ifdef mingw32_HOST_OS
+#if defined(mingw32_HOST_OS)
     // on Windows, drop the .exe suffix if there is one
     {
         char *suff;

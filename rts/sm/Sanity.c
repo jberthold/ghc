@@ -291,7 +291,7 @@ checkClosure( const StgClosure* p )
         // ASSERT(get_itbl(bq->bh)->type == BLACKHOLE);
         ASSERT(LOOKS_LIKE_CLOSURE_PTR(bq->bh));
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         ASSERT(bq->owner == (StgTSO*) &stg_system_tso
                || get_itbl((StgClosure *)(bq->owner))->type == TSO);
 #else

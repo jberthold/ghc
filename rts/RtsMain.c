@@ -24,7 +24,7 @@
 
 #if defined(PARALLEL_RTS)
 #include "Schedule.h"
-#ifdef DEBUG
+#if defined(DEBUG)
 #include <unistd.h> // gethostname, getpid, sleep with "wait" flag
 #endif
 #endif

@@ -17,7 +17,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef STANDALONE
+#if defined(STANDALONE)
 #include <stdio.h>
 #include <errno.h>
 #define sysErrorBelch(x) perror(x "\n")
@@ -29,7 +29,7 @@
 #include "RtsUtils.h"
 #endif
 
-#ifdef HAVE_ZLIB
+#if defined(HAVE_ZLIB)
 #error "Do not use ZLib, this code produces invalid zip files"
 #include "zlib.h"
 #endif
@@ -353,7 +353,7 @@ bool compressFiles(char const* archive,
   StgWord8 buffer[BUFSIZE];
   int i;
 
-#ifdef HAVE_ZLIB
+#if defined(HAVE_ZLIB)
   z_stream strm;
   StgWord8 outbuf[BUFSIZE];
   int ret;
@@ -392,7 +392,7 @@ bool compressFiles(char const* archive,
     f = mkFileHeader(names[i]);
 
     // write FileHeader
-#ifdef HAVE_ZLIB
+#if defined(HAVE_ZLIB)
     f->compres=8; // zlib deflate compression
 #else
     f->compres=0; // no compression
@@ -404,7 +404,7 @@ bool compressFiles(char const* archive,
     dd.usize=0; dd.csize = 0;
     dd.crc32=0xffffffff; // "preconditioning"
 
-#ifdef HAVE_ZLIB
+#if defined(HAVE_ZLIB)
     strm.zalloc = Z_NULL;
     strm.zfree = Z_NULL;
     strm.opaque = Z_NULL;

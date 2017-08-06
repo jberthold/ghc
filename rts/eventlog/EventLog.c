@@ -1201,7 +1201,7 @@ void postProgramInvocation(char *commandline)
     RELEASE_LOCK(&eventBufMutex);
 }
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
 void postProcessEvent(EventProcessID pid, EventTypeNum tag)
 {
     ASSERT(tag == EVENT_CREATE_PROCESS || tag == EVENT_KILL_PROCESS);

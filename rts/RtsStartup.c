@@ -66,7 +66,7 @@ static bool rts_shutdown = false;
 
 static void flushStdHandles(void);
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
 // remember exit code in hs_exit, avoid loop on multiple failures
 int err           = 0;
 bool exit_started = false;
@@ -170,7 +170,7 @@ hs_init_ghc(int *argc, char **argv[], RtsConfig rts_config)
      */
     stat_startInit();
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
     /*
      * The parallel system needs to be initialised and synchronised before
      * the program is run.
@@ -577,7 +577,7 @@ void
 shutdownHaskellAndExit(int n, int fastExit)
 {
     if (!fastExit) {
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         err = n; // set exit value for parallel shutdown routine
 #endif
         // we're about to exit(), no need to wait for foreign calls to return.
@@ -649,7 +649,7 @@ void (*exitFn)(int) = 0;
 void
 stg_exit(int n)
 {
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
   // if exiting due to an error (n != 0), shut down all PEs, conclude tracing.
   // shutdownParallelSystem calls MP_quit which sets nPEs to 0 on exit,
   // therefore we avoid calling it again if nPEs is already 0.
@@ -657,7 +657,7 @@ stg_exit(int n)
   if ( n != EXIT_SUCCESS && nPEs != 0 && !exit_started ) {
     exit_started = true;    // do not reenter here
     shutdownParallelSystem(n); // shutdown other PEs (see ParInit/MPSystem)
-#ifdef TRACING
+#if defined(TRACING)
     endTracing();
     freeTracing();
 #endif

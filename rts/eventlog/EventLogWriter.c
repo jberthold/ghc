@@ -21,7 +21,7 @@
 #include <unistd.h>
 #endif
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
 #include "rts/Parallel.h" //need thisPE for parallel trace file name
 
 #else
@@ -55,7 +55,7 @@ initEventLogFileWriter(void)
         }
     }
 #endif
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
     int thisPESize, peTemp;
     peTemp = thisPE;
     thisPESize = 1;
@@ -72,7 +72,7 @@ initEventLogFileWriter(void)
                                         "initEventLogFileWriter");
 #endif //else PARALLEL_RTS
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
     sprintf(event_log_filename, "%s#%d.eventlog", prog, thisPE);
 #else //PARALLEL_RTS
     if (event_log_pid == -1) { // #4512

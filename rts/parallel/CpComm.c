@@ -148,7 +148,7 @@ static int cpw_shm_probe_sys(void);
 static int cpw_shm_free_pending_msg(void);
 static int cpw_shm_close(cpw_shm_t *shm);
 
-#ifdef DEBUG
+#if defined(DEBUG)
 static void cpw_shm_debug_info(cpw_shm_t *shm);
 #endif
 static int cpw_self_recv_msg(PEId *fromPE, OpCode *tag,
@@ -689,7 +689,7 @@ static int cpw_sem_close(cpw_sem_t *sem) {
  * Shared Memory *
  *===============*/
 
-#ifdef DEBUG
+#if defined(DEBUG)
 /* print debug information for shared memory */
 static void cpw_shm_debug_info(cpw_shm_t *shm) {
   debugBelch("#############################\n"
@@ -1988,7 +1988,7 @@ static int cpw_sem_close(cpw_sem_t *sem) {
 
 /* print debug information for shared memory */
 static void cpw_shm_debug_info(cpw_shm_t *shm) {
-#ifdef DEBUG
+#if defined(DEBUG)
   char msg[3200]; /* 25lines x 80characters, estimated upper bound */
   snprintf(msg, 3200,
              "#############################\n"

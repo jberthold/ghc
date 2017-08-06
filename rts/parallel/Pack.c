@@ -19,7 +19,7 @@
 
 */
 
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 
 #include <Rts.h>
 #include <string.h>
@@ -58,7 +58,7 @@
 #endif
 
 
-#ifdef DEBUG
+#if defined(DEBUG)
 #define DBG_HEADROOM 1
 #define END_OF_BUFFER_MARKER 0xdededeee
 #else
@@ -66,14 +66,14 @@
 #endif
 
 // debugging macros for library and in-RTS version
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 // for the library version, borrow flags "scheduler" and "sparks"
 # define PACKDEBUG(s) IF_DEBUG(scheduler, s)
 # define PACKETDEBUG(s) IF_DEBUG(sparks, s)
 #else
 // for the in-RTS version, use the usual macros
 // XXX maybe drop support for the non-parallel in-RTS version
-# ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
 #  define PACKDEBUG(s) IF_PAR_DEBUG(pack, s)
 #  define PACKETDEBUG(s) IF_PAR_DEBUG(packet, s)
 # else
@@ -148,7 +148,7 @@ typedef struct PackState_ {
 static void init(void) __attribute__((constructor));
 
 // init/destruct pack data structure
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 static PackState* initPacking(StgArrBytes *mutArr);
 #else
 static PackState* initRtsPacking(StgWord *buffer, uint32_t size, StgTSO *tso);
@@ -176,7 +176,7 @@ STATIC_INLINE bool roomToPack(PackState* p, uint32_t size);
 STATIC_INLINE StgInfoTable* getClosureInfo(StgClosure* node, StgInfoTable* info,
                                            uint32_t *size, uint32_t *ptrs,
                                            uint32_t *nonptrs, uint32_t *vhs);
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 // remains local when code is stand-alone for the library
 STATIC_INLINE bool pmIsBlackhole(StgClosure* node);
 #define isBlackhole pmIsBlackhole
@@ -188,7 +188,7 @@ STATIC_INLINE bool pmIsBlackhole(StgClosure* node);
 /************************
  *  interface for packing
  */
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 // interface function used in foreign primop: pack graph to given array, return
 // size in bytes (offset by P_ERRCODEMAX) or an error code
 int pmtryPackToBuffer(StgClosure* closure, StgArrBytes* mutArr);
@@ -223,7 +223,7 @@ static StgWord PackArray(PackState* p, StgClosure* array);
 /**************************
  *  interface for unpacking
  */
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 // interface unpacking from a Haskell array (using the Haskell Byte Array)
 // may return error code P_GARBLED
 StgClosure* pmUnpackGraphWrapper(StgArrBytes* packBufferArray, Capability* cap);
@@ -308,7 +308,7 @@ static void init(void) {
  */
 
 // Pack state constructor, allocates space, queue and hash table.
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 // A mutable array is passed as the buffer space. Note that its size comes in
 // bytes, while internally all is managed in units of StgWord.
 static PackState* initPacking(StgArrBytes *mutArr) {
@@ -463,7 +463,7 @@ STATIC_INLINE bool roomToPack(PackState* p, uint32_t size)
 {
     if ((p->position +  // where we are in the buffer right now
          size +         // space needed for the current closure
-#ifdef GUM
+#if defined(GUM)
          queueSize(q) * FETCH_ME_PACKED_SIZE +
 #endif
          1)             // closure tag
@@ -476,7 +476,7 @@ STATIC_INLINE bool roomToPack(PackState* p, uint32_t size)
 
 // quick test for blackholes. Available somewhere else?
 
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 STATIC_INLINE
 #endif
 bool isBlackhole(StgClosure* node) {
@@ -715,7 +715,7 @@ STATIC_INLINE void Pack(PackState* p, StgWord data) {
     p->buffer[p->position++] = data;
 }
 
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 // pmtryPackToBuffer: interface function called by the foreign primop.
 // Returns packed size (in bytes!) + P_ERRCODEMAX when successful, or
 // error codes upon failure
@@ -1234,7 +1234,7 @@ static StgWord PackGeneric(PackState* p, StgClosure* closure)
     registerOffset(p, closure);
 
     // GUM would allocate a GA for the packed closure if it is a thunk
-#ifdef GUM
+#if defined(GUM)
     // Checks for globalisation scheme; default: globalise everything thunks
     if ( RtsFlags.ParFlags.globalising == 0 ||
          (closure_THUNK(closure) && !closure_UNPOINTED(closure)) )
@@ -1269,7 +1269,7 @@ static StgWord PackGeneric(PackState* p, StgClosure* closure)
 
     // unpacked_size += size; XXX unpacked_size in PackState
 
-#ifdef GUM
+#if defined(GUM)
     // Record that this is a revertable black hole so that we can fill
     // in its address from the fetch reply.  Problem: unshared thunks
     // may cause space leaks this way, their GAs should be deallocated
@@ -1632,7 +1632,7 @@ static StgWord PackArray(PackState *p, StgClosure *closure) {
   Done by UnpackClosure(), see there.
 */
 
-#ifdef LIBRARY_CODE
+#if defined(LIBRARY_CODE)
 // unpacking from a Haskell array (using the Haskell Byte Array)
 // may return error code P_GARBLED
 StgClosure* pmUnpackGraphWrapper(StgArrBytes* packBufferArray, Capability* cap)

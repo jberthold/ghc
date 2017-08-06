@@ -631,7 +631,7 @@ uint32_t MP_recv(uint32_t maxlength, StgWord8 *destination,
     // errorBelch: complain, but do not stop
     errorBelch("MPSystem(PVM): unable to find ID of PE # %x.",
                sendPE);
-#ifdef DEBUG
+#if defined(DEBUG)
     stg_exit(EXIT_FAILURE);
 #else
     // ignore error, discard message and make a recursive

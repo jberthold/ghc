@@ -399,7 +399,7 @@ checkBlockingQueues (Capability *cap, StgTSO *tso)
     StgBlockingQueue *bq, *next;
     StgClosure *p;
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
     // we should never end up here with the system TSO (collision impossible)
     ASSERT(tso != (StgTSO*) &stg_system_tso);
 #endif
@@ -464,7 +464,7 @@ updateThunk (Capability *cap, StgTSO *tso, StgClosure *thunk, StgClosure *val)
 
     i = v->header.info;
     if (i == &stg_TSO_info) {
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         ASSERT((StgTSO*)v != (StgTSO*) &stg_system_tso); 
 #endif
         checkBlockingQueues(cap, tso);
@@ -480,7 +480,7 @@ updateThunk (Capability *cap, StgTSO *tso, StgClosure *thunk, StgClosure *val)
     owner = ((StgBlockingQueue*)v)->owner;
 
     if (owner != tso) {
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         ASSERT(owner != (StgTSO*) &stg_system_tso);
 #endif
         checkBlockingQueues(cap, tso);

@@ -14,7 +14,7 @@
  *      this file contains routines for *data* communication only
  * ------------------------------------------------------------------------- */
 
-#ifdef PARALLEL_RTS /* whole file */
+#if defined(PARALLEL_RTS) /* whole file */
 
 #include "Rts.h"
 #include "RtsUtils.h"
@@ -270,7 +270,7 @@ int sendWrapper(StgTSO *sendingtso, int mode, StgClosure *data) {
     // shortcut if sender and receiver share the same heap
     if ( (sender.machine == receiver->machine)
        // conceptually OK if same process, in practice, same machine is enough
-#ifdef PEDANTIC
+#if defined(PEDANTIC)
          && (sender.process == receiver->process)
 #endif
          //   we do this only for DATA and HEAD messages, tags 2 and 3
@@ -450,7 +450,7 @@ fakeDataMsg(StgClosure *graph,
 
   // should only be called when sender and receiver share heap
   ASSERT(sender.machine == receiver.machine
-#ifdef PEDANTIC
+#if defined(PEDANTIC)
          && sender.process == receiver.process
 #endif
          );

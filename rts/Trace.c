@@ -819,7 +819,7 @@ void traceEnd (void)
 
 void traceVersion_(char *version)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("version: %s \n", version);
     } else
@@ -832,7 +832,7 @@ void traceVersion_(char *version)
 
 void traceProgramInvocation_(char *commandline)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("program call commandline: %s \n", commandline);
     } else
@@ -847,7 +847,7 @@ void traceProgramInvocation_(char *commandline)
 
 void traceEdenEventStartReceive_(Capability *cap)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("cap %d: starting to work on inbox \n", cap->no);
     } else
@@ -860,7 +860,7 @@ void traceEdenEventStartReceive_(Capability *cap)
 
 void traceEdenEventEndReceive_(Capability *cap)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("cap %d: stopped working on inbox \n", cap->no);
     } else
@@ -873,7 +873,7 @@ void traceEdenEventEndReceive_(Capability *cap)
 
 void traceCreateProcess_(StgWord pid)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("creating process %u \n", (uint32_t)pid );
     } else
@@ -886,7 +886,7 @@ void traceCreateProcess_(StgWord pid)
 
 void traceKillProcess_(StgWord pid)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("killing process %u \n", (uint32_t)pid);
     } else
@@ -899,7 +899,7 @@ void traceKillProcess_(StgWord pid)
 
 void traceAssignThreadToProcessEvent_(Capability *cap, StgThreadID tid, StgWord pid)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("cap %d: assigning thread %u to process %u \n",
                       cap->no , tid, (uint32_t)pid);
@@ -913,7 +913,7 @@ void traceAssignThreadToProcessEvent_(Capability *cap, StgThreadID tid, StgWord 
 
 void traceCreateMachine_ (PEId pe, StgWord64 time,StgWord64 ticks)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
       trace_stderr_(" creating machine %u at time %lu ns \n",pe, (long)time, (long)ticks);
     } else
@@ -926,7 +926,7 @@ void traceCreateMachine_ (PEId pe, StgWord64 time,StgWord64 ticks)
 
 void traceKillMachine_ (PEId pe)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("killing machine %u",pe);
     } else
@@ -939,7 +939,7 @@ void traceKillMachine_ (PEId pe)
 
 void traceSendMessageEvent_ (OpCode msgtag, rtsPackBuffer *buf)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("sending message with Tag %d, \n \t sender: process %lu, thread %lu  \n \t receiver: machine %d, process %lu, portID %lu \n", 
                  msgtag, (long)buf->sender.process, (long)buf->sender.id, buf->receiver.machine, (long)buf->receiver.process, (long)buf->receiver.id);
@@ -953,7 +953,7 @@ void traceSendMessageEvent_ (OpCode msgtag, rtsPackBuffer *buf)
 
 void traceReceiveMessageEvent_ (Capability *cap, OpCode msgtag, rtsPackBuffer *buf)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("cap %d: receive message with Tag %d of size %d, \n"
                       "\treceiver: process %u, portID %u  \n"
@@ -971,7 +971,7 @@ void traceReceiveMessageEvent_ (Capability *cap, OpCode msgtag, rtsPackBuffer *b
 
 void traceSendReceiveLocalMessageEvent_ (OpCode msgtag, StgWord spid, StgWord stid, StgWord rpid, StgWord rpoid)
 {
-#ifdef DEBUG
+#if defined(DEBUG)
     if (RtsFlags.TraceFlags.tracing == TRACE_STDERR) {
         trace_stderr_("sending/receiving LOCAL message with Tag %d, \n \t sender: process %lu, thread %lu  \n \t receiver: process %lu, portID %lu \n", 
                  msgtag, (long)spid, (long)stid, (long)rpid, (long)rpoid);
