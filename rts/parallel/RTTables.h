@@ -52,10 +52,6 @@
 
 #if defined(PARALLEL_RTS) // whole file
 
-#if !defined(RTS_H) // should be after Rts.h  
-#error "RTTables.h: include Rts.h before"
-#endif
-
 // a port type, stands for an inport (pe, proc,inport->id), an outport
 // (pe,proc,tso->id) and processes (pe, proc, 0).
 // 

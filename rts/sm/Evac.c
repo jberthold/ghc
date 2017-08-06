@@ -34,6 +34,7 @@ StgWord64 whitehole_spin = 0;
 
 #if defined(THREADED_RTS) && !defined(PARALLEL_GC)
 #define evacuate(p) evacuate1(p)
+#define evacuate_BLACKHOLE(p) evacuate_BLACKHOLE1(p)
 #define HEAP_ALLOCED_GC(p) HEAP_ALLOCED(p)
 #endif
 
@@ -115,7 +116,7 @@ copy_tag(StgClosure **p, const StgInfoTable *info,
         const StgInfoTable *new_info;
         new_info = (const StgInfoTable *)cas((StgPtr)&src->header.info, (W_)info, MK_FORWARDING_PTR(to));
         if (new_info != info) {
-#ifdef PROFILING
+#if defined(PROFILING)
             // We copied this object at the same time as another
             // thread.  We'll evacuate the object again and the copy
             // we just made will be discarded at the next GC, but we
@@ -136,7 +137,7 @@ copy_tag(StgClosure **p, const StgInfoTable *info,
     *p = TAG_CLOSURE(tag,(StgClosure*)to);
 #endif
 
-#ifdef PROFILING
+#if defined(PROFILING)
     // We store the size of the just evacuated object in the LDV word so that
     // the profiler can guess the position of the next object later.
     // This is safe only if we are sure that no other thread evacuates
@@ -171,7 +172,7 @@ copy_tag_nolock(StgClosure **p, const StgInfoTable *info,
 //      __builtin_prefetch(to + size + 2, 1);
 //  }
 
-#ifdef PROFILING
+#if defined(PROFILING)
     // We store the size of the just evacuated object in the LDV word so that
     // the profiler can guess the position of the next object later.
     SET_EVACUAEE_FOR_LDV(from, size);
@@ -195,7 +196,7 @@ copyPart(StgClosure **p, StgClosure *src, uint32_t size_to_reserve,
 spin:
         info = xchg((StgPtr)&src->header.info, (W_)&stg_WHITEHOLE_info);
         if (info == (W_)&stg_WHITEHOLE_info) {
-#ifdef PROF_SPIN
+#if defined(PROF_SPIN)
             whitehole_spin++;
 #endif
             goto spin;
@@ -221,7 +222,7 @@ spin:
     src->header.info = (const StgInfoTable*)MK_FORWARDING_PTR(to);
     *p = (StgClosure *)to;
 
-#ifdef PROFILING
+#if defined(PROFILING)
     // We store the size of the just evacuated object in the LDV word so that
     // the profiler can guess the position of the next object later.
     SET_EVACUAEE_FOR_LDV(from, size_to_reserve);
@@ -344,7 +345,7 @@ evacuate_static_object (StgClosure **link_field, StgClosure *q)
     // See Note [STATIC_LINK fields] for how the link field bits work
     if ((((StgWord)(link)&STATIC_BITS) | prev_static_flag) != 3) {
         StgWord new_list_head = (StgWord)q | static_flag;
-#ifndef THREADED_RTS
+#if !defined(THREADED_RTS)
         *link_field = gct->static_objects;
         gct->static_objects = (StgClosure *)new_list_head;
 #else
@@ -532,7 +533,6 @@ loop:
   ASSERTM(LOOKS_LIKE_CLOSURE_PTR(q), "invalid closure, info=%p", q->header.info);
 
   if (!HEAP_ALLOCED_GC(q)) {
-
       if (!major_gc) return;
 
 #if defined(PARALLEL_RTS)
@@ -712,7 +712,7 @@ loop:
   case THUNK_1_1:
   case THUNK_2_0:
   case THUNK_0_2:
-#ifdef NO_PROMOTE_THUNKS
+#if defined(NO_PROMOTE_THUNKS)
 #error bitrotted
 #endif
     copy(p,info,q,sizeofW(StgThunk)+2,gen_no);
@@ -875,6 +875,68 @@ loop:
   }
 
   barf("evacuate");
+}
+
+/* -----------------------------------------------------------------------------
+   Evacuate a pointer that is guaranteed to point to a BLACKHOLE.
+
+   This is used for evacuating the updatee of an update frame on the stack.  We
+   want to copy the blackhole even if it has been updated by another thread and
+   is now an indirection, because the original update frame still needs to
+   update it.
+
+   See also Note [upd-black-hole] in sm/Scav.c.
+   -------------------------------------------------------------------------- */
+
+void
+evacuate_BLACKHOLE(StgClosure **p)
+{
+    bdescr *bd;
+    uint32_t gen_no;
+    StgClosure *q;
+    const StgInfoTable *info;
+    q = *p;
+
+    // closure is required to be a heap-allocated BLACKHOLE
+    ASSERT(HEAP_ALLOCED_GC(q));
+    ASSERT(GET_CLOSURE_TAG(q) == 0);
+
+    bd = Bdescr((P_)q);
+
+    // blackholes can't be in a compact, or large
+    ASSERT((bd->flags & (BF_COMPACT | BF_LARGE)) == 0);
+
+    if (bd->flags & BF_EVACUATED) {
+        if (bd->gen_no < gct->evac_gen_no) {
+            gct->failed_to_evac = true;
+            TICK_GC_FAILED_PROMOTION();
+        }
+        return;
+    }
+    if (bd->flags & BF_MARKED) {
+        if (!is_marked((P_)q,bd)) {
+            mark((P_)q,bd);
+            push_mark_stack((P_)q);
+        }
+        return;
+    }
+    gen_no = bd->dest_no;
+    info = q->header.info;
+    if (IS_FORWARDING_PTR(info))
+    {
+        StgClosure *e = (StgClosure*)UN_FORWARDING_PTR(info);
+        *p = e;
+        if (gen_no < gct->evac_gen_no) {  // optimisation
+            if (Bdescr((P_)e)->gen_no < gct->evac_gen_no) {
+                gct->failed_to_evac = true;
+                TICK_GC_FAILED_PROMOTION();
+            }
+        }
+        return;
+    }
+
+    ASSERT(INFO_PTR_TO_STRUCT(info)->type == BLACKHOLE);
+    copy(p,info,q,sizeofW(StgInd),gen_no);
 }
 
 /* -----------------------------------------------------------------------------
@@ -1072,7 +1134,7 @@ selector_loop:
               // Select the right field from the constructor
               val = selectee->payload[field];
 
-#ifdef PROFILING
+#if defined(PROFILING)
               // For the purposes of LDV profiling, we have destroyed
               // the original selector thunk, p.
               if (era > 0) {

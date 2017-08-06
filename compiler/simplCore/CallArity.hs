@@ -18,6 +18,7 @@ import CoreArity ( typeArity )
 import CoreUtils ( exprIsCheap, exprIsTrivial )
 import UnVarGraph
 import Demand
+import Util
 
 import Control.Arrow ( first, second )
 
@@ -349,7 +350,7 @@ Note [Thunks in recursive groups]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 We never eta-expand a thunk in a recursive group, on the grounds that if it is
-part of a recursive group, then it will be called multipe times.
+part of a recursive group, then it will be called multiple times.
 
 This is not necessarily true, e.g.  it would be safe to eta-expand t2 (but not
 t1) in the following code:
@@ -671,11 +672,11 @@ callArityRecEnv any_boring ae_rhss ae_body
 
     cross_calls
         -- See Note [Taking boring variables into account]
-        | any_boring          = completeGraph (domRes ae_combined)
+        | any_boring               = completeGraph (domRes ae_combined)
         -- Also, calculating cross_calls is expensive. Simply be conservative
         -- if the mutually recursive group becomes too large.
-        | length ae_rhss > 25 = completeGraph (domRes ae_combined)
-        | otherwise           = unionUnVarGraphs $ map cross_call ae_rhss
+        | lengthExceeds ae_rhss 25 = completeGraph (domRes ae_combined)
+        | otherwise                = unionUnVarGraphs $ map cross_call ae_rhss
     cross_call (v, ae_rhs) = completeBipartiteGraph called_by_v called_with_v
       where
         is_thunk = idCallArity v == 0

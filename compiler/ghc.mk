@@ -176,6 +176,7 @@ compiler/stage1/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_ARCH \"$(BuildArch_CPP)\""           >> $@
 	@echo "#define HOST_ARCH \"$(HostArch_CPP)\""             >> $@
 	@echo "#define TARGET_ARCH \"$(TargetArch_CPP)\""         >> $@
+	@echo "#define LLVM_TARGET \"$(LLVMTarget_CPP)\""         >> $@
 	@echo                                                     >> $@
 	@echo "#define $(BuildOS_CPP)_BUILD_OS 1"                 >> $@
 	@echo "#define $(HostOS_CPP)_HOST_OS 1"                   >> $@
@@ -217,6 +218,7 @@ compiler/stage2/$(PLATFORM_H) : mk/config.mk mk/project.mk | $$(dir $$@)/.
 	@echo "#define BUILD_ARCH \"$(HostArch_CPP)\""            >> $@
 	@echo "#define HOST_ARCH \"$(TargetArch_CPP)\""           >> $@
 	@echo "#define TARGET_ARCH \"$(TargetArch_CPP)\""         >> $@
+	@echo "#define LLVM_TARGET \"$(LLVMTarget_CPP)\""         >> $@
 	@echo                                                     >> $@
 	@echo "#define $(HostOS_CPP)_BUILD_OS 1"                  >> $@
 	@echo "#define $(TargetOS_CPP)_HOST_OS 1"                 >> $@
@@ -482,6 +484,7 @@ compiler_stage2_dll0_MODULES = \
 	FastString \
 	FastStringEnv \
 	FieldLabel \
+	FileCleanup \
 	Fingerprint \
 	FiniteMap \
 	ForeignCall \
@@ -494,6 +497,7 @@ compiler_stage2_dll0_MODULES = \
 	HsImpExp \
 	HsLit \
 	PlaceHolder \
+	HsExtension \
 	PmExpr \
 	HsPat \
 	HsSyn \

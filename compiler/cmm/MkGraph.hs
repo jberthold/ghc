@@ -26,7 +26,9 @@ import Cmm
 import CmmCallConv
 import CmmSwitch (SwitchTargets)
 
-import Compiler.Hoopl hiding (Unique, (<*>), mkFirst, mkMiddle, mkLast, mkLabel, mkBranch, Shape(..))
+import Hoopl.Block
+import Hoopl.Graph
+import Hoopl.Label
 import DynFlags
 import FastString
 import ForeignCall
@@ -183,7 +185,7 @@ mkNop        :: CmmAGraph
 mkNop         = nilOL
 
 mkComment    :: FastString -> CmmAGraph
-#ifdef DEBUG
+#if defined(DEBUG)
 -- SDM: generating all those comments takes time, this saved about 4% for me
 mkComment fs  = mkMiddle $ CmmComment fs
 #else

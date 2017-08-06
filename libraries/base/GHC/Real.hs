@@ -27,7 +27,7 @@ import GHC.Enum
 import GHC.Show
 import {-# SOURCE #-} GHC.Exception( divZeroException, overflowException, ratioZeroDenomException )
 
-#ifdef OPTIMISE_INTEGER_GCD_LCM
+#if defined(OPTIMISE_INTEGER_GCD_LCM)
 # if defined(MIN_VERSION_integer_gmp)
 import GHC.Integer.GMP.Internals
 # else
@@ -636,7 +636,7 @@ lcm _ 0         =  0
 lcm 0 _         =  0
 lcm x y         =  abs ((x `quot` (gcd x y)) * y)
 
-#ifdef OPTIMISE_INTEGER_GCD_LCM
+#if defined(OPTIMISE_INTEGER_GCD_LCM)
 {-# RULES
 "gcd/Int->Int->Int"             gcd = gcdInt'
 "gcd/Integer->Integer->Integer" gcd = gcdInteger
@@ -646,14 +646,12 @@ lcm x y         =  abs ((x `quot` (gcd x y)) * y)
 gcdInt' :: Int -> Int -> Int
 gcdInt' (I# x) (I# y) = I# (gcdInt x y)
 
-#if MIN_VERSION_integer_gmp(1,0,0)
 {-# RULES
 "gcd/Word->Word->Word"          gcd = gcdWord'
  #-}
 
 gcdWord' :: Word -> Word -> Word
 gcdWord' (W# x) (W# y) = W# (gcdWord x y)
-#endif
 #endif
 
 integralEnumFrom :: (Integral a, Bounded a) => a -> [a]

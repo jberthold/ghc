@@ -30,6 +30,7 @@ module CoreUtils (
         exprIsBig, exprIsConLike,
         rhsIsStatic, isCheapApp, isExpandableApp,
         exprIsLiteralString, exprIsTopLevelBindable,
+        altsAreExhaustive,
 
         -- * Equality
         cheapEqExpr, cheapEqExpr', eqExpr,
@@ -713,7 +714,7 @@ This gave rise to a horrible sequence of cases
 and similarly in cascade for all the join points!
 
 NB: it's important that all this is done in [InAlt], *before* we work
-on the alternatives themselves, because Simpify.simplAlt may zap the
+on the alternatives themselves, because Simplify.simplAlt may zap the
 occurrence info on the binders in the alternatives, which in turn
 defeats combineIdenticalAlts (see Trac #7360).
 
@@ -1391,7 +1392,7 @@ altsAreExhaustive ((con1,_,_) : alts)
   = case con1 of
       DEFAULT   -> True
       LitAlt {} -> False
-      DataAlt c -> 1 + length alts == tyConFamilySize (dataConTyCon c)
+      DataAlt c -> alts `lengthIs` (tyConFamilySize (dataConTyCon c) - 1)
       -- It is possible to have an exhaustive case that does not
       -- enumerate all constructors, notably in a GADT match, but
       -- we behave conservatively here -- I don't think it's important
@@ -1783,7 +1784,7 @@ eqExpr in_scope e1 e2
       && go (rnBndr2 env v1 v2) e1 e2
 
     go env (Let (Rec ps1) e1) (Let (Rec ps2) e2)
-      = length ps1 == length ps2
+      = equalLength ps1 ps2
       && all2 (go env') rs1 rs2 && go env' e1 e2
       where
         (bs1,rs1) = unzip ps1
@@ -1838,7 +1839,7 @@ diffExpr top env (Let bs1 e1) (Let bs2 e2)
   = let (ds, env') = diffBinds top env (flattenBinds [bs1]) (flattenBinds [bs2])
     in ds ++ diffExpr top env' e1 e2
 diffExpr top env (Case e1 b1 t1 a1) (Case e2 b2 t2 a2)
-  | length a1 == length a2 && not (null a1) || eqTypeX env t1 t2
+  | equalLength a1 a2 && not (null a1) || eqTypeX env t1 t2
     -- See Note [Empty case alternatives] in TrieMap
   = diffExpr top env e1 e2 ++ concat (zipWith diffAlt a1 a2)
   where env' = rnBndr2 env b1 b2
@@ -1933,7 +1934,7 @@ diffUnfold _   BootUnfolding  BootUnfolding               = []
 diffUnfold _   (OtherCon cs1) (OtherCon cs2) | cs1 == cs2 = []
 diffUnfold env (DFunUnfolding bs1 c1 a1)
                (DFunUnfolding bs2 c2 a2)
-  | c1 == c2 && length bs1 == length bs2
+  | c1 == c2 && equalLength bs1 bs2
   = concatMap (uncurry (diffExpr False env')) (zip a1 a2)
   where env' = rnBndrs2 env bs1 bs2
 diffUnfold env (CoreUnfolding t1 _ _ v1 cl1 wf1 x1 g1)

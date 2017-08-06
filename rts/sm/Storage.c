@@ -71,7 +71,7 @@ uint32_t n_nurseries;
  */
 volatile StgWord next_nursery[MAX_NUMA_NODES];
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 /*
  * Storage manager mutex:  protects all the above state from
  * simultaneous access by two STG threads.
@@ -113,7 +113,7 @@ initGeneration (generation *gen, int g)
     gen->mark = 0;
     gen->compact = 0;
     gen->bitmap = NULL;
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     initSpinLock(&gen->sync);
 #endif
     gen->threads = END_TSO_QUEUE;
@@ -195,9 +195,9 @@ initStorage (void)
 
   exec_block = NULL;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
   initSpinLock(&gc_alloc_block_sync);
-#ifdef PROF_SPIN
+#if defined(PROF_SPIN)
   whitehole_spin = 0;
 #endif
 #endif
@@ -381,7 +381,7 @@ lockCAF (StgRegTable *reg, StgIndStatic *caf)
 
     orig_info = caf->header.info;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     const StgInfoTable *cur_info;
 
     if (orig_info == &stg_IND_STATIC_info ||
@@ -452,7 +452,7 @@ newCAF(StgRegTable *reg, StgIndStatic *caf)
                              regTableToCapability(reg), oldest_gen->no);
         }
 
-#ifdef DEBUG
+#if defined(DEBUG)
         // In the DEBUG rts, we keep track of live CAFs by chaining them
         // onto a list debug_caf_list.  This is so that we can tell if we
         // ever enter a GC'd CAF, and emit a suitable barf().
@@ -642,7 +642,7 @@ resetNurseries (void)
     }
     assignNurseriesToCapabilities(0, n_capabilities);
 
-#ifdef DEBUG
+#if defined(DEBUG)
     bdescr *bd;
     for (n = 0; n < n_nurseries; n++) {
         for (bd = nurseries[n].blocks; bd; bd = bd->link) {
@@ -1341,6 +1341,20 @@ StgWord calcTotalCompactW (void)
 #include <libkern/OSCacheControl.h>
 #endif
 
+#if defined(__clang__)
+/* clang defines __clear_cache as a builtin on some platforms.
+ * For example on armv7-linux-androideabi. The type slightly
+ * differs from gcc.
+ */
+extern void __clear_cache(void * begin, void * end);
+#elif defined(__GNUC__)
+/* __clear_cache is a libgcc function.
+ * It existed before __builtin___clear_cache was introduced.
+ * See Trac #8562.
+ */
+extern void __clear_cache(char * begin, char * end);
+#endif /* __GNUC__ */
+
 /* On ARM and other platforms, we need to flush the cache after
    writing code into memory, so the processor reliably sees it. */
 void flushExec (W_ len, AdjustorExecutable exec_addr)
@@ -1352,11 +1366,26 @@ void flushExec (W_ len, AdjustorExecutable exec_addr)
 #elif (defined(arm_HOST_ARCH) || defined(aarch64_HOST_ARCH)) && defined(ios_HOST_OS)
   /* On iOS we need to use the special 'sys_icache_invalidate' call. */
   sys_icache_invalidate(exec_addr, len);
+#elif defined(__clang__)
+  unsigned char* begin = (unsigned char*)exec_addr;
+  unsigned char* end   = begin + len;
+# if __has_builtin(__builtin___clear_cache)
+  __builtin___clear_cache((void*)begin, (void*)end);
+# else
+  __clear_cache((void*)begin, (void*)end);
+# endif
 #elif defined(__GNUC__)
   /* For all other platforms, fall back to a libgcc builtin. */
   unsigned char* begin = (unsigned char*)exec_addr;
   unsigned char* end   = begin + len;
+  /* __builtin___clear_cache is supported since GNU C 4.3.6.
+   * We pick 4.4 to simplify condition a bit.
+   */
+# if __GNUC__ > 4 || (__GNUC__ == 4 && __GNUC_MINOR__ >= 4)
+  __builtin___clear_cache((void*)begin, (void*)end);
+# else
   __clear_cache((void*)begin, (void*)end);
+# endif
 #else
 #error Missing support to flush the instruction cache
 #endif
@@ -1515,7 +1544,7 @@ void freeExec (void *addr)
 
 #endif /* switch(HOST_OS) */
 
-#ifdef DEBUG
+#if defined(DEBUG)
 
 // handy function for use in gdb, because Bdescr() is inlined.
 extern bdescr *_bdescr (StgPtr p);

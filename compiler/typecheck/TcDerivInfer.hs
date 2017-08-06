@@ -67,12 +67,12 @@ inferConstraints :: [TyVar] -> Class -> [TcType] -> TcType
 inferConstraints tvs main_cls cls_tys inst_ty
                  rep_tc rep_tc_args
                  mechanism
-  | is_generic && not is_anyclass     -- Generic constraints are easy
+  | is_generic && not is_anyclass          -- Generic constraints are easy
   = return ([], tvs, inst_tys)
 
-  | is_generic1 && not is_anyclass    -- Generic1 needs Functor
-  = ASSERT( length rep_tc_tvs > 0 )   -- See Note [Getting base classes]
-    ASSERT( length cls_tys   == 1 )   -- Generic1 has a single kind variable
+  | is_generic1 && not is_anyclass         -- Generic1 needs Functor
+  = ASSERT( rep_tc_tvs `lengthExceeds` 0 ) -- See Note [Getting base classes]
+    ASSERT( cls_tys `lengthIs` 1 )         -- Generic1 has a single kind variable
     do { functorClass <- tcLookupClass functorClassName
        ; con_arg_constraints (get_gen1_constraints functorClass) }
 
@@ -760,7 +760,7 @@ Similarly for 'baz', givng the constraint C2
                                 ~ Maybe s -> Maybe s -> Bool)
 
 In this case baz has no local quantification, so the implication
-constraint has no local skolems and there are no unificaiton
+constraint has no local skolems and there are no unification
 variables.
 
 [STEP DAC SOLVE]

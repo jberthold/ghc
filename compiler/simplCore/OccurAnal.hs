@@ -2572,7 +2572,7 @@ adjustRhsUsage mb_join_arity rec_flag bndrs usage
                  Nothing            -> all isOneShotBndr bndrs
 
     exact_join = case mb_join_arity of
-                   Just join_arity -> join_arity == length bndrs
+                   Just join_arity -> bndrs `lengthIs` join_arity
                    _               -> False
 
 type IdWithOccInfo = Id
@@ -2657,12 +2657,9 @@ tagRecBinders lvl body_uds triples
      -- 3. Compute final usage details from adjusted RHS details
      adj_uds   = body_uds +++ combineUsageDetailsList rhs_udss'
 
-     -- 4. Tag each binder with its adjusted details modulo the
-     --    join-point-hood decision
-     occs      = map (lookupDetails adj_uds) bndrs
-     occs'     | will_be_joins = occs
-               | otherwise     = map markNonTailCalled occs
-     bndrs'    = zipWith setBinderOcc occs' bndrs
+     -- 4. Tag each binder with its adjusted details
+     bndrs'    = [ setBinderOcc (lookupDetails adj_uds bndr) bndr
+                 | bndr <- bndrs ]
 
      -- 5. Drop the binders from the adjusted details and return
      usage'    = adj_uds `delDetailsList` bndrs
@@ -2718,7 +2715,7 @@ decideJoinPointHood NotTopLevel usage bndrs
 
     ok_rule _ BuiltinRule{} = False -- only possible with plugin shenanigans
     ok_rule join_arity (Rule { ru_args = args })
-      = length args == join_arity
+      = args `lengthIs` join_arity
         -- Invariant 1 as applied to LHSes of rules
 
 willBeJoinId_maybe :: CoreBndr -> Maybe JoinArity

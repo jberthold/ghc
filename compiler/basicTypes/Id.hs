@@ -5,7 +5,7 @@
 \section[Id]{@Ids@: Value and constructor identifiers}
 -}
 
-{-# LANGUAGE ImplicitParams, CPP #-}
+{-# LANGUAGE CPP #-}
 
 -- |
 -- #name_types#
@@ -53,7 +53,7 @@ module Id (
         setIdInfo, lazySetIdInfo, modifyIdInfo, maybeModifyIdInfo,
         zapLamIdInfo, zapIdDemandInfo, zapIdUsageInfo, zapIdUsageEnvInfo,
         zapIdUsedOnceInfo, zapIdTailCallInfo,
-        zapFragileIdInfo, zapIdStrictness,
+        zapFragileIdInfo, zapIdStrictness, zapStableUnfolding,
         transferPolyIdInfo,
 
         -- ** Predicates on Ids
@@ -117,7 +117,7 @@ module Id (
 #include "HsVersions.h"
 
 import DynFlags
-import CoreSyn ( CoreRule, evaldUnfolding, Unfolding( NoUnfolding ) )
+import CoreSyn ( CoreRule, isStableUnfolding, evaldUnfolding, Unfolding( NoUnfolding ) )
 
 import IdInfo
 import BasicTypes
@@ -628,8 +628,10 @@ idFunRepArity :: Id -> RepArity
 idFunRepArity x = countFunRepArgs (idArity x) (idType x)
 
 -- | Returns true if an application to n args would diverge
-isBottomingId :: Id -> Bool
-isBottomingId id = isBottomingSig (idStrictness id)
+isBottomingId :: Var -> Bool
+isBottomingId v
+  | isId v    = isBottomingSig (idStrictness v)
+  | otherwise = False
 
 idStrictness :: Id -> StrictSig
 idStrictness id = strictnessInfo (idInfo id)
@@ -713,7 +715,7 @@ setIdCafInfo :: Id -> CafInfo -> Id
 setIdCafInfo id caf_info = modifyIdInfo (`setCafInfo` caf_info) id
 
         ---------------------------------
-        -- Occcurrence INFO
+        -- Occurrence INFO
 idOccInfo :: Id -> OccInfo
 idOccInfo id = occInfo (idInfo id)
 
@@ -864,6 +866,11 @@ zapIdUsedOnceInfo = zapInfo zapUsedOnceInfo
 
 zapIdTailCallInfo :: Id -> Id
 zapIdTailCallInfo = zapInfo zapTailCallInfo
+
+zapStableUnfolding :: Id -> Id
+zapStableUnfolding id
+ | isStableUnfolding (realIdUnfolding id) = setIdUnfolding id NoUnfolding
+ | otherwise                              = id
 
 {-
 Note [transferPolyIdInfo]

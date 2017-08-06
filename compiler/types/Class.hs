@@ -60,6 +60,10 @@ data Class
 
         classTyVars  :: [TyVar],        -- The class kind and type variables;
                                         -- identical to those of the TyCon
+           -- If you want visiblity info, look at the classTyCon
+           -- This field is redundant because it's duplicated in the
+           -- classTyCon, but classTyVars is used quite often, so maybe
+           -- it's a bit faster to cache it here
 
         classFunDeps :: [FunDep TyVar],  -- The functional dependencies
 
@@ -245,7 +249,7 @@ classSCSelId :: Class -> Int -> Id
 -- where n is 0-indexed, and counts
 --    *all* superclasses including equalities
 classSCSelId (Class { classBody = ConcreteClass { classSCSels = sc_sels } }) n
-  = ASSERT( n >= 0 && n < length sc_sels )
+  = ASSERT( n >= 0 && lengthExceeds sc_sels n )
     sc_sels !! n
 classSCSelId c n = pprPanic "classSCSelId" (ppr c <+> ppr n)
 

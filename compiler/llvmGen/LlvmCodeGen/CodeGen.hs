@@ -18,7 +18,9 @@ import Cmm
 import PprCmm
 import CmmUtils
 import CmmSwitch
-import Hoopl
+import Hoopl.Block
+import Hoopl.Graph
+import Hoopl.Collections
 
 import DynFlags
 import FastString
@@ -34,10 +36,8 @@ import Util
 import Control.Monad.Trans.Class
 import Control.Monad.Trans.Writer
 
-#if __GLASGOW_HASKELL__ > 710
 import Data.Semigroup   ( Semigroup )
 import qualified Data.Semigroup as Semigroup
-#endif
 import Data.List ( nub )
 import Data.Maybe ( catMaybes )
 
@@ -506,7 +506,7 @@ genCallExtract
     :: ForeignTarget           -- ^ PrimOp
     -> Width                   -- ^ Width of the operands.
     -> (CmmActual, CmmActual)  -- ^ Actual arguments.
-    -> (LlvmType, LlvmType)    -- ^ LLLVM types of the returned sturct.
+    -> (LlvmType, LlvmType)    -- ^ LLVM types of the returned struct.
     -> LlvmM (LlvmVar, LlvmVar, StmtData)
 genCallExtract target@(PrimTarget op) w (argA, argB) (llvmTypeA, llvmTypeB) = do
     let width = widthToLlvmInt w
@@ -986,7 +986,7 @@ which will eliminate the expression entirely.
 However, it's certainly possible and reasonable for this to occur in
 hand-written C-- code. Consider something like:
 
-    #ifndef SOME_CONDITIONAL
+    #if !defined(SOME_CONDITIONAL)
     #define CHECK_THING(x) 1
     #else
     #define CHECK_THING(x) some_operation((x))
@@ -1861,11 +1861,9 @@ getTBAARegMeta = getTBAAMeta . getTBAA
 -- | A more convenient way of accumulating LLVM statements and declarations.
 data LlvmAccum = LlvmAccum LlvmStatements [LlvmCmmDecl]
 
-#if __GLASGOW_HASKELL__ > 710
 instance Semigroup LlvmAccum where
   LlvmAccum stmtsA declsA <> LlvmAccum stmtsB declsB =
         LlvmAccum (stmtsA Semigroup.<> stmtsB) (declsA Semigroup.<> declsB)
-#endif
 
 instance Monoid LlvmAccum where
     mempty = LlvmAccum nilOL []

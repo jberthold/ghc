@@ -56,7 +56,7 @@ import Outputable
 import Control.Monad
 import qualified GHC.LanguageExtensions as LangExt
 
-#ifdef GHCI
+#if defined(GHCI)
 import DynamicLoading   ( loadPlugins )
 import Plugins          ( installCoreToDos )
 #else
@@ -284,7 +284,7 @@ getCoreToDo dflags
 
                 -- At least 3 iterations because otherwise we land up with
                 -- huge dead expressions because of an infelicity in the
-                -- simpifier.
+                -- simplifier.
                 --      let k = BIG in foldr k z xs
                 -- ==>  let k = BIG in letrec go = \xs -> ...(k x).... in go xs
                 -- ==>  let k = BIG in letrec go = \xs -> ...(BIG x).... in go xs
@@ -368,7 +368,7 @@ getCoreToDo dflags
 -- Loading plugins
 
 addPluginPasses :: [CoreToDo] -> CoreM [CoreToDo]
-#ifndef GHCI
+#if !defined(GHCI)
 addPluginPasses builtin_passes
   = do { dflags <- getDynFlags
        ; let pluginMods = pluginModNames dflags
@@ -493,7 +493,7 @@ doCorePass (CoreDoRuleCheck phase pat)  = ruleCheckPass phase pat
 doCorePass CoreDoNothing                = return
 doCorePass (CoreDoPasses passes)        = runCorePasses passes
 
-#ifdef GHCI
+#if defined(GHCI)
 doCorePass (CoreDoPluginPass _ pass) = {-# SCC "Plugin" #-} pass
 #endif
 

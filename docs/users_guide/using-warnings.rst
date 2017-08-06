@@ -17,6 +17,7 @@ generally likely to indicate bugs in your program. These are:
 
     * :ghc-flag:`-Woverlapping-patterns`
     * :ghc-flag:`-Wwarnings-deprecations`
+    * :ghc-flag:`-Wdeprecations`
     * :ghc-flag:`-Wdeprecated-flags`
     * :ghc-flag:`-Wunrecognised-pragmas`
     * :ghc-flag:`-Wduplicate-constraints`
@@ -103,7 +104,8 @@ to abort.
     Makes any warning into a fatal error. Useful so that you don't miss
     warnings when doing batch compilation.
 
-.. ghc-flag:: -Werror=<wflag>
+.. ghc-flag:: -Werror=⟨wflag⟩
+    :noindex:
 
     :implies: ``-W<wflag>``
 
@@ -115,7 +117,8 @@ to abort.
     Warnings are treated only as warnings, not as errors. This is the
     default, but can be useful to negate a :ghc-flag:`-Werror` flag.
 
-.. ghc-flag:: -Wwarn=<wflag>
+.. ghc-flag:: -Wwarn=⟨wflag⟩
+    :noindex:
 
     Causes a specific warning to be treated as normal warning, not fatal error.
 
@@ -183,13 +186,17 @@ of ``-W(no-)*``.
 
 .. ghc-flag:: -fdefer-out-of-scope-variables
 
-    Defer variable out of scope errors (errors about names without a leading underscore)
+    Defer variable out-of-scope errors (errors about names without a leading underscore)
     until runtime. This will turn variable-out-of-scope errors into warnings.
     Using a value that depends on a typed hole produces a runtime error,
     the same as :ghc-flag:`-fdefer-type-errors` (which implies this option).
     See :ref:`typed-holes` and :ref:`defer-type-errors`.
 
     Implied by :ghc-flag:`-fdefer-type-errors`. See also :ghc-flag:`-Wdeferred-out-of-scope-variables`.
+
+.. ghc-flag:: -Wdeferred-out-of-scope-variables
+
+    Warn when a deferred out-of-scope variable is encountered.
 
 .. ghc-flag:: -Wpartial-type-signatures
 
@@ -241,6 +248,18 @@ of ``-W(no-)*``.
     Causes a warning to be emitted when a module, function or type with
     a ``WARNING`` or ``DEPRECATED pragma`` is used. See
     :ref:`warning-deprecated-pragma` for more details on the pragmas.
+
+    This option is on by default.
+
+.. ghc-flag:: -Wdeprecations
+
+    .. index::
+       single: deprecations
+
+    Causes a warning to be emitted when a module, function or type with
+    a ``WARNING`` or ``DEPRECATED pragma`` is used. See
+    :ref:`warning-deprecated-pragma` for more details on the pragmas.
+    An alias for :ghc-flag:`-Wwarnings-deprecations`.
 
     This option is on by default.
 
@@ -457,7 +476,7 @@ of ``-W(no-)*``.
     declaration.
 
     This option is on by default. As usual you can suppress it on a
-    per-module basis with :ghc-flag:`-Wno-redundant-constraints`.
+    per-module basis with :ghc-flag:`-Wno-redundant-constraints <-Wredundant-constraints>`.
     Occasionally you may specifically want a function to have a more
     constrained signature than necessary, perhaps to leave yourself
     wiggle-room for changing the implementation without changing the
@@ -547,7 +566,7 @@ of ``-W(no-)*``.
         h = \[] -> 2
         Just k = f y
 
-.. ghc-flag:: -fmax-pmcheck-iterations=<N>
+.. ghc-flag:: -fmax-pmcheck-iterations=⟨n⟩
 
     :default: 2000000
 
@@ -776,7 +795,8 @@ of ``-W(no-)*``.
        f :: Eq a => a -> a
 
     This option is on by default. As usual you can suppress it on a
-    per-module basis with :ghc-flag:`-Wno-simplifiable-class-constraints`.
+    per-module basis with :ghc-flag:`-Wno-simplifiable-class-constraints
+    <-Wsimplifiable-class-constraints>`.
 
 .. ghc-flag:: -Wtabs
 
@@ -900,18 +920,20 @@ of ``-W(no-)*``.
        single: binds, unused
 
     Warn if a pattern binding binds no variables at all, unless it is a
-    lone, possibly-banged, wild-card pattern. For example: ::
+    lone wild-card pattern, or a banged pattern. For example: ::
 
         Just _ = rhs3    -- Warning: unused pattern binding
         (_, _) = rhs4    -- Warning: unused pattern binding
         _  = rhs3        -- No warning: lone wild-card pattern
-        !_ = rhs4        -- No warning: banged wild-card pattern; behaves like seq
+        !() = rhs4       -- No warning: banged pattern; behaves like seq
 
+    In general a lazy pattern binding `p = e` is a no-op if `p` does not
+    bind any variables.
     The motivation for allowing lone wild-card patterns is they are not
     very different from ``_v = rhs3``, which elicits no warning; and
     they can be useful to add a type constraint, e.g. ``_ = x::Int``. A
-    lone banged wild-card pattern is useful as an alternative (to
-    ``seq``) way to force evaluation.
+    banged pattern (see :ref:`bang-patterns`) is *not* a no-op, because
+    it forces evaluation, and is useful as an alternative to ``seq``.
 
 .. ghc-flag:: -Wunused-imports
 
@@ -979,7 +1001,7 @@ of ``-W(no-)*``.
 
         type instance F _x _y = []
 
-    Unlike :ghc-flag:`-Wunused-matches`, :ghc-flag:`-Wunused-type-variables` is
+    Unlike :ghc-flag:`-Wunused-matches`, :ghc-flag:`-Wunused-type-patterns` is
     not implied by :ghc-flag:`-Wall`. The rationale for this decision is that
     unlike term-level pattern names, type names are often chosen expressly for
     documentation purposes, so using underscores in type names can make the
@@ -1028,6 +1050,8 @@ of ``-W(no-)*``.
     :ref:`rules-inline`.
 
 .. ghc-flag:: -Wcpp-undef
+
+    :since: 8.2
 
     This flag passes ``-Wundef`` to the C pre-processor (if its being used)
     which causes the pre-processor to warn on uses of the `#if` directive on

@@ -137,7 +137,7 @@ These data types are the heart of the compiler
 -}
 
 -- | This is the data type that represents GHCs core intermediate language. Currently
--- GHC uses System FC <http://research.microsoft.com/~simonpj/papers/ext-f/> for this purpose,
+-- GHC uses System FC <https://www.microsoft.com/en-us/research/publication/system-f-with-type-equality-coercions/> for this purpose,
 -- which is closely related to the simpler and better known System F <http://en.wikipedia.org/wiki/System_F>.
 --
 -- We get from Haskell source to this Core language in a number of stages:
@@ -457,7 +457,8 @@ See #case_invariants#
 
 Note [Levity polymorphism invariants]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-The levity-polymorphism invariants are these:
+The levity-polymorphism invariants are these (as per "Levity Polymorphism",
+PLDI '17):
 
 * The type of a term-binder must not be levity-polymorphic,
   unless it is a let(rec)-bound join point
@@ -1651,7 +1652,7 @@ In unfoldings and rules, we guarantee that the template is occ-analysed,
 so that the occurrence info on the binders is correct.  This is important,
 because the Simplifier does not re-analyse the template when using it. If
 the occurrence info is wrong
-  - We may get more simpifier iterations than necessary, because
+  - We may get more simplifier iterations than necessary, because
     once-occ info isn't there
   - More seriously, we may get an infinite loop if there's a Rec
     without a loop breaker marked
@@ -1682,6 +1683,8 @@ ltAlt a1 a2 = (a1 `cmpAlt` a2) == LT
 
 cmpAltCon :: AltCon -> AltCon -> Ordering
 -- ^ Compares 'AltCon's within a single list of alternatives
+-- DEFAULT comes out smallest, so that sorting by AltCon
+-- puts alternatives in the order required by #case_invariants#
 cmpAltCon DEFAULT      DEFAULT     = EQ
 cmpAltCon DEFAULT      _           = LT
 

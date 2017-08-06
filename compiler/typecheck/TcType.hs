@@ -58,7 +58,7 @@ module TcType (
   -- These are important because they do not look through newtypes
   getTyVar,
   tcSplitForAllTy_maybe,
-  tcSplitForAllTys, tcSplitPiTys, tcSplitForAllTyVarBndrs,
+  tcSplitForAllTys, tcSplitPiTys, tcSplitPiTy_maybe, tcSplitForAllTyVarBndrs,
   tcSplitPhiTy, tcSplitPredFunTy_maybe,
   tcSplitFunTy_maybe, tcSplitFunTys, tcFunArgTy, tcFunResultTy, tcFunResultTyN,
   tcSplitFunTysN,
@@ -66,7 +66,8 @@ module TcType (
   tcRepSplitTyConApp_maybe, tcRepSplitTyConApp_maybe',
   tcTyConAppTyCon, tcTyConAppTyCon_maybe, tcTyConAppArgs,
   tcSplitAppTy_maybe, tcSplitAppTy, tcSplitAppTys, tcRepSplitAppTy_maybe,
-  tcGetTyVar_maybe, tcGetTyVar, nextRole,
+  tcRepGetNumAppTys,
+  tcGetCastedTyVar_maybe, tcGetTyVar_maybe, tcGetTyVar, nextRole,
   tcSplitSigmaTy, tcSplitNestedSigmaTys, tcDeepSplitSigmaTy_maybe,
 
   ---------------------------------
@@ -183,10 +184,14 @@ module TcType (
 
   pprKind, pprParendKind, pprSigmaType,
   pprType, pprParendType, pprTypeApp, pprTyThingCategory, tyThingCategory,
-  pprTheta, pprThetaArrowTy, pprClassPred,
+  pprTheta, pprParendTheta, pprThetaArrowTy, pprClassPred,
   pprTvBndr, pprTvBndrs,
 
-  TypeSize, sizeType, sizeTypes, toposortTyVars
+  TypeSize, sizeType, sizeTypes, toposortTyVars,
+
+  ---------------------------------
+  -- argument visibility
+  tcTyConVisibilities, isNextTyConArgVisible, isNextArgVisible
 
   ) where
 
@@ -219,6 +224,7 @@ import BasicTypes
 import Util
 import Bag
 import Maybes
+import ListSetOps ( getNth )
 import Outputable
 import FastString
 import ErrUtils( Validity(..), MsgDoc, isValid )
@@ -496,10 +502,6 @@ data TcTyVarDetails
                   --          when looking up instances
                   -- See Note [Binding when looking up instances] in InstEnv
 
-  | FlatSkol      -- A flatten-skolem.  It stands for the TcType, and zonking
-       TcType     -- will replace it by that type.
-                  -- See Note [The flattening story] in TcFlatten
-
   | RuntimeUnk    -- Stands for an as-yet-unknown type in the GHCi
                   -- interactive context
 
@@ -523,11 +525,17 @@ data MetaInfo
                    -- never contains any ForAlls.
 
    | SigTv         -- A variant of TauTv, except that it should not be
-                   -- unified with a type, only with a type variable
+                   --   unified with a type, only with a type variable
                    -- See Note [Signature skolems]
 
    | FlatMetaTv    -- A flatten meta-tyvar
                    -- It is a meta-tyvar, but it is always untouchable, with level 0
+                   -- See Note [The flattening story] in TcFlatten
+
+   | FlatSkolTv    -- A flatten skolem tyvar
+                   -- Just like FlatMetaTv, but is comletely "owned" by
+                   --   its Given CFunEqCan.
+                   -- It is filled in /only/ by unflattenGivens
                    -- See Note [The flattening story] in TcFlatten
 
 instance Outputable MetaDetails where
@@ -536,8 +544,7 @@ instance Outputable MetaDetails where
 
 pprTcTyVarDetails :: TcTyVarDetails -> SDoc
 -- For debugging
-pprTcTyVarDetails (RuntimeUnk {})  = text "rt"
-pprTcTyVarDetails (FlatSkol {})    = text "fsk"
+pprTcTyVarDetails (RuntimeUnk {})      = text "rt"
 pprTcTyVarDetails (SkolemTv lvl True)  = text "ssk" <> colon <> ppr lvl
 pprTcTyVarDetails (SkolemTv lvl False) = text "sk"  <> colon <> ppr lvl
 pprTcTyVarDetails (MetaTv { mtv_info = info, mtv_tclvl = tclvl })
@@ -546,7 +553,8 @@ pprTcTyVarDetails (MetaTv { mtv_info = info, mtv_tclvl = tclvl })
     pp_info = case info of
                 TauTv      -> text "tau"
                 SigTv      -> text "sig"
-                FlatMetaTv -> text "fuv"
+                FlatMetaTv -> text "fmv"
+                FlatSkolTv -> text "fsk"
 
 
 {- *********************************************************************
@@ -715,7 +723,7 @@ Note [TcLevel assignment]
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 We arrange the TcLevels like this
 
-   0   Level for flatten meta-vars
+   0   Level for all flatten meta-vars
    1   Top level
    2   First-level implication constraints
    3   Second-level implication constraints
@@ -727,9 +735,9 @@ The flatten meta-vars are all at level 0, just to make them untouchable.
 maxTcLevel :: TcLevel -> TcLevel -> TcLevel
 maxTcLevel (TcLevel a) (TcLevel b) = TcLevel (a `max` b)
 
-fmvTcLevel :: TcLevel -> TcLevel
+fmvTcLevel :: TcLevel
 -- See Note [TcLevel assignment]
-fmvTcLevel _ = TcLevel 0
+fmvTcLevel = TcLevel 0
 
 topTcLevel :: TcLevel
 -- See Note [TcLevel assignment]
@@ -763,7 +771,6 @@ tcTyVarLevel tv
     case tcTyVarDetails tv of
           MetaTv { mtv_tclvl = tv_lvl } -> tv_lvl
           SkolemTv tv_lvl _             -> tv_lvl
-          FlatSkol ty                   -> tcTypeLevel ty
           RuntimeUnk                    -> topTcLevel
 
 tcTypeLevel :: TcType -> TcLevel
@@ -1167,20 +1174,15 @@ isFmvTyVar tv
         MetaTv { mtv_info = FlatMetaTv } -> True
         _                                -> False
 
--- | True of both given and wanted flatten-skolems (fak and usk)
-isFlattenTyVar tv
-  = ASSERT2( tcIsTcTyVar tv, ppr tv )
-    case tcTyVarDetails tv of
-        FlatSkol {}                      -> True
-        MetaTv { mtv_info = FlatMetaTv } -> True
-        _                                -> False
-
--- | True of FlatSkol skolems only
 isFskTyVar tv
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
     case tcTyVarDetails tv of
-        FlatSkol {} -> True
-        _           -> False
+        MetaTv { mtv_info = FlatSkolTv } -> True
+        _                                -> False
+
+-- | True of both given and wanted flatten-skolems (fak and usk)
+isFlattenTyVar tv
+  = isFmvTyVar tv || isFskTyVar tv
 
 isSkolemTyVar tv
   = ASSERT2( tcIsTcTyVar tv, ppr tv )
@@ -1360,6 +1362,10 @@ variables.  It's up to you to make sure this doesn't matter.
 -- Always succeeds, even if it returns an empty list.
 tcSplitPiTys :: Type -> ([TyBinder], Type)
 tcSplitPiTys = splitPiTys
+
+-- | Splits a type into a TyBinder and a body, if possible. Panics otherwise
+tcSplitPiTy_maybe :: Type -> Maybe (TyBinder, Type)
+tcSplitPiTy_maybe = splitPiTy_maybe
 
 tcSplitForAllTy_maybe :: Type -> Maybe (TyVarBinder, Type)
 tcSplitForAllTy_maybe ty | Just ty' <- tcView ty = tcSplitForAllTy_maybe ty'
@@ -1573,7 +1579,21 @@ tcSplitAppTys ty
                    Just (ty', arg) -> go ty' (arg:args)
                    Nothing         -> (ty,args)
 
+-- | Returns the number of arguments in the given type, without
+-- looking through synonyms. This is used only for error reporting.
+-- We don't look through synonyms because of #11313.
+tcRepGetNumAppTys :: Type -> Arity
+tcRepGetNumAppTys = length . snd . repSplitAppTys
+
 -----------------------
+-- | If the type is a tyvar, possibly under a cast, returns it, along
+-- with the coercion. Thus, the co is :: kind tv ~N kind type
+tcGetCastedTyVar_maybe :: Type -> Maybe (TyVar, CoercionN)
+tcGetCastedTyVar_maybe ty | Just ty' <- tcView ty = tcGetCastedTyVar_maybe ty'
+tcGetCastedTyVar_maybe (CastTy (TyVarTy tv) co) = Just (tv, co)
+tcGetCastedTyVar_maybe (TyVarTy tv)             = Just (tv, mkNomReflCo (tyVarKind tv))
+tcGetCastedTyVar_maybe _                        = Nothing
+
 tcGetTyVar_maybe :: Type -> Maybe TyVar
 tcGetTyVar_maybe ty | Just ty' <- tcView ty = tcGetTyVar_maybe ty'
 tcGetTyVar_maybe (TyVarTy tv)   = Just tv
@@ -1732,7 +1752,7 @@ tc_eq_type view_fun orig_ty1 orig_ty2 = go True orig_env orig_ty1 orig_ty2
        -- be oversaturated
       where
         bndrs = tyConBinders tc
-        viss  = map (isVisibleArgFlag . tyConBinderArgFlag) bndrs
+        viss  = map isVisibleTyConBinder bndrs
     tc_vis False _ = repeat False  -- if we're not in a visible context, our args
                                    -- aren't either
 
@@ -2152,7 +2172,9 @@ isInsolubleOccursCheck eq_rel tv ty
     go (CoercionTy _) = False   -- ToDo: what about the coercion
     go (TyConApp tc tys)
       | isGenerativeTyCon tc role = any go tys
-      | otherwise                 = False
+      | otherwise                 = any go (drop (tyConArity tc) tys)
+         -- (a ~ F b a), where F has arity 1,
+         -- has an insoluble occurs check
 
     role = eqRelRole eq_rel
 
@@ -2561,8 +2583,11 @@ sizeType = go
     go (TyVarTy {})              = 1
     go (TyConApp tc tys)
       | isTypeFamilyTyCon tc     = infinity  -- Type-family applications can
-                                           -- expand to any arbitrary size
+                                             -- expand to any arbitrary size
       | otherwise                = sizeTypes (filterOutInvisibleTypes tc tys) + 1
+                                   -- Why filter out invisible args?  I suppose any
+                                   -- size ordering is sound, but why is this better?
+                                   -- I came across this when investigating #14010.
     go (LitTy {})                = 1
     go (FunTy arg res)           = go arg + go res + 1
     go (AppTy fun arg)           = go fun + go arg
@@ -2574,3 +2599,28 @@ sizeType = go
 
 sizeTypes :: [Type] -> TypeSize
 sizeTypes tys = sum (map sizeType tys)
+
+-----------------------------------------------------------------------------------
+-----------------------------------------------------------------------------------
+-----------------------
+-- | For every arg a tycon can take, the returned list says True if the argument
+-- is taken visibly, and False otherwise. Ends with an infinite tail of Trues to
+-- allow for oversaturation.
+tcTyConVisibilities :: TyCon -> [Bool]
+tcTyConVisibilities tc = tc_binder_viss ++ tc_return_kind_viss ++ repeat True
+  where
+    tc_binder_viss      = map isVisibleTyConBinder (tyConBinders tc)
+    tc_return_kind_viss = map isVisibleBinder (fst $ tcSplitPiTys (tyConResKind tc))
+
+-- | If the tycon is applied to the types, is the next argument visible?
+isNextTyConArgVisible :: TyCon -> [Type] -> Bool
+isNextTyConArgVisible tc tys
+  = tcTyConVisibilities tc `getNth` length tys
+
+-- | Should this type be applied to a visible argument?
+isNextArgVisible :: TcType -> Bool
+isNextArgVisible ty
+  | Just (bndr, _) <- tcSplitPiTy_maybe ty = isVisibleBinder bndr
+  | otherwise                              = True
+    -- this second case might happen if, say, we have an unzonked TauTv.
+    -- But TauTvs can't range over types that take invisible arguments

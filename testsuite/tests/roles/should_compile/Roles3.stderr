@@ -8,7 +8,7 @@ TYPE CONSTRUCTORS
     meth1 :: a -> a
     {-# MINIMAL meth1 #-}
   class C2 a b where
-    meth2 :: a ~ b => a -> b
+    meth2 :: (a ~ b) => a -> b
     {-# MINIMAL meth2 #-}
   class C3 a b where
     type family F3 b :: * open
@@ -23,13 +23,13 @@ TYPE CONSTRUCTORS
 COERCION AXIOMS
   axiom Roles3.N:C1 :: C1 a = a -> a -- Defined at Roles3.hs:6:1
   axiom Roles3.N:C2 ::
-    C2 a b = a ~ b => a -> b -- Defined at Roles3.hs:9:1
+    C2 a b = (a ~ b) => a -> b -- Defined at Roles3.hs:9:1
   axiom Roles3.N:C3 ::
     C3 a b = a -> F3 b -> F3 b -- Defined at Roles3.hs:12:1
   axiom Roles3.N:C4 ::
     C4 a b = a -> F4 b -> F4 b -- Defined at Roles3.hs:18:1
 Dependent modules: []
-Dependent packages: [base-4.10.0.0, ghc-prim-0.5.0.0,
+Dependent packages: [base-4.10.0.0, ghc-prim-0.5.1.0,
                      integer-gmp-1.0.0.1]
 
 ==================== Typechecker ====================

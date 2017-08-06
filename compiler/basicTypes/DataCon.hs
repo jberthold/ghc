@@ -28,8 +28,9 @@ module DataCon (
 
         -- ** Type deconstruction
         dataConRepType, dataConSig, dataConInstSig, dataConFullSig,
-        dataConName, dataConIdentity, dataConTag, dataConTyCon,
-        dataConOrigTyCon, dataConUserType,
+        dataConName, dataConIdentity, dataConTag, dataConTagZ,
+        dataConTyCon, dataConOrigTyCon,
+        dataConUserType,
         dataConUnivTyVars, dataConUnivTyVarBinders,
         dataConExTyVars, dataConExTyVarBinders,
         dataConAllTyVars,
@@ -232,7 +233,7 @@ It's a flaw in the language.
         it separately in the type checker on occurrences of a
         constructor, either in an expression or in a pattern.
 
-        [May 2003: actually I think this decision could evasily be
+        [May 2003: actually I think this decision could easily be
         reversed now, and probably should be.  Generics could be
         disabled for types with a stupid context; record updates now
         (H98) needs the context too; etc.  It's an unforced change, so
@@ -424,7 +425,7 @@ For the TyVarBinders in a DataCon and PatSyn:
 
 Why do we need the TyVarBinders, rather than just the TyVars?  So that
 we can construct the right type for the DataCon with its foralls
-attributed the correce visiblity.  That in turn governs whether you
+attributed the correct visibility.  That in turn governs whether you
 can use visible type application at a call of the data constructor.
 
 Note [DataCon arities]
@@ -777,7 +778,7 @@ mkDataCon name declared_infix prom_info
 --      data T a where { MkT :: S }
 -- then it's possible that the univ_tvs may hit an assertion failure
 -- if you pull on univ_tvs.  This case is checked by checkValidDataCon,
--- so the error is detected properly... it's just that asaertions here
+-- so the error is detected properly... it's just that assertions here
 -- are a little dodgy.
 
   = con
@@ -861,6 +862,9 @@ dataConName = dcName
 dataConTag :: DataCon -> ConTag
 dataConTag  = dcTag
 
+dataConTagZ :: DataCon -> ConTagZ
+dataConTagZ con = dataConTag con - fIRST_TAG
+
 -- | The type constructor that we are building via this data constructor
 dataConTyCon :: DataCon -> TyCon
 dataConTyCon = dcRepTyCon
@@ -898,7 +902,7 @@ dataConExTyVars (MkData { dcExTyVars = tvbs }) = binderVars tvbs
 dataConExTyVarBinders :: DataCon -> [TyVarBinder]
 dataConExTyVarBinders = dcExTyVars
 
--- | Both the universal and existentiatial type variables of the constructor
+-- | Both the universal and existential type variables of the constructor
 dataConAllTyVars :: DataCon -> [TyVar]
 dataConAllTyVars (MkData { dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs })
   = binderVars (univ_tvs ++ ex_tvs)
@@ -1048,7 +1052,7 @@ dataConInstSig
   -> [Type]    -- Instantiate the *universal* tyvars with these types
   -> ([TyVar], ThetaType, [Type])  -- Return instantiated existentials
                                    -- theta and arg tys
--- ^ Instantantiate the universal tyvars of a data con,
+-- ^ Instantiate the universal tyvars of a data con,
 --   returning the instantiated existentials, constraints, and args
 dataConInstSig (MkData { dcUnivTyVars = univ_tvs, dcExTyVars = ex_tvs
                        , dcEqSpec = eq_spec, dcOtherTheta  = theta
@@ -1126,7 +1130,7 @@ dataConInstArgTys :: DataCon    -- ^ A datacon with no existentials or equality 
                   -> [Type]
 dataConInstArgTys dc@(MkData {dcUnivTyVars = univ_tvs,
                               dcExTyVars = ex_tvs}) inst_tys
- = ASSERT2( length univ_tvs == length inst_tys
+ = ASSERT2( univ_tvs `equalLength` inst_tys
           , text "dataConInstArgTys" <+> ppr dc $$ ppr univ_tvs $$ ppr inst_tys)
    ASSERT2( null ex_tvs, ppr dc )
    map (substTyWith (binderVars univ_tvs) inst_tys) (dataConRepArgTys dc)
@@ -1143,7 +1147,7 @@ dataConInstOrigArgTys
 dataConInstOrigArgTys dc@(MkData {dcOrigArgTys = arg_tys,
                                   dcUnivTyVars = univ_tvs,
                                   dcExTyVars = ex_tvs}) inst_tys
-  = ASSERT2( length tyvars == length inst_tys
+  = ASSERT2( tyvars `equalLength` inst_tys
           , text "dataConInstOrigArgTys" <+> ppr dc $$ ppr tyvars $$ ppr inst_tys )
     map (substTyWith tyvars inst_tys) arg_tys
   where

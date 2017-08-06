@@ -5,7 +5,7 @@
 \section{@Vars@: Variables}
 -}
 
-{-# LANGUAGE CPP, MultiWayIf, FlexibleInstances, DeriveDataTypeable #-}
+{-# LANGUAGE CPP, FlexibleContexts, MultiWayIf, FlexibleInstances, DeriveDataTypeable #-}
 
 -- |
 -- #name_types#
@@ -64,6 +64,7 @@ module Var (
         TyVarBndr(..), ArgFlag(..), TyVarBinder,
         binderVar, binderVars, binderArgFlag, binderKind,
         isVisibleArgFlag, isInvisibleArgFlag, sameVis,
+        mkTyVarBinder, mkTyVarBinders,
 
         -- ** Constructing TyVar's
         mkTyVar, mkTcTyVar,
@@ -158,7 +159,7 @@ type TyCoVar = Id       -- Type, *or* coercion variable
 
 
 {- Many passes apply a substitution, and it's very handy to have type
-   synonyms to remind us whether or not the subsitution has been applied -}
+   synonyms to remind us whether or not the substitution has been applied -}
 
 type InVar      = Var
 type InTyVar    = TyVar
@@ -374,7 +375,7 @@ updateVarTypeM f id = do { ty' <- f (varType id)
 -- Is something required to appear in source Haskell ('Required'),
 -- permitted by request ('Specified') (visible type application), or
 -- prohibited entirely from appearing in source Haskell ('Inferred')?
--- See Note [TyBinders and ArgFlags] in TyCoRep
+-- See Note [TyVarBndrs, TyVarBinders, TyConBinders, and visibility] in TyCoRep
 data ArgFlag = Required | Specified | Inferred
   deriving (Eq, Data)
 
@@ -404,7 +405,7 @@ sameVis _        _        = True
 
 -- Type Variable Binder
 --
--- TyVarBndr is polymorphic in both tyvar and visiblity fields:
+-- TyVarBndr is polymorphic in both tyvar and visibility fields:
 --   * tyvar can be TyVar or IfaceTv
 --   * argf  can be ArgFlag or TyConBndrVis
 data TyVarBndr tyvar argf = TvBndr tyvar argf
@@ -428,6 +429,14 @@ binderArgFlag (TvBndr _ argf) = argf
 
 binderKind :: TyVarBndr TyVar argf -> Kind
 binderKind (TvBndr tv _) = tyVarKind tv
+
+-- | Make a named binder
+mkTyVarBinder :: ArgFlag -> Var -> TyVarBinder
+mkTyVarBinder vis var = TvBndr var vis
+
+-- | Make many named binders
+mkTyVarBinders :: ArgFlag -> [TyVar] -> [TyVarBinder]
+mkTyVarBinders vis = map (mkTyVarBinder vis)
 
 {-
 ************************************************************************
@@ -521,7 +530,7 @@ instance Binary ArgFlag where
 ************************************************************************
 -}
 
-idInfo :: Id -> IdInfo
+idInfo :: HasDebugCallStack => Id -> IdInfo
 idInfo (Id { id_info = info }) = info
 idInfo other                   = pprPanic "idInfo" (ppr other)
 

@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP, ImplicitParams #-}
 {-
 (c) The University of Glasgow 2006-2012
 (c) The GRASP Project, Glasgow University, 1992-1998
@@ -122,6 +121,7 @@ import Data.List (intersperse)
 
 import GHC.Fingerprint
 import GHC.Show         ( showMultiLineString )
+import GHC.Stack        ( callStack, prettyCallStack )
 
 {-
 ************************************************************************
@@ -723,19 +723,18 @@ ppUnless False doc = doc
 --
 -- Only takes effect if colours are enabled.
 coloured :: Col.PprColour -> SDoc -> SDoc
-coloured col@(Col.PprColour c) sdoc =
+coloured col sdoc =
   sdocWithDynFlags $ \dflags ->
     if shouldUseColor dflags
-    then SDoc $ \ctx@SDC{ sdocLastColour = Col.PprColour lc } ->
+    then SDoc $ \ctx@SDC{ sdocLastColour = lastCol } ->
          case ctx of
            SDC{ sdocStyle = PprUser _ _ Coloured } ->
-             let ctx' = ctx{ sdocLastColour = col } in
-             Pretty.zeroWidthText (cReset ++ c)
+             let ctx' = ctx{ sdocLastColour = lastCol `mappend` col } in
+             Pretty.zeroWidthText (Col.renderColour col)
                Pretty.<> runSDoc sdoc ctx'
-               Pretty.<> Pretty.zeroWidthText (cReset ++ lc)
+               Pretty.<> Pretty.zeroWidthText (Col.renderColourAfresh lastCol)
            _ -> runSDoc sdoc ctx
     else sdoc
-  where Col.PprColour cReset = Col.colReset
 
 keyword :: SDoc -> SDoc
 keyword = coloured Col.colBold
@@ -1131,7 +1130,8 @@ doOrDoes _   = text "do"
 
 callStackDoc :: HasCallStack => SDoc
 callStackDoc =
-    hang (text "Call stack:") 4 (vcat $ map text $ lines prettyCurrentCallStack)
+    hang (text "Call stack:")
+       4 (vcat $ map text $ lines (prettyCallStack callStack))
 
 pprPanic :: HasCallStack => String -> SDoc -> a
 -- ^ Throw an exception saying "bug in GHC"

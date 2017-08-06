@@ -108,7 +108,7 @@ bool major_gc;
 static W_ g0_pcnt_kept = 30; // percentage of g0 live at last minor GC
 
 /* Mut-list stats */
-#ifdef DEBUG
+#if defined(DEBUG)
 uint32_t mutlist_MUTVARS,
     mutlist_MUTARRS,
     mutlist_MVARS,
@@ -192,7 +192,7 @@ GarbageCollect (uint32_t collect_gen,
 {
   bdescr *bd;
   generation *gen;
-  StgWord live_blocks, live_words, par_max_copied;
+  StgWord live_blocks, live_words, par_max_copied, par_balanced_copied;
 #if defined(THREADED_RTS)
   gc_thread *saved_gct;
 #endif
@@ -203,7 +203,7 @@ GarbageCollect (uint32_t collect_gen,
   saved_gct = gct;
 #endif
 
-#ifdef PROFILING
+#if defined(PROFILING)
   CostCentreStack *save_CCS[n_capabilities];
 #endif
 
@@ -228,7 +228,7 @@ GarbageCollect (uint32_t collect_gen,
   // lock the StablePtr table
   stableLock();
 
-#ifdef DEBUG
+#if defined(DEBUG)
   mutlist_MUTVARS = 0;
   mutlist_MUTARRS = 0;
   mutlist_MVARS = 0;
@@ -242,7 +242,7 @@ GarbageCollect (uint32_t collect_gen,
 #endif
 
   // attribute any costs to CCS_GC
-#ifdef PROFILING
+#if defined(PROFILING)
   for (n = 0; n < n_capabilities; n++) {
       save_CCS[n] = capabilities[n]->r.rCCCS;
       capabilities[n]->r.rCCCS = CCS_GC;
@@ -295,7 +295,7 @@ GarbageCollect (uint32_t collect_gen,
   debugTrace(DEBUG_gc, "GC (gen %d, using %d thread(s))",
              N, n_gc_threads);
 
-#ifdef DEBUG
+#if defined(DEBUG)
   // check for memory leaks if DEBUG is on
   memInventory(DEBUG_gc);
 #endif
@@ -442,14 +442,14 @@ GarbageCollect (uint32_t collect_gen,
   // Now see which stable names are still alive.
   gcStableTables();
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
   // we have to update the inport addresses in here, as long as
   // IsAlive() works... Inports to garbage-collected blackholes will
   // be closed, sending a message to the sender if known.
   updateRTT();
 #endif
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
   if (n_gc_threads == 1) {
       for (n = 0; n < n_capabilities; n++) {
           pruneSparkQueue(capabilities[n]);
@@ -463,7 +463,7 @@ GarbageCollect (uint32_t collect_gen,
   }
 #endif
 
-#ifdef PROFILING
+#if defined(PROFILING)
   // We call processHeapClosureForDead() on every closure destroyed during
   // the current garbage collection, so we invoke LdvCensusForDead().
   if (RtsFlags.ProfFlags.doHeapProfile == HEAP_BY_LDV
@@ -486,8 +486,14 @@ GarbageCollect (uint32_t collect_gen,
 
   copied = 0;
   par_max_copied = 0;
+  par_balanced_copied = 0;
   {
       uint32_t i;
+      uint64_t par_balanced_copied_acc = 0;
+
+      for (i=0; i < n_gc_threads; i++) {
+          copied += gc_threads[i]->copied;
+      }
       for (i=0; i < n_gc_threads; i++) {
           if (n_gc_threads > 1) {
               debugTrace(DEBUG_gc,"thread %d:", i);
@@ -497,11 +503,20 @@ GarbageCollect (uint32_t collect_gen,
               debugTrace(DEBUG_gc,"   no_work          %ld", gc_threads[i]->no_work);
               debugTrace(DEBUG_gc,"   scav_find_work %ld",   gc_threads[i]->scav_find_work);
           }
-          copied += gc_threads[i]->copied;
           par_max_copied = stg_max(gc_threads[i]->copied, par_max_copied);
+          par_balanced_copied_acc +=
+            stg_min(n_gc_threads * gc_threads[i]->copied, copied);
       }
       if (n_gc_threads == 1) {
           par_max_copied = 0;
+          par_balanced_copied = 0;
+      }
+      else
+      {
+          // See Note [Work Balance] for an explanation of this computation
+          par_balanced_copied =
+              (par_balanced_copied_acc - copied + (n_gc_threads - 1) / 2) /
+              (n_gc_threads - 1);
       }
   }
 
@@ -725,7 +740,7 @@ GarbageCollect (uint32_t collect_gen,
       checkUnload (gct->scavenged_static_objects);
   }
 
-#ifdef PROFILING
+#if defined(PROFILING)
   // resetStaticObjectForRetainerProfiling() must be called before
   // zeroing below.
 
@@ -788,19 +803,19 @@ GarbageCollect (uint32_t collect_gen,
   // extra GC trace info
   IF_DEBUG(gc, statDescribeGens());
 
-#ifdef DEBUG
+#if defined(DEBUG)
   // symbol-table based profiling
   /*  heapCensus(to_blocks); */ /* ToDo */
 #endif
 
   // restore enclosing cost centre
-#ifdef PROFILING
+#if defined(PROFILING)
   for (n = 0; n < n_capabilities; n++) {
       capabilities[n]->r.rCCCS = save_CCS[n];
   }
 #endif
 
-#ifdef DEBUG
+#if defined(DEBUG)
   // check for memory leaks if DEBUG is on
   memInventory(DEBUG_gc);
 #endif
@@ -808,7 +823,7 @@ GarbageCollect (uint32_t collect_gen,
   // ok, GC over: tell the stats department what happened.
   stat_endGC(cap, gct, live_words, copied,
              live_blocks * BLOCK_SIZE_W - live_words /* slop */,
-             N, n_gc_threads, par_max_copied);
+             N, n_gc_threads, par_max_copied, par_balanced_copied);
 
 #if defined(RTS_USER_SIGNALS)
   if (RtsFlags.MiscFlags.install_signal_handlers) {
@@ -849,7 +864,7 @@ new_gc_thread (uint32_t n, gc_thread *t)
 
     t->cap = capabilities[n];
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     t->id = 0;
     initSpinLock(&t->gc_spin);
     initSpinLock(&t->mut_spin);
@@ -1050,7 +1065,7 @@ loop:
 
     // scavenge_loop() only exits when there's no work to do
 
-#ifdef DEBUG
+#if defined(DEBUG)
     r = dec_running();
 #else
     dec_running();
@@ -1111,7 +1126,7 @@ gcWorkerThread (Capability *cap)
 
     scavenge_until_all_done();
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
     // Now that the whole heap is marked, we discard any sparks that
     // were found to be unreachable.  The main GC thread is currently
     // marking heap reachable via weak pointers, so it is

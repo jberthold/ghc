@@ -11,8 +11,7 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef RTS_TYPES_H
-#define RTS_TYPES_H
+#pragma once
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -60,5 +59,3 @@ typedef struct rtsPackBuffer_ {
     StgInt               unpacked_size; // currently unused
     StgWord              buffer[];      // payload
 } rtsPackBuffer;
-
-#endif /* RTS_TYPES_H */

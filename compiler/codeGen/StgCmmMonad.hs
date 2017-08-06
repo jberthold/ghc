@@ -64,7 +64,7 @@ module StgCmmMonad (
 import Cmm
 import StgCmmClosure
 import DynFlags
-import Hoopl
+import Hoopl.Collections
 import Maybes
 import MkGraph
 import BlockId
@@ -74,6 +74,7 @@ import Module
 import Id
 import VarEnv
 import OrdList
+import BasicTypes( ConTagZ )
 import Unique
 import UniqSupply
 import FastString

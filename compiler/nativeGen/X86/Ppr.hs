@@ -32,7 +32,8 @@ import Reg
 import PprBase
 
 
-import Hoopl
+import Hoopl.Collections
+import Hoopl.Label
 import BasicTypes       (Alignment)
 import DynFlags
 import Cmm              hiding (topInfoTable)
@@ -724,6 +725,7 @@ pprInstr (MUL format op1 op2) = pprFormatOpOp (sLit "mul") format op1 op2
 pprInstr (MUL2 format op) = pprFormatOp (sLit "mul") format op
 
 pprInstr (FDIV format op1 op2) = pprFormatOpOp (sLit "div") format op1 op2
+pprInstr (SQRT format op1 op2) = pprFormatOpReg (sLit "sqrt") format op1 op2
 
 pprInstr (CVTSS2SD from to)      = pprRegReg (sLit "cvtss2sd") from to
 pprInstr (CVTSD2SS from to)      = pprRegReg (sLit "cvtsd2ss") from to

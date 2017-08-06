@@ -25,12 +25,12 @@ import HscMain          ( newHscEnv )
 import DriverPipeline   ( oneShot, compileFile )
 import DriverMkDepend   ( doMkDependHS )
 import DriverBkp   ( doBackpack )
-#ifdef GHCI
+#if defined(GHCI)
 import GHCi.UI          ( interactiveUI, ghciWelcomeMsg, defaultGhciSettings )
 #endif
 
 -- Frontend plugins
-#ifdef GHCI
+#if defined(GHCI)
 import DynamicLoading   ( loadFrontendPlugin )
 import Plugins
 #else
@@ -46,7 +46,7 @@ import HscTypes
 import Packages         ( pprPackages, pprPackagesSimple )
 import DriverPhases
 import BasicTypes       ( failed )
-import DynFlags
+import DynFlags hiding (WarnReason(..))
 import ErrUtils
 import FastString
 import Outputable
@@ -149,7 +149,7 @@ main = do
                 Right postLoadMode ->
                     main' postLoadMode dflags argv3 flagWarnings
 
-main' :: PostLoadMode -> DynFlags -> [Located String] -> [Located String]
+main' :: PostLoadMode -> DynFlags -> [Located String] -> [Warn]
       -> Ghc ()
 main' postLoadMode dflags0 args flagWarnings = do
   -- set the default GhcMode, HscTarget and GhcLink.  The HscTarget
@@ -258,7 +258,7 @@ main' postLoadMode dflags0 args flagWarnings = do
   liftIO $ dumpFinalStats dflags6
 
 ghciUI :: [(FilePath, Maybe Phase)] -> Maybe [String] -> Ghc ()
-#ifndef GHCI
+#if !defined(GHCI)
 ghciUI _ _ = throwGhcException (CmdLineError "not built for interactive use")
 #else
 ghciUI     = interactiveUI defaultGhciSettings
@@ -504,7 +504,7 @@ isDoEvalMode :: Mode -> Bool
 isDoEvalMode (Right (Right (DoEval _))) = True
 isDoEvalMode _ = False
 
-#ifdef GHCI
+#if defined(GHCI)
 isInteractiveMode :: PostLoadMode -> Bool
 isInteractiveMode DoInteractive = True
 isInteractiveMode _             = False
@@ -543,7 +543,7 @@ isCompManagerMode _             = False
 parseModeFlags :: [Located String]
                -> IO (Mode,
                       [Located String],
-                      [Located String])
+                      [Warn])
 parseModeFlags args = do
   let ((leftover, errs1, warns), (mModeFlag, errs2, flags')) =
           runCmdLine (processArgs mode_flags args)
@@ -554,7 +554,7 @@ parseModeFlags args = do
 
   -- See Note [Handling errors when parsing commandline flags]
   unless (null errs1 && null errs2) $ throwGhcException $ errorsToGhcException $
-      map (("on the commandline", )) $ map unLoc errs1 ++ errs2
+      map (("on the commandline", )) $ map (unLoc . errMsg) errs1 ++ errs2
 
   return (mode, flags' ++ leftover, warns)
 
@@ -735,7 +735,7 @@ showBanner :: PostLoadMode -> DynFlags -> IO ()
 showBanner _postLoadMode dflags = do
    let verb = verbosity dflags
 
-#ifdef GHCI
+#if defined(GHCI)
    -- Show the GHCi banner
    when (isInteractiveMode _postLoadMode && verb >= 1) $ putStrLn ghciWelcomeMsg
 #endif
@@ -831,13 +831,14 @@ dumpPackagesSimple dflags = putMsg dflags (pprPackagesSimple dflags)
 -- Frontend plugin support
 
 doFrontend :: ModuleName -> [(String, Maybe Phase)] -> Ghc ()
-#ifndef GHCI
+#if !defined(GHCI)
 doFrontend modname _ = pluginError [modname]
 #else
 doFrontend modname srcs = do
     hsc_env <- getSession
     frontend_plugin <- liftIO $ loadFrontendPlugin hsc_env modname
-    frontend frontend_plugin (frontendPluginOpts (hsc_dflags hsc_env)) srcs
+    frontend frontend_plugin
+      (reverse $ frontendPluginOpts (hsc_dflags hsc_env)) srcs
 #endif
 
 -- -----------------------------------------------------------------------------

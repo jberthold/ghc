@@ -1,4 +1,4 @@
-{-# LANGUAGE CPP, MagicHash, RecordWildCards, GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE MagicHash, RecordWildCards, GeneralizedNewtypeDeriving #-}
 --
 --  (c) The University of Glasgow 2002-2006
 --
@@ -34,11 +34,7 @@ import Data.Array.Base  ( UArray(..) )
 import Data.ByteString (ByteString)
 import Data.IntMap (IntMap)
 import qualified Data.IntMap as IntMap
-#if MIN_VERSION_base(4,9,0)
 import GHC.Stack.CCS
-#else
-import GHC.Stack as GHC.Stack.CCS
-#endif
 
 -- -----------------------------------------------------------------------------
 -- Compiled Byte Code
@@ -80,7 +76,7 @@ data UnlinkedBCO
         unlinkedBCOName   :: !Name,
         unlinkedBCOArity  :: {-# UNPACK #-} !Int,
         unlinkedBCOInstrs :: !(UArray Int Word16),      -- insns
-        unlinkedBCOBitmap :: !(UArray Int Word),        -- bitmap
+        unlinkedBCOBitmap :: !(UArray Int Word64),      -- bitmap
         unlinkedBCOLits   :: !(SizedSeq BCONPtr),       -- non-ptrs
         unlinkedBCOPtrs   :: !(SizedSeq BCOPtr)         -- ptrs
    }

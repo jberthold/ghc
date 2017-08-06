@@ -11,8 +11,7 @@
  *
  * -------------------------------------------------------------------------- */
 
-#ifndef RTS_PARALLEL_H
-#define RTS_PARALLEL_H
+#pragma once
 
 StgInt newSpark (StgRegTable *reg, StgClosure *p);
 
@@ -144,5 +143,3 @@ void processDataMsg(Capability* cap, OpCode opcode,
 extern StgInd stg_system_tso;
 
 #endif /* PARALLEL_RTS */
-
-#endif /* RTS_PARALLEL_H */

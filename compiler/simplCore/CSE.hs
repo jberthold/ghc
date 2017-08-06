@@ -282,7 +282,7 @@ with mutual recursion it's quite hard; but for self-recursive bindings
   Note the \f in the domain of the mapping!
 
 * When we come across the binding for 'g', look up (\g. (\y. ...g...))
-  Bingo we get a hit.  So we can repace the 'g' binding with
+  Bingo we get a hit.  So we can replace the 'g' binding with
      g = f
 
 We can't use cs_map for this, because the key isn't an expression of
@@ -352,15 +352,19 @@ cse_bind toplevel env (in_id, in_rhs) out_id
     (env', out_id') = addBinding env in_id out_id out_rhs
 
 addBinding :: CSEnv                      -- Includes InId->OutId cloning
-           -> InId
+           -> InVar                      -- Could be a let-bound type
            -> OutId -> OutExpr           -- Processed binding
            -> (CSEnv, OutId)             -- Final env, final bndr
 -- Extend the CSE env with a mapping [rhs -> out-id]
 -- unless we can instead just substitute [in-id -> rhs]
+--
+-- It's possible for the binder to be a type variable (see
+-- Note [Type-let] in CoreSyn), in which case we can just substitute.
 addBinding env in_id out_id rhs'
-  | noCSE in_id = (env,                              out_id)
-  | use_subst   = (extendCSSubst env in_id rhs',     out_id)
-  | otherwise   = (extendCSEnv env rhs' id_expr', zapped_id)
+  | not (isId in_id) = (extendCSSubst env in_id rhs',     out_id)
+  | noCSE in_id      = (env,                              out_id)
+  | use_subst        = (extendCSSubst env in_id rhs',     out_id)
+  | otherwise        = (extendCSEnv env rhs' id_expr', zapped_id)
   where
     id_expr'  = varToCoreExpr out_id
     zapped_id = zapIdUsageInfo out_id
@@ -381,7 +385,7 @@ addBinding env in_id out_id rhs'
                    _      -> False
 
 noCSE :: InId -> Bool
-noCSE id = not (isAlwaysActive (idInlineActivation id))
+noCSE id =  not (isAlwaysActive (idInlineActivation id))
              -- See Note [CSE for INLINE and NOINLINE]
          || isAnyInlinePragma (idInlinePragma id)
              -- See Note [CSE for stable unfoldings]
@@ -450,7 +454,7 @@ cseExpr _   (Lit lit)             = Lit lit
 cseExpr env (Var v)               = lookupSubst env v
 cseExpr env (App f a)             = App (cseExpr env f) (tryForCSE env a)
 cseExpr env (Tick t e)            = Tick t (cseExpr env e)
-cseExpr env (Cast e co)           = Cast (cseExpr env e) (substCo (csEnvSubst env) co)
+cseExpr env (Cast e co)           = Cast (tryForCSE env e) (substCo (csEnvSubst env) co)
 cseExpr env (Lam b e)             = let (env', b') = addBinder env b
                                     in Lam b' (cseExpr env' e)
 cseExpr env (Let bind e)          = let (env', bind') = cseBind NotTopLevel env bind
@@ -572,7 +576,7 @@ extendCSEnv cse expr triv_expr
 extendCSRecEnv :: CSEnv -> OutId -> OutExpr -> OutExpr -> CSEnv
 -- See Note [CSE for recursive bindings]
 extendCSRecEnv cse bndr expr triv_expr
-  = cse { cs_rec_map = extendCoreMap (cs_map cse) (Lam bndr expr) triv_expr }
+  = cse { cs_rec_map = extendCoreMap (cs_rec_map cse) (Lam bndr expr) triv_expr }
 
 lookupCSRecEnv :: CSEnv -> OutId -> OutExpr -> Maybe OutExpr
 -- See Note [CSE for recursive bindings]

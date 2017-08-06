@@ -9,10 +9,9 @@
  *
  * ---------------------------------------------------------------------------*/
 
-#ifndef HSFFI_H
-#define HSFFI_H
+#pragma once
 
-#ifdef __cplusplus
+#if defined(__cplusplus)
 extern "C" {
 #endif
 
@@ -119,8 +118,6 @@ extern void hs_try_putmvar (int capability, HsStablePtr sp);
 
 
 
-#ifdef __cplusplus
+#if defined(__cplusplus)
 }
 #endif
-
-#endif /* HSFFI_H */

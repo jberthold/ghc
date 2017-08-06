@@ -617,7 +617,7 @@ bound on the LHS:
     RULE forall (c :: a~b). f (x |> c) = e
   Now, if that binding is inlined, so that a=b=Int, we'd get
     RULE forall (c :: Int~Int). f (x |> c) = e
-  and now when we simpilfy the LHS (Simplify.simplRule) we
+  and now when we simplify the LHS (Simplify.simplRule) we
   optCoercion will turn that 'c' into Refl:
     RULE forall (c :: Int~Int). f (x |> <Int>) = e
   and then perhaps drop it altogether.  Now 'c' is unbound.
@@ -843,7 +843,7 @@ match_co renv subst co1 co2
       _ -> Nothing
 match_co _ _ _co1 _co2
     -- Currently just deals with CoVarCo, TyConAppCo and Refl
-#ifdef DEBUG
+#if defined(DEBUG)
   = pprTrace "match_co: needs more cases" (ppr _co1 $$ ppr _co2) Nothing
 #else
   = Nothing

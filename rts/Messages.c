@@ -19,13 +19,13 @@
    Send a message to another Capability
    ------------------------------------------------------------------------- */
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 
 void sendMessage(Capability *from_cap, Capability *to_cap, Message *msg)
 {
     ACQUIRE_LOCK(&to_cap->lock);
 
-#ifdef DEBUG
+#if defined(DEBUG)
     {
         const StgInfoTable *i = msg->header.info;
         if (i != &stg_MSG_THROWTO_info &&
@@ -60,7 +60,7 @@ void sendMessage(Capability *from_cap, Capability *to_cap, Message *msg)
    Handle a message
    ------------------------------------------------------------------------- */
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
 
 void
 executeMessage (Capability *cap, Message *m)
@@ -205,7 +205,7 @@ loop:
 
     else if (info == &stg_TSO_info)
     {
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         bool is_system = p == (StgClosure*) &stg_system_tso;
         // In case of a system-created blackhole, most code stays the same as
         // below: create BQ with first message MSG, change BH pointer. But we
@@ -213,7 +213,7 @@ loop:
 #endif
         owner = (StgTSO*)p;
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
         if (owner->cap != cap) {
             sendMessage(cap, owner->cap, (Message*)msg);
             debugTraceCap(DEBUG_sched, cap, "forwarding message to cap %d",
@@ -235,7 +235,7 @@ loop:
 
         msg->link = (MessageBlackHole*)END_TSO_QUEUE;
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         if (is_system) {
             bq->link = (StgBlockingQueue*) stg_system_tso.indirectee;
             stg_system_tso.indirectee = (StgClosure*) bq;
@@ -263,7 +263,7 @@ loop:
         if (owner->why_blocked == NotBlocked && owner->id != msg->tso->id) {
             promoteInRunQueue(cap, owner);
         }
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         } // end of "else" for "if (is_system)"
 #endif
 
@@ -272,8 +272,7 @@ loop:
         ((StgInd*)bh)->indirectee = (StgClosure *)bq;
         recordClosureMutated(cap,bh); // bh was mutated
 
-#ifdef PARALLEL_RTS
-        // nearby, these are macros, so they need "{..}"
+#if defined(PARALLEL_RTS)
         if (is_system) {
           debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH",
                         (W_)msg->tso->id);
@@ -294,7 +293,7 @@ loop:
 
         ASSERT(bq->bh == bh);
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         bool is_system = bq->owner == (StgTSO*) &stg_system_tso;
         // In case of a system-created blackhole, most code stays the same as
         // below: create BQ with first message MSG, change BH pointer. But we
@@ -304,7 +303,7 @@ loop:
 
         ASSERT(owner != END_TSO_QUEUE);
 
-#ifdef THREADED_RTS
+#if defined(THREADED_RTS)
         if (owner->cap != cap) {
             sendMessage(cap, owner->cap, (Message*)msg);
             debugTraceCap(DEBUG_sched, cap, "forwarding message to cap %d",
@@ -322,7 +321,7 @@ loop:
             recordClosureMutated(cap,(StgClosure*)bq);
         }
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         // nearby, these are macros, so they need "{..}"
         if (is_system) {
           debugTraceCap(DEBUG_sched, cap, "thread %d blocked on system BH",
@@ -332,11 +331,13 @@ loop:
                         (W_)msg->tso->id, (W_)owner->id);
         }
 #else
-        debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
+        debugTraceCap(DEBUG_sched, cap,
+                      "thread %d blocked on existing BLOCKING_QUEUE "
+                      "owned by thread %d",
                       (W_)msg->tso->id, (W_)owner->id);
 #endif
 
-#ifdef PARALLEL_RTS
+#if defined(PARALLEL_RTS)
         if (!is_system)
           // then do the other if statement
 #endif

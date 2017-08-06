@@ -7,7 +7,7 @@ module TcSMonad (
     WorkList(..), isEmptyWorkList, emptyWorkList,
     extendWorkListNonEq, extendWorkListCt, extendWorkListDerived,
     extendWorkListCts, extendWorkListEq, extendWorkListFunEq,
-    appendWorkList,
+    appendWorkList, extendWorkListImplic,
     selectNextWorkItem,
     workListSize, workListWantedCount,
     getWorkList, updWorkListTcS,
@@ -16,9 +16,9 @@ module TcSMonad (
     TcS, runTcS, runTcSDeriveds, runTcSWithEvBinds,
     failTcS, warnTcS, addErrTcS,
     runTcSEqualities,
-    nestTcS, nestImplicTcS, setEvBindsTcS,
+    nestTcS, nestImplicTcS, setEvBindsTcS, buildImplication,
 
-    runTcPluginTcS, addUsedGRE, addUsedGREs, deferTcSForAllEq,
+    runTcPluginTcS, addUsedGRE, addUsedGREs,
 
     -- Tracing etc
     panicTcS, traceTcS,
@@ -52,7 +52,7 @@ module TcSMonad (
     getNoGivenEqs, setInertCans,
     getInertEqs, getInertCans, getInertGivens,
     getInertInsols,
-    emptyInert, getTcSInerts, setTcSInerts,
+    getTcSInerts, setTcSInerts,
     matchableGivens, prohibitedSuperClassSolve,
     getUnsolvedInerts,
     removeInertCts, getPendingScDicts,
@@ -93,7 +93,7 @@ module TcSMonad (
     -- MetaTyVars
     newFlexiTcSTy, instFlexi, instFlexiX,
     cloneMetaTyVar, demoteUnfilledFmv,
-    tcInstType,
+    tcInstType, tcInstSkolTyVarsX,
 
     TcLevel, isTouchableMetaTyVarTcS,
     isFilledMetaTyVar_maybe, isFilledMetaTyVar,
@@ -160,14 +160,12 @@ import Maybes
 
 import TrieMap
 import Control.Monad
-#if __GLASGOW_HASKELL__ > 710
 import qualified Control.Monad.Fail as MonadFail
-#endif
 import MonadUtils
 import Data.IORef
 import Data.List ( foldl', partition )
 
-#ifdef DEBUG
+#if defined(DEBUG)
 import Digraph
 import UniqSet
 #endif
@@ -277,8 +275,8 @@ extendWorkListDeriveds loc evs wl
   | isDroppableDerivedLoc loc = wl { wl_deriv = evs ++ wl_deriv wl }
   | otherwise                 = extendWorkListEqs (map mkNonCanonical evs) wl
 
-extendWorkListImplic :: Implication -> WorkList -> WorkList
-extendWorkListImplic implic wl = wl { wl_implics = implic `consBag` wl_implics wl }
+extendWorkListImplic :: Bag Implication -> WorkList -> WorkList
+extendWorkListImplic implics wl = wl { wl_implics = implics `unionBags` wl_implics wl }
 
 extendWorkListCt :: Ct -> WorkList -> WorkList
 -- Agnostic
@@ -292,7 +290,7 @@ extendWorkListCt ct wl
      EqPred {}
        -> extendWorkListEq ct wl
 
-     ClassPred cls _  -- See Note [Prioritise class equalites]
+     ClassPred cls _  -- See Note [Prioritise class equalities]
        |  cls `hasKey` heqTyConKey
        || cls `hasKey` eqTyConKey
        -> extendWorkListEq ct wl
@@ -383,6 +381,16 @@ data InertSet
               -- Canonical Given, Wanted, Derived
               -- Sometimes called "the inert set"
 
+       , inert_fsks :: [(TcTyVar, TcType)]
+              -- A list of (fsk, ty) pairs; we add one element when we flatten
+              -- a function application in a Given constraint, creating
+              -- a new fsk in newFlattenSkolem.  When leaving a nested scope,
+              -- unflattenGivens unifies fsk := ty
+              --
+              -- We could also get this info from inert_funeqs, filtered by
+              -- level, but it seems simpler and more direct to capture the
+              -- fsk as we generate them.
+
        , inert_flat_cache :: ExactFunEqMap (TcCoercion, TcType, CtFlavour)
               -- See Note [Type family equations]
               -- If    F tys :-> (co, rhs, flav),
@@ -421,6 +429,7 @@ emptyInert
                          , inert_irreds   = emptyCts
                          , inert_insols   = emptyCts }
        , inert_flat_cache    = emptyExactFunEqs
+       , inert_fsks          = []
        , inert_solved_dicts  = emptyDictMap }
 
 
@@ -1382,6 +1391,7 @@ addInertEq :: Ct -> TcS ()
 addInertEq ct
   = do { traceTcS "addInertEq {" $
          text "Adding new inert equality:" <+> ppr ct
+
        ; ics <- getInertCans
 
        ; ct@(CTyEqCan { cc_tyvar = tv, cc_ev = ev }) <- maybeEmitShadow ics ct
@@ -1498,7 +1508,7 @@ kick_out_rewritable new_fr new_tv ics@(IC { inert_eqs      = tv_eqs
     (dicts_out,  dicts_in)  = partitionDicts   kick_out_ct dictmap
     (irs_out,    irs_in)    = partitionBag     kick_out_ct irreds
     (insols_out, insols_in) = partitionBag     kick_out_ct insols
-      -- Kick out even insolubles: See Note [Kick out insolubles]
+      -- Kick out even insolubles: See Note [Rewrite insolubles]
 
     fr_may_rewrite :: CtFlavourRole -> Bool
     fr_may_rewrite fs = new_fr `eqMayRewriteFR` fs
@@ -1590,14 +1600,29 @@ new equality, to maintain the inert-set invariants.
     take the substitution into account
 
 
-Note [Kick out insolubles]
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [Rewrite insolubles]
+~~~~~~~~~~~~~~~~~~~~~~~~~
 Suppose we have an insoluble alpha ~ [alpha], which is insoluble
-because an occurs check.  And then we unify alpha := [Int].
-Then we really want to rewrite the insoluble to [Int] ~ [[Int]].
-Now it can be decomposed.  Otherwise we end up with a "Can't match
-[Int] ~ [[Int]]" which is true, but a bit confusing because the
-outer type constructors match.
+because an occurs check.  And then we unify alpha := [Int].  Then we
+really want to rewrite the insoluble to [Int] ~ [[Int]].  Now it can
+be decomposed.  Otherwise we end up with a "Can't match [Int] ~
+[[Int]]" which is true, but a bit confusing because the outer type
+constructors match.
+
+Similarly, if we have a CHoleCan, we'd like to rewrite it with any
+Givens, to give as informative an error messasge as possible
+(Trac #12468, #11325).
+
+Hence:
+ * In the main simlifier loops in TcSimplify (solveWanteds,
+   simpl_loop), we feed the insolubles in solveSimpleWanteds,
+   so that they get rewritten (albeit not solved).
+
+ * We kick insolubles out of the inert set, if they can be
+   rewritten (see TcSMonad.kick_out_rewritable)
+
+ * We rewrite those insolubles in TcCanonical.
+   See Note [Make sure that insolubles are fully rewritten]
 -}
 
 
@@ -1798,42 +1823,33 @@ getNoGivenEqs :: TcLevel          -- TcLevel of this implication
 -- See Note [When does an implication have given equalities?]
 getNoGivenEqs tclvl skol_tvs
   = do { inerts@(IC { inert_eqs = ieqs, inert_irreds = iirreds
-                    , inert_funeqs = funeqs
                     , inert_insols = insols })
               <- getInertCans
-       ; let local_fsks = foldFunEqs add_fsk funeqs emptyVarSet
-
-             has_given_eqs = foldrBag ((||) . ev_given_here . ctEvidence) False
+       ; let has_given_eqs = foldrBag ((||) . ev_given_here . ctEvidence) False
                                       (iirreds `unionBags` insols)
-                          || anyDVarEnv (eqs_given_here local_fsks) ieqs
+                          || anyDVarEnv eqs_given_here ieqs
 
        ; traceTcS "getNoGivenEqs" (vcat [ ppr has_given_eqs, ppr inerts
                                         , ppr insols])
        ; return (not has_given_eqs, insols) }
   where
-    eqs_given_here :: VarSet -> EqualCtList -> Bool
-    eqs_given_here local_fsks [CTyEqCan { cc_tyvar = tv, cc_ev = ev }]
+    eqs_given_here :: EqualCtList -> Bool
+    eqs_given_here [CTyEqCan { cc_tyvar = tv, cc_ev = ev }]
                               -- Givens are always a sigleton
-      = not (skolem_bound_here local_fsks tv) && ev_given_here ev
-    eqs_given_here _ _ = False
+      = not (skolem_bound_here tv) && ev_given_here ev
+    eqs_given_here _ = False
 
     ev_given_here :: CtEvidence -> Bool
-    -- True for a Given bound by the curent implication,
+    -- True for a Given bound by the current implication,
     -- i.e. the current level
     ev_given_here ev
       =  isGiven ev
       && tclvl == ctLocLevel (ctEvLoc ev)
 
-    add_fsk :: Ct -> VarSet -> VarSet
-    add_fsk ct fsks | CFunEqCan { cc_fsk = tv, cc_ev = ev } <- ct
-                    , isGiven ev = extendVarSet fsks tv
-                    | otherwise  = fsks
-
     skol_tv_set = mkVarSet skol_tvs
-    skolem_bound_here local_fsks tv -- See Note [Let-bound skolems]
+    skolem_bound_here tv -- See Note [Let-bound skolems]
       = case tcTyVarDetails tv of
           SkolemTv {} -> tv `elemVarSet` skol_tv_set
-          FlatSkol {} -> not (tv `elemVarSet` local_fsks)
           _           -> False
 
 -- | Returns Given constraints that might,
@@ -1873,9 +1889,11 @@ matchableGivens loc_w pred (IS { inert_cans = inert_cans })
     -- bindable when unifying with givens. That ensures that we
     -- conservatively assume that a meta tyvar might get unified with
     -- something that matches the 'given', until demonstrated
-    -- otherwise.
-    bind_meta_tv tv | isMetaTyVar tv = BindMe
-                    | otherwise      = Skolem
+    -- otherwise.  More info in Note [Instance and Given overlap]
+    -- in TcInteract
+    bind_meta_tv tv | isMetaTyVar tv
+                    , not (isFskTyVar tv) = BindMe
+                    | otherwise           = Skolem
 
 prohibitedSuperClassSolve :: CtLoc -> CtLoc -> Bool
 -- See Note [Solving superclass constraints] in TcInstDcls
@@ -2047,7 +2065,7 @@ solvable from the other. So, we do lookup in the inert set using
 loose types, which omit the kind-check.
 
 We must be careful when using the result of a lookup because it may
-not match the requsted info exactly!
+not match the requested info exactly!
 
 -}
 
@@ -2278,10 +2296,8 @@ instance Monad TcS where
   fail err  = TcS (\_ -> fail err)
   m >>= k   = TcS (\ebs -> unTcS m ebs >>= \r -> unTcS (k r) ebs)
 
-#if __GLASGOW_HASKELL__ > 710
 instance MonadFail.MonadFail TcS where
   fail err  = TcS (\_ -> fail err)
-#endif
 
 instance MonadUnique TcS where
    getUniqueSupplyM = wrapTcS getUniqueSupplyM
@@ -2397,14 +2413,17 @@ runTcSWithEvBinds ev_binds_var tcs
        ; when (count > 0) $
          csTraceTcM $ return (text "Constraint solver steps =" <+> int count)
 
-#ifdef DEBUG
+       ; unflattenGivens inert_var
+
+#if defined(DEBUG)
        ; ev_binds <- TcM.getTcEvBindsMap ev_binds_var
        ; checkForCyclicBinds ev_binds
 #endif
 
        ; return res }
 
-#ifdef DEBUG
+----------------------------
+#if defined(DEBUG)
 checkForCyclicBinds :: EvBindMap -> TcM ()
 checkForCyclicBinds ev_binds_map
   | null cycles
@@ -2431,6 +2450,7 @@ checkForCyclicBinds ev_binds_map
             -- Note [Deterministic SCC] in Digraph.
 #endif
 
+----------------------------
 setEvBindsTcS :: EvBindsVar -> TcS a -> TcS a
 setEvBindsTcS ref (TcS thing_inside)
  = TcS $ \ env -> thing_inside (env { tcs_ev_binds = ref })
@@ -2444,8 +2464,9 @@ nestImplicTcS ref inner_tclvl (TcS thing_inside)
                    , tcs_count         = count
                    } ->
     do { inerts <- TcM.readTcRef old_inert_var
-       ; let nest_inert = inerts { inert_flat_cache = emptyExactFunEqs }
-                                     -- See Note [Do not inherit the flat cache]
+       ; let nest_inert = emptyInert { inert_cans         = inert_cans inerts
+                                     , inert_solved_dicts = inert_solved_dicts inerts }
+                          -- See Note [Do not inherit the flat cache]
        ; new_inert_var <- TcM.newTcRef nest_inert
        ; new_wl_var    <- TcM.newTcRef emptyWorkList
        ; let nest_env = TcSEnv { tcs_ev_binds      = ref
@@ -2456,7 +2477,9 @@ nestImplicTcS ref inner_tclvl (TcS thing_inside)
        ; res <- TcM.setTcLevel inner_tclvl $
                 thing_inside nest_env
 
-#ifdef DEBUG
+       ; unflattenGivens new_inert_var
+
+#if defined(DEBUG)
        -- Perform a check that the thing_inside did not cause cycles
        ; ev_binds <- TcM.getTcEvBindsMap ref
        ; checkForCyclicBinds ev_binds
@@ -2502,6 +2525,45 @@ nestTcS (TcS thing_inside)
                                 , inert_cans = nxt_ic })
 
        ; return res }
+
+buildImplication :: SkolemInfo
+                 -> [TcTyVar]        -- Skolems
+                 -> [EvVar]          -- Givens
+                 -> TcS result
+                 -> TcS (Bag Implication, TcEvBinds, result)
+-- Just like TcUnify.buildImplication, but in the TcS monnad,
+-- using the work-list to gather the constraints
+buildImplication skol_info skol_tvs givens (TcS thing_inside)
+  = TcS $ \ env ->
+    do { new_wl_var <- TcM.newTcRef emptyWorkList
+       ; tc_lvl <- TcM.getTcLevel
+       ; let new_tclvl = pushTcLevel tc_lvl
+
+       ; res <- TcM.setTcLevel new_tclvl $
+                thing_inside (env { tcs_worklist = new_wl_var })
+
+       ; wl@WL { wl_eqs = eqs } <- TcM.readTcRef new_wl_var
+       ; if null eqs
+         then return (emptyBag, emptyTcEvBinds, res)
+         else
+    do { env <- TcM.getLclEnv
+       ; ev_binds_var <- TcM.newTcEvBinds
+       ; let wc  = ASSERT2( null (wl_funeqs wl) && null (wl_rest wl) &&
+                            null (wl_deriv wl) && null (wl_implics wl), ppr wl )
+                   WC { wc_simple = listToCts eqs
+                      , wc_impl   = emptyBag
+                      , wc_insol  = emptyCts }
+             imp = Implic { ic_tclvl  = new_tclvl
+                          , ic_skols  = skol_tvs
+                          , ic_no_eqs = True
+                          , ic_given  = givens
+                          , ic_wanted = wc
+                          , ic_status = IC_Unsolved
+                          , ic_binds  = ev_binds_var
+                          , ic_env    = env
+                          , ic_needed = emptyVarSet
+                          , ic_info   = skol_info }
+      ; return (unitBag imp, TcEvBinds ev_binds_var, res) } }
 
 {-
 Note [Propagate the solved dictionaries]
@@ -2566,10 +2628,11 @@ emitInsoluble ct
   where
     this_pred = ctPred ct
     add_insol is@(IS { inert_cans = ics@(IC { inert_insols = old_insols }) })
-      | already_there = is
-      | otherwise     = is { inert_cans = ics { inert_insols = old_insols `snocCts` ct } }
+      | drop_it   = is
+      | otherwise = is { inert_cans = ics { inert_insols = old_insols `snocCts` ct } }
       where
-        already_there = not (isWantedCt ct) && anyBag (tcEqType this_pred . ctPred) old_insols
+        drop_it = isDroppableDerivedCt ct &&
+                  anyBag (tcEqType this_pred . ctPred) old_insols
              -- See Note [Do not add duplicate derived insolubles]
 
 newTcRef :: a -> TcS (TcRef a)
@@ -2609,15 +2672,6 @@ unifyTyVar tv ty
     do { TcM.traceTc "unifyTyVar" (ppr tv <+> text ":=" <+> ppr ty)
        ; TcM.writeMetaTyVar tv ty
        ; TcM.updTcRef (tcs_unified env) (+1) }
-
-unflattenFmv :: TcTyVar -> TcType -> TcS ()
--- Fill a flatten-meta-var, simply by unifying it.
--- This does NOT count as a unification in tcs_unified.
-unflattenFmv tv ty
-  = ASSERT2( isMetaTyVar tv, ppr tv )
-    TcS $ \ _ ->
-    do { TcM.traceTc "unflattenFmv" (ppr tv <+> text ":=" <+> ppr ty)
-       ; TcM.writeMetaTyVar tv ty }
 
 reportUnifications :: TcS a -> TcS (Int, a)
 reportUnifications (TcS thing_inside)
@@ -2773,8 +2827,12 @@ which will result in two Deriveds to end up in the insoluble set:
   wc_insols = (c ~ [c]) [D], (c ~ [c]) [D]
 -}
 
--- Flatten skolems
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+{- *********************************************************************
+*                                                                      *
+*                Flatten skolems                                       *
+*                                                                      *
+********************************************************************* -}
+
 newFlattenSkolem :: CtFlavour -> CtLoc
                  -> TyCon -> [TcType]                    -- F xis
                  -> TcS (CtEvidence, Coercion, TcTyVar)  -- [G/WD] x:: F xis ~ fsk
@@ -2789,9 +2847,14 @@ newFlattenSkolem flav loc tc xis
     new_skolem
       | Given <- flav
       = do { fsk <- wrapTcS (TcM.newFskTyVar fam_ty)
-           ; let co = mkNomReflCo fam_ty
-           ; ev  <- newGivenEvVar loc (mkPrimEqPred fam_ty (mkTyVarTy fsk),
-                                       EvCoercion co)
+
+           -- Extend the inert_fsks list, for use by unflattenGivens
+           ; updInertTcS $ \is -> is { inert_fsks = (fsk, fam_ty) : inert_fsks is }
+
+           -- Construct the Refl evidence
+           ; let pred = mkPrimEqPred fam_ty (mkTyVarTy fsk)
+                 co   = mkNomReflCo fam_ty
+           ; ev  <- newGivenEvVar loc (pred, EvCoercion co)
            ; return (ev, co, fsk) }
 
       | otherwise  -- Generate a [WD] for both Wanted and Derived
@@ -2800,6 +2863,25 @@ newFlattenSkolem flav loc tc xis
            ; (ev, hole_co) <- newWantedEq loc Nominal fam_ty (mkTyVarTy fmv)
            ; return (ev, hole_co, fmv) }
 
+----------------------------
+unflattenGivens :: IORef InertSet -> TcM ()
+-- Unflatten all the fsks created by flattening types in Given
+-- constraints We must be sure to do this, else we end up with
+-- flatten-skolems buried in any residual Wanteds
+--
+-- NB: this is the /only/ way that a fsk (MetaDetails = FlatSkolTv)
+--     is filled in. Nothing else does so.
+--
+-- It's here (rather than in TcFlatten) because the Right Places
+-- to call it are in runTcSWithEvBinds/nestImplicTcS, where it
+-- is nicely paired with the creation an empty inert_fsks list.
+unflattenGivens inert_var
+ = do { inerts <- TcM.readTcRef inert_var
+       ; mapM_ flatten_one (inert_fsks inerts) }
+  where
+    flatten_one (fsk, ty) = TcM.writeMetaTyVar fsk ty
+
+----------------------------
 extendFlatCache :: TyCon -> [Type] -> (TcCoercion, TcType, CtFlavour) -> TcS ()
 extendFlatCache tc xi_args stuff@(_, ty, fl)
   | isGivenOrWDeriv fl  -- Maintain the invariant that inert_flat_cache
@@ -2815,6 +2897,33 @@ extendFlatCache tc xi_args stuff@(_, ty, fl)
   | otherwise
   = return ()
 
+----------------------------
+unflattenFmv :: TcTyVar -> TcType -> TcS ()
+-- Fill a flatten-meta-var, simply by unifying it.
+-- This does NOT count as a unification in tcs_unified.
+unflattenFmv tv ty
+  = ASSERT2( isMetaTyVar tv, ppr tv )
+    TcS $ \ _ ->
+    do { TcM.traceTc "unflattenFmv" (ppr tv <+> text ":=" <+> ppr ty)
+       ; TcM.writeMetaTyVar tv ty }
+
+----------------------------
+demoteUnfilledFmv :: TcTyVar -> TcS ()
+-- If a flatten-meta-var is still un-filled,
+-- turn it into an ordinary meta-var
+demoteUnfilledFmv fmv
+  = wrapTcS $ do { is_filled <- TcM.isFilledMetaTyVar fmv
+                 ; unless is_filled $
+                   do { tv_ty <- TcM.newFlexiTyVarTy (tyVarKind fmv)
+                      ; TcM.writeMetaTyVar fmv tv_ty } }
+
+
+{- *********************************************************************
+*                                                                      *
+*                Instantiation etc.
+*                                                                      *
+********************************************************************* -}
+
 -- Instantiations
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -2827,15 +2936,6 @@ newFlexiTcSTy knd = wrapTcS (TcM.newFlexiTyVarTy knd)
 
 cloneMetaTyVar :: TcTyVar -> TcS TcTyVar
 cloneMetaTyVar tv = wrapTcS (TcM.cloneMetaTyVar tv)
-
-demoteUnfilledFmv :: TcTyVar -> TcS ()
--- If a flatten-meta-var is still un-filled,
--- turn it into an ordinary meta-var
-demoteUnfilledFmv fmv
-  = wrapTcS $ do { is_filled <- TcM.isFilledMetaTyVar fmv
-                 ; unless is_filled $
-                   do { tv_ty <- TcM.newFlexiTyVarTy (tyVarKind fmv)
-                      ; TcM.writeMetaTyVar fmv tv_ty } }
 
 instFlexi :: [TKVar] -> TcS TCvSubst
 instFlexi = instFlexiX emptyTCvSubst
@@ -2860,7 +2960,8 @@ tcInstType :: ([TyVar] -> TcM (TCvSubst, [TcTyVar]))
                 -- (type vars, preds (incl equalities), rho)
 tcInstType inst_tyvars id = wrapTcS (TcM.tcInstType inst_tyvars id)
 
-
+tcInstSkolTyVarsX :: TCvSubst -> [TyVar] -> TcS (TCvSubst, [TcTyVar])
+tcInstSkolTyVarsX subst tvs = wrapTcS $ TcM.tcInstSkolTyVarsX subst tvs
 
 -- Creating and setting evidence variables and CtFlavors
 -- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -3079,47 +3180,3 @@ from which we get the implication
 See TcSMonad.deferTcSForAllEq
 -}
 
--- Deferring forall equalities as implications
--- ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-deferTcSForAllEq :: Role -- Nominal or Representational
-                 -> CtLoc  -- Original wanted equality flavor
-                 -> [Coercion]        -- among the kinds of the binders
-                 -> ([TyVarBinder],TcType)   -- ForAll tvs1 body1
-                 -> ([TyVarBinder],TcType)   -- ForAll tvs2 body2
-                 -> TcS Coercion
-deferTcSForAllEq role loc kind_cos (bndrs1,body1) (bndrs2,body2)
- = do { let tvs1'  = zipWithEqual "deferTcSForAllEq"
-                       mkCastTy (mkTyVarTys tvs1) kind_cos
-            body2' = substTyWithUnchecked tvs2 tvs1' body2
-      ; (subst, skol_tvs) <- wrapTcS $ TcM.tcInstSkolTyVars tvs1
-      ; let phi1  = Type.substTyUnchecked subst body1
-            phi2  = Type.substTyUnchecked subst body2'
-            skol_info = UnifyForAllSkol phi1
-
-      ; (ctev, hole_co) <- newWantedEq loc role phi1 phi2
-      ; env <- getLclEnv
-      ; ev_binds <- newTcEvBinds
-           -- We have nowhere to put these bindings
-           -- but TcSimplify.setImplicationStatus
-           -- checks that we don't actually use them
-      ; let new_tclvl = pushTcLevel (tcl_tclvl env)
-            wc        = WC { wc_simple = singleCt (mkNonCanonical ctev)
-                           , wc_impl   = emptyBag
-                           , wc_insol  = emptyCts }
-            imp       = Implic { ic_tclvl  = new_tclvl
-                               , ic_skols  = skol_tvs
-                               , ic_no_eqs = True
-                               , ic_given  = []
-                               , ic_wanted = wc
-                               , ic_status = IC_Unsolved
-                               , ic_binds  = ev_binds
-                               , ic_env    = env
-                               , ic_needed = emptyVarSet
-                               , ic_info   = skol_info }
-      ; updWorkListTcS (extendWorkListImplic imp)
-      ; let cobndrs    = zip skol_tvs kind_cos
-      ; return $ mkForAllCos cobndrs hole_co }
-   where
-     tvs1 = binderVars bndrs1
-     tvs2 = binderVars bndrs2

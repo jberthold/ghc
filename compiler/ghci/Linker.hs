@@ -47,6 +47,7 @@ import UniqDSet
 import FastString
 import Platform
 import SysTools
+import FileCleanup
 
 -- Standard libraries
 import Control.Monad
@@ -721,15 +722,6 @@ getLinkDeps hsc_env hpt pls replace_osuf span mods
             adjust_ul _ (DotA fp) = panic ("adjust_ul DotA " ++ show fp)
             adjust_ul _ (DotDLL fp) = panic ("adjust_ul DotDLL " ++ show fp)
             adjust_ul _ l@(BCOs {}) = return l
-#if !MIN_VERSION_filepath(1,4,1)
-    stripExtension :: String -> FilePath -> Maybe FilePath
-    stripExtension []        path = Just path
-    stripExtension ext@(x:_) path = stripSuffix dotExt path
-        where dotExt = if isExtSeparator x then ext else '.':ext
-
-    stripSuffix :: Eq a => [a] -> [a] -> Maybe [a]
-    stripSuffix xs ys = fmap reverse $ stripPrefix (reverse xs) (reverse ys)
-#endif
 
 
 
@@ -883,7 +875,8 @@ dynLoadObjs hsc_env pls objs = do
     let platform = targetPlatform dflags
     let minus_ls = [ lib | Option ('-':'l':lib) <- ldInputs dflags ]
     let minus_big_ls = [ lib | Option ('-':'L':lib) <- ldInputs dflags ]
-    (soFile, libPath , libName) <- newTempLibName dflags (soExt platform)
+    (soFile, libPath , libName) <-
+      newTempLibName dflags TFL_CurrentModule (soExt platform)
     let
         dflags2 = dflags {
                       -- We don't want the original ldInputs in
@@ -931,7 +924,9 @@ dynLoadObjs hsc_env pls objs = do
     -- Note: We are loading packages with local scope, so to see the
     -- symbols in this link we must link all loaded packages again.
     linkDynLib dflags2 objs (pkgs_loaded pls)
-    consIORef (filesToNotIntermediateClean dflags) soFile
+
+    -- if we got this far, extend the lifetime of the library file
+    changeTempFilesLifetime dflags TFL_GhcSession [soFile]
     m <- loadDLL hsc_env soFile
     case m of
         Nothing -> return pls { temp_sos = (libPath, libName) : temp_sos pls }
@@ -1087,13 +1082,13 @@ unload_wkr hsc_env keep_linkables pls = do
                    filter (not . null . linkableObjs) bcos_to_unload))) $
     purgeLookupSymbolCache hsc_env
 
-  let bcos_retained = map linkableModule remaining_bcos_loaded
+  let bcos_retained = mkModuleSet $ map linkableModule remaining_bcos_loaded
 
       -- Note that we want to remove all *local*
       -- (i.e. non-isExternal) names too (these are the
       -- temporary bindings from the command line).
       keep_name (n,_) = isExternalName n &&
-                        nameModule n `elem` bcos_retained
+                        nameModule n `elemModuleSet` bcos_retained
 
       itbl_env'     = filterNameEnv keep_name (itbl_env pls)
       closure_env'  = filterNameEnv keep_name (closure_env pls)

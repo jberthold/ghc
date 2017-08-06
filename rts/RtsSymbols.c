@@ -97,8 +97,6 @@
       SymI_HasProto(stg_asyncReadzh)                     \
       SymI_HasProto(stg_asyncWritezh)                    \
       SymI_HasProto(stg_asyncDoProczh)                   \
-      SymI_HasProto(getWin32ProgArgv)                    \
-      SymI_HasProto(setWin32ProgArgv)                    \
       SymI_HasProto(rts_InstallConsoleEvent)             \
       SymI_HasProto(rts_ConsoleHandlerDone)              \
       SymI_HasProto(atexit)                              \
@@ -286,7 +284,7 @@
 #define RTS_OPENBSD_ONLY_SYMBOLS
 #endif
 
-#ifndef SMP
+#if !defined(SMP)
 # define MAIN_CAP_SYM SymI_HasProto(MainCapability)
 #else
 # define MAIN_CAP_SYM
@@ -325,7 +323,7 @@
      SymE_NeedsDataProto(ffi_type_uint8)                    \
      SymE_NeedsDataProto(ffi_type_pointer)
 
-#ifdef TABLES_NEXT_TO_CODE
+#if defined(TABLES_NEXT_TO_CODE)
 #define RTS_RET_SYMBOLS /* nothing */
 #else
 #define RTS_RET_SYMBOLS                                 \

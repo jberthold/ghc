@@ -166,7 +166,7 @@ module Type (
         zapTCvSubst, getTCvInScope, getTCvSubstRangeFVs,
         extendTCvInScope, extendTCvInScopeList, extendTCvInScopeSet,
         extendTCvSubst, extendCvSubst,
-        extendTvSubst, extendTvSubstBinder,
+        extendTvSubst, extendTvSubstBinderAndInScope,
         extendTvSubstList, extendTvSubstAndInScope,
         extendTvSubstWithClone,
         isInScope, composeTCvSubstEnv, composeTCvSubst, zipTyEnv, zipCoEnv,
@@ -182,7 +182,8 @@ module Type (
         cloneTyVarBndr, cloneTyVarBndrs, lookupTyVar,
 
         -- * Pretty-printing
-        pprType, pprParendType, pprTypeApp, pprTyThingCategory, pprShortTyThing,
+        pprType, pprParendType, pprPrecType,
+        pprTypeApp, pprTyThingCategory, pprShortTyThing,
         pprTvBndr, pprTvBndrs, pprForAll, pprUserForAll,
         pprSigmaType, ppSuggestExplicitKinds,
         pprTheta, pprThetaArrowTy, pprClassPred,
@@ -614,8 +615,8 @@ getTyVar_maybe ty | Just ty' <- coreView ty = getTyVar_maybe ty'
                   | otherwise               = repGetTyVar_maybe ty
 
 -- | If the type is a tyvar, possibly under a cast, returns it, along
--- with the coercion. Thus, the co is :: kind tv ~R kind type
-getCastedTyVar_maybe :: Type -> Maybe (TyVar, Coercion)
+-- with the coercion. Thus, the co is :: kind tv ~N kind type
+getCastedTyVar_maybe :: Type -> Maybe (TyVar, CoercionN)
 getCastedTyVar_maybe ty | Just ty' <- coreView ty = getCastedTyVar_maybe ty'
 getCastedTyVar_maybe (CastTy (TyVarTy tv) co)     = Just (tv, co)
 getCastedTyVar_maybe (TyVarTy tv)
@@ -788,7 +789,7 @@ splitAppTys ty = split ty ty []
     split orig_ty _                     args  = (orig_ty, args)
 
 -- | Like 'splitAppTys', but doesn't look through type synonyms
-repSplitAppTys :: Type -> (Type, [Type])
+repSplitAppTys :: HasDebugCallStack => Type -> (Type, [Type])
 repSplitAppTys ty = split ty []
   where
     split (AppTy ty arg) args = split ty (arg:args)
@@ -942,7 +943,7 @@ funArgTy ty | Just ty' <- coreView ty = funArgTy ty'
 funArgTy (FunTy arg _res) = arg
 funArgTy ty               = pprPanic "funArgTy" (ppr ty)
 
-piResultTy :: Type -> Type ->  Type
+piResultTy :: HasDebugCallStack => Type -> Type ->  Type
 piResultTy ty arg = case piResultTy_maybe ty arg of
                       Just res -> res
                       Nothing  -> pprPanic "piResultTy" (ppr ty $$ ppr arg)
@@ -987,7 +988,7 @@ piResultTy_maybe ty arg
 -- so we pay attention to efficiency, especially in the special case
 -- where there are no for-alls so we are just dropping arrows from
 -- a function type/kind.
-piResultTys :: Type -> [Type] -> Type
+piResultTys :: HasDebugCallStack => Type -> [Type] -> Type
 piResultTys ty [] = ty
 piResultTys ty orig_args@(arg:args)
   | Just ty' <- coreView ty
@@ -1029,7 +1030,7 @@ applyTysX :: [TyVar] -> Type -> [Type] -> Type
 -- applyTyxX beta-reduces (/\tvs. body_ty) arg_tys
 -- Assumes that (/\tvs. body_ty) is closed
 applyTysX tvs body_ty arg_tys
-  = ASSERT2( length arg_tys >= n_tvs, pp_stuff )
+  = ASSERT2( arg_tys `lengthAtLeast` n_tvs, pp_stuff )
     ASSERT2( tyCoVarsOfType body_ty `subVarSet` mkVarSet tvs, pp_stuff )
     mkAppTys (substTyWith tvs (take n_tvs arg_tys) body_ty)
              (drop n_tvs arg_tys)
@@ -1093,7 +1094,7 @@ tyConAppArgN :: Int -> Type -> Type
 -- Executing Nth
 tyConAppArgN n ty
   = case tyConAppArgs_maybe ty of
-      Just tys -> ASSERT2( n < length tys, ppr n <+> ppr tys ) tys `getNth` n
+      Just tys -> ASSERT2( tys `lengthExceeds` n, ppr n <+> ppr tys ) tys `getNth` n
       Nothing  -> pprPanic "tyConAppArgN" (ppr n <+> ppr ty)
 
 -- | Attempts to tease a type apart into a type constructor and the application
@@ -1160,18 +1161,46 @@ newTyConInstRhs tycon tys
                            ~~~~~~
 A casted type has its *kind* casted into something new.
 
-Note [Weird typing rule for ForAllTy]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [No reflexive casts in types]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+As far as possible, we would like to maintain the following property:
 
-Here is the (truncated) typing rule for the dependent ForAllTy:
+  (*) If (t1 `eqType` t2), then t1 and t2 are treated identically within GHC.
 
-inner : kind
-------------------------------------
-ForAllTy (Named tv vis) inner : kind
+The (*) property is very useful, because we have a tendency to compare two
+types to see if they're equal, and then arbitrarily choose one. We don't
+want this arbitrary choice to then matter later on. Maintaining (*) means
+that every function that looks at a structure of a type must think about
+casts. In places where we directly pattern-match, this consideration is
+forced by consideration of the CastTy constructor.
 
-Note that neither the inner type nor for ForAllTy itself have to have
-kind *! But, it means that we should push any kind casts through the
-ForAllTy. The only trouble is avoiding capture.
+But, when we call a splitXXX function, it's easy to ignore the possibility
+of casts. In particular, splitTyConApp is used extensively, and we don't
+want it to fail on (T a b c |> co). Happily, if we have
+  (T a b c |> co) `eqType` (T d e f)
+then co must be reflexive. Why? eqType checks that the kinds are equal, as
+well as checking that (a `eqType` d), (b `eqType` e), and (c `eqType` f).
+By the kind check, we know that (T a b c |> co) and (T d e f) have the same
+kind. So the only way that co could be non-reflexive is for (T a b c) to have
+a different kind than (T d e f). But because T's kind is closed (all tycon kinds
+are closed), the only way for this to happen is that one of the arguments has
+to differ, leading to a contradiction. Thus, co is reflexive.
+
+Accordingly, by eliminating reflexive casts, splitTyConApp need not worry
+about outermost casts to uphold (*).
+
+Unforunately, that's not the end of the story. Consider comparing
+  (T a b c)      =?       (T a b |> (co -> <Type>)) (c |> sym co)
+These two types have the same kind (Type), but the left type is a TyConApp
+while the right type is not. To handle this case, we will have to implement
+some variant of the dreaded KPush algorithm (c.f. CoreOpt.pushCoDataCon).
+This stone is left unturned for now, meaning that we don't yet uphold (*).
+
+The other place where (*) will be hard to guarantee is in splitAppTy, because
+I (Richard E) can't think of a way to push coercions into AppTys. The good
+news here is that splitAppTy is not used all that much, and so all clients of
+that function can simply be told to use splitCastTy as well, in order to
+uphold (*). This, too, is left undone, for now.
 
 -}
 
@@ -1180,23 +1209,10 @@ splitCastTy_maybe ty | Just ty' <- coreView ty = splitCastTy_maybe ty'
 splitCastTy_maybe (CastTy ty co)               = Just (ty, co)
 splitCastTy_maybe _                            = Nothing
 
--- | Make a 'CastTy'. The Coercion must be nominal. This function looks
--- at the entire structure of the type and coercion in an attempt to
--- maintain representation invariance (that is, any two types that are `eqType`
--- look the same). Be very wary of calling this in a loop.
+-- | Make a 'CastTy'. The Coercion must be nominal. Checks the
+-- Coercion for reflexivity, dropping it if it's reflexive.
+-- See Note [No reflexive casts in types]
 mkCastTy :: Type -> Coercion -> Type
--- Running example:
---   T :: forall k1. k1 -> forall k2. k2 -> Bool -> Maybe k1 -> *
---   co :: * ~R X    (maybe X is a newtype around *)
---   ty = T Nat 3 Symbol "foo" True (Just 2)
---
--- We wish to "push" the cast down as far as possible. See also
--- Note [Pushing down casts] in TyCoRep. Here is where we end
--- up:
---
---   (T Nat 3 Symbol |> <Symbol> -> <Bool> -> <Maybe Nat> -> co)
---      "foo" True (Just 2)
---
 mkCastTy ty co | isReflexiveCo co = ty
 -- NB: Do the slow check here. This is important to keep the splitXXX
 -- functions working properly. Otherwise, we may end up with something
@@ -1205,73 +1221,7 @@ mkCastTy ty co | isReflexiveCo co = ty
 -- in test dependent/should_compile/dynamic-paper.
 
 mkCastTy (CastTy ty co1) co2 = mkCastTy ty (co1 `mkTransCo` co2)
-
-mkCastTy outer_ty@(ForAllTy (TvBndr tv vis) inner_ty) co
-  = ForAllTy (TvBndr tv' vis) (substTy subst inner_ty `mkCastTy` co)
-  where
-    -- See Note [Weird typing rule for ForAllTy]
-    -- have to make sure that pushing the co in doesn't capture the bound var
-    fvs = tyCoVarsOfCo co `unionVarSet` tyCoVarsOfType outer_ty
-    empty_subst = mkEmptyTCvSubst (mkInScopeSet fvs)
-    (subst, tv') = substTyVarBndr empty_subst tv
-
-mkCastTy ty co = -- NB: don't check if the coercion "from" type matches here;
-                 -- there may be unzonked variables about
-                 let result = split_apps [] ty co in
-                 ASSERT2( CastTy ty co `eqType` result
-                        , ppr ty <+> dcolon <+> ppr (typeKind ty) $$
-                          ppr co <+> dcolon <+> ppr (coercionKind co) $$
-                          ppr (CastTy ty co) <+> dcolon <+> ppr (typeKind (CastTy ty co)) $$
-                          ppr result <+> dcolon <+> ppr (typeKind result) )
-                 result
-  where
-    -- split_apps breaks apart any type applications, so we can see how far down
-    -- to push the cast
-    split_apps args (AppTy t1 t2) co
-      = split_apps (t2:args) t1 co
-    split_apps args (TyConApp tc tc_args) co
-      | mightBeUnsaturatedTyCon tc
-      = affix_co (tyConTyBinders tc) (mkTyConTy tc) (tc_args `chkAppend` args) co
-      | otherwise -- not decomposable... but it may still be oversaturated
-      = let (non_decomp_args, decomp_args) = splitAt (tyConArity tc) tc_args
-            saturated_tc = mkTyConApp tc non_decomp_args
-        in
-        affix_co (fst $ splitPiTys $ typeKind saturated_tc)
-                 saturated_tc (decomp_args `chkAppend` args) co
-
-    split_apps args (FunTy arg res) co
-      | rep_arg <- getRuntimeRep "mkCastTy.split_apps" arg
-      , rep_res <- getRuntimeRep "mkCastTy.split_apps" res
-      = affix_co (tyConTyBinders funTyCon) (mkTyConTy funTyCon)
-                 (rep_arg : rep_res : arg : res : args) co
-    split_apps args ty co
-      = affix_co (fst $ splitPiTys $ typeKind ty)
-                 ty args co
-
-    -- Having broken everything apart, this figures out the point at which there
-    -- are no more dependent quantifications, and puts the cast there
-    affix_co _ ty [] co
-      = no_double_casts ty co
-    affix_co bndrs ty args co
-      -- if kind contains any dependent quantifications, we can't push.
-      -- apply arguments until it doesn't
-      = let (no_dep_bndrs, some_dep_bndrs) = spanEnd isAnonTyBinder bndrs
-            (some_dep_args, rest_args) = splitAtList some_dep_bndrs args
-            dep_subst = zipTyBinderSubst some_dep_bndrs some_dep_args
-            used_no_dep_bndrs = takeList rest_args no_dep_bndrs
-            rest_arg_tys = substTys dep_subst (map tyBinderType used_no_dep_bndrs)
-            co' = mkFunCos Nominal
-                           (map (mkReflCo Nominal) rest_arg_tys)
-                           co
-        in
-        ((ty `mkAppTys` some_dep_args) `no_double_casts` co') `mkAppTys` rest_args
-
-    no_double_casts (CastTy ty co1) co2 = CastTy ty (co1 `mkTransCo` co2)
-    no_double_casts ty              co  = CastTy ty co
-
-tyConTyBinders :: TyCon -> [TyBinder]
--- Return the tyConBinders in TyBinder form
-tyConTyBinders tycon = tyConBindersTyBinders (tyConBinders tycon)
+mkCastTy ty co = CastTy ty co
 
 tyConBindersTyBinders :: [TyConBinder] -> [TyBinder]
 -- Return the tyConBinders in TyBinder form
@@ -1365,8 +1315,12 @@ mkLamType v ty
 
 mkLamTypes vs ty = foldr mkLamType ty vs
 
--- | Given a list of type-level vars and a result type, makes TyBinders, preferring
--- anonymous binders if the variable is, in fact, not dependent.
+-- | Given a list of type-level vars and a result kind,
+-- makes TyBinders, preferring anonymous binders
+-- if the variable is, in fact, not dependent.
+-- e.g.    mkTyConBindersPreferAnon [(k:*),(b:k),(c:k)] (k->k)
+-- We want (k:*) Named, (a;k) Anon, (c:k) Anon
+--
 -- All binders are /visible/.
 mkTyConBindersPreferAnon :: [TyVar] -> Type -> [TyConBinder]
 mkTyConBindersPreferAnon vars inner_ty = fst (go vars)
@@ -1536,14 +1490,6 @@ isTauTy (CoercionTy _)        = False  -- Not sure about this
 %************************************************************************
 -}
 
--- | Make a named binder
-mkTyVarBinder :: ArgFlag -> Var -> TyVarBinder
-mkTyVarBinder vis var = TvBndr var vis
-
--- | Make many named binders
-mkTyVarBinders :: ArgFlag -> [TyVar] -> [TyVarBinder]
-mkTyVarBinders vis = map (mkTyVarBinder vis)
-
 -- | Make an anonymous binder
 mkAnonBinder :: Type -> TyBinder
 mkAnonBinder = Anon
@@ -1575,13 +1521,6 @@ caseBinder :: TyBinder           -- ^ binder to scrutinize
            -> a
 caseBinder (Named v) f _ = f v
 caseBinder (Anon t)  _ d = d t
-
--- | Create a TCvSubst combining the binders and types provided.
--- NB: It is specifically OK if the lists are of different lengths.
--- Barely used
-zipTyBinderSubst :: [TyBinder] -> [Type] -> TCvSubst
-zipTyBinderSubst bndrs tys
-  = mkTvSubstPrs [ (tv, ty) | (Named (TvBndr tv _), ty) <- zip bndrs tys ]
 
 -- | Manufacture a new 'TyConBinder' from a 'TyBinder'. Anonymous
 -- 'TyBinder's are still assigned names as 'TyConBinder's, so we need
@@ -1644,9 +1583,9 @@ isPredTy ty = go ty []
     go_tc :: TyCon -> [KindOrType] -> Bool
     go_tc tc args
       | tc `hasKey` eqPrimTyConKey || tc `hasKey` eqReprPrimTyConKey
-                  = length args == 4  -- ~# and ~R# sadly have result kind #
-                                      -- not Constraint; but we still want
-                                      -- isPredTy to reply True.
+                  = args `lengthIs` 4  -- ~# and ~R# sadly have result kind #
+                                       -- not Constraint; but we still want
+                                       -- isPredTy to reply True.
       | otherwise = go_k (tyConKind tc) args
 
     go_k :: Kind -> [KindOrType] -> Bool
@@ -1893,7 +1832,7 @@ predTypeEqRel ty
 --
 -- This is a deterministic sorting operation
 -- (that is, doesn't depend on Uniques).
-toposortTyVars :: [TyVar] -> [TyVar]
+toposortTyVars :: [TyCoVar] -> [TyCoVar]
 toposortTyVars tvs = reverse $
                      [ node_payload node | node <- topologicalSortG $
                                           graphFromEdgedVerticesOrd nodes ]
@@ -1947,7 +1886,7 @@ mkFamilyTyConApp :: TyCon -> [Type] -> Type
 mkFamilyTyConApp tc tys
   | Just (fam_tc, fam_tys) <- tyConFamInst_maybe tc
   , let tvs = tyConTyVars tc
-        fam_subst = ASSERT2( length tvs == length tys, ppr tc <+> ppr tys )
+        fam_subst = ASSERT2( tvs `equalLength` tys, ppr tc <+> ppr tys )
                     zipTvSubst tvs tys
   = mkTyConApp fam_tc (substTys fam_subst fam_tys)
   | otherwise

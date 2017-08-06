@@ -51,6 +51,7 @@ import qualified RegAlloc.Graph.Main            as Color
 import qualified RegAlloc.Graph.Stats           as Color
 import qualified RegAlloc.Graph.TrivColorable   as Color
 
+import AsmUtils
 import TargetReg
 import Platform
 import Config
@@ -65,7 +66,9 @@ import BlockId
 import CgUtils          ( fixStgRegisters )
 import Cmm
 import CmmUtils
-import Hoopl
+import Hoopl.Collections
+import Hoopl.Label
+import Hoopl.Block
 import CmmOpt           ( cmmMachOpFold )
 import PprCmm
 import CLabel
@@ -768,7 +771,7 @@ makeImportsDoc dflags imports
                 -- security. GHC generated code does not need an executable
                 -- stack so add the note in:
             (if platformHasGnuNonexecStack platform
-             then text ".section .note.GNU-stack,\"\",@progbits"
+             then text ".section .note.GNU-stack,\"\"," <> sectionType "progbits"
              else Outputable.empty)
             $$
                 -- And just because every other compiler does, let's stick in

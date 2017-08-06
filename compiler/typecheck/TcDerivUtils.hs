@@ -6,7 +6,7 @@
 Error-checking and other utilities for @deriving@ clauses or declarations.
 -}
 
-{-# LANGUAGE ImplicitParams #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module TcDerivUtils (
         DerivSpec(..), pprDerivSpec,
@@ -36,7 +36,6 @@ import Module (getModule)
 import Name
 import Outputable
 import PrelNames
-import RdrName
 import SrcLoc
 import TcGenDeriv
 import TcGenFunctor
@@ -105,13 +104,27 @@ instance Outputable theta => Outputable (DerivSpec theta) where
 
 -- What action to take in order to derive a class instance.
 -- See Note [Deriving strategies] in TcDeriv
--- NB: DerivSpecMechanism is purely local to this module
 data DerivSpecMechanism
   = DerivSpecStock   -- "Standard" classes
-      (SrcSpan -> TyCon -> [Type] -> TcM (LHsBinds RdrName, BagDerivStuff))
+      (SrcSpan -> TyCon
+               -> [Type]
+               -> TcM (LHsBinds GhcPs, BagDerivStuff, [Name]))
+      -- This function returns three things:
+      --
+      -- 1. @LHsBinds GhcPs@: The derived instance's function bindings
+      --    (e.g., @compare (T x) (T y) = compare x y@)
+      -- 2. @BagDerivStuff@: Auxiliary bindings needed to support the derived
+      --    instance. As examples, derived 'Generic' instances require
+      --    associated type family instances, and derived 'Eq' and 'Ord'
+      --    instances require top-level @con2tag@ functions.
+      --    See Note [Auxiliary binders] in TcGenDeriv.
+      -- 3. @[Name]@: A list of Names for which @-Wunused-binds@ should be
+      --    suppressed. This is used to suppress unused warnings for record
+      --    selectors when deriving 'Read', 'Show', or 'Generic'.
+      --    See Note [Deriving and unused record selectors].
 
   | DerivSpecNewtype -- -XGeneralizedNewtypeDeriving
-      Type -- ^ The newtype rep type
+      Type -- The newtype rep type
 
   | DerivSpecAnyClass -- -XDeriveAnyClass
 
@@ -236,25 +249,26 @@ is willing to support it. The canDeriveAnyClass function checks if this is the
 case.
 -}
 
-hasStockDeriving :: Class
-                   -> Maybe (SrcSpan
-                             -> TyCon
-                             -> [Type]
-                             -> TcM (LHsBinds RdrName, BagDerivStuff))
+hasStockDeriving
+  :: Class -> Maybe (SrcSpan
+                     -> TyCon
+                     -> [Type]
+                     -> TcM (LHsBinds GhcPs, BagDerivStuff, [Name]))
 hasStockDeriving clas
   = assocMaybe gen_list (getUnique clas)
   where
-    gen_list :: [(Unique, SrcSpan
-                          -> TyCon
-                          -> [Type]
-                          -> TcM (LHsBinds RdrName, BagDerivStuff))]
+    gen_list
+      :: [(Unique, SrcSpan
+                   -> TyCon
+                   -> [Type]
+                   -> TcM (LHsBinds GhcPs, BagDerivStuff, [Name]))]
     gen_list = [ (eqClassKey,          simpleM gen_Eq_binds)
                , (ordClassKey,         simpleM gen_Ord_binds)
                , (enumClassKey,        simpleM gen_Enum_binds)
                , (boundedClassKey,     simple gen_Bounded_binds)
                , (ixClassKey,          simpleM gen_Ix_binds)
-               , (showClassKey,        with_fix_env gen_Show_binds)
-               , (readClassKey,        with_fix_env gen_Read_binds)
+               , (showClassKey,        read_or_show gen_Show_binds)
+               , (readClassKey,        read_or_show gen_Read_binds)
                , (dataClassKey,        simpleM gen_Data_binds)
                , (functorClassKey,     simple gen_Functor_binds)
                , (foldableClassKey,    simple gen_Foldable_binds)
@@ -264,18 +278,57 @@ hasStockDeriving clas
                , (gen1ClassKey,        generic (gen_Generic_binds Gen1)) ]
 
     simple gen_fn loc tc _
-      = return (gen_fn loc tc)
+      = let (binds, deriv_stuff) = gen_fn loc tc
+        in return (binds, deriv_stuff, [])
 
     simpleM gen_fn loc tc _
-      = gen_fn loc tc
+      = do { (binds, deriv_stuff) <- gen_fn loc tc
+           ; return (binds, deriv_stuff, []) }
 
-    with_fix_env gen_fn loc tc _
+    read_or_show gen_fn loc tc _
       = do { fix_env <- getDataConFixityFun tc
-           ; return (gen_fn fix_env loc tc) }
+           ; let (binds, deriv_stuff) = gen_fn fix_env loc tc
+                 field_names          = all_field_names tc
+           ; return (binds, deriv_stuff, field_names) }
 
     generic gen_fn _ tc inst_tys
       = do { (binds, faminst) <- gen_fn tc inst_tys
-           ; return (binds, unitBag (DerivFamInst faminst)) }
+           ; let field_names = all_field_names tc
+           ; return (binds, unitBag (DerivFamInst faminst), field_names) }
+
+    -- See Note [Deriving and unused record selectors]
+    all_field_names = map flSelector . concatMap dataConFieldLabels
+                                     . tyConDataCons
+
+{-
+Note [Deriving and unused record selectors]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider this (see Trac #13919):
+
+  module Main (main) where
+
+  data Foo = MkFoo {bar :: String} deriving Show
+
+  main :: IO ()
+  main = print (Foo "hello")
+
+Strictly speaking, the record selector `bar` is unused in this module, since
+neither `main` nor the derived `Show` instance for `Foo` mention `bar`.
+However, the behavior of `main` is affected by the presence of `bar`, since
+it will print different output depending on whether `MkFoo` is defined using
+record selectors or not. Therefore, we do not to issue a
+"Defined but not used: ‘bar’" warning for this module, since removing `bar`
+changes the program's behavior. This is the reason behind the [Name] part of
+the return type of `hasStockDeriving`—it tracks all of the record selector
+`Name`s for which -Wunused-binds should be suppressed.
+
+Currently, the only three stock derived classes that require this are Read,
+Show, and Generic, as their derived code all depend on the record selectors
+of the derived data type's constructors.
+
+See also Note [Newtype deriving and unused constructors] in TcDeriv for
+another example of a similar trick.
+-}
 
 getDataConFixityFun :: TyCon -> TcM (Name -> Fixity)
 -- If the TyCon is locally defined, we want the local fixity env;
@@ -512,7 +565,8 @@ cond_functorOK allowFunctions allowExQuantifiedLastTyVar _ rep_tc
     tc_tvs            = tyConTyVars rep_tc
     Just (_, last_tv) = snocView tc_tvs
     bad_stupid_theta  = filter is_bad (tyConStupidTheta rep_tc)
-    is_bad pred       = last_tv `elemVarSet` tyCoVarsOfType pred
+    is_bad pred       = last_tv `elemVarSet` exactTyCoVarsOfType pred
+      -- See Note [Check that the type variable is truly universal]
 
     data_cons = tyConDataCons rep_tc
     check_con con = allValid (check_universal con : foldDataConArgs (ft_check con) con)
@@ -524,7 +578,7 @@ cond_functorOK allowFunctions allowExQuantifiedLastTyVar _ rep_tc
                 -- in TcGenFunctor
       | Just tv <- getTyVar_maybe (last (tyConAppArgs (dataConOrigResTy con)))
       , tv `elem` dataConUnivTyVars con
-      , not (tv `elemVarSet` tyCoVarsOfTypes (dataConTheta con))
+      , not (tv `elemVarSet` exactTyCoVarsOfTypes (dataConTheta con))
       = IsValid   -- See Note [Check that the type variable is truly universal]
       | otherwise
       = NotValid (badCon con existential)
@@ -666,4 +720,17 @@ As a result, T can have a derived Foldable instance:
     foldr _ z T6       = z
 
 See Note [DeriveFoldable with ExistentialQuantification] in TcGenFunctor.
+
+For Functor and Traversable, we must take care not to let type synonyms
+unfairly reject a type for not being truly universally quantified. An
+example of this is:
+
+    type C (a :: Constraint) b = a
+    data T a b = C (Show a) b => MkT b
+
+Here, the existential context (C (Show a) b) does technically mention the last
+type variable b. But this is OK, because expanding the type synonym C would
+give us the context (Show a), which doesn't mention b. Therefore, we must make
+sure to expand type synonyms before performing this check. Not doing so led to
+Trac #13813.
 -}
