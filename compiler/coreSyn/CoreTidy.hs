@@ -15,6 +15,7 @@ module CoreTidy (
 #include "HsVersions.h"
 
 import CoreSyn
+import CoreUnfold ( mkCoreUnfolding )
 import CoreArity
 import Id
 import IdInfo
@@ -220,10 +221,19 @@ tidyUnfolding tidy_env df@(DFunUnfolding { df_bndrs = bndrs, df_args = args }) _
     (tidy_env', bndrs') = tidyBndrs tidy_env bndrs
 
 tidyUnfolding tidy_env
-              unf@(CoreUnfolding { uf_tmpl = unf_rhs, uf_src = src })
+              (CoreUnfolding { uf_tmpl = unf_rhs, uf_is_top = top_lvl
+                             , uf_src = src, uf_guidance = guidance })
               unf_from_rhs
   | isStableSource src
-  = unf { uf_tmpl = tidyExpr tidy_env unf_rhs }    -- Preserves OccInfo
+  = mkCoreUnfolding src top_lvl (tidyExpr tidy_env unf_rhs) guidance
+    -- Preserves OccInfo
+
+    -- Note that uf_is_value and friends may be a thunk containing a reference
+    -- to the old template. Consequently it is important that we rebuild them,
+    -- despite the fact that they won't change, to avoid a space leak (since,
+    -- e.g., ToIface doesn't look at them; see #13564). This is the same
+    -- approach we use in Simplify.simplUnfolding and TcIface.tcUnfolding.
+
   | otherwise
   = unf_from_rhs
 tidyUnfolding _ unf _ = unf     -- NoUnfolding or OtherCon

@@ -23,6 +23,8 @@ import Coercion
 import FamInstEnv ( FamInstEnvs )
 import FamInst ( tcTopNormaliseNewTypeTF_maybe )
 import Var
+import VarEnv( mkInScopeSet )
+import VarSet( extendVarSetList )
 import Outputable
 import DynFlags( DynFlags )
 import NameSet
@@ -50,85 +52,23 @@ Note [Canonicalization]
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 Canonicalization converts a simple constraint to a canonical form. It is
-unary (i.e. treats individual constraints one at a time), does not do
-any zonking, but lives in TcS monad because it needs to create fresh
-variables (for flattening) and consult the inerts (for efficiency).
+unary (i.e. treats individual constraints one at a time).
 
-The execution plan for canonicalization is the following:
+Constraints originating from user-written code come into being as
+CNonCanonicals (except for CHoleCans, arising from holes). We know nothing
+about these constraints. So, first:
 
-  1) Decomposition of equalities happens as necessary until we reach a
-     variable or type family in one side. There is no decomposition step
-     for other forms of constraints.
+     Classify CNonCanoncal constraints, depending on whether they
+     are equalities, class predicates, or other.
 
-  2) If, when we decompose, we discover a variable on the head then we
-     look at inert_eqs from the current inert for a substitution for this
-     variable and contine decomposing. Hence we lazily apply the inert
-     substitution if it is needed.
+Then proceed depending on the shape of the constraint. Generally speaking,
+each constraint gets flattened and then decomposed into one of several forms
+(see type Ct in TcRnTypes).
 
-  3) If no more decomposition is possible, we deeply apply the substitution
-     from the inert_eqs and continue with flattening.
+When an already-canonicalized constraint gets kicked out of the inert set,
+it must be recanonicalized. But we know a bit about its shape from the
+last time through, so we can skip the classification step.
 
-  4) During flattening, we examine whether we have already flattened some
-     function application by looking at all the CTyFunEqs with the same
-     function in the inert set. The reason for deeply applying the inert
-     substitution at step (3) is to maximise our chances of matching an
-     already flattened family application in the inert.
-
-The net result is that a constraint coming out of the canonicalization
-phase cannot be rewritten any further from the inerts (but maybe /it/ can
-rewrite an inert or still interact with an inert in a further phase in the
-simplifier.
-
-Note [Caching for canonicals]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Our plan with pre-canonicalization is to be able to solve a constraint
-really fast from existing bindings in TcEvBinds. So one may think that
-the condition (isCNonCanonical) is not necessary.  However consider
-the following setup:
-
-InertSet = { [W] d1 : Num t }
-WorkList = { [W] d2 : Num t, [W] c : t ~ Int}
-
-Now, we prioritize equalities, but in our concrete example
-(should_run/mc17.hs) the first (d2) constraint is dealt with first,
-because (t ~ Int) is an equality that only later appears in the
-worklist since it is pulled out from a nested implication
-constraint. So, let's examine what happens:
-
-   - We encounter work item (d2 : Num t)
-
-   - Nothing is yet in EvBinds, so we reach the interaction with inerts
-     and set:
-              d2 := d1
-    and we discard d2 from the worklist. The inert set remains unaffected.
-
-   - Now the equation ([W] c : t ~ Int) is encountered and kicks-out
-     (d1 : Num t) from the inerts.  Then that equation gets
-     spontaneously solved, perhaps. We end up with:
-        InertSet : { [G] c : t ~ Int }
-        WorkList : { [W] d1 : Num t}
-
-   - Now we examine (d1), we observe that there is a binding for (Num
-     t) in the evidence binds and we set:
-             d1 := d2
-     and end up in a loop!
-
-Now, the constraints that get kicked out from the inert set are always
-Canonical, so by restricting the use of the pre-canonicalizer to
-NonCanonical constraints we eliminate this danger. Moreover, for
-canonical constraints we already have good caching mechanisms
-(effectively the interaction solver) and we are interested in reducing
-things like superclasses of the same non-canonical constraint being
-generated hence I don't expect us to lose a lot by introducing the
-(isCNonCanonical) restriction.
-
-A similar situation can arise in TcSimplify, at the end of the
-solve_wanteds function, where constraints from the inert set are
-returned as new work -- our substCt ensures however that if they are
-not rewritten by subst, they remain canonical and hence we will not
-attempt to solve them from the EvBinds. If on the other hand they did
-get rewritten and are now non-canonical they will still not match the
-EvBinds, so we are again good.
 -}
 
 -- Top-level canonicalization
@@ -223,18 +163,19 @@ canClass ev cls tys pend_sc
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We need to add superclass constraints for two reasons:
 
-* For givens, they give us a route to to proof.  E.g.
+* For givens [G], they give us a route to to proof.  E.g.
     f :: Ord a => a -> Bool
     f x = x == x
   We get a Wanted (Eq a), which can only be solved from the superclass
   of the Given (Ord a).
 
-* For wanteds, they may give useful functional dependencies.  E.g.
+* For wanteds [W], and deriveds [WD], [D], they may give useful
+  functional dependencies.  E.g.
      class C a b | a -> b where ...
      class C a b => D a b where ...
-  Now a Wanted constraint (D Int beta) has (C Int beta) as a superclass
+  Now a [W] constraint (D Int beta) has (C Int beta) as a superclass
   and that might tell us about beta, via C's fundeps.  We can get this
-  by generateing a Derived (C Int beta) constraint.  It's derived because
+  by generating a [D] (C Int beta) constraint.  It's derived because
   we don't actually have to cough up any evidence for it; it's only there
   to generate fundep equalities.
 
@@ -289,11 +230,19 @@ So here's the plan:
 4. Go round to (2) again.  This loop (2,3,4) is implemented
    in TcSimplify.simpl_loop.
 
-We try to terminate the loop by flagging which class constraints
-(given or wanted) are potentially un-expanded.  This is what the
-cc_pend_sc flag is for in CDictCan.  So in Step 3 we only expand
-superclasses for constraints with cc_pend_sc set to true (i.e.
+The cc_pend_sc flag in a CDictCan records whether the superclasses of
+this constraint have been expanded.  Specifically, in Step 3 we only
+expand superclasses for constraints with cc_pend_sc set to true (i.e.
 isPendingScDict holds).
+
+Why do we do this?  Two reasons:
+
+* To avoid repeated work, by repeatedly expanding the superclasses of
+  same constraint,
+
+* To terminate the above loop, at least in the -XNoRecursiveSuperClasses
+  case.  If there are recursive superclasses we could, in principle,
+  expand forever, always encountering new constraints.
 
 When we take a CNonCanonical or CIrredCan, but end up classifying it
 as a CDictCan, we set the cc_pend_sc flag to False.
@@ -642,27 +591,7 @@ can_eq_nc' _flat _rdr_env _envs ev eq_rel ty1 _ ty2 _
 
 can_eq_nc' _flat _rdr_env _envs ev eq_rel
            s1@(ForAllTy {}) _ s2@(ForAllTy {}) _
- | CtWanted { ctev_loc = loc, ctev_dest = orig_dest } <- ev
- = do { let (bndrs1,body1) = tcSplitForAllTyVarBndrs s1
-            (bndrs2,body2) = tcSplitForAllTyVarBndrs s2
-      ; if not (equalLength bndrs1 bndrs2)
-        then do { traceTcS "Forall failure" $
-                     vcat [ ppr s1, ppr s2, ppr bndrs1, ppr bndrs2
-                          , ppr (map binderArgFlag bndrs1)
-                          , ppr (map binderArgFlag bndrs2) ]
-                ; canEqHardFailure ev s1 s2 }
-        else
-          do { traceTcS "Creating implication for polytype equality" $ ppr ev
-             ; kind_cos <- zipWithM (unifyWanted loc Nominal)
-                             (map binderKind bndrs1) (map binderKind bndrs2)
-             ; all_co <- deferTcSForAllEq (eqRelRole eq_rel) loc
-                                           kind_cos (bndrs1,body1) (bndrs2,body2)
-             ; setWantedEq orig_dest all_co
-             ; stopWith ev "Deferred polytype equality" } }
- | otherwise
- = do { traceTcS "Omitting decomposition of given polytype equality" $
-        pprEq s1 s2    -- See Note [Do not decompose given polytype equalities]
-      ; stopWith ev "Discard given polytype equality" }
+  = can_eq_nc_forall ev eq_rel s1 s2
 
 -- See Note [Canonicalising type applications] about why we require flat types
 can_eq_nc' True _rdr_env _envs ev eq_rel (AppTy t1 s1) _ ty2 _
@@ -692,6 +621,77 @@ can_eq_nc' True _rdr_env _envs ev eq_rel ty1 ps_ty1 (TyVarTy tv2) ps_ty2
 can_eq_nc' True _rdr_env _envs ev _eq_rel _ ps_ty1 _ ps_ty2
   = do { traceTcS "can_eq_nc' catch-all case" (ppr ps_ty1 $$ ppr ps_ty2)
        ; canEqHardFailure ev ps_ty1 ps_ty2 }
+
+---------------------------------
+can_eq_nc_forall :: CtEvidence -> EqRel
+                 -> Type -> Type    -- LHS and RHS
+                 -> TcS (StopOrContinue Ct)
+-- (forall as. phi1) ~ (forall bs. phi2)
+-- Check for length match of as, bs
+-- Then build an implication constraint: forall as. phi1 ~ phi2[as/bs]
+-- But remember also to unify the kinds of as and bs
+--  (this is the 'go' loop), and actually substitute phi2[as |> cos / bs]
+-- Remember also that we might have forall z (a:z). blah
+--  so we must proceed one binder at a time (Trac #13879)
+
+can_eq_nc_forall ev eq_rel s1 s2
+ | CtWanted { ctev_loc = loc, ctev_dest = orig_dest } <- ev
+ = do { let free_tvs1 = tyCoVarsOfType s1
+            free_tvs2 = tyCoVarsOfType s2
+            (bndrs1, phi1) = tcSplitForAllTyVarBndrs s1
+            (bndrs2, phi2) = tcSplitForAllTyVarBndrs s2
+      ; if not (equalLength bndrs1 bndrs2)
+        then do { traceTcS "Forall failure" $
+                     vcat [ ppr s1, ppr s2, ppr bndrs1, ppr bndrs2
+                          , ppr (map binderArgFlag bndrs1)
+                          , ppr (map binderArgFlag bndrs2) ]
+                ; canEqHardFailure ev s1 s2 }
+        else
+   do { traceTcS "Creating implication for polytype equality" $ ppr ev
+      ; let empty_subst1 = mkEmptyTCvSubst $ mkInScopeSet free_tvs1
+      ; (subst1, skol_tvs) <- tcInstSkolTyVarsX empty_subst1 $
+                              binderVars bndrs1
+
+      ; let skol_info = UnifyForAllSkol phi1
+            phi1' = substTy subst1 phi1
+
+            -- Unify the kinds, extend the substitution
+            go (skol_tv:skol_tvs) subst (bndr2:bndrs2)
+              = do { let tv2 = binderVar bndr2
+                   ; kind_co <- unifyWanted loc Nominal
+                                            (tyVarKind skol_tv)
+                                            (substTy subst (tyVarKind tv2))
+                   ; let subst' = extendTvSubst subst tv2
+                                       (mkCastTy (mkTyVarTy skol_tv) kind_co)
+                   ; co <- go skol_tvs subst' bndrs2
+                   ; return (mkForAllCo skol_tv kind_co co) }
+
+            -- Done: unify phi1 ~ phi2
+            go [] subst bndrs2
+              = ASSERT( null bndrs2 )
+                unifyWanted loc (eqRelRole eq_rel)
+                            phi1' (substTy subst phi2)
+
+            go _ _ _ = panic "cna_eq_nc_forall"  -- case (s:ss) []
+
+            empty_subst2 = mkEmptyTCvSubst $ mkInScopeSet $
+                           free_tvs2 `extendVarSetList` skol_tvs
+
+      ; (implic, _ev_binds, all_co) <- buildImplication skol_info skol_tvs [] $
+                                       go skol_tvs empty_subst2 bndrs2
+           -- We have nowhere to put these bindings
+           -- but TcSimplify.setImplicationStatus
+           -- checks that we don't actually use them
+           -- when skol_info = UnifyForAllSkol
+
+      ; updWorkListTcS (extendWorkListImplic implic)
+      ; setWantedEq orig_dest all_co
+      ; stopWith ev "Deferred polytype equality" } }
+
+ | otherwise
+ = do { traceTcS "Omitting decomposition of given polytype equality" $
+        pprEq s1 s2    -- See Note [Do not decompose given polytype equalities]
+      ; stopWith ev "Discard given polytype equality" }
 
 ---------------------------------
 -- | Compare types for equality, while zonking as necessary. Gives up
@@ -1739,7 +1739,7 @@ may reflect the result of unification alpha := ty, so new_pred might
 not _look_ the same as old_pred, and it's vital to proceed from now on
 using new_pred.
 
-The flattener preserves type synonyms, so they should appear in new_pred
+qThe flattener preserves type synonyms, so they should appear in new_pred
 as well as in old_pred; that is important for good error messages.
  -}
 

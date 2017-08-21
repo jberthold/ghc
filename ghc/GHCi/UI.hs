@@ -51,7 +51,7 @@ import GHC ( LoadHowMuch(..), Target(..),  TargetId(..), InteractiveImport(..),
 import HsImpExp
 import HsSyn
 import HscTypes ( tyThingParent_maybe, handleFlagWarnings, getSafeMode, hsc_IC,
-                  setInteractivePrintName, hsc_dflags, msObjFilePath )
+                  setInteractivePrintName, hsc_dflags )
 import Module
 import Name
 import Packages ( trusted, getPackageDetails, getInstalledPackageDetails,
@@ -104,7 +104,7 @@ import Data.Time.Format ( formatTime, defaultTimeLocale )
 import Data.Version ( showVersion )
 
 import Exception hiding (catch)
-import Foreign
+import Foreign hiding (void)
 import GHC.Stack hiding (SrcLoc(..))
 
 import System.Directory
@@ -186,15 +186,15 @@ ghciCommands = map mkCmd [
   ("issafe",    keepGoing' isSafeCmd,           completeModule),
   ("kind",      keepGoing' (kindOfType False),  completeIdentifier),
   ("kind!",     keepGoing' (kindOfType True),   completeIdentifier),
-  ("load",      keepGoingPaths (loadModule_ False), completeHomeModuleOrFile),
-  ("load!",     keepGoingPaths (loadModule_ True), completeHomeModuleOrFile),
+  ("load",      keepGoingPaths loadModule_,     completeHomeModuleOrFile),
+  ("load!",     keepGoingPaths loadModuleDefer, completeHomeModuleOrFile),
   ("list",      keepGoing' listCmd,             noCompletion),
   ("module",    keepGoing moduleCmd,            completeSetModule),
   ("main",      keepGoing runMain,              completeFilename),
   ("print",     keepGoing printCmd,             completeExpression),
   ("quit",      quit,                           noCompletion),
-  ("reload",    keepGoing' (reloadModule False), noCompletion),
-  ("reload!",   keepGoing' (reloadModule True), noCompletion),
+  ("reload",    keepGoing' reloadModule,        noCompletion),
+  ("reload!",   keepGoing' reloadModuleDefer,   noCompletion),
   ("run",       keepGoing runRun,               completeFilename),
   ("script",    keepGoing' scriptCmd,           completeFilename),
   ("set",       keepGoing setCmd,               completeSetOptions),
@@ -1444,7 +1444,7 @@ editFile str =
      code <- liftIO $ system (cmd ++ cmdArgs)
 
      when (code == ExitSuccess)
-       $ reloadModule False ""
+       $ reloadModule ""
 
 -- The user didn't specify a file so we pick one for them.
 -- Our strategy is to pick the first module that failed to load,
@@ -1604,21 +1604,27 @@ checkModule m = do
 
 -- | Sets '-fdefer-type-errors' if 'defer' is true, executes 'load' and unsets
 -- '-fdefer-type-errors' again if it has not been set before.
-deferredLoad :: Bool -> InputT GHCi SuccessFlag -> InputT GHCi ()
-deferredLoad defer load = do
-  -- Force originalFlags to avoid leaking the associated HscEnv
-  !originalFlags <- getDynFlags
-  when defer $ Monad.void $
-    GHC.setProgramDynFlags $ setGeneralFlag' Opt_DeferTypeErrors originalFlags
-  Monad.void $ load
-  Monad.void $ GHC.setProgramDynFlags $ originalFlags
+wrapDeferTypeErrors :: InputT GHCi a -> InputT GHCi a
+wrapDeferTypeErrors load =
+  gbracket
+    (do
+      -- Force originalFlags to avoid leaking the associated HscEnv
+      !originalFlags <- getDynFlags
+      void $ GHC.setProgramDynFlags $
+         setGeneralFlag' Opt_DeferTypeErrors originalFlags
+      return originalFlags)
+    (\originalFlags -> void $ GHC.setProgramDynFlags originalFlags)
+    (\_ -> load)
 
 loadModule :: [(FilePath, Maybe Phase)] -> InputT GHCi SuccessFlag
 loadModule fs = timeIt (const Nothing) (loadModule' fs)
 
 -- | @:load@ command
-loadModule_ :: Bool -> [FilePath] -> InputT GHCi ()
-loadModule_ defer fs = deferredLoad defer (loadModule (zip fs (repeat Nothing)))
+loadModule_ :: [FilePath] -> InputT GHCi ()
+loadModule_ fs = void $ loadModule (zip fs (repeat Nothing))
+
+loadModuleDefer :: [FilePath] -> InputT GHCi ()
+loadModuleDefer = wrapDeferTypeErrors . loadModule_
 
 loadModule' :: [(FilePath, Maybe Phase)] -> InputT GHCi SuccessFlag
 loadModule' files = do
@@ -1654,12 +1660,14 @@ addModule files = do
   return ()
 
 -- | @:reload@ command
-reloadModule :: Bool -> String -> InputT GHCi ()
-reloadModule defer m = deferredLoad defer $
-                       doLoadAndCollectInfo True loadTargets
+reloadModule :: String -> InputT GHCi ()
+reloadModule m = void $ doLoadAndCollectInfo True loadTargets
   where
     loadTargets | null m    = LoadAllTargets
                 | otherwise = LoadUpTo (GHC.mkModuleName m)
+
+reloadModuleDefer :: String -> InputT GHCi ()
+reloadModuleDefer = wrapDeferTypeErrors . reloadModule
 
 -- | Load/compile targets and (optionally) collect module-info
 --
@@ -1713,7 +1721,7 @@ afterLoad ok retain_context = do
   lift revertCAFs  -- always revert CAFs on load.
   lift discardTickArrays
   loaded_mods <- getLoadedModules
-  modulesLoadedMsg ok loaded_mods
+  modulesLoadedMsg ok (length loaded_mods)
   lift $ setContextAfterLoad retain_context loaded_mods
 
 setContextAfterLoad :: Bool -> [GHC.ModSummary] -> GHCi ()
@@ -1788,27 +1796,18 @@ keepPackageImports = filterM is_pkg_import
           mod_name = unLoc (ideclName d)
 
 
-modulesLoadedMsg :: SuccessFlag -> [GHC.ModSummary] -> InputT GHCi ()
-modulesLoadedMsg ok mods = do
+modulesLoadedMsg :: SuccessFlag -> Int -> InputT GHCi ()
+modulesLoadedMsg ok num_mods = do
   dflags <- getDynFlags
   unqual <- GHC.getPrintUnqual
-  let mod_name mod = do
-        is_interpreted <- GHC.isModuleInterpreted mod
-        return $ if is_interpreted
-                  then ppr (GHC.ms_mod mod)
-                  else ppr (GHC.ms_mod mod)
-                       <> text " ("
-                       <> text (normalise $ msObjFilePath mod)
-                       <> text ")" -- fix #9887
-  mod_names <- mapM mod_name mods
-  let mod_commas
-        | null mods = text "none."
-        | otherwise = hsep (punctuate comma mod_names) <> text "."
-      status = case ok of
+  let status = case ok of
                    Failed    -> text "Failed"
                    Succeeded -> text "Ok"
 
-      msg = status <> text ", modules loaded:" <+> mod_commas
+      num_mods_pp = if num_mods == 1
+        then "1 module"
+        else int num_mods <+> "modules"
+      msg = status <> text "," <+> num_mods_pp <+> "loaded."
 
   when (verbosity dflags > 0) $
      liftIO $ putStrLn $ showSDocForUser dflags unqual msg

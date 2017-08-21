@@ -14,7 +14,8 @@ AC_DEFUN([GHC_SELECT_FILE_EXTENSIONS],
         AC_MSG_WARN([I'm assuming you wanted to build for i386-unknown-mingw32])
         exit 1
         ;;
-    *-unknown-mingw32)
+    # examples: i386-unknown-mingw32, i686-w64-mingw32, x86_64-w64-mingw32
+    *-mingw32)
         windows=YES
         $2='.exe'
         $3='.dll'
@@ -458,55 +459,42 @@ AC_DEFUN([GET_ARM_ISA],
 # Set the variables used in the settings file
 AC_DEFUN([FP_SETTINGS],
 [
-    SettingsCCompilerCommand="$CC"
-    SettingsHaskellCPPCommand="$HaskellCPPCmd"
-    SettingsHaskellCPPFlags="$HaskellCPPArgs"
-    SettingsLdCommand="$LdCmd"
-    SettingsArCommand="$ArCmd"
-    SettingsPerlCommand="$PerlCmd"
-
-    if test -z "$DllWrap"
+    if test "$windows" = YES
     then
+        mingw_bin_prefix=mingw/bin/
+        SettingsCCompilerCommand="\$topdir/../${mingw_bin_prefix}gcc.exe"
+        SettingsHaskellCPPCommand="\$topdir/../${mingw_bin_prefix}gcc.exe"
+        SettingsHaskellCPPFlags="$HaskellCPPArgs"
+        SettingsLdCommand="\$topdir/../${mingw_bin_prefix}ld.exe"
+        SettingsArCommand="\$topdir/../${mingw_bin_prefix}ar.exe"
+        SettingsPerlCommand='$topdir/../perl/perl.exe'
+        SettingsDllWrapCommand="\$topdir/../${mingw_bin_prefix}dllwrap.exe"
+        SettingsWindresCommand="\$topdir/../${mingw_bin_prefix}windres.exe"
+        SettingsTouchCommand='$topdir/bin/touchy.exe'
+    else
+        SettingsCCompilerCommand="$CC"
+        SettingsHaskellCPPCommand="$HaskellCPPCmd"
+        SettingsHaskellCPPFlags="$HaskellCPPArgs"
+        SettingsLdCommand="$LdCmd"
+        SettingsArCommand="$ArCmd"
+        SettingsPerlCommand="$PerlCmd"
         SettingsDllWrapCommand="/bin/false"
-    else
-        SettingsDllWrapCommand="$DllWrap"
-    fi
-
-    if test -z "$Windres"
-    then
         SettingsWindresCommand="/bin/false"
-    else
-        SettingsWindresCommand="$Windres"
-    fi
-
-    if test -z "$Libtool"
-    then
         SettingsLibtoolCommand="libtool"
-    else
-        SettingsLibtoolCommand="$Libtool"
-    fi
-
-    if test -z "$Touch"
-    then
         SettingsTouchCommand='touch'
-    else
-        SettingsTouchCommand='$Touch'
     fi
-
     if test -z "$LlcCmd"
     then
       SettingsLlcCommand="llc"
     else
       SettingsLlcCommand="$LlcCmd"
     fi
-
     if test -z "$OptCmd"
     then
       SettingsOptCommand="opt"
     else
       SettingsOptCommand="$OptCmd"
     fi
-
     SettingsCCompilerFlags="$CONF_CC_OPTS_STAGE2"
     SettingsCCompilerLinkFlags="$CONF_GCC_LINKER_OPTS_STAGE2"
     SettingsCCompilerSupportsNoPie="$CONF_GCC_SUPPORTS_NO_PIE"
@@ -635,15 +623,12 @@ AC_DEFUN([FPTOOLS_SET_C_LD_FLAGS],
         # instructions (ie not Thumb) and to link using the gold linker.
         # Forcing LD to be ld.gold is done in FIND_LD m4 macro.
         $2="$$2 -marm"
-        $3="$$3 -fuse-ld=gold -Wl,-z,noexecstack"
+        $3="$$3 -Wl,-z,noexecstack"
         $4="$$4 -z noexecstack"
         ;;
 
     aarch64*linux*)
-        # On aarch64/linux and aarch64/android, tell gcc to link using the
-        # gold linker.
-        # Forcing LD to be ld.gold is done in FIND_LD m4 macro.
-        $3="$$3 -fuse-ld=gold -Wl,-z,noexecstack"
+        $3="$$3 -Wl,-z,noexecstack"
         $4="$$4 -z noexecstack"
         ;;
 
@@ -2080,27 +2065,63 @@ AC_DEFUN([FIND_LLVM_PROG],[
     fi
 ])
 
-# FIND_LD
-# Find the version of `ld` to use. This is used in both in the top level
-# configure.ac and in distrib/configure.ac.in.
+# CHECK_LD_COPY_BUG()
+# -------------------
+# Check for binutils bug #16177 present in some versions of the bfd ld
+# implementation affecting ARM relocations.
+# https://sourceware.org/bugzilla/show_bug.cgi?id=16177
 #
-# $1 = the variable to set
+# $1 = the platform
 #
-AC_DEFUN([FIND_LD],[
-    FP_ARG_WITH_PATH_GNU_PROG([LD], [ld], [ld])
-    case $target in
-        arm*linux*       | \
-        aarch64*linux*   )
-            # Arm and Aarch64 requires use of the binutils ld.gold linker.
-            # This case should catch at least arm-unknown-linux-gnueabihf,
-            # arm-linux-androideabi, arm64-unknown-linux and
-            # aarch64-linux-android
-            FP_ARG_WITH_PATH_GNU_PROG([LD_GOLD], [ld.gold], [ld.gold])
-            $1="$LD_GOLD"
-            ;;
-        *)
-            $1="$LD"
-            ;;
+AC_DEFUN([CHECK_LD_COPY_BUG],[
+    case $1 in
+      arm*linux*)
+        AC_CHECK_TARGET_TOOL([READELF], [readelf])
+        AC_CHECK_TARGET_TOOL([AS], [as])
+        AC_MSG_CHECKING([for ld bug 16177])
+        cat >actest.s <<-EOF
+          .globl _start
+          .p2align 4
+        _start:
+          bkpt
+
+        .data
+          .globl data_object
+        object_reference:
+          .long data_object
+          .size object_reference, 4
+EOF
+
+        cat >aclib.s <<-EOF
+          .data
+          .globl data_object
+          .type data_object, %object
+          .size data_object, 4
+        data_object:
+            .long 123
+EOF
+
+        $AS -o aclib.o aclib.s
+        $LD -shared -o aclib.so aclib.o
+
+        $AS -o actest.o actest.s
+        $LD -o actest actest.o aclib.so
+
+        if $READELF -r actest | grep R_ARM_COPY > /dev/null; then
+            AC_MSG_RESULT([affected])
+            AC_MSG_ERROR(
+              [Your linker is affected by binutils #16177, which
+               critically breaks linkage of GHC objects. Please either upgrade
+               binutils or supply a different linker with the LD environment
+               variable.])
+        else
+            AC_MSG_RESULT([unaffected])
+        fi
+
+        rm -f aclib.s aclib.o aclib.so actest.s actest.o actest
+        ;;
+      *)
+        ;;
     esac
 ])
 
@@ -2278,6 +2299,67 @@ AC_DEFUN([FP_BFD_SUPPORT], [
             LIBS="$save_LIBS"
         ]
     )
+])
+
+
+# FP_CC_LINKER_FLAG_TRY()
+# --------------------
+# Try a particular linker to see whether we can use it. In particular, determine
+# whether we can convince gcc to use it via a -fuse-ld=... flag.
+#
+# $1 = the name of the linker to try
+# $2 = the variable to set with the appropriate GHC flag if the linker is
+# found to be usable
+AC_DEFUN([FP_CC_LINKER_FLAG_TRY], [
+    AC_MSG_CHECKING([whether C compiler supports -fuse-ld=$1])
+    echo 'int main(void) {return 0;}' > conftest.c
+    if $CC -o conftest.o -fuse-ld=$1 conftest.c > /dev/null 2>&1
+    then
+        $2="-fuse-ld=$1"
+        AC_MSG_RESULT([yes])
+    else
+        AC_MSG_RESULT([no])
+    fi
+    rm -f conftest.c conftest.o
+])
+
+# FIND_LD
+# ---------
+# Find the version of `ld` to use and figure out how to get gcc to use it for
+# linking (if --enable-ld-override is enabled). This is used in both in the top
+# level configure.ac and in distrib/configure.ac.in.
+#
+# $1 = the platform
+# $2 = the variable to set with GHC options to configure gcc to use the chosen linker
+#
+AC_DEFUN([FIND_LD],[
+    AC_ARG_ENABLE(ld-override,
+      [AC_HELP_STRING([--disable-ld-override],
+        [Prevent GHC from overriding the default linker used by gcc. If ld-override is enabled GHC will try to tell gcc to use whichever linker is selected by the LD environment variable. [default=override enabled]])],
+      [],
+      [enable_ld_override=yes])
+
+    if test "x$enable_ld_override" = "xyes"; then
+        AC_CHECK_TARGET_TOOLS([TmpLd], [ld.gold ld.lld ld])
+
+        out=`$TmpLd --version`
+        case $out in
+          "GNU ld"*)   FP_CC_LINKER_FLAG_TRY(bfd, $2) ;;
+          "GNU gold"*) FP_CC_LINKER_FLAG_TRY(gold, $2) ;;
+          "LLD"*)      FP_CC_LINKER_FLAG_TRY(lld, $2) ;;
+          *) AC_MSG_NOTICE([unknown linker version $out]) ;;
+        esac
+        if test "z$$2" = "z"; then
+            AC_MSG_NOTICE([unable to convince '$CC' to use linker '$TmpLd'])
+            AC_CHECK_TARGET_TOOL([LD], [ld])
+        else
+            LD="$TmpLd"
+        fi
+   else
+        AC_CHECK_TARGET_TOOL([LD], [ld])
+   fi
+
+   CHECK_LD_COPY_BUG([$1])
 ])
 
 # LocalWords:  fi

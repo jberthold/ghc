@@ -332,7 +332,9 @@ loop:
                         (W_)msg->tso->id, (W_)owner->id);
         }
 #else
-        debugTraceCap(DEBUG_sched, cap, "thread %d blocked on thread %d",
+        debugTraceCap(DEBUG_sched, cap,
+                      "thread %d blocked on existing BLOCKING_QUEUE "
+                      "owned by thread %d",
                       (W_)msg->tso->id, (W_)owner->id);
 #endif
 

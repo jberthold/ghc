@@ -4,14 +4,13 @@
  *
  * GC support for immutable non-GCed structures, also known as Compact
  * Normal Forms (CNF for short). This provides the RTS support for
- * the 'compact' package and the Data.Compact module.
+ * the 'compact' package and the GHC.Compact module.
  *
  * ---------------------------------------------------------------------------*/
 
 #define _GNU_SOURCE
 
 #include "PosixSource.h"
-#include <string.h>
 #include "Rts.h"
 #include "RtsUtils.h"
 
@@ -24,6 +23,8 @@
 #include "BlockAlloc.h"
 #include "Trace.h"
 #include "sm/ShouldCompact.h"
+
+#include <string.h>
 
 #ifdef HAVE_UNISTD_H
 #include <unistd.h>
@@ -50,7 +51,7 @@
   Structure
   ~~~~~~~~~
 
-  * In Data.Compact.Internal we have
+  * In GHC.Compact we have
     data Compact a = Compact Compact# a
 
   * The Compact# primitive object is operated on by the primitives.
@@ -1124,8 +1125,8 @@ maybe_fixup_internal_pointers (StgCompactNFDataBlock *block,
     if (!any_needs_fixup(block))
         return root;
 
-    debugBelch("Compact imported at the wrong address, will fix up"
-               " internal pointers\n");
+    IF_DEBUG(compact, debugBelch("Compact imported at the wrong address, "
+                            "will fix up internal pointers\n"));
 
     // I am PROOT!
     proot = &root;

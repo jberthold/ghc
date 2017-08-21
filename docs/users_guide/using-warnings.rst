@@ -17,6 +17,7 @@ generally likely to indicate bugs in your program. These are:
 
     * :ghc-flag:`-Woverlapping-patterns`
     * :ghc-flag:`-Wwarnings-deprecations`
+    * :ghc-flag:`-Wdeprecations`
     * :ghc-flag:`-Wdeprecated-flags`
     * :ghc-flag:`-Wunrecognised-pragmas`
     * :ghc-flag:`-Wduplicate-constraints`
@@ -104,6 +105,7 @@ to abort.
     warnings when doing batch compilation.
 
 .. ghc-flag:: -Werror=<wflag>
+    :noindex:
 
     :implies: ``-W<wflag>``
 
@@ -116,6 +118,7 @@ to abort.
     default, but can be useful to negate a :ghc-flag:`-Werror` flag.
 
 .. ghc-flag:: -Wwarn=<wflag>
+    :noindex:
 
     Causes a specific warning to be treated as normal warning, not fatal error.
 
@@ -241,6 +244,18 @@ of ``-W(no-)*``.
     Causes a warning to be emitted when a module, function or type with
     a ``WARNING`` or ``DEPRECATED pragma`` is used. See
     :ref:`warning-deprecated-pragma` for more details on the pragmas.
+
+    This option is on by default.
+
+.. ghc-flag:: -Wdeprecations
+
+    .. index::
+       single: deprecations
+
+    Causes a warning to be emitted when a module, function or type with
+    a ``WARNING`` or ``DEPRECATED pragma`` is used. See
+    :ref:`warning-deprecated-pragma` for more details on the pragmas.
+    An alias for :ghc-flag:`-Wwarnings-deprecations`.
 
     This option is on by default.
 

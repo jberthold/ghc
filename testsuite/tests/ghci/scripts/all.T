@@ -97,6 +97,7 @@ test('ghci061', normal, ghci_script, ['ghci061.script'])
 test('ghci062', [extra_files(['ghci062/', 'ghci062/Test.hs']),
                  when(config.have_ext_interp, extra_ways(['ghci-ext']))],
 		ghci_script, ['ghci062.script'])
+test('ghci063', normal, ghci_script, ['ghci063.script'])
 
 test('T2452', normal, ghci_script, ['T2452.script'])
 test('T2766', normal, ghci_script, ['T2766.script'])
@@ -250,5 +251,6 @@ test('T12550', normal, ghci_script, ['T12550.script'])
 test('StaticPtr', normal, ghci_script, ['StaticPtr.script'])
 test('T13202', normal, ghci_script, ['T13202.script'])
 test('T13202a', normal, ghci_script, ['T13202a.script'])
+test('T13385', [extra_hc_opts("-XRebindableSyntax")], ghci_script, ['T13385.script'])
 test('T13466', normal, ghci_script, ['T13466.script'])
 test('GhciCurDir', normal, ghci_script, ['GhciCurDir.script'])

@@ -84,6 +84,8 @@ def setTestOpts( f ):
 #      test('test001', expect_fail, compile, [''])
 #
 # to expect failure for this test.
+#
+# type TestOpt = (name :: String, opts :: Object) -> IO ()
 
 def normal( name, opts ):
     return;
@@ -518,6 +520,12 @@ def normalise_errmsg_fun( *fs ):
 def _normalise_errmsg_fun( name, opts, *fs ):
     opts.extra_errmsg_normaliser =  join_normalisers(opts.extra_errmsg_normaliser, fs)
 
+def normalise_whitespace_fun(f):
+    return lambda name, opts: _normalise_whitespace_fun(name, opts, f)
+
+def _normalise_whitespace_fun(name, opts, f):
+    opts.whitespace_normaliser = f
+
 def normalise_version_( *pkgs ):
     def normalise_version__( str ):
         return re.sub('(' + '|'.join(map(re.escape,pkgs)) + ')-[0-9.]+',
@@ -622,7 +630,7 @@ def runTest(watcher, opts, name, func, args):
         test_common_work(watcher, name, opts, func, args)
 
 # name  :: String
-# setup :: TestOpts -> IO ()
+# setup :: [TestOpt] -> IO ()
 def test(name, setup, func, args):
     global aloneTests
     global parallelTests
@@ -767,7 +775,10 @@ def test_common_work(watcher, name, opts, func, args):
         t.n_tests_skipped += len(set(all_ways) - set(do_ways))
 
         if config.cleanup and do_ways:
-            cleanup()
+            try:
+                cleanup()
+            except Exception as e:
+                framework_fail(name, 'runTest', 'Unhandled exception during cleanup: ' + str(e))
 
         package_conf_cache_file_end_timestamp = get_package_cache_timestamp();
 
@@ -1003,7 +1014,9 @@ def do_compile(name, way, should_fail, top_mod, extra_mods, extra_hc_opts, **kwa
                            join_normalisers(getTestOpts().extra_errmsg_normaliser,
                                             normalise_errmsg),
                            expected_stderr_file, actual_stderr_file,
-                           whitespace_normaliser=normalise_whitespace):
+                           whitespace_normaliser=getattr(getTestOpts(),
+                                                         "whitespace_normaliser",
+                                                         normalise_whitespace)):
         return failBecause('stderr mismatch')
 
     # no problems found, this test passed
@@ -1910,8 +1923,8 @@ if config.msys:
     import time
     def cleanup():
         testdir = getTestOpts().testdir
-        max_attemps = 5
-        retries = max_attemps
+        max_attempts = 5
+        retries = max_attempts
         def on_error(function, path, excinfo):
             # At least one test (T11489) removes the write bit from a file it
             # produces. Windows refuses to delete read-only files with a
@@ -1935,13 +1948,18 @@ if config.msys:
         # with an even more cryptic error.
         #
         # See Trac #13162
+        exception = None
         while retries > 0 and os.path.exists(testdir):
-            time.sleep((max_attemps-retries)*6)
-            shutil.rmtree(testdir, onerror=on_error, ignore_errors=False)
-            retries=-1
+            time.sleep((max_attempts-retries)*6)
+            try:
+                shutil.rmtree(testdir, onerror=on_error, ignore_errors=False)
+            except Exception as e:
+                exception = e
+            retries -= 1
 
         if retries == 0 and os.path.exists(testdir):
-            raise Exception("Unable to remove folder '" + testdir + "'. Unable to start current test.")
+            raise Exception("Unable to remove folder '%s': %s\nUnable to start current test."
+                            % (testdir, exception))
 else:
     def cleanup():
         testdir = getTestOpts().testdir

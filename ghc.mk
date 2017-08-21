@@ -471,7 +471,10 @@ endif
 
 ifeq "$(WITH_TERMINFO)" "YES"
 PACKAGES_STAGE1 += terminfo
+else
+libraries/haskeline_CONFIGURE_OPTS += --flags=-terminfo
 endif
+
 PACKAGES_STAGE1 += haskeline
 PACKAGES_STAGE1 += ghci
 
@@ -924,7 +927,7 @@ ifneq "$(INSTALL_LIBEXECS)" ""
 	done
 # We rename ghc-stage2, so that the right program name is used in error
 # messages etc.
-ifeq "$(Windows_Host)" "NO"
+ifeq "$(Windows_Target)" "NO"
 	"$(MV)" "$(DESTDIR)$(ghclibexecdir)/bin/ghc-stage$(INSTALL_GHC_STAGE)" "$(DESTDIR)$(ghclibexecdir)/bin/ghc"
 endif
 endif
@@ -1015,6 +1018,10 @@ install_packages: rts/dist/package.conf.install
 # with an 077 umask.
 	for f in '$(INSTALLED_PACKAGE_CONF)'/*; do $(CREATE_DATA) "$$f"; done
 
+# Finally, update package.cache to ensure it's newer than the registration
+# files. This avoids #13375.
+	"$(INSTALLED_GHC_PKG_REAL)" --global-package-db "$(INSTALLED_PACKAGE_CONF)" recache
+
 # -----------------------------------------------------------------------------
 # Binary distributions
 
@@ -1100,7 +1107,8 @@ unix-binary-dist-prep:
 	$(call removeFiles,$(BIN_DIST_PREP_TAR))
 # h means "follow symlinks", e.g. if aclocal.m4 is a symlink to a source
 # tree then we want to include the real file, not a symlink to it
-	cd bindistprep && "$(TAR_CMD)" hcf - -T ../bindist-list | $(TAR_COMP_CMD) -c > ../$(BIN_DIST_PREP_TAR_COMP)
+	sort bindist-list | uniq > bindist-list.uniq
+	cd bindistprep && "$(TAR_CMD)" hcf - -T ../bindist-list.uniq | $(TAR_COMP_CMD) -c > ../$(BIN_DIST_PREP_TAR_COMP)
 
 windows-binary-dist-prep:
 	$(call removeTrees,bindistprep/)
@@ -1411,6 +1419,7 @@ distclean : clean
 
 # We make these when making or testing bindists
 	$(call removeFiles,bindist-list)
+	$(call removeFiles,bindist-list.uniq)
 	$(call removeTrees,bindisttest/a)
 
 # Not sure why this is being cleaned here.

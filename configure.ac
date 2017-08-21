@@ -13,10 +13,10 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Parallel Haskell Compilation System], [8.2.0], [eden@mathematik.uni-marburg.de], [ghc-AC_PACKAGE_VERSION])
+AC_INIT([The Parallel Haskell Compilation System], [8.2.1], [eden@mathematik.uni-marburg.de], [ghc-AC_PACKAGE_VERSION])
 
 # Set this to YES for a released version, otherwise NO
-: ${RELEASE=NO}
+: ${RELEASE=YES}
 
 # The primary version (e.g. 7.5, 7.4.1) is set in the AC_INIT line
 # above.  If this is not a released version, then we will append the
@@ -177,9 +177,13 @@ then
 
     if test "$ghc_host_os" = "mingw32"
     then
-        # Canonicalise to <drive>:/path/to/ghc
-        WithGhc=`cygpath -m "${WithGhc}"`
-
+        if test "${OSTYPE}" = "msys"
+        then
+            WithGhc=`echo "${WithGhc}" | sed "s#^/\([a-zA-Z]\)/#\1:/#"`
+        else
+            # Canonicalise to <drive>:/path/to/ghc
+            WithGhc=`cygpath -m "${WithGhc}"`
+        fi
         echo "GHC path canonicalised to: ${WithGhc}"
     fi
 fi
@@ -374,8 +378,6 @@ then
     NM="${mingwbin}nm.exe"
     RANLIB="${mingwbin}ranlib.exe"
     OBJDUMP="${mingwbin}objdump.exe"
-    Windres="${mingwbin}windres.exe"
-    DllWrap="${mingwbin}dllwrap.exe"
     fp_prog_ar="${mingwbin}ar.exe"
 
     # NB. Download the perl binaries if required
@@ -425,12 +427,6 @@ with a cross-compiler.  To cross-compile GHC itself, set TARGET: stage
 GHC.
 ])
 fi
-if test "$CrossCompiling" = "YES"
-then
-  CrossCompilePrefix="${target}-"
-else
-  CrossCompilePrefix=""
-fi
 # Despite its similarity in name to TargetPlatform, TargetPlatformFull is used
 # in calls to subproject configure scripts and thus must be set to the autoconf
 # triple, not the normalized GHC triple that TargetPlatform is set to.
@@ -446,12 +442,21 @@ fi
 # all be taken care of for us if we configured the subprojects using
 # AC_CONFIG_DIR, but unfortunately Cabal needs to be the one to do the
 # configuration.
+#
+# We also use non-canonicalized triple when install stage1 crosscompiler
 if test -z "${target_alias}"
 then
   # --target wasn't given; use result from AC_CANONICAL_TARGET
   TargetPlatformFull="${target}"
 else
   TargetPlatformFull="${target_alias}"
+fi
+if test "$CrossCompiling" = "YES"
+then
+  # Use value passed by user from --target=
+  CrossCompilePrefix="${TargetPlatformFull}-"
+else
+  CrossCompilePrefix=""
 fi
 AC_SUBST(CrossCompiling)
 AC_SUBST(CrossCompilePrefix)
@@ -490,9 +495,13 @@ FP_SET_CFLAGS_C99([CC_STAGE0],[CONF_CC_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
 FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE1],[CONF_CPP_OPTS_STAGE1])
 FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE2],[CONF_CPP_OPTS_STAGE2])
 
-dnl ** Which ld to use?
+dnl ** Choose a linker
 dnl --------------------------------------------------------------
-FIND_LD([LdCmd])
+FIND_LD([$target],[GccUseLdOpt])
+CONF_GCC_LINKER_OPTS_STAGE1="$CONF_GCC_LINKER_OPTS_STAGE1 $GccUseLdOpt"
+CONF_GCC_LINKER_OPTS_STAGE2="$CONF_GCC_LINKER_OPTS_STAGE2 $GccUseLdOpt"
+LdCmd="$LD"
+CFLAGS="$CFLAGS $GccUseLdOpt"
 AC_SUBST([LdCmd])
 
 dnl ** Which nm to use?
@@ -724,6 +733,7 @@ AC_SUBST(HaveDtrace)
 AC_PATH_PROG(HSCOLOUR,HsColour)
 # HsColour is passed to Cabal, so we need a native path
 if test "$HostOS"      = "mingw32" && \
+   test "${OSTYPE}"   != "msys"    && \
    test "${HSCOLOUR}" != ""
 then
     # Canonicalise to <drive>:/path/to/gcc
@@ -1390,9 +1400,13 @@ echo "\
    Unregisterised            : $Unregisterised
    hs-cpp       : $HaskellCPPCmd
    hs-cpp-flags : $HaskellCPPArgs
+   ar           : $ArCmd
    ld           : $LdCmd
    nm           : $NmCmd
    objdump      : $ObjdumpCmd
+   ranlib       : $RanlibCmd
+   windres      : $Windres
+   dllwrap      : $DllWrap
    Happy        : $HappyCmd ($HappyVersion)
    Alex         : $AlexCmd ($AlexVersion)
    Perl         : $PerlCmd

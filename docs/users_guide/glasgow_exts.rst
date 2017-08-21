@@ -1570,7 +1570,7 @@ Tuple sections
 
     Allow the use of tuple section syntax
 
-The :ghc-flag:`-XTupleSections` flag enables Python-style partially applied
+The :ghc-flag:`-XTupleSections` flag enables partially applied
 tuple constructors. For example, the following program ::
 
       (, True)
@@ -3590,8 +3590,7 @@ automatically derived:
    ``Functor``, defined in ``GHC.Base``. See :ref:`deriving-functor`.
 
 -  With :ghc-flag:`-XDeriveDataTypeable`, you can derive instances of the class
-   ``Data``, defined in ``Data.Data``. See :ref:`deriving-typeable` for
-   deriving ``Typeable``.
+   ``Data``, defined in ``Data.Data``. See :ref:`deriving-data`.
 
 -  With :ghc-flag:`-XDeriveFoldable`, you can derive instances of the class
    ``Foldable``, defined in ``Data.Foldable``. See
@@ -3906,14 +3905,19 @@ For a full specification of the algorithms used in :ghc-flag:`-XDeriveFunctor`,
 :ghc-flag:`-XDeriveFoldable`, and :ghc-flag:`-XDeriveTraversable`, see
 :ghc-wiki:`this wiki page <Commentary/Compiler/DeriveFunctor>`.
 
-.. _deriving-typeable:
+.. _deriving-data:
 
-Deriving ``Typeable`` instances
+Deriving ``Data`` instances
 -------------------------------
 
 .. ghc-flag:: -XDeriveDataTypeable
 
-    Enable automatic deriving of instances for the ``Typeable`` typeclass
+    Enable automatic deriving of instances for the ``Data`` typeclass
+
+.. _deriving-typeable:
+
+Deriving ``Typeable`` instances
+-------------------------------
 
 The class ``Typeable`` is very special:
 
@@ -3924,8 +3928,9 @@ The class ``Typeable`` is very special:
    ensures that the programmer cannot subvert the type system by writing
    bogus instances.
 
--  Derived instances of ``Typeable`` are ignored, and may be reported as
-   an error in a later version of the compiler.
+-  Derived instances of ``Typeable`` may be declared if the
+   :ghc-flag:`-XDeriveDataTypeable` extension is enabled, but they are ignored,
+   and they may be reported as an error in a later version of the compiler.
 
 -  The rules for solving \`Typeable\` constraints are as follows:
 
@@ -6977,7 +6982,7 @@ However see :ref:`ghci-decls` for the overlap rules in GHCi.
 Decidability of type synonym instances
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-.. ghc-flag:: -XUndeciableInstances
+.. ghc-flag:: -XUndecidableInstances
 
     Relax restrictions on the decidability of type synonym family instances.
 
@@ -8351,7 +8356,7 @@ think about compiling this to runnable code, though, problems appear.
 In particular, when we call ``bad``, we must somehow pass ``x`` into
 ``bad``. How wide (that is, how many bits) is ``x``? Is it a pointer?
 What kind of register (floating-point or integral) should ``x`` go in?
-It's all impossible to say, because ``x``'s type, ``TYPE r2`` is
+It's all impossible to say, because ``x``'s type, ``a :: TYPE r1`` is
 levity polymorphic. We thus forbid such constructions, via the
 following straightforward rule:
 
@@ -8848,9 +8853,22 @@ the function is callable. For example: ::
 
 Here ``strange``\'s type is ambiguous, but the call in ``foo`` is OK
 because it gives rise to a constraint ``(D Bool beta)``, which is
-soluble by the ``(D Bool b)`` instance. So the language extension
+soluble by the ``(D Bool b)`` instance.
+
+Another way of getting rid of the ambiguity at the call site is to use
+the :ghc-flag:`-XTypeApplications` flag to specify the types. For example: ::
+
+      class D a b where
+        h :: b
+      instance D Int Int where ...
+
+      main = print (h @Int @Int)
+
+Here ``a`` is ambiguous in the definition of ``D`` but later specified
+to be `Int` using type applications.
+
 :ghc-flag:`-XAllowAmbiguousTypes` allows you to switch off the ambiguity check.
-But even with ambiguity checking switched off, GHC will complain about a
+However, even with ambiguity checking switched off, GHC will complain about a
 function that can *never* be called, such as this one: ::
 
       f :: (Int ~ Bool) => a -> a
@@ -9236,6 +9254,49 @@ The flag :ghc-flag:`-XMonoLocalBinds` is implied by :ghc-flag:`-XTypeFamilies`
 and :ghc-flag:`-XGADTs`. You can switch it off again with
 :ghc-flag:`-XNoMonoLocalBinds <-XMonoLocalBinds>` but type inference becomes
 less predicatable if you do so. (Read the papers!)
+
+.. _kind-generalisation:
+
+Kind generalisation
+-------------------
+
+Just as :ghc-flag:`-XMonoLocalBinds` places limitations on when the *type* of a
+*term* is generalised (see :ref:`mono-local-binds`), it also limits when the
+*kind* of a *type signature* is generalised. Here is an example involving
+:ref:`type signatures on instance declarations <instance-sigs>`: ::
+
+    data Proxy a = Proxy
+    newtype Tagged s b = Tagged b
+
+    class C b where
+      c :: forall (s :: k). Tagged s b
+
+    instance C (Proxy a) where
+      c :: forall s. Tagged s (Proxy a)
+      c = Tagged Proxy
+
+With :ghc-flag:`-XMonoLocalBinds` enabled, this ``C (Proxy a)`` instance will
+fail to typecheck. The reason is that the type signature for ``c`` captures
+``a``, an outer-scoped type variable, which means the type signature is not
+closed. Therefore, the inferred kind for ``s`` will *not* be generalised, and
+as a result, it will fail to unify with the kind variable ``k`` which is
+specified in the declaration of ``c``. This can be worked around by specifying
+an explicit kind variable for ``s``, e.g., ::
+
+    instance C (Proxy a) where
+      c :: forall (s :: k). Tagged s (Proxy a)
+      c = Tagged Proxy
+
+or, alternatively: ::
+
+    instance C (Proxy a) where
+      c :: forall k (s :: k). Tagged s (Proxy a)
+      c = Tagged Proxy
+
+This declarations are equivalent using Haskell's implicit "add implicit
+foralls" rules (see :ref:`implicit-quantification`). The implicit foralls rules
+are purely syntactic and are quite separate from the kind generalisation
+described here.
 
 .. _visible-type-application:
 
@@ -10407,7 +10468,7 @@ for constructing pretty-printed error messages, ::
         | ErrorMessage :<>: ErrorMessage     -- Put two chunks of error message next to each other
         | ErrorMessage :$$: ErrorMessage     -- Put two chunks of error message above each other
 
-in the ``GHC.TypeLits`` :base-ref:`module <GHC-TypeList.html>`.
+in the ``GHC.TypeLits`` :base-ref:`module <GHC-TypeLits.html>`.
 
 For instance, we might use this interface to provide a more useful error
 message for applications of ``show`` on unsaturated functions like this, ::
@@ -12299,7 +12360,6 @@ That being said, with the appropriate use of wrapper datatypes, the
 above limitations induce no loss of generality: ::
 
     {-# LANGUAGE ConstraintKinds           #-}
-    {-# LANGUAGE DeriveDataTypeable        #-}
     {-# LANGUAGE ExistentialQuantification #-}
     {-# LANGUAGE Rank2Types                #-}
     {-# LANGUAGE StandaloneDeriving        #-}
@@ -12310,7 +12370,6 @@ above limitations induce no loss of generality: ::
     import GHC.StaticPtr
 
     data Dict c = c => Dict
-      deriving Typeable
 
     g1 :: Typeable a => StaticPtr (Dict (Show a) -> a -> String)
     g1 = static (\Dict -> show)
@@ -12459,6 +12518,12 @@ are two ways of using these pragmas.
    type constructor ``T`` *or* the data constructor ``T``, or both if
    both are in scope. If both are in scope, there is currently no way to
    specify one without the other (c.f. fixities :ref:`infix-tycons`).
+
+Also note that the argument to ``DEPRECATED`` and ``WARNING`` can also be a list
+of strings, in which case the strings will be presented on separate lines in the
+resulting warning message, ::
+
+    {-# DEPRECATED foo, bar ["Don't use these", "Use gar instead"] #-}
 
 Warnings and deprecations are not reported for (a) uses within the
 defining module, (b) defining a method in a class instance, and (c) uses

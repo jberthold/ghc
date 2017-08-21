@@ -719,7 +719,8 @@ test('T9020',
            # Original:    381360728
            # 2014-07-31:  343005716 (Windows) (general round of updates)
            # 2017-03-24:  249904136 (x86/Linux, 64-bit machine)
-           (wordsize(64), 493596312, 10)])
+
+           (wordsize(64), 423163832, 10)])
            # prev:        795469104
            # 2014-07-17:  728263536 (general round of updates)
            # 2014-09-10:  785871680 post-AMP-cleanup
@@ -732,13 +733,14 @@ test('T9020',
            # 2017-02-14:  500707080 Early inline patch; 35% decrease!
            #                        Program size collapses in first simplification
            # 2017-03-31:  493596312 Fix memory leak in simplifier
+           # 2017-04-28:  423163832  Remove exponential behaviour in simplifier
       ],
       compile,[''])
 
 test('T9675',
      [ only_ways(['optasm']),
        compiler_stats_num_field('max_bytes_used', # Note [residency]
-          [(wordsize(64), 29871032, 15),
+          [(wordsize(64), 25234080, 15),
           # 2014-10-13    29596552
           # 2014-10-13    26570896   seq the DmdEnv in seqDmdType as well
           # 2014-10-13    18582472   different machines giving different results..
@@ -748,12 +750,14 @@ test('T9675',
           # 2015-12-11    30837312   TypeInType (see #11196)
           # 2016-03-14    38776008   Final demand analyzer run
           # 2016-04-01    29871032   Fix leaks in demand analysis
+          # 2017-04-30    17675240   Fix leaks in tidy unfoldings
+          # 2017-06-14    25234080   Unknown
            (wordsize(32), 18043224, 15)
           # 2015-07-11    15341228   (x86/Linux, 64-bit machine) use +RTS -G1
           # 2016-04-06    18043224   (x86/Linux, 64-bit machine)
           ]),
        compiler_stats_num_field('peak_megabytes_allocated', # Note [residency]
-          [(wordsize(64), 121, 15),
+          [(wordsize(64), 93, 15),
           # 2014-10-13    66
           # 2014-10-13    58         seq the DmdEnv in seqDmdType as well
           # 2014-10-13    49         different machines giving different results...
@@ -764,6 +768,8 @@ test('T9675',
           # 2015-12-11    113        TypeInType (see #11196)
           # 2016-04-14    144        Final demand analyzer run
           # 2016-07-26    121        Unboxed sums?
+          # 2017-04-30    63         Fix leaks in tidy unfoldings
+          # 2017-06-14    93         Unknown
             (wordsize(32), 56, 15)
           # 2015-07-11    56         (x86/Linux, 64-bit machine) use +RTS -G1
           ]),
@@ -929,7 +935,7 @@ test('T9233',
 test('T10370',
      [ only_ways(['optasm']),
        compiler_stats_num_field('max_bytes_used', # Note [residency]
-          [(wordsize(64), 41291976, 15),
+          [(wordsize(64), 31524048, 15),
           # 2015-10-22    19548720
           # 2016-02-24    22823976   Changing Levity to RuntimeRep; not sure why this regresses though, even after some analysis
           # 2016-04-14    28256896   final demand analyzer run
@@ -945,19 +951,21 @@ test('T10370',
           # 2017-02-17    51126304   Type-indexed Typeable
           # 2017-02-27    43455848   Likely drift from recent simplifier improvements
           # 2017-02-25    41291976   Early inline patch
+          # 2017-04-30    31524048   Fix leaks in tidy unfoldings
 
            (wordsize(32), 19276304, 15),
           # 2015-10-22    11371496
           # 2017-03-24    19276304 (x86/Linux, 64-bit machine)
           ]),
        compiler_stats_num_field('peak_megabytes_allocated', # Note [residency]
-          [(wordsize(64), 154, 15),
+          [(wordsize(64), 117, 15),
           # 2015-10-22     76
           # 2016-04-14    101 final demand analyzer run
           # 2016-08-08    121 see above
           # 2017-01-18    146 Allow top-level string literals in Core
           # 2017-02-17    187 Type-indexed Typeable
           # 2017-02-25    154 Early inline patch
+          # 2017-04-30    117 Fix leaks in tidy unfoldings
            (wordsize(32),  69, 15),
           # 2015-10-22     39
           # 2017-03-24     69
@@ -1001,12 +1009,13 @@ test('T12227',
 test('T12425',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 134334800, 5),
+          [(wordsize(64), 127500136, 5),
           # initial:      125831400
           # 2017-01-18:   133380960  Allow top-level string literals in Core
           # 2017-02-17:   153611448  Type-indexed Typeable
           # 2017-03-03:   142256192  Share Typeable KindReps
           # 2017-03-21:   134334800  Unclear
+          # 2017-04-28:   127500136  Remove exponential behaviour in simplifier
           ]),
      ],
      compile,
@@ -1034,13 +1043,14 @@ test('T12234',
 test('T13035',
      [ only_ways(['normal']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 93249744, 5),
+          [(wordsize(64), 118665640, 5),
           # 2017-01-05   90595208  initial
           # 2017-01-19   95269000  Allow top-level string literals in Core
           # 2017-02-05   88806416  Probably OccAnal fixes
           # 2017-02-17   103890200 Type-indexed Typeable
           # 2017-02-25   98390488  Early inline patch
           # 2017-03-21   93249744  It's unclear
+          # 2017-07-19   118665640 Generate Typeable bindings for data instances
           ]),
      ],
      compile,
@@ -1072,3 +1082,24 @@ test('T12707',
      ],
      compile,
      [''])
+
+test('T13379',
+     [ compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 411597856, 5),
+          # initial:    411597856
+          ]),
+     ],
+     compile,
+     [''])
+
+test('MultiLayerModules',
+     [ compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 6956533312, 10),
+          # initial:    12139116496
+          # 2017-05-12: 6956533312   Revert "Use a deterministic map for imp_dep_mods"
+          ]),
+       pre_cmd('./genMultiLayerModules'),
+       extra_files(['genMultiLayerModules']),
+     ],
+     multimod_compile,
+     ['MultiLayerModules', '-v0'])

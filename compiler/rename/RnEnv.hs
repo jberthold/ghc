@@ -91,6 +91,7 @@ import Data.Function    ( on )
 import ListSetOps       ( minusList )
 import Constants        ( mAX_TUPLE_SIZE )
 import qualified GHC.LanguageExtensions as LangExt
+import Data.Maybe (isJust)
 
 {-
 *********************************************************
@@ -723,16 +724,25 @@ lookup_demoted rdr_name dflags
   | Just demoted_rdr <- demoteRdrName rdr_name
     -- Maybe it's the name of a *data* constructor
   = do { data_kinds <- xoptM LangExt.DataKinds
-       ; mb_demoted_name <- lookupOccRn_maybe demoted_rdr
-       ; case mb_demoted_name of
-           Nothing -> unboundNameX WL_Any rdr_name star_info
-           Just demoted_name
-             | data_kinds ->
-             do { whenWOptM Opt_WarnUntickedPromotedConstructors $
-                  addWarn (Reason Opt_WarnUntickedPromotedConstructors)
-                          (untickedPromConstrWarn demoted_name)
-                ; return demoted_name }
-             | otherwise  -> unboundNameX WL_Any rdr_name suggest_dk }
+       ; if data_kinds
+            then do { mb_demoted_name <- lookupOccRn_maybe demoted_rdr
+                    ; case mb_demoted_name of
+                        Nothing -> unboundNameX WL_Any rdr_name star_info
+                        Just demoted_name ->
+                          do { whenWOptM Opt_WarnUntickedPromotedConstructors $
+                               addWarn
+                                 (Reason Opt_WarnUntickedPromotedConstructors)
+                                 (untickedPromConstrWarn demoted_name)
+                             ; return demoted_name } }
+            else do { -- We need to check if a data constructor of this name is
+                      -- in scope to give good error messages. However, we do
+                      -- not want to give an additional error if the data
+                      -- constructor happens to be out of scope! See #13947.
+                      mb_demoted_name <- discardErrs $
+                                         lookupOccRn_maybe demoted_rdr
+                    ; let suggestion | isJust mb_demoted_name = suggest_dk
+                                     | otherwise              = star_info
+                    ; unboundNameX WL_Any rdr_name suggestion } }
 
   | otherwise
   = reportUnboundName rdr_name

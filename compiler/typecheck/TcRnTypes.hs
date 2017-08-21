@@ -35,12 +35,12 @@ module TcRnTypes(
         -- Renamer types
         ErrCtxt, RecFieldEnv,
         ImportAvails(..), emptyImportAvails, plusImportAvails,
-        WhereFrom(..), mkModDeps,
+        WhereFrom(..), mkModDeps, modDepsElts,
 
         -- Typechecker types
         TcTypeEnv, TcIdBinderStack, TcIdBinder(..),
         TcTyThing(..), PromotionErr(..),
-        IdBindingInfo(..),
+        IdBindingInfo(..), ClosedTypeId, RhsNames,
         IsGroupClosed(..),
         SelfBootInfo(..),
         pprTcTyThingCategory, pprPECategory, CompleteMatch(..),
@@ -60,9 +60,9 @@ module TcRnTypes(
         ArrowCtxt(..),
 
         -- TcSigInfo
-        TcSigInfo(..), TcIdSigInfo(..),
+        TcSigFun, TcSigInfo(..), TcIdSigInfo(..),
         TcIdSigInst(..), TcPatSynInfo(..),
-        isPartialSig,
+        isPartialSig, hasCompleteSig,
 
         -- Canonical constraints
         Xi, Ct(..), Cts, emptyCts, andCts, andManyCts, pprCts,
@@ -85,7 +85,7 @@ module TcRnTypes(
         andWC, unionsWC, mkSimpleWC, mkImplicWC,
         addInsols, getInsolubles, insolublesOnly, addSimples, addImplics,
         tyCoVarsOfWC, dropDerivedWC, dropDerivedSimples, dropDerivedInsols,
-        tyCoVarsOfWCList,
+        tyCoVarsOfWCList, trulyInsoluble,
         isDroppableDerivedLoc, insolubleImplic,
         arisesFromGivens,
 
@@ -140,7 +140,7 @@ import HscTypes
 import TcEvidence
 import Type
 import Class    ( Class )
-import TyCon    ( TyCon )
+import TyCon    ( TyCon, tyConKind )
 import Coercion ( Coercion, mkHoleCo )
 import ConLike  ( ConLike(..) )
 import DataCon  ( DataCon, dataConUserType, dataConOrigArgTys )
@@ -165,7 +165,7 @@ import Module
 import SrcLoc
 import VarSet
 import ErrUtils
-import UniqDFM
+import UniqFM
 import UniqSupply
 import BasicTypes
 import Bag
@@ -184,6 +184,7 @@ import qualified Control.Monad.Fail as MonadFail
 import Data.Set      ( Set )
 import qualified Data.Set as S
 
+import Data.List ( sort )
 import Data.Map ( Map )
 import Data.Dynamic  ( Dynamic )
 import Data.Typeable ( TypeRep )
@@ -774,8 +775,11 @@ data TcLclEnv           -- Changes as we move inside an expression
         tcl_tclvl      :: TcLevel,         -- Birthplace for new unification variables
 
         tcl_th_ctxt    :: ThStage,         -- Template Haskell context
-        tcl_th_bndrs   :: ThBindEnv,       -- Binding level of in-scope Names
-                                           -- defined in this module (not imported)
+        tcl_th_bndrs   :: ThBindEnv,       -- and binder info
+            -- The ThBindEnv records the TH binding level of in-scope Names
+            -- defined in this module (not imported)
+            -- We can't put this info in the TypeEnv because it's needed
+            -- (and extended) in the renamer, for untyed splices
 
         tcl_arrow_ctxt :: ArrowCtxt,       -- Arrow-notation context
 
@@ -808,6 +812,14 @@ data TcLclEnv           -- Changes as we move inside an expression
         tcl_lie  :: TcRef WantedConstraints,    -- Place to accumulate type constraints
         tcl_errs :: TcRef Messages              -- Place to accumulate errors
     }
+
+type ErrCtxt = (Bool, TidyEnv -> TcM (TidyEnv, MsgDoc))
+        -- Monadic so that we have a chance
+        -- to deal with bound type variables just before error
+        -- message construction
+
+        -- Bool:  True <=> this is a landmark context; do not
+        --                 discard it when trimming for display
 
 type TcTypeEnv = NameEnv TcTyThing
 
@@ -1011,9 +1023,10 @@ data ArrowCtxt   -- Note [Escaping the arrow scope]
 data TcTyThing
   = AGlobal TyThing             -- Used only in the return type of a lookup
 
-  | ATcId   {           -- Ids defined in this module; may not be fully zonked
-        tct_id     :: TcId,
-        tct_info :: IdBindingInfo }   -- See Note [Bindings with closed types]
+  | ATcId           -- Ids defined in this module; may not be fully zonked
+      { tct_id   :: TcId
+      , tct_info :: IdBindingInfo   -- See Note [Meaning of IdBindingInfo]
+      }
 
   | ATyVar  Name TcTyVar        -- The type variable to which the lexically scoped type
                                 -- variable is bound. We only need the Name
@@ -1034,7 +1047,8 @@ data PromotionErr
   | ClassPE          -- Ditto Class
 
   | FamDataConPE     -- Data constructor for a data family
-                     -- See Note [AFamDataCon: not promoting data family constructors] in TcRnDriver
+                     -- See Note [AFamDataCon: not promoting data family constructors]
+                     -- in TcEnv.
   | PatSynPE         -- Pattern synonyms
                      -- See Note [Don't promote pattern synonyms] in TcEnv
 
@@ -1052,48 +1066,139 @@ instance Outputable TcTyThing where     -- Debugging only
                                  <> ppr (varType (tct_id elt)) <> comma
                                  <+> ppr (tct_info elt))
    ppr (ATyVar n tv)    = text "Type variable" <+> quotes (ppr n) <+> equals <+> ppr tv
-   ppr (ATcTyCon tc)    = text "ATcTyCon" <+> ppr tc
+   ppr (ATcTyCon tc)    = text "ATcTyCon" <+> ppr tc <+> dcolon <+> ppr (tyConKind tc)
    ppr (APromotionErr err) = text "APromotionErr" <+> ppr err
 
--- | Describes how an Id is bound.
+-- | IdBindingInfo describes how an Id is bound.
 --
 -- It is used for the following purposes:
---
 -- a) for static forms in TcExpr.checkClosedInStaticForm and
--- b) to figure out when a nested binding can be generalised (in
---    TcBinds.decideGeneralisationPlan).
+-- b) to figure out when a nested binding can be generalised,
+--    in TcBinds.decideGeneralisationPlan.
 --
--- See Note [Meaning of IdBindingInfo].
-data IdBindingInfo
+data IdBindingInfo -- See Note [Meaning of IdBindingInfo and ClosedTypeId]
     = NotLetBound
     | ClosedLet
-    | NonClosedLet NameSet Bool
+    | NonClosedLet
+         RhsNames        -- Used for (static e) checks only
+         ClosedTypeId    -- Used for generalisation checks
+                         -- and for (static e) checks
 
--- Note [Meaning of IdBindingInfo]
---
--- @NotLetBound@ means that the Id is not let-bound (e.g. it is bound in a
--- lambda-abstraction or in a case pattern).
---
--- @ClosedLet@ means that the Id is let-bound, it is closed and its type is
--- closed as well.
---
--- @NonClosedLet fvs type-closed@ means that the Id is let-bound but it is not
--- closed. The @fvs@ set contains the free variables of the rhs. The type-closed
--- flag indicates if the type of Id is closed.
+-- | IsGroupClosed describes a group of mutually-recursive bindings
+data IsGroupClosed
+  = IsGroupClosed
+      (NameEnv RhsNames)  -- Free var info for the RHS of each binding in the goup
+                          -- Used only for (static e) checks
+
+      ClosedTypeId        -- True <=> all the free vars of the group are
+                          --          imported or ClosedLet or
+                          --          NonClosedLet with ClosedTypeId=True.
+                          --          In particular, no tyvars, no NotLetBound
+
+type RhsNames = NameSet   -- Names of variables, mentioned on the RHS of
+                          -- a definition, that are not Global or ClosedLet
+
+type ClosedTypeId = Bool
+  -- See Note [Meaning of IdBindingInfo and ClosedTypeId]
+
+{- Note [Meaning of IdBindingInfo]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+NotLetBound means that
+  the Id is not let-bound (e.g. it is bound in a
+  lambda-abstraction or in a case pattern)
+
+ClosedLet means that
+   - The Id is let-bound,
+   - Any free term variables are also Global or ClosedLet
+   - Its type has no free variables (NB: a top-level binding subject
+     to the MR might have free vars in its type)
+   These ClosedLets can definitely be floated to top level; and we
+   may need to do so for static forms.
+
+   Property:   ClosedLet
+             is equivalent to
+               NonClosedLet emptyNameSet True
+
+(NonClosedLet (fvs::RhsNames) (cl::ClosedTypeId)) means that
+   - The Id is let-bound
+
+   - The fvs::RhsNames contains the free names of the RHS,
+     excluding Global and ClosedLet ones.
+
+   - For the ClosedTypeId field see Note [Bindings with closed types]
+
+For (static e) to be valid, we need for every 'x' free in 'e',
+x's binding must be floatable to top level.  Specifically:
+   * x's RhsNames must be non-empty
+   * x's type has no free variables
+See Note [Grand plan for static forms] in StaticPtrTable.hs.
+This test is made in TcExpr.checkClosedInStaticForm.
+Actually knowing x's RhsNames (rather than just its emptiness
+or otherwise) is just so we can produce better error messages
+
+Note [Bindings with closed types: ClosedTypeId]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+
+  f x = let g ys = map not ys
+        in ...
+
+Can we generalise 'g' under the OutsideIn algorithm?  Yes,
+because all g's free variables are top-level; that is they themselves
+have no free type variables, and it is the type variables in the
+environment that makes things tricky for OutsideIn generalisation.
+
+Here's the invariant:
+   If an Id has ClosedTypeId=True (in its IdBindingInfo), then
+   the Id's type is /definitely/ closed (has no free type variables).
+   Specifically,
+       a) The Id's acutal type is closed (has no free tyvars)
+       b) Either the Id has a (closed) user-supplied type signature
+          or all its free varaibles are Global/ClosedLet
+             or NonClosedLet with ClosedTypeId=True.
+          In particular, none are NotLetBound.
+
+Why is (b) needed?   Consider
+    \x. (x :: Int, let y = x+1 in ...)
+Initially x::alpha.  If we happen to typecheck the 'let' before the
+(x::Int), y's type will have a free tyvar; but if the other way round
+it won't.  So we treat any let-bound variable with a free
+non-let-bound variable as not ClosedTypeId, regardless of what the
+free vars of its type actually are.
+
+But if it has a signature, all is well:
+   \x. ...(let { y::Int; y = x+1 } in
+           let { v = y+2 } in ...)...
+Here the signature on 'v' makes 'y' a ClosedTypeId, so we can
+generalise 'v'.
+
+Note that:
+
+  * A top-level binding may not have ClosedTypeId=True, if it suffers
+    from the MR
+
+  * A nested binding may be closed (eg 'g' in the example we started
+    with). Indeed, that's the point; whether a function is defined at
+    top level or nested is orthogonal to the question of whether or
+    not it is closed.
+
+  * A binding may be non-closed because it mentions a lexically scoped
+    *type variable*  Eg
+        f :: forall a. blah
+        f x = let g y = ...(y::a)...
+
+Under OutsideIn we are free to generalise an Id all of whose free
+variables have ClosedTypeId=True (or imported).  This is an extension
+compared to the JFP paper on OutsideIn, which used "top-level" as a
+proxy for "closed".  (It's not a good proxy anyway -- the MR can make
+a top-level binding with a free type variable.)
+-}
 
 instance Outputable IdBindingInfo where
   ppr NotLetBound = text "NotLetBound"
   ppr ClosedLet = text "TopLevelLet"
   ppr (NonClosedLet fvs closed_type) =
     text "TopLevelLet" <+> ppr fvs <+> ppr closed_type
-
--- | Tells if a group of binders is closed.
---
--- When it is not closed, it provides a map of binder ids to the free vars
--- in their right-hand sides.
---
-data IsGroupClosed = ClosedGroup
-                   | NonClosedGroup (NameEnv NameSet)
 
 instance Outputable PromotionErr where
   ppr ClassPE        = text "ClassPE"
@@ -1123,58 +1228,6 @@ pprPECategory NoDataKindsTC  = text "Type constructor"
 pprPECategory NoDataKindsDC  = text "Data constructor"
 pprPECategory NoTypeInTypeTC = text "Type constructor"
 pprPECategory NoTypeInTypeDC = text "Data constructor"
-
-{- Note [Bindings with closed types]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-Consider
-
-  f x = let g ys = map not ys
-        in ...
-
-Can we generalise 'g' under the OutsideIn algorithm?  Yes,
-because all g's free variables are top-level; that is they themselves
-have no free type variables, and it is the type variables in the
-environment that makes things tricky for OutsideIn generalisation.
-
-Definition:
-   A variable is "closed", and has tct_info set to TopLevel,
-iff
-   a) all its free variables are imported, or are let-bound and closed
-   b) generalisation is not restricted by the monomorphism restriction
-
-Invariant: a closed variable has no free type variables in its type.
-Why? Assume (induction hypothesis) that closed variables have closed
-types, and that we have a new binding f = e, satisfying (a) and (b).
-Then since monomorphism restriction does not apply, and there are no
-free type variables, we can fully generalise, so its type will be closed.
-
-Under OutsideIn we are free to generalise a closed let-binding.
-This is an extension compared to the JFP paper on OutsideIn, which
-used "top-level" as a proxy for "closed".  (It's not a good proxy
-anyway -- the MR can make a top-level binding with a free type
-variable.)
-
-Note that:
-  * A top-level binding may not be closed, if it suffers from the MR
-
-  * A nested binding may be closed (eg 'g' in the example we started with)
-    Indeed, that's the point; whether a function is defined at top level
-    or nested is orthogonal to the question of whether or not it is closed
-
-  * A binding may be non-closed because it mentions a lexically scoped
-    *type variable*  Eg
-        f :: forall a. blah
-        f x = let g y = ...(y::a)...
-
--}
-
-type ErrCtxt = (Bool, TidyEnv -> TcM (TidyEnv, MsgDoc))
-        -- Monadic so that we have a chance
-        -- to deal with bound type variables just before error
-        -- message construction
-
-        -- Bool:  True <=> this is a landmark context; do not
-        --                 discard it when trimming for display
 
 {-
 ************************************************************************
@@ -1210,7 +1263,7 @@ data ImportAvails
           -- different packages. (currently not the case, but might be in the
           -- future).
 
-        imp_dep_mods :: DModuleNameEnv (ModuleName, IsBootInterface),
+        imp_dep_mods :: ModuleNameEnv (ModuleName, IsBootInterface),
           -- ^ Home-package modules needed by the module being compiled
           --
           -- It doesn't matter whether any of these dependencies
@@ -1252,14 +1305,21 @@ data ImportAvails
       }
 
 mkModDeps :: [(ModuleName, IsBootInterface)]
-          -> DModuleNameEnv (ModuleName, IsBootInterface)
-mkModDeps deps = foldl add emptyUDFM deps
+          -> ModuleNameEnv (ModuleName, IsBootInterface)
+mkModDeps deps = foldl add emptyUFM deps
                where
-                 add env elt@(m,_) = addToUDFM env m elt
+                 add env elt@(m,_) = addToUFM env m elt
+
+modDepsElts
+  :: ModuleNameEnv (ModuleName, IsBootInterface)
+  -> [(ModuleName, IsBootInterface)]
+modDepsElts = sort . nonDetEltsUFM
+  -- It's OK to use nonDetEltsUFM here because sorting by module names
+  -- restores determinism
 
 emptyImportAvails :: ImportAvails
 emptyImportAvails = ImportAvails { imp_mods          = emptyModuleEnv,
-                                   imp_dep_mods      = emptyUDFM,
+                                   imp_dep_mods      = emptyUFM,
                                    imp_dep_pkgs      = S.empty,
                                    imp_trust_pkgs    = S.empty,
                                    imp_trust_own_pkg = False,
@@ -1282,7 +1342,7 @@ plusImportAvails
                   imp_trust_pkgs = tpkgs2, imp_trust_own_pkg = tself2,
                   imp_orphs = orphs2, imp_finsts = finsts2 })
   = ImportAvails { imp_mods          = plusModuleEnv_C (++) mods1 mods2,
-                   imp_dep_mods      = plusUDFM_C plus_mod_dep dmods1 dmods2,
+                   imp_dep_mods      = plusUFM_C plus_mod_dep dmods1 dmods2,
                    imp_dep_pkgs      = dpkgs1 `S.union` dpkgs2,
                    imp_trust_pkgs    = tpkgs1 `S.union` tpkgs2,
                    imp_trust_own_pkg = tself1 || tself2,
@@ -1326,6 +1386,8 @@ instance Outputable WhereFrom where
 -- These data types need to be here only because
 -- TcSimplify uses them, and TcSimplify is fairly
 -- low down in the module hierarchy
+
+type TcSigFun  = Name -> Maybe TcSigInfo
 
 data TcSigInfo = TcIdSig     TcIdSigInfo
                | TcPatSynSig TcPatSynInfo
@@ -1464,6 +1526,12 @@ isPartialSig :: TcIdSigInst -> Bool
 isPartialSig (TISI { sig_inst_sig = PartialSig {} }) = True
 isPartialSig _                                       = False
 
+-- | No signature or a partial signature
+hasCompleteSig :: TcSigFun -> Name -> Bool
+hasCompleteSig sig_fn name
+  = case sig_fn name of
+      Just (TcIdSig (CompleteSig {})) -> True
+      _                               -> False
 
 
 {-
@@ -1493,14 +1561,14 @@ data Ct
   -- Atomic canonical constraints
   = CDictCan {  -- e.g.  Num xi
       cc_ev     :: CtEvidence, -- See Note [Ct/evidence invariant]
+
       cc_class  :: Class,
-      cc_tyargs :: [Xi],       -- cc_tyargs are function-free, hence Xi
-      cc_pend_sc :: Bool       -- True <=> (a) cc_class has superclasses
-                               --          (b) we have not (yet) added those
-                               --              superclasses as Givens
-           -- NB: cc_pend_sc is used for G/W/D.  For W/D the reason
-           --     we need superclasses is to expose possible improvement
-           --     via fundeps
+      cc_tyargs :: [Xi],   -- cc_tyargs are function-free, hence Xi
+
+      cc_pend_sc :: Bool   -- See Note [The superclass story] in TcCanonical
+                           -- True <=> (a) cc_class has superclasses
+                           --          (b) we have not (yet) added those
+                           --              superclasses as Givens
     }
 
   | CIrredEvCan {  -- These stand for yet-unusable predicates
@@ -1578,9 +1646,8 @@ holeOcc :: Hole -> OccName
 holeOcc (ExprHole uv)  = unboundVarOcc uv
 holeOcc (TypeHole occ) = occ
 
-{-
-Note [Hole constraints]
-~~~~~~~~~~~~~~~~~~~~~~~
+{- Note [Hole constraints]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 CHoleCan constraints are used for two kinds of holes,
 distinguished by cc_hole:
 
@@ -1616,9 +1683,9 @@ of (cc_ev ct), and is fully rewritten wrt the substitution.   Eg for CDictCan,
 This holds by construction; look at the unique place where CDictCan is
 built (in TcCanonical).
 
-In contrast, the type of the evidence *term* (ccev_evtm or ctev_evar/dest) in
+In contrast, the type of the evidence *term* (ctev_dest / ctev_evar) in
 the evidence may *not* be fully zonked; we are careful not to look at it
-during constraint solving.  See Note [Evidence field of CtEvidence]
+during constraint solving. See Note [Evidence field of CtEvidence].
 -}
 
 mkNonCanonical :: CtEvidence -> Ct
@@ -1775,13 +1842,25 @@ dropDerivedSimples simples = mapMaybeBag dropDerivedCt simples
 dropDerivedCt :: Ct -> Maybe Ct
 dropDerivedCt ct
   = case ctEvFlavour ev of
-      Wanted WOnly -> Just (ct { cc_ev = ev_wd })
-      Wanted _     -> Just ct
+      Wanted WOnly -> Just (ct' { cc_ev = ev_wd })
+      Wanted _     -> Just ct'
       _            -> ASSERT( isDerivedCt ct ) Nothing
                       -- simples are all Wanted or Derived
   where
     ev    = ctEvidence ct
     ev_wd = ev { ctev_nosh = WDeriv }
+    ct'   = setPendingScDict ct -- See Note [Resetting cc_pend_sc]
+
+{- Note [Resetting cc_pend_sc]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When we discard Derived constraints, in dropDerivedSimples, we must
+set the cc_pend_sc flag to True, so that if we re-process this
+CDictCan we will re-generate its derived superclasses. Otherwise
+we might miss some fundeps.  Trac #13662 showed this up.
+
+See Note [The superclass story] in TcCanonical.
+-}
+
 
 dropDerivedInsols :: Cts -> Cts
 -- See Note [Dropping derived constraints]
@@ -1975,6 +2054,12 @@ isPendingScDict :: Ct -> Maybe Ct
 isPendingScDict ct@(CDictCan { cc_pend_sc = True })
                   = Just (ct { cc_pend_sc = False })
 isPendingScDict _ = Nothing
+
+setPendingScDict :: Ct -> Ct
+-- Set the cc_pend_sc flag to True
+setPendingScDict ct@(CDictCan { cc_pend_sc = False })
+                    = ct { cc_pend_sc = True }
+setPendingScDict ct = ct
 
 superClassesMightHelp :: Ct -> Bool
 -- ^ True if taking superclasses of givens, or of wanteds (to perhaps
@@ -2367,6 +2452,16 @@ For Givens we make new EvVars and bind them immediately. Two main reasons:
     (see evTermCoercion), so the easy thing is to bind it to an Id.
 
 So a Given has EvVar inside it rather than (as previously) an EvTerm.
+
+Note [Given in ctEvCoercion]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When retrieving the evidence from a Given equality, we update the type of the EvVar
+from the ctev_pred field. In Note [Evidence field of CtEvidence], we claim that
+the type of the evidence is never looked at -- but this isn't true in the case of
+a coercion that is used in a type. (See the comments in Note [Flattening] in TcFlatten
+about the FTRNotFollowed case of flattenTyVar.) So, right here where we are retrieving
+the coercion from a Given, we update the type to make sure it's zonked.
+
 -}
 
 -- | A place for type-checking evidence to go after it is generated.
@@ -2374,12 +2469,15 @@ So a Given has EvVar inside it rather than (as previously) an EvTerm.
 -- EvVarDest.
 data TcEvDest
   = EvVarDest EvVar         -- ^ bind this var to the evidence
+              -- EvVarDest is always used for non-type-equalities
+              -- e.g. class constraints
+
   | HoleDest  CoercionHole  -- ^ fill in this hole with the evidence
+              -- HoleDest is always used for type-equalities
               -- See Note [Coercion holes] in TyCoRep
 
 data CtEvidence
   = CtGiven    -- Truly given, not depending on subgoals
-               -- NB: Spontaneous unifications belong here
       { ctev_pred :: TcPredType      -- See Note [Ct/evidence invariant]
       , ctev_evar :: EvVar           -- See Note [Evidence field of CtEvidence]
       , ctev_loc  :: CtLoc }
@@ -2420,13 +2518,19 @@ ctEvTerm :: CtEvidence -> EvTerm
 ctEvTerm ev@(CtWanted { ctev_dest = HoleDest _ }) = EvCoercion $ ctEvCoercion ev
 ctEvTerm ev = EvId (ctEvId ev)
 
+-- Always returns a coercion whose type is precisely ctev_pred of the CtEvidence.
+-- See also Note [Given in ctEvCoercion]
 ctEvCoercion :: CtEvidence -> Coercion
-ctEvCoercion ev@(CtWanted { ctev_dest = HoleDest hole, ctev_pred = pred })
-  = case getEqPredTys_maybe pred of
-      Just (role, ty1, ty2) -> mkHoleCo hole role ty1 ty2
-      _                     -> pprPanic "ctEvTerm" (ppr ev)
-ctEvCoercion (CtGiven { ctev_evar = ev_id }) = mkTcCoVarCo ev_id
-ctEvCoercion ev = pprPanic "ctEvCoercion" (ppr ev)
+ctEvCoercion (CtGiven { ctev_pred = pred_ty, ctev_evar = ev_id })
+  = mkTcCoVarCo (setVarType ev_id pred_ty)  -- See Note [Given in ctEvCoercion]
+ctEvCoercion (CtWanted { ctev_dest = dest, ctev_pred = pred })
+  | HoleDest hole <- dest
+  , Just (role, ty1, ty2) <- getEqPredTys_maybe pred
+  = -- ctEvCoercion is only called on type equalities
+    -- and they always have HoleDests
+    mkHoleCo hole role ty1 ty2
+ctEvCoercion ev
+  = pprPanic "ctEvCoercion" (ppr ev)
 
 ctEvId :: CtEvidence -> TcId
 ctEvId (CtWanted { ctev_dest = EvVarDest ev }) = ev
