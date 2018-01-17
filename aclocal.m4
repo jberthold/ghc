@@ -231,8 +231,7 @@ AC_DEFUN([FPTOOLS_SET_HASKELL_PLATFORM_VARS],
         dec|none|unknown|hp|apple|next|sun|sgi|ibm|montavista|portbld)
             ;;
         *)
-            echo "Unknown vendor [$]1"
-            exit 1
+            AC_MSG_WARN([Unknown vendor [$]1])
             ;;
         esac
     }
@@ -1115,7 +1114,9 @@ AC_SUBST([LdHasFilelist])
 # ----------
 # Sets fp_prog_ar to a path to ar. Exits if no ar can be found
 AC_DEFUN([FP_PROG_AR],
-[AC_PATH_PROG([fp_prog_ar], [ar])
+[if test -z "$fp_prog_ar"; then
+  AC_PATH_PROG([fp_prog_ar], [ar])
+fi
 if test -z "$fp_prog_ar"; then
   AC_MSG_ERROR([cannot find ar in your PATH, no idea how to make a library])
 fi
@@ -2339,27 +2340,51 @@ AC_DEFUN([FIND_LD],[
       [],
       [enable_ld_override=yes])
 
-    if test "x$enable_ld_override" = "xyes"; then
-        AC_CHECK_TARGET_TOOLS([TmpLd], [ld.gold ld.lld ld])
-
-        out=`$TmpLd --version`
-        case $out in
-          "GNU ld"*)   FP_CC_LINKER_FLAG_TRY(bfd, $2) ;;
-          "GNU gold"*) FP_CC_LINKER_FLAG_TRY(gold, $2) ;;
-          "LLD"*)      FP_CC_LINKER_FLAG_TRY(lld, $2) ;;
-          *) AC_MSG_NOTICE([unknown linker version $out]) ;;
-        esac
-        if test "z$$2" = "z"; then
-            AC_MSG_NOTICE([unable to convince '$CC' to use linker '$TmpLd'])
+    find_ld() {
+        # Make sure the user didn't specify LD manually.
+        if test "z$LD" != "z"; then
             AC_CHECK_TARGET_TOOL([LD], [ld])
-        else
-            LD="$TmpLd"
+            return
         fi
-   else
-        AC_CHECK_TARGET_TOOL([LD], [ld])
-   fi
 
-   CHECK_LD_COPY_BUG([$1])
+        # Manually iterate over possible names since we want to ensure that, e.g.,
+        # if ld.lld is installed but gcc doesn't support -fuse-ld=lld, that we
+        # then still try ld.gold and -fuse-ld=gold.
+        for possible_ld in ld.lld ld.gold ld; do
+            TmpLd="" # In case the user set LD
+            AC_CHECK_TARGET_TOOL([TmpLd], [$possible_ld])
+            if test "x$TmpLd" = "x"; then continue; fi
+
+            out=`$TmpLd --version`
+            case $out in
+              "GNU ld"*)   FP_CC_LINKER_FLAG_TRY(bfd, $2) ;;
+              "GNU gold"*) FP_CC_LINKER_FLAG_TRY(gold, $2) ;;
+              "LLD"*)      FP_CC_LINKER_FLAG_TRY(lld, $2) ;;
+              *) AC_MSG_NOTICE([unknown linker version $out]) ;;
+            esac
+            if test "z$$2" = "z"; then
+                AC_MSG_NOTICE([unable to convince '$CC' to use linker '$TmpLd'])
+                # a terrible hack to prevent autoconf from caching the previous
+                # AC_CHECK_TARGET_TOOL result since next time we'll be looking
+                # for another ld variant.
+                $as_unset ac_cv_prog_ac_ct_TmpLd
+            else
+                LD="$TmpLd"
+                return
+            fi
+        done
+
+        # Fallback
+        AC_CHECK_TARGET_TOOL([LD], [ld])
+    }
+
+    if test "x$enable_ld_override" = "xyes"; then
+        find_ld
+    else
+        AC_CHECK_TARGET_TOOL([LD], [ld])
+    fi
+
+    CHECK_LD_COPY_BUG([$1])
 ])
 
 # LocalWords:  fi

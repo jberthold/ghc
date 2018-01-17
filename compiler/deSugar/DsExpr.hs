@@ -372,21 +372,20 @@ dsExpr (ExplicitTuple tup_args boxity)
              go (lam_vars, args) (L _ (Present expr))
                     -- Expressions that are present don't generate
                     -- lambdas, just arguments.
-               = do { core_expr <- dsLExpr expr
+               = do { core_expr <- dsLExprNoLP expr
                     ; return (lam_vars, core_expr : args) }
 
-       ; (lam_vars, args) <- foldM go ([], []) (reverse tup_args)
+       ; dsWhenNoErrs (foldM go ([], []) (reverse tup_args))
                 -- The reverse is because foldM goes left-to-right
-
-       ; return $ mkCoreLams lam_vars $
-                  mkCoreTupBoxity boxity args }
+                      (\(lam_vars, args) -> mkCoreLams lam_vars $
+                                            mkCoreTupBoxity boxity args) }
 
 dsExpr (ExplicitSum alt arity expr types)
-  = do { core_expr <- dsLExpr expr
-       ; return $ mkCoreConApps (sumDataCon alt arity)
-                                (map (Type . getRuntimeRep "dsExpr ExplicitSum") types ++
-                                 map Type types ++
-                                 [core_expr]) }
+  = do { dsWhenNoErrs (dsLExprNoLP expr)
+                      (\core_expr -> mkCoreConApps (sumDataCon alt arity)
+                                     (map (Type . getRuntimeRep) types ++
+                                      map Type types ++
+                                      [core_expr]) ) }
 
 dsExpr (HsSCC _ cc expr@(L loc _)) = do
     dflags <- getDynFlags

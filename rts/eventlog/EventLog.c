@@ -1357,15 +1357,6 @@ void postSendReceiveLocalMessageEvent(OpCode msgtag, EventProcessID spid,
 }
 #endif //PARALLEL_RTS
 
-typedef enum {
-    HEAP_PROF_BREAKDOWN_COST_CENTRE = 0x1,
-    HEAP_PROF_BREAKDOWN_MODULE,
-    HEAP_PROF_BREAKDOWN_CLOSURE_DESCR,
-    HEAP_PROF_BREAKDOWN_TYPE_DESCR,
-    HEAP_PROF_BREAKDOWN_RETAINER,
-    HEAP_PROF_BREAKDOWN_BIOGRAPHY,
-} HeapProfBreakdown;
-
 static HeapProfBreakdown getHeapProfBreakdown(void)
 {
     switch (RtsFlags.ProfFlags.doHeapProfile) {
@@ -1381,6 +1372,8 @@ static HeapProfBreakdown getHeapProfBreakdown(void)
         return HEAP_PROF_BREAKDOWN_RETAINER;
     case HEAP_BY_LDV:
         return HEAP_PROF_BREAKDOWN_BIOGRAPHY;
+    case HEAP_BY_CLOSURE_TYPE:
+        return HEAP_PROF_BREAKDOWN_CLOSURE_TYPE;
     default:
         barf("getHeapProfBreakdown: unknown heap profiling mode");
     }

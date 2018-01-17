@@ -8,7 +8,7 @@ verbosityOptions =
          , flagDescription = "verbose mode (equivalent to ``-v3``)"
          , flagType = DynamicFlag
          }
-  , flag { flagName = "-v⟨n⟩"
+  , flag { flagName = "-v ⟨n⟩"
          , flagDescription = "set verbosity level"
          , flagType = DynamicFlag
          , flagReverse = ""
@@ -34,7 +34,7 @@ verbosityOptions =
   , flag { flagName = "-fprint-explicit-kinds"
          , flagDescription =
            "Print explicit kind foralls and kind arguments in types. " ++
-           "See also :ghc-flag:`-XKindSignature`"
+           "See also :ghc-flag:`-XKindSignatures`"
          , flagType = DynamicFlag
          , flagReverse = "-fno-print-explicit-kinds"
          }
@@ -83,6 +83,10 @@ verbosityOptions =
          }
   , flag { flagName = "-fshow-hole-constraints"
          , flagDescription = "Show constraints when reporting typed holes"
+         , flagType = DynamicFlag
+         }
+  , flag { flagName = "-fshow-loaded-modules"
+         , flagDescription = "Show the names of modules that GHCi loaded after a :ghci-cmd:`:load` command."
          , flagType = DynamicFlag
          }
   ]

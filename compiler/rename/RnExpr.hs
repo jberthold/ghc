@@ -1592,7 +1592,7 @@ mkStmtTreeOptimal stmts =
               (StmtTreeOne (stmt_arr ! hi), 1))
            | left_cost < right_cost
            = ((left,left_cost), (StmtTreeOne (stmt_arr ! hi), 1))
-           | otherwise -- left_cost > right_cost
+           | left_cost > right_cost
            = ((StmtTreeOne (stmt_arr ! lo), 1), (right,right_cost))
            | otherwise = minimumBy (comparing cost) alternatives
            where
@@ -1797,9 +1797,12 @@ slurpIndependentStmts
 slurpIndependentStmts stmts = go [] [] emptyNameSet stmts
  where
   -- If we encounter a BindStmt that doesn't depend on a previous BindStmt
-  -- in this group, then add it to the group.
+  -- in this group, then add it to the group. We have to be careful about
+  -- strict patterns though; splitSegments expects that if we return Just
+  -- then we have actually done some splitting. Otherwise it will go into
+  -- an infinite loop (#14163).
   go lets indep bndrs ((L loc (BindStmt pat body bind_op fail_op ty), fvs) : rest)
-    | isEmptyNameSet (bndrs `intersectNameSet` fvs)
+    | isEmptyNameSet (bndrs `intersectNameSet` fvs) && not (isStrictPattern pat)
     = go lets ((L loc (BindStmt pat body bind_op fail_op ty), fvs) : indep)
          bndrs' rest
     where bndrs' = bndrs `unionNameSet` mkNameSet (collectPatBinders pat)

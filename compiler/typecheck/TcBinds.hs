@@ -39,7 +39,7 @@ import TyCon
 import TcType
 import Type( mkStrLitTy, tidyOpenType, mkTyVarBinder, splitTyConApp_maybe)
 import TysPrim
-import TysWiredIn( cTupleTyConName )
+import TysWiredIn( mkBoxedTupleTy )
 import Id
 import Var
 import VarSet
@@ -784,12 +784,12 @@ tcPolyInfer rec_tc prag_fn tc_sig_fn mono bind_list
        ; mapM_ (checkOverloadedSig mono) sigs
 
        ; traceTc "simplifyInfer call" (ppr tclvl $$ ppr name_taus $$ ppr wanted)
-       ; (qtvs, givens, ev_binds)
+       ; (qtvs, givens, ev_binds, insoluble)
                  <- simplifyInfer tclvl infer_mode sigs name_taus wanted
 
        ; let inferred_theta = map evVarPred givens
        ; exports <- checkNoErrs $
-                    mapM (mkExport prag_fn qtvs inferred_theta) mono_infos
+                    mapM (mkExport prag_fn insoluble qtvs inferred_theta) mono_infos
 
        ; loc <- getSrcSpanM
        ; let poly_ids = map abe_poly exports
@@ -804,6 +804,8 @@ tcPolyInfer rec_tc prag_fn tc_sig_fn mono bind_list
 
 --------------
 mkExport :: TcPragEnv
+         -> Bool                        -- True <=> there was an insoluble type error
+                                        --          when typechecking the bindings
          -> [TyVar] -> TcThetaType      -- Both already zonked
          -> MonoBindInfo
          -> TcM (ABExport Id)
@@ -820,12 +822,12 @@ mkExport :: TcPragEnv
 
 -- Pre-condition: the qtvs and theta are already zonked
 
-mkExport prag_fn qtvs theta
+mkExport prag_fn insoluble qtvs theta
          mono_info@(MBI { mbi_poly_name = poly_name
                         , mbi_sig       = mb_sig
                         , mbi_mono_id   = mono_id })
   = do  { mono_ty <- zonkTcType (idType mono_id)
-        ; poly_id <- mkInferredPolyId qtvs theta poly_name mb_sig mono_ty
+        ; poly_id <- mkInferredPolyId insoluble qtvs theta poly_name mb_sig mono_ty
 
         -- NB: poly_id has a zonked type
         ; poly_id <- addInlinePrags poly_id prag_sigs
@@ -860,10 +862,12 @@ mkExport prag_fn qtvs theta
     prag_sigs = lookupPragEnv prag_fn poly_name
     sig_ctxt  = InfSigCtxt poly_name
 
-mkInferredPolyId :: [TyVar] -> TcThetaType
+mkInferredPolyId :: Bool  -- True <=> there was an insoluble error when
+                          --          checking the binding group for this Id
+                 -> [TyVar] -> TcThetaType
                  -> Name -> Maybe TcIdSigInst -> TcType
                  -> TcM TcId
-mkInferredPolyId qtvs inferred_theta poly_name mb_sig_inst mono_ty
+mkInferredPolyId insoluble qtvs inferred_theta poly_name mb_sig_inst mono_ty
   | Just (TISI { sig_inst_sig = sig })  <- mb_sig_inst
   , CompleteSig { sig_bndr = poly_id } <- sig
   = return poly_id
@@ -891,9 +895,13 @@ mkInferredPolyId qtvs inferred_theta poly_name mb_sig_inst mono_ty
 
        ; traceTc "mkInferredPolyId" (vcat [ppr poly_name, ppr qtvs, ppr theta'
                                           , ppr inferred_poly_ty])
-       ; addErrCtxtM (mk_inf_msg poly_name inferred_poly_ty) $
+       ; unless insoluble $
+         addErrCtxtM (mk_inf_msg poly_name inferred_poly_ty) $
          checkValidType (InfSigCtxt poly_name) inferred_poly_ty
          -- See Note [Validity of inferred types]
+         -- If we found an insoluble error in the function definition, don't
+         -- do this check; otherwise (Trac #14000) we may report an ambiguity
+         -- error for a rather bogus type.
 
        ; return (mkLocalIdOrCoVar poly_name inferred_poly_ty) }
 
@@ -939,20 +947,20 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
              keep_me  = psig_qtvs `unionVarSet` free_tvs
              my_theta = pickCapturedPreds keep_me inferred_theta
 
-       -- Report the inferred constraints for an extra-constraints wildcard/hole as
-       -- an error message, unless the PartialTypeSignatures flag is enabled. In this
-       -- case, the extra inferred constraints are accepted without complaining.
-       -- NB: inferred_theta already includes all the annotated constraints
+       -- Fill in the extra-constraints wildcard hole with inferred_theta,
+       -- so that the Hole constraint we have already emitted (in tcHsPartialSigType)
+       -- can report what filled it in.
+       -- NB: my_theta already includes all the annotated constraints
              inferred_diff = [ pred
                              | pred <- my_theta
                              , all (not . (`eqType` pred)) annotated_theta ]
        ; ctuple <- mk_ctuple inferred_diff
        ; writeMetaTyVar wc_var ctuple
+
        ; traceTc "completeTheta" $
             vcat [ ppr sig
                  , ppr annotated_theta, ppr inferred_theta
                  , ppr inferred_diff ]
-
        ; return (my_qtvs, my_theta) }
 
   | otherwise  -- A complete type signature is dealt with in mkInferredPolyId
@@ -968,9 +976,9 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
       where
         keep_me = free_tvs `unionVarSet` psig_qtvs
 
-    mk_ctuple [pred] = return pred
-    mk_ctuple preds  = do { tc <- tcLookupTyCon (cTupleTyConName (length preds))
-                          ; return (mkTyConApp tc preds) }
+    mk_ctuple preds = return (mkBoxedTupleTy preds)
+       -- Hack alert!  See TcHsType:
+       -- Note [Extra-constraint holes in partial type signatures]
 
     mk_psig_qtvs :: [(Name,TcTyVar)] -> TcM TcTyVarSet
     mk_psig_qtvs annotated_tvs

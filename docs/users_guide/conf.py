@@ -12,7 +12,7 @@ import os
 sys.path.insert(0, os.path.abspath('.'))
 from ghc_config import extlinks, version
 
-extensions = ['sphinx.ext.extlinks']
+extensions = ['sphinx.ext.extlinks', 'sphinx.ext.mathjax']
 
 templates_path = ['.templates']
 source_suffix = '.rst'
@@ -37,7 +37,7 @@ exclude_patterns = ['.build', "*.gen.rst"]
 
 # The name for this set of Sphinx documents.  If None, it defaults to
 # "<project> v<release> documentation".
-html_title = "Glasgow Haskell Compiler <release> User's Guide"
+html_title = "Glasgow Haskell Compiler %s User's Guide" % release
 html_short_title = "GHC %s User's Guide" % release
 html_theme_path = ['.']
 html_theme = 'ghc-theme'
@@ -116,35 +116,39 @@ texinfo_documents = [
 from sphinx import addnodes
 from docutils import nodes
 
+# The following functions parse flag declarations, and then have two jobs. First
+# they modify the docutils node `signode` for the proper display of the
+# declaration. Second, they return the name used to reference the flag.
+# (i.e. return "name" implies you reference the flag with :flag:`name`)
 def parse_ghci_cmd(env, sig, signode):
-    name = sig.split(';')[0]
-    sig = sig.replace(';', '')
-    signode += addnodes.desc_name(name, sig)
+    parts = sig.split(';')
+    name = parts[0]
+    args = ''
+    if len(parts) > 1:
+        args = parts[1]
+    # Bold name
+    signode += addnodes.desc_name(name, name)
+    # Smaller args
+    signode += addnodes.desc_addname(args, args)
+    # Reference name
     return name
 
 def parse_flag(env, sig, signode):
+
+    # Break flag into name and args
     import re
-    names = []
-    for i, flag in enumerate(sig.split(',')):
-        flag = flag.strip()
-        sep = '='
-        parts = flag.split('=')
-        if len(parts) == 1:
-            sep=' '
-            parts = flag.split()
-        if len(parts) == 0: continue
+    parts = re.split('( |=|\\[)', sig, 1)
+    flag = parts[0]
+    args = ''
+    if len(parts) > 1:
+        args = ''.join(parts[1:])
 
-        name = parts[0]
-        names.append(name)
-        sig = sep + ' '.join(parts[1:])
-        sig = re.sub(ur'<([-a-zA-Z ]+)>', ur'⟨\1⟩', sig)
-        if i > 0:
-            signode += addnodes.desc_name(', ', ', ')
-        signode += addnodes.desc_name(name, name)
-        if len(sig) > 0:
-            signode += addnodes.desc_addname(sig, sig)
-
-    return names[0]
+    # Bold printed name
+    signode += addnodes.desc_name(flag, flag)
+    # Smaller arguments
+    signode += addnodes.desc_addname(args, args)
+    # Reference name left unchanged
+    return sig
 
 def setup(app):
     from sphinx.util.docfields import Field, TypedField

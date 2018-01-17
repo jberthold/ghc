@@ -1463,7 +1463,7 @@ runPhase (RealPhase LlvmLlc) input_fn dflags
         -- iOS requires external references to be loaded indirectly from the
         -- DATA segment or dyld traps at runtime writing into TEXT: see #7722
         rmodel | platformOS (targetPlatform dflags) == OSiOS = "dynamic-no-pic"
-               | gopt Opt_PIC dflags                         = "pic"
+               | positionIndependent dflags                  = "pic"
                | WayDyn `elem` ways dflags                   = "dynamic-no-pic"
                | otherwise                                   = "static"
         tbaa | gopt Opt_LlvmTBAA dflags = "--enable-tbaa=true"
@@ -2153,13 +2153,12 @@ linkBinary' staticLink dflags o_files dep_packages = do
                       ++ [ SysTools.Option "-o"
                          , SysTools.FileOption "" output_fn
                          ]
+                      ++ libmLinkOpts
                       ++ map SysTools.Option (
                          []
 
-                      -- See Note [No PIE eating when linking]
-                      ++ (if sGccSupportsNoPie mySettings
-                             then ["-no-pie"]
-                             else [])
+                      -- See Note [No PIE when linking]
+                      ++ picCCOpts dflags
 
                       -- Permit the linker to auto link _symbol to _imp_symbol.
                       -- This lets us link against DLLs without needing an "import library".
@@ -2475,7 +2474,7 @@ joinObjectFiles dflags o_files output_fn = do
                        SysTools.Option "-nostdlib",
                        SysTools.Option "-Wl,-r"
                      ]
-                        -- See Note [No PIE eating while linking] in SysTools
+                        -- See Note [No PIE while linking] in SysTools
                      ++ (if sGccSupportsNoPie mySettings
                           then [SysTools.Option "-no-pie"]
                           else [])

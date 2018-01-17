@@ -1109,7 +1109,7 @@ Generalised list comprehensions are a further enhancement to the list
 comprehension syntactic sugar to allow operations such as sorting and
 grouping which are familiar from SQL. They are fully described in the
 paper `Comprehensive comprehensions: comprehensions with "order by" and
-"group by" <http://research.microsoft.com/~simonpj/papers/list-comp>`__,
+"group by" <https://www.microsoft.com/en-us/research/wp-content/uploads/2007/09/list-comp.pdf>`__,
 except that the syntax we use differs slightly from the paper.
 
 The extension is enabled with the flag :ghc-flag:`-XTransformListComp`.
@@ -4507,6 +4507,10 @@ Note the following details
 Deriving strategies
 -------------------
 
+.. ghc-flag:: -XDerivingStrategies
+
+    Allow multiple ``deriving``, each optionally qualified with a *strategy*.
+
 In most scenarios, every ``deriving`` statement generates a typeclass instance
 in an unambiguous fashion. There is a corner case, however, where
 simultaneously enabling both the :ghc-flag:`-XGeneralizedNewtypeDeriving` and
@@ -4557,8 +4561,8 @@ Currently, the deriving strategies are:
 
 If an explicit deriving strategy is not given, GHC has an algorithm for
 determining how it will actually derive an instance. For brevity, the algorithm
-is omitted here. You can read the full algorithm at
-:ghc-wiki:`Wiki page <DerivingStrategies>`.
+is omitted here. You can read the full algorithm on the
+:ghc-wiki:`GHC Wiki <Commentary/Compiler/DerivingStrategies>`.
 
 .. _pattern-synonyms:
 
@@ -5703,7 +5707,7 @@ reduction step makes the problem smaller by at least one constructor.
 You can find lots of background material about the reason for these
 restrictions in the paper `Understanding functional dependencies via
 Constraint Handling
-Rules <http://research.microsoft.com/%7Esimonpj/papers/fd%2Dchr/>`__.
+Rules <https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/jfp06.pdf>`__.
 
 For example, these are okay:
 
@@ -5776,7 +5780,7 @@ Condition (described in :ref:`instance-termination`) are lifted.
 Termination is still ensured by having a fixed-depth recursion stack. If
 you exceed the stack depth you get a sort of backtrace, and the
 opportunity to increase the stack depth with
-``-freduction-depth=``\ *N*. However, if you should exceed the default
+``-freduction-depth=⟨n⟩``. However, if you should exceed the default
 reduction depth limit, it is probably best just to disable depth
 checking, with ``-freduction-depth=0``. The exact depth your program
 requires depends on minutiae of your code, and it may change between
@@ -6983,6 +6987,7 @@ Decidability of type synonym instances
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 .. ghc-flag:: -XUndecidableInstances
+    :noindex:
 
     Relax restrictions on the decidability of type synonym family instances.
 
@@ -8206,9 +8211,9 @@ enabled).
 The only way ``*`` is unordinary is in its parsing. In order to be backward
 compatible, ``*`` is parsed as if it were an alphanumeric idenfifier; note
 that we do not write ``Int :: (*)`` but just plain ``Int :: *``. Due to the
-bizarreness with which ``*`` is parsed-and the fact that it is the only such
-operator in GHC-there are some corner cases that are
-not handled. We are aware of two:
+bizarreness with which ``*`` is parsed--and the fact that it is the only such
+operator in GHC--there are some corner cases that are
+not handled. We are aware of three:
 
 - In a Haskell-98-style data constructor, you must put parentheses around
   ``*``, like this: ::
@@ -8221,6 +8226,10 @@ not handled. We are aware of two:
 
   Note that the keyword ``type`` there is just to disambiguate the import
   from a term-level ``(*)``. (:ref:`explicit-namespaces`)
+
+- In an instance declaration head (the part after the word ``instance``), you
+  must parenthesize ``*``. This applies to all manners of instances, including
+  the left-hand sides of individual equations of a closed type family.
 
 The ``Data.Kind`` module also exports ``Type`` as a synonym for ``*``.
 Now that type synonyms work in kinds, it is conceivable that we will deprecate
@@ -9246,7 +9255,7 @@ restriction is not closed, and hence may in turn prevent generalisation
 of bindings that mention it.
 
 The rationale for this more conservative strategy is given in `the
-papers <http://research.microsoft.com/~simonpj/papers/constraints/index.htm>`__
+papers <https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/jfp-outsidein.pdf>`__
 "Let should not be generalised" and "Modular type inference with local
 assumptions", and a related `blog post <http://ghc.haskell.org/trac/ghc/blog/LetGeneralisationInGhc7>`__.
 
@@ -9833,7 +9842,7 @@ Here we do not need to give a type signature to ``w``, because it is an
 argument of constructor ``T1`` and that tells GHC all it needs to know.
 
 
-.. _implicit-quant:
+.. _implicit-quantification:
 
 Implicit quantification
 -----------------------
@@ -9897,7 +9906,7 @@ Impredicative polymorphism
 
 .. ghc-flag:: -XImpredicativeTypes
 
-    :implies: :ghc-flag:`-RankNTypes`
+    :implies: :ghc-flag:`-XRankNTypes`
 
     Allow impredicative polymorphic types.
 
@@ -9990,14 +9999,15 @@ Here are some more details:
    containing holes, by using the :ghc-flag:`-fdefer-typed-holes` flag. This
    flag defers errors produced by typed holes until runtime, and
    converts them into compile-time warnings. These warnings can in turn
-   be suppressed entirely by :ghc-flag:`-fno-warn-typed-holes`.
+   be suppressed entirely by :ghc-flag:`-Wno-typed-holes <-Wtyped-holes>`.
 
    The same behaviour for "``Variable out of scope``" errors, it terminates
    compilation by default. You can defer such errors by using the
    :ghc-flag:`-fdefer-out-of-scope-variables` flag. This flag defers errors
    produced by out of scope variables until runtime, and
    converts them into compile-time warnings. These warnings can in turn
-   be suppressed entirely by :ghc-flag:`-fno-warn-deferred-out-of-scope-variables`.
+   be suppressed entirely by :ghc-flag:`-Wno-deferred-out-of-scope-variables
+   <-Wdeferred-out-of-scope-variables>`.
 
    The result is that a hole or a variable will behave like ``undefined``, but with
    the added benefits that it shows a warning at compile time, and will
@@ -10144,6 +10154,10 @@ type-checker will accept the inferred type for each hole, generating
 warnings instead of errors. Additionally, these warnings can be silenced
 with the :ghc-flag:`-Wno-partial-type-signatures <-Wpartial-type-signatures>`
 flag.
+
+However, because GHC must *infer* the type when part of a type is left
+out, it is unable to use polymorphic recursion. The same restriction
+takes place when the type signature is omitted completely.
 
 .. _pts-syntax:
 
@@ -10519,24 +10533,25 @@ ignore the problems in ``a``.
 
 For more motivation and details please refer to the
 :ghc-wiki:`Wiki <DeferErrorsToRuntime>` page or the `original
-paper <http://research.microsoft.com/en-us/um/people/simonpj/papers/ext-f/>`__.
+paper <https://www.microsoft.com/en-us/research/wp-content/uploads/2012/01/icfp12.pdf>`__.
 
 Enabling deferring of type errors
 ---------------------------------
 
 The flag :ghc-flag:`-fdefer-type-errors` controls whether type errors are
 deferred to runtime. Type errors will still be emitted as warnings, but
-will not prevent compilation. You can use
-:ghc-flag:`-Wno-deferred-type-errors <-Wdeferred-type-errors>` to suppress these
-warnings.
+will not prevent compilation. You can use :ghc-flag:`-Wno-type-errors
+<-Wtype-errors>` to suppress these warnings.
 
 This flag implies the :ghc-flag:`-fdefer-typed-holes` and
-:ghc-flag:`-fdefer-out-of-scope-variables` flags, which enables this
-behaviour for `typed holes <#typed-holes>`__ and variables. Should you so wish, it is
+:ghc-flag:`-fdefer-out-of-scope-variables` flags, which enables this behaviour
+for `typed holes <#typed-holes>`__ and variables. Should you so wish, it is
 possible to enable :ghc-flag:`-fdefer-type-errors` without enabling
 :ghc-flag:`-fdefer-typed-holes` or :ghc-flag:`-fdefer-out-of-scope-variables`,
-by explicitly specifying :ghc-flag:`-fno-defer-typed-holes` or :ghc-flag:`-fno-defer-out-of-scope-variables`
-on the command-line after the :ghc-flag:`-fdefer-type-errors` flag.
+by explicitly specifying :ghc-flag:`-fno-defer-typed-holes
+<-fdefer-typed-holes>` or :ghc-flag:`-fno-defer-out-of-scope-variables
+<-fdefer-out-of-scope-variables>` on the command-line after the
+:ghc-flag:`-fdefer-type-errors` flag.
 
 At runtime, whenever a term containing a type error would need to be
 evaluated, the error is converted into a runtime exception of type
@@ -10577,7 +10592,9 @@ Otherwise, in the common case of a simple type error such as typing
 immediately-following type error when the expression is evaluated.
 
 This exception doesn't apply to statements, as the following example
-demonstrates: ::
+demonstrates:
+
+.. code-block:: none
 
     Prelude> let x = (True, 1 == 'a')
 
@@ -10601,12 +10618,10 @@ in "`Template Meta-programming for
 Haskell <http://research.microsoft.com/~simonpj/papers/meta-haskell/>`__"
 (Proc Haskell Workshop 2002).
 
-There is a Wiki page about Template Haskell at
-http://www.haskell.org/haskellwiki/Template_Haskell, and that is the
-best place to look for further details. You may also consult the `online
-Haskell library reference
-material <http://www.haskell.org/ghc/docs/latest/html/libraries/index.html>`__
-(look for module ``Language.Haskell.TH``). Many changes to the original
+The `Template Haskell <http://www.haskell.org/haskellwiki/Template_Haskell>`__
+page on the GHC Wiki has a wealth of information. You may also consult the
+:th-ref:`Haddock reference documentation <Language-Haskell-TH.html>`.
+Many changes to the original
 design are described in `Notes on Template Haskell version
 2 <http://research.microsoft.com/~simonpj/papers/meta-haskell/notes2.ps>`__.
 Not all of these changes are in GHC, however.
@@ -10988,17 +11003,17 @@ non-trivial program, you may be interested in combining this with the
 :ghc-flag:`-ddump-to-file` flag (see :ref:`dumping-output`. For each file using
 Template Haskell, this will show the output in a ``.dump-splices`` file.
 
-The flag :ghc-flag:`-dth-dec-file` shows the expansions of all top-level TH
-declaration splices, both typed and untyped, in the file :file:`M.th.hs`
-where M is the name of the module being compiled. Note that other types
-of splices (expressions, types, and patterns) are not shown. Application
-developers can check this into their repository so that they can grep
-for identifiers that were defined in Template Haskell. This is similar
-to using :ghc-flag:`-ddump-to-file` with :ghc-flag:`-ddump-splices` but it always
+The flag :ghc-flag:`-dth-dec-file=⟨file⟩` shows the expansions of all top-level
+TH declaration splices, both typed and untyped, in the file :file:`M.th.hs`
+where M is the name of the module being compiled. Note that other types of
+splices (expressions, types, and patterns) are not shown. Application
+developers can check this into their repository so that they can grep for
+identifiers that were defined in Template Haskell. This is similar to using
+:ghc-flag:`-ddump-to-file` with :ghc-flag:`-ddump-splices` but it always
 generates a file instead of being coupled to :ghc-flag:`-ddump-to-file`. The
-format is also different: it does not show code from the original file,
-instead it only shows generated code and has a comment for the splice
-location of the original file.
+format is also different: it does not show code from the original file, instead
+it only shows generated code and has a comment for the splice location of the
+original file.
 
 Below is a sample output of :ghc-flag:`-ddump-splices` ::
 
@@ -11009,7 +11024,7 @@ Below is a sample output of :ghc-flag:`-ddump-splices` ::
       foo :: Int -> Int
       foo x = (x + 1)
 
-Below is the output of the same sample using :ghc-flag:`-dth-dec-file` ::
+Below is the output of the same sample using :ghc-flag:`-dth-dec-file=⟨file⟩` ::
 
     -- TH_pragma.hs:(6,4)-(8,26): Splicing declarations
     foo :: Int -> Int
@@ -11111,15 +11126,15 @@ Fortunately GHC provides two workarounds.
 
 The first option is to compile the program twice:
 
-1. Compile the program or library first the normal way, without :ghc-flag:`-prof`.
+1. Compile the program or library first the normal way, without
+   :ghc-flag:`-prof`.
 
-2. Then compile it again with :ghc-flag:`-prof`, and additionally use ``-osuf p_o``
-   to name the object files differently (you can
-   choose any suffix that isn't the normal object suffix here). GHC will
-   automatically load the object files built in the first step when
-   executing splice expressions. If you omit the :ghc-flag:`-osuf` flag when
-   building with :ghc-flag:`-prof` and Template Haskell is used, GHC will emit
-   an error message.
+2. Then compile it again with :ghc-flag:`-prof`, and additionally use ``-osuf
+   p_o`` to name the object files differently (you can choose any suffix that
+   isn't the normal object suffix here). GHC will automatically load the object
+   files built in the first step when executing splice expressions. If you omit
+   the :ghc-flag:`-osuf ⟨suffix⟩` flag when building with :ghc-flag:`-prof` and
+   Template Haskell is used, GHC will emit an error message.
 
    .. index::
       single : -osuf; using with profiling
@@ -13401,7 +13416,7 @@ From a semantic point of view:
 -  Rules are enabled (that is, used during optimisation) by the
    :ghc-flag:`-fenable-rewrite-rules` flag. This flag is implied by
    :ghc-flag:`-O`, and may be switched off (as usual) by
-   :ghc-flag:`-fno-enable-rewrite-rules <-f-enable-rewrite-rules>`. (NB: enabling
+   :ghc-flag:`-fno-enable-rewrite-rules <-fenable-rewrite-rules>`. (NB: enabling
    :ghc-flag:`-fenable-rewrite-rules` without :ghc-flag:`-O` may not do what you
    expect, though, because without :ghc-flag:`-O` GHC ignores all optimisation
    information in interface files; see :ghc-flag:`-fignore-interface-pragmas`).

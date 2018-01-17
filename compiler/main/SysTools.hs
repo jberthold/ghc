@@ -8,7 +8,7 @@
 -----------------------------------------------------------------------------
 -}
 
-{-# LANGUAGE CPP, ScopedTypeVariables #-}
+{-# LANGUAGE CPP, MultiWayIf, ScopedTypeVariables #-}
 
 module SysTools (
         -- Initialisation
@@ -44,6 +44,9 @@ module SysTools (
         addFilesToClean,
 
         Option(..),
+
+        -- platform-specifics
+        libmLinkOpts,
 
         -- frameworks
         getPkgFrameworkOpts,
@@ -1526,9 +1529,18 @@ getFinalPath name = do
                                                      (fILE_ATTRIBUTE_NORMAL .|. fILE_FLAG_BACKUP_SEMANTICS)
                                                      Nothing
                       let fnPtr = makeGetFinalPathNameByHandle $ castPtrToFunPtr addr
-                      path    <- Win32.try "GetFinalPathName"
+                      -- First try to resolve the path to get the actual path
+                      -- of any symlinks or other file system redirections that
+                      -- may be in place. However this function can fail, and in
+                      -- the event it does fail, we need to try using the
+                      -- original path and see if we can decompose that.
+                      -- If the call fails Win32.try will raise an exception
+                      -- that needs to be caught. See #14159
+                      path    <- (Win32.try "GetFinalPathName"
                                     (\buf len -> fnPtr handle buf len 0) 512
-                                    `finally` closeHandle handle
+                                    `finally` closeHandle handle)
+                                `catch`
+                                 (\(_ :: IOException) -> return name)
                       return $ Just path
 
 type GetFinalPath = HANDLE -> LPTSTR -> DWORD -> DWORD -> IO DWORD
@@ -1563,15 +1575,6 @@ linesPlatform xs =
    lineBreak (x:xs) = let (as,bs) = lineBreak xs in (x:as,bs)
 
 #endif
-
-{-
-Note [No PIE eating while linking]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-As of 2016 some Linux distributions (e.g. Debian) have started enabling -pie by
-default in their gcc builds. This is incompatible with -r as it implies that we
-are producing an executable. Consequently, we must manually pass -no-pie to gcc
-when joining object files or linking dynamic libraries. See #12759.
--}
 
 linkDynLib :: DynFlags -> [String] -> [InstalledUnitId] -> IO ()
 linkDynLib dflags0 o_files dep_packages
@@ -1736,13 +1739,10 @@ linkDynLib dflags0 o_files dep_packages
 
             runLink dflags (
                     map Option verbFlags
+                 ++ libmLinkOpts
                  ++ [ Option "-o"
                     , FileOption "" output_fn
                     ]
-                    -- See Note [No PIE eating when linking]
-                 ++ (if sGccSupportsNoPie (settings dflags)
-                     then [Option "-no-pie"]
-                     else [])
                  ++ map Option o_files
                  ++ [ Option "-shared" ]
                  ++ map Option bsymbolicFlag
@@ -1754,6 +1754,16 @@ linkDynLib dflags0 o_files dep_packages
                  ++ map Option pkg_lib_path_opts
                  ++ map Option pkg_link_opts
               )
+
+-- | Some platforms require that we explicitly link against @libm@ if any
+-- math-y things are used (which we assume to include all programs). See #14022.
+libmLinkOpts :: [Option]
+libmLinkOpts =
+#if defined(HAVE_LIBM)
+  [Option "-lm"]
+#else
+  []
+#endif
 
 getPkgFrameworkOpts :: DynFlags -> Platform -> [InstalledUnitId] -> IO [String]
 getPkgFrameworkOpts dflags platform dep_packages

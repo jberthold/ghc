@@ -59,6 +59,7 @@ module DynFlags (
         tablesNextToCode, mkTablesNextToCode,
         makeDynFlagsConsistent,
         shouldUseColor,
+        positionIndependent,
 
         Way(..), mkBuildTag, wayRTSOnly, addWay', updateWays,
         wayGeneralFlags, wayUnsetGeneralFlags,
@@ -507,7 +508,9 @@ data GeneralFlag
    | Opt_DeferTypeErrors
    | Opt_DeferTypedHoles
    | Opt_DeferOutOfScopeVariables
-   | Opt_PIC
+   | Opt_PIC                         -- ^ @-fPIC@
+   | Opt_PIE                         -- ^ @-fPIE@
+   | Opt_PICExecutable               -- ^ @-pie@
    | Opt_SccProfilingOn
    | Opt_Ticky
    | Opt_Ticky_Allocd
@@ -533,6 +536,7 @@ data GeneralFlag
    | Opt_PprCaseAsLet
    | Opt_PprShowTicks
    | Opt_ShowHoleConstraints
+   | Opt_ShowLoadedModules
 
    -- Suppress all coercions, them replacing with '...'
    | Opt_SuppressCoercions
@@ -1315,6 +1319,10 @@ data RtsOptsEnabled = RtsOptsNone | RtsOptsSafeOnly | RtsOptsAll
 shouldUseColor :: DynFlags -> Bool
 shouldUseColor dflags = overrideWith (canUseColor dflags) (useColor dflags)
 
+-- | Are we building with @-fPIE@ or @-fPIC@ enabled?
+positionIndependent :: DynFlags -> Bool
+positionIndependent dflags = gopt Opt_PIC dflags || gopt Opt_PIE dflags
+
 -----------------------------------------------------------------------------
 -- Ways
 
@@ -1468,11 +1476,7 @@ wayOptl :: Platform -> Way -> [String]
 wayOptl _ (WayCustom {}) = []
 wayOptl platform WayThreaded =
         case platformOS platform of
-        -- FreeBSD's default threading library is the KSE-based M:N libpthread,
-        -- which GHC has some problems with.  It's currently not clear whether
-        -- the problems are our fault or theirs, but it seems that using the
-        -- alternative 1:1 threading library libthr works around it:
-        OSFreeBSD  -> ["-lthr"]
+        OSFreeBSD  -> ["-pthread"]
         OSOpenBSD  -> ["-pthread"]
         OSNetBSD   -> ["-pthread"]
         _          -> []
@@ -2699,6 +2703,8 @@ dynamic_flags_deps = [
 #endif
   , make_ord_flag defGhcFlag "relative-dynlib-paths"
       (NoArg (setGeneralFlag Opt_RelativeDynlibPaths))
+  , make_ord_flag defGhcFlag "pie"            (NoArg (setGeneralFlag Opt_PICExecutable))
+  , make_ord_flag defGhcFlag "no-pie"         (NoArg (unSetGeneralFlag Opt_PICExecutable))
 
         ------- Specific phases  --------------------------------------------
     -- need to appear before -pgmL to be parsed as LLVM flags.
@@ -3344,6 +3350,8 @@ dynamic_flags_deps = [
                                                     d { safeInfer = False }))
   , make_ord_flag defGhcFlag "fPIC"          (NoArg (setGeneralFlag Opt_PIC))
   , make_ord_flag defGhcFlag "fno-PIC"       (NoArg (unSetGeneralFlag Opt_PIC))
+  , make_ord_flag defGhcFlag "fPIE"          (NoArg (setGeneralFlag Opt_PIC))
+  , make_ord_flag defGhcFlag "fno-PIE"       (NoArg (unSetGeneralFlag Opt_PIC))
 
          ------ Debugging flags ----------------------------------------------
   , make_ord_flag defGhcFlag "g"             (OptIntSuffix setDebugLevel)
@@ -3807,6 +3815,7 @@ fFlagsDeps = [
   flagSpec "show-warning-groups"              Opt_ShowWarnGroups,
   flagSpec "hide-source-paths"                Opt_HideSourcePaths,
   flagSpec "show-hole-constraints"            Opt_ShowHoleConstraints,
+  flagSpec "show-loaded-modules"              Opt_ShowLoadedModules,
   flagSpec "whole-archive-hs-libs"            Opt_WholeArchiveHsLibs
   ]
 
@@ -5029,8 +5038,10 @@ setOptHpcDir arg  = upd $ \ d -> d {hpcDir = arg}
 -- platform.
 
 picCCOpts :: DynFlags -> [String]
-picCCOpts dflags
-    = case platformOS (targetPlatform dflags) of
+picCCOpts dflags = pieOpts ++ picOpts
+  where
+    picOpts =
+      case platformOS (targetPlatform dflags) of
       OSDarwin
           -- Apple prefers to do things the other way round.
           -- PIC is on by default.
@@ -5054,6 +5065,23 @@ picCCOpts dflags
        | gopt Opt_PIC dflags || WayDyn `elem` ways dflags ->
           ["-fPIC", "-U__PIC__", "-D__PIC__"]
        | otherwise                             -> []
+
+    pieOpts
+      | gopt Opt_PICExecutable dflags       = ["-pie"]
+        -- See Note [No PIE when linking]
+      | sGccSupportsNoPie (settings dflags) = ["-no-pie"]
+      | otherwise                           = []
+
+
+{-
+Note [No PIE while linking]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+As of 2016 some Linux distributions (e.g. Debian) have started enabling -pie by
+default in their gcc builds. This is incompatible with -r as it implies that we
+are producing an executable. Consequently, we must manually pass -no-pie to gcc
+when joining object files or linking dynamic libraries. Unless, of course, the
+user has explicitly requested a PIE executable with -pie. See #12759.
+-}
 
 picPOpts :: DynFlags -> [String]
 picPOpts dflags
@@ -5225,15 +5253,9 @@ makeDynFlagsConsistent dflags
       = let dflags' = dflags { hscTarget = HscLlvm }
             warn = "No native code generator, so using LLVM"
         in loop dflags' warn
- | hscTarget dflags == HscLlvm &&
-   not ((arch == ArchX86_64) && (os == OSLinux || os == OSDarwin || os == OSFreeBSD)) &&
-   not ((isARM arch) && (os == OSLinux)) &&
-   (gopt Opt_PIC dflags || WayDyn `elem` ways dflags)
-    = if cGhcWithNativeCodeGen == "YES"
-      then let dflags' = dflags { hscTarget = HscAsm }
-               warn = "Using native code generator rather than LLVM, as LLVM is incompatible with -fPIC and -dynamic on this platform"
-           in loop dflags' warn
-      else throwGhcException $ CmdLineError "Can't use -fPIC or -dynamic on this platform"
+ | not (osElfTarget os) && gopt Opt_PIE dflags
+    = loop (gopt_unset dflags Opt_PIE)
+           "Position-independent only supported on ELF platforms"
  | os == OSDarwin &&
    arch == ArchX86_64 &&
    not (gopt Opt_PIC dflags)

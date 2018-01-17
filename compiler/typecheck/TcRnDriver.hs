@@ -2109,7 +2109,7 @@ tcGhciStmts stmts
                        (noLoc $ ExplicitList unitTy Nothing (map mk_item ids)) ;
             mk_item id = let ty_args = [idType id, unitTy] in
                          nlHsApp (nlHsTyApp unsafeCoerceId
-                                   (map (getRuntimeRep "tcGhciStmts") ty_args ++ ty_args))
+                                   (map getRuntimeRep ty_args ++ ty_args))
                                  (nlHsVar id) ;
             stmts = tc_stmts ++ [noLoc (mkLastStmt ret_expr)]
         } ;
@@ -2180,9 +2180,9 @@ tcRnExpr hsc_env mode rdr_expr
                   else return expr_ty } ;
 
     -- Generalise
-    ((qtvs, dicts, _), lie_top) <- captureTopConstraints $
-                                   {-# SCC "simplifyInfer" #-}
-                                   simplifyInfer tclvl
+    ((qtvs, dicts, _, _), lie_top) <- captureTopConstraints $
+                                      {-# SCC "simplifyInfer" #-}
+                                      simplifyInfer tclvl
                                                  infer_mode
                                                  []    {- No sig vars -}
                                                  [(fresh_it, res_ty)]
@@ -2499,9 +2499,7 @@ loadUnqualIfaces hsc_env ictxt
 
 rnDump :: (Outputable a, Data a) => a -> TcRn ()
 -- Dump, with a banner, if -ddump-rn
-rnDump rn = do { traceOptTcRn Opt_D_dump_rn (mkDumpDoc "Renamer" (ppr rn))
-               ; traceOptTcRn Opt_D_dump_rn_ast
-                 (mkDumpDoc "Renamer" (text (showAstData NoBlankSrcSpan rn))) }
+rnDump rn = do { traceOptTcRn Opt_D_dump_rn (mkDumpDoc "Renamer" (ppr rn)) }
 
 tcDump :: TcGblEnv -> TcRn ()
 tcDump env

@@ -31,6 +31,12 @@ The highlights since the 8.0 release include:
 Full details
 ------------
 
+Package system
+~~~~~~~~~~~~~~
+
+- The long awaited Backpack module system is now fully usable. See
+  :ghc-wiki:`the GHC Wiki <Backpack>` for details.
+
 Language
 ~~~~~~~~
 
@@ -41,6 +47,16 @@ Language
   class instance using the :ghc-flag:`-XDerivingStrategies` language extension
   (see :ref:`deriving-strategies`).
 
+- The new :ghc-flag:`-XUnboxedSums` extension allows more efficient representation
+  of sum data. Some future GHC release will have support for worker/wrapper
+  transformation of sum arguments and constructor unpacking.
+
+- Support for overloaded record fields via a new ``HasField`` class and
+  associated compiler logic (see :ref:`record-field-selector-polymorphism`)
+
+- GHC now recognizes the ``COMPLETE`` language pragma, allowing the user to
+  specify sets of patterns (including pattern synonyms) which constitute a
+  complete pattern match. See :ref:`complete-pragma` for details.
 
 Compiler
 ~~~~~~~~
@@ -175,7 +191,7 @@ Compiler
     -- uses of `Monoid MyMonoid` here are improved
     bar :: MonadWriter MyMonoid m => ...
 
-- GHC now derives the definition of ``<$`` when using :ghc-flag:`DeriveFunctor`
+- GHC now derives the definition of ``<$`` when using :ghc-flag:`-XDeriveFunctor`
   rather than using the default definition. This prevents unnecessary
   allocation and a potential space leak when deriving ``Functor`` for
   a recursive type.
@@ -219,8 +235,8 @@ Compiler
     instance Foo (Either a b) where
       type Bar (Either a b) = b -> a
 
-  See the section on `associated type family instances <assoc-data-inst>` for
-  more information.
+  See the section on :ref:`associated type family instances <assoc-data-inst>`
+  for more information.
 
 - A bug involving the interaction between :ghc-flag:`-XMonoLocalBinds` and
   :ghc-flag:`-XPolyKinds` has been fixed. This can cause some programs to fail
@@ -234,6 +250,8 @@ GHCi
 
 - Added support for :ghc-flag:`-XStaticPointers` in interpreted modules. Note, however,
   that ``static`` expressions are still not allowed in expressions evaluated in the REPL.
+
+- Added support for :ghci-cmd:`:type +d` and :ghci-cmd:`:type +v`. (:ghc-ticket:`11975`)
 
 Template Haskell
 ~~~~~~~~~~~~~~~~
@@ -299,7 +317,7 @@ Runtime system
 
 - Heap overflow throws a catchable exception, provided that it was detected
   by the RTS during a GC cycle due to the program exceeding a limit set by
-  ``+RTS -M`` (see :rts-flag:`-M`), and not due to an allocation being refused
+  ``+RTS -M`` (see :rts-flag:`-M ⟨size⟩`), and not due to an allocation being refused
   by the operating system. This exception is thrown to the same thread that
   receives ``UserInterrupt`` exceptions, and may be caught by user programs.
 
@@ -307,17 +325,18 @@ Runtime system
   move long-lived data outside of the heap so that the garbage
   collector does not have to trace it repeatedly.  Compacted data can
   also be serialized, stored, and deserialized again later by the same
-  program.  For more details see the :compact-ref:`GHC.Compact
-  <GHC-Compact.html>` module.
+  program.  For more details see the :ghc-compact-ref:`GHC.Compact
+  <GHC-Compact.html>` module. Moreover, see the ``compact`` library on `Hackage
+  <https://hackage.haskell.org/package/compact>`_ for a high-level interface.
 
 - There is new support for improving performance on machines with a
   Non-Uniform Memory Architecture (NUMA).  See :rts-flag:`--numa`.
   This is supported on Linux and Windows systems.
 
 - The garbage collector can be told to use fewer threads than the
-  global number of capabilities set by :rts-flag:`-N`. By default, the garbage
+  global number of capabilities set by :rts-flag:`-N ⟨x⟩`. By default, the garbage
   collector will use a number of threads equal to the lesser of the global number
-  of capabilities or the number of physical cores. See :rts-flag:`-qn`, and a
+  of capabilities or the number of physical cores. See :rts-flag:`-qn ⟨x⟩`, and a
   `blog post <http://simonmar.github.io/posts/2016-12-08-Haskell-in-the-datacentre.html>`_
   that describes this.
 
@@ -333,12 +352,13 @@ Runtime system
   threads to all cores in systems which have multiple processor groups.
   (e.g. > 64 cores, see :ghc-ticket:`11054`)
 
-- Output of :ref:`Event log <rts-eventlog>` data can now be configured.
-  Enabling external tools to collect and analyze the event log data while the
+- Output of :ref:`Event log <rts-eventlog>` data can now be configured,
+  enabling external tools to collect and analyze the event log data while the
   application is still running.
 
-- advapi32, shell32 and user32 are now automatically loaded in GHCi. libGCC is also
-  loaded when a depencency requires it. See :ghc-ticket:`13189`.
+- ``advapi32``, ``shell32`` and ``user32`` are now automatically loaded in GHCi.
+  ``libGCC`` is also loaded when a dependency requires it. See
+  :ghc-ticket:`13189`.
 
 hsc2hs
 ~~~~~~

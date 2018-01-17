@@ -390,17 +390,19 @@ mkDataConWorkId wkr_name data_con
 
     wkr_sig = mkClosedStrictSig (replicate wkr_arity topDmd) (dataConCPR data_con)
         --      Note [Data-con worker strictness]
-        -- Notice that we do *not* say the worker is strict
+        -- Notice that we do *not* say the worker Id is strict
         -- even if the data constructor is declared strict
         --      e.g.    data T = MkT !(Int,Int)
-        -- Why?  Because the *wrapper* is strict (and its unfolding has case
-        -- expressions that do the evals) but the *worker* itself is not.
-        -- If we pretend it is strict then when we see
-        --      case x of y -> $wMkT y
+        -- Why?  Because the *wrapper* $WMkT is strict (and its unfolding has
+        -- case expressions that do the evals) but the *worker* MkT itself is
+        --  not. If we pretend it is strict then when we see
+        --      case x of y -> MkT y
         -- the simplifier thinks that y is "sure to be evaluated" (because
-        --  $wMkT is strict) and drops the case.  No, $wMkT is not strict.
+        -- the worker MkT is strict) and drops the case.  No, the workerId
+        -- MkT is not strict.
         --
-        -- When the simplifier sees a pattern
+        -- However, the worker does have StrictnessMarks.  When the simplifier
+        -- sees a pattern
         --      case e of MkT x -> ...
         -- it uses the dataConRepStrictness of MkT to mark x as evaluated;
         -- but that's fine... dataConRepStrictness comes from the data con
@@ -528,7 +530,11 @@ mkDataConRep dflags fam_envs wrap_name mb_bangs data_con
 
              wrap_sig = mkClosedStrictSig wrap_arg_dmds (dataConCPR data_con)
 
-             wrap_arg_dmds = map mk_dmd arg_ibangs
+             wrap_arg_dmds =
+               replicate (length theta) topDmd ++ map mk_dmd arg_ibangs
+               -- Don't forget the dictionary arguments when building
+               -- the strictness signature (#14290).
+
              mk_dmd str | isBanged str = evalDmd
                         | otherwise           = topDmd
 
