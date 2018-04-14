@@ -128,6 +128,9 @@
 [submodule ".arc-linters/arcanist-external-json-linter"]
 	path = .arc-linters/arcanist-external-json-linter
 	url = http://git.haskell.org/arcanist-external-json-linter.git
+[submodule "hadrian"]
+	path = hadrian
+	url = http://git.haskell.org/hadrian.git
 [submodule "libraries/edenmodules"]
 	path = libraries/edenmodules
 	url = git://hex.mathematik.uni-marburg.de/edenmodules.git

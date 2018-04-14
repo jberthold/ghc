@@ -555,7 +555,8 @@ solveOneFromTheOther ev_i ev_w
   -- See Note [Replacement vs keeping]
 
   | lvl_i == lvl_w
-  = do { binds <- getTcEvBindsMap
+  = do { ev_binds_var <- getTcEvBindsVar
+       ; binds <- getTcEvBindsMap ev_binds_var
        ; return (same_level_strategy binds) }
 
   | otherwise   -- Both are Given, levels differ
@@ -589,7 +590,7 @@ solveOneFromTheOther ev_i ev_w
        | otherwise
        = KeepInert
 
-     has_binding binds ev = isJust (lookupEvBind binds (ctEvId ev))
+     has_binding binds ev = isJust (lookupEvBind binds (ctEvEvId ev))
 
 {-
 Note [Replacement vs keeping]
@@ -669,7 +670,7 @@ interactIrred inerts workItem@(CIrredCan { cc_ev = ev_w, cc_insol = insoluble })
                -- which can happen with solveOneFromTheOther, so that
                -- we get distinct error messages with -fdefer-type-errors
                -- See Note [Do not add duplicate derived insolubles]
-  , not (isDroppableDerivedCt workItem)
+  , not (isDroppableCt workItem)
   = continueWith workItem
 
   | let (matching_irreds, others) = findMatchingIrreds (inert_irreds inerts) ev_w
@@ -989,7 +990,7 @@ interactDict inerts workItem@(CDictCan { cc_ev = ev_w, cc_class = cls, cc_tyargs
        ; try_inst_res <- shortCutSolver dflags ev_w ev_i
        ; case try_inst_res of
            Just evs -> do { flip mapM_ evs $ \ (ev_t, ct_ev, cls, typ) ->
-                               do { setWantedEvBind (ctEvId ct_ev) ev_t
+                               do { setWantedEvBind (ctEvEvId ct_ev) ev_t
                                   ; addSolvedDict ct_ev cls typ }
                           ; stopWith ev_w "interactDict/solved from instance" }
 
@@ -1858,7 +1859,8 @@ improveTopFunEqs ev fam_tc args fsk
                                           , ppr eqns ])
        ; mapM_ (unifyDerived loc Nominal) eqns }
   where
-    loc = ctEvLoc ev
+    loc = ctEvLoc ev  -- ToDo: this location is wrong; it should be FunDepOrigin2
+                      -- See Trac #14778
 
 improve_top_fun_eqs :: FamInstEnvs
                     -> TyCon -> [TcType] -> TcType
@@ -2238,7 +2240,7 @@ doTopReactDict inerts work_item@(CDictCan { cc_ev = fl, cc_class = cls
      finish_wanted theta mk_ev
         = do { addSolvedDict fl cls xis
              ; evc_vars <- mapM (newWanted deeper_loc) theta
-             ; setWantedEvBind (ctEvId fl) (mk_ev (map getEvTerm evc_vars))
+             ; setWantedEvBind (ctEvEvId fl) (mk_ev (map getEvTerm evc_vars))
              ; emitWorkNC (freshGoals evc_vars)
              ; stopWith fl "Dict/Top (solved wanted)" }
 

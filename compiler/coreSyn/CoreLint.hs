@@ -531,7 +531,7 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
        ; checkL ( isJoinId binder
                || not (isUnliftedType binder_ty)
                || (isNonRec rec_flag && exprOkForSpeculation rhs)
-               || exprIsLiteralString rhs)
+               || exprIsTickedString rhs)
            (badBndrTyMsg binder (text "unlifted"))
 
         -- Check that if the binder is top-level or recursive, it's not
@@ -539,14 +539,14 @@ lintSingleBinding top_lvl_flag rec_flag (binder,rhs)
         -- computation to perform, see Note [CoreSyn top-level string literals].
        ; checkL (not (isStrictId binder)
             || (isNonRec rec_flag && not (isTopLevel top_lvl_flag))
-            || exprIsLiteralString rhs)
+            || exprIsTickedString rhs)
            (mkStrictMsg binder)
 
         -- Check that if the binder is at the top level and has type Addr#,
         -- that it is a string literal, see
         -- Note [CoreSyn top-level string literals].
        ; checkL (not (isTopLevel top_lvl_flag && binder_ty `eqType` addrPrimTy)
-                 || exprIsLiteralString rhs)
+                 || exprIsTickedString rhs)
            (mkTopNonLitStrMsg binder)
 
        ; flags <- getLintFlags
@@ -1123,7 +1123,7 @@ checkCaseAlts e ty alts =
   where
     (con_alts, maybe_deflt) = findDefault alts
 
-        -- Check that successive alternatives have increasing tags
+        -- Check that successive alternatives have strictly increasing tags
     increasing_tag (alt1 : rest@( alt2 : _)) = alt1 `ltAlt` alt2 && increasing_tag rest
     increasing_tag _                         = True
 
@@ -1666,8 +1666,6 @@ lintCoercion co@(UnivCo prov r ty1 ty2)
                                     ; check_kinds kco k1 k2 }
 
            PluginProv _     -> return ()  -- no extra checks
-           HoleProv h       -> addErrL $
-                               text "Unfilled coercion hole:" <+> ppr h
 
        ; when (r /= Phantom && classifiesTypeWithValues k1
                             && classifiesTypeWithValues k2)
@@ -1873,6 +1871,11 @@ lintCoercion this@(AxiomRuleCo co cs)
   lintRoles n es []  = err "Not enough coercion arguments"
                           [ text "Expected:" <+> int (n + length es)
                           , text "Provided:" <+> int n ]
+
+lintCoercion (HoleCo h)
+  = do { addErrL $ text "Unfilled coercion hole:" <+> ppr h
+       ; lintCoercion (CoVarCo (coHoleCoVar h)) }
+
 
 ----------
 lintUnliftedCoVar :: CoVar -> LintM ()

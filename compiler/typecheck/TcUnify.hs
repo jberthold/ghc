@@ -1180,16 +1180,13 @@ buildImplicationFor tclvl skol_info skol_tvs given wanted
   = ASSERT2( all isSkolemTyVar skol_tvs, ppr skol_tvs )
     do { ev_binds_var <- newTcEvBinds
        ; env <- getLclEnv
-       ; let implic = Implic { ic_tclvl = tclvl
-                             , ic_skols = skol_tvs
-                             , ic_no_eqs = False
-                             , ic_given = given
-                             , ic_wanted = wanted
-                             , ic_status  = IC_Unsolved
-                             , ic_binds = ev_binds_var
-                             , ic_env = env
-                             , ic_needed = emptyVarSet
-                             , ic_info = skol_info }
+       ; let implic = newImplication { ic_tclvl  = tclvl
+                                     , ic_skols  = skol_tvs
+                                     , ic_given  = given
+                                     , ic_wanted = wanted
+                                     , ic_binds  = ev_binds_var
+                                     , ic_env    = env
+                                     , ic_info   = skol_info }
 
        ; return (unitBag implic, TcEvBinds ev_binds_var) }
 
@@ -2056,10 +2053,8 @@ occCheckExpand tv ty
     go env (TyVarTy tv')
       | tv == tv'                         = Nothing
       | Just tv'' <- lookupVarEnv env tv' = return (mkTyVarTy tv'')
-      | otherwise                         = do { k' <- go env (tyVarKind tv')
-                                               ; return (mkTyVarTy $
-                                                         setTyVarKind tv' k') }
-           -- See Note [Occurrence checking: look inside kinds]
+      | otherwise                         = do { tv'' <- go_var env tv'
+                                               ; return (mkTyVarTy tv'') }
 
     go _   ty@(LitTy {}) = return ty
     go env (AppTy ty1 ty2) = do { ty1' <- go env ty1
@@ -2094,6 +2089,12 @@ occCheckExpand tv ty
                                 ; return (mkCoercionTy co') }
 
     ------------------
+    go_var env v = do { k' <- go env (varType v)
+                      ; return (setVarType v k') }
+           -- Works for TyVar and CoVar
+           -- See Note [Occurrence checking: look inside kinds]
+
+    ------------------
     go_co env (Refl r ty)               = do { ty' <- go env ty
                                              ; return (mkReflCo r ty') }
       -- Note: Coercions do not contain type synonyms
@@ -2113,8 +2114,10 @@ occCheckExpand tv ty
     go_co env (FunCo r co1 co2)         = do { co1' <- go_co env co1
                                              ; co2' <- go_co env co2
                                              ; return (mkFunCo r co1' co2') }
-    go_co env (CoVarCo c)               = do { k' <- go env (varType c)
-                                             ; return (mkCoVarCo (setVarType c k')) }
+    go_co env (CoVarCo c)               = do { c' <- go_var env c
+                                             ; return (mkCoVarCo c') }
+    go_co env (HoleCo h)                = do { c' <- go_var env (ch_co_var h)
+                                             ; return (HoleCo (h { ch_co_var = c' })) }
     go_co env (AxiomInstCo ax ind args) = do { args' <- mapM (go_co env) args
                                              ; return (mkAxiomInstCo ax ind args') }
     go_co env (UnivCo p r ty1 ty2)      = do { p' <- go_prov env p
@@ -2148,7 +2151,6 @@ occCheckExpand tv ty
     go_prov env (PhantomProv co)    = PhantomProv <$> go_co env co
     go_prov env (ProofIrrelProv co) = ProofIrrelProv <$> go_co env co
     go_prov _   p@(PluginProv _)    = return p
-    go_prov _   p@(HoleProv _)      = return p
 
 canUnifyWithPolyType :: DynFlags -> TcTyVarDetails -> Bool
 canUnifyWithPolyType dflags details

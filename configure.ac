@@ -13,10 +13,10 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Parallel Haskell Compilation System], [8.3], [eden@mathematik.uni-marburg.de], [ghc-AC_PACKAGE_VERSION])
+AC_INIT([The Parallel Haskell Compilation System], [8.4.1], [eden@mathematik.uni-marburg.de], [ghc-AC_PACKAGE_VERSION])
 
 # Set this to YES for a released version, otherwise NO
-: ${RELEASE=NO}
+: ${RELEASE=YES}
 
 # The primary version (e.g. 7.5, 7.4.1) is set in the AC_INIT line
 # above.  If this is not a released version, then we will append the
@@ -538,14 +538,21 @@ FP_SET_CFLAGS_C99([CC_STAGE0],[CONF_CC_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
 FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE1],[CONF_CPP_OPTS_STAGE1])
 FP_SET_CFLAGS_C99([CC],[CONF_CC_OPTS_STAGE2],[CONF_CPP_OPTS_STAGE2])
 
-dnl ** Choose a linker
+dnl ** Which ld to use
 dnl --------------------------------------------------------------
 FIND_LD([$target],[GccUseLdOpt])
 CONF_GCC_LINKER_OPTS_STAGE1="$CONF_GCC_LINKER_OPTS_STAGE1 $GccUseLdOpt"
 CONF_GCC_LINKER_OPTS_STAGE2="$CONF_GCC_LINKER_OPTS_STAGE2 $GccUseLdOpt"
 LdCmd="$LD"
+LdNoGoldCmd="$LD_NO_GOLD"
 CFLAGS="$CFLAGS $GccUseLdOpt"
 AC_SUBST([LdCmd])
+AC_SUBST([LdNoGoldCmd])
+
+FP_PROG_LD_IS_GNU
+FP_PROG_LD_BUILD_ID
+FP_PROG_LD_NO_COMPACT_UNWIND
+FP_PROG_LD_FILELIST
 
 dnl ** Which nm to use?
 dnl --------------------------------------------------------------
@@ -603,7 +610,7 @@ if test "$RANLIB" = ":"; then
     AC_MSG_ERROR([cannot find ranlib in your PATH])
 fi
 RanlibCmd="$RANLIB"
-RANLIB="$RanlibCmd"
+AC_SUBST([RanlibCmd])
 
 dnl ** which strip to use?
 dnl --------------------------------------------------------------
@@ -624,7 +631,6 @@ then
 else
     AC_CHECK_TARGET_TOOL([LIBTOOL], [libtool])
     LibtoolCmd="$LIBTOOL"
-    LIBTOOL="$LibtoolCmd"
 fi
 AC_SUBST([LibtoolCmd])
 
@@ -708,22 +714,22 @@ FP_GCC_VERSION
 dnl ** See whether gcc supports -no-pie
 FP_GCC_SUPPORTS_NO_PIE
 
+dnl ** Used to determine how to compile ghc-prim's atomics.c, used by
+dnl    unregisterised, Sparc, and PPC backends.
+FP_GCC_SUPPORTS__ATOMICS
+AC_DEFINE([HAVE_C11_ATOMICS], [$CONF_GCC_SUPPORTS__ATOMICS], [Does GCC support __atomic primitives?])
+
+FP_GCC_EXTRA_FLAGS
+
 dnl ** look to see if we have a C compiler using an llvm back end.
 dnl
 FP_CC_LLVM_BACKEND
-
-FP_PROG_LD_IS_GNU
-FP_PROG_LD_BUILD_ID
-FP_PROG_LD_NO_COMPACT_UNWIND
-FP_PROG_LD_FILELIST
 
 FPTOOLS_SET_C_LD_FLAGS([target],[CFLAGS],[LDFLAGS],[IGNORE_LINKER_LD_FLAGS],[CPPFLAGS])
 FPTOOLS_SET_C_LD_FLAGS([build],[CONF_CC_OPTS_STAGE0],[CONF_GCC_LINKER_OPTS_STAGE0],[CONF_LD_LINKER_OPTS_STAGE0],[CONF_CPP_OPTS_STAGE0])
 FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE1],[CONF_GCC_LINKER_OPTS_STAGE1],[CONF_LD_LINKER_OPTS_STAGE1],[CONF_CPP_OPTS_STAGE1])
 FPTOOLS_SET_C_LD_FLAGS([target],[CONF_CC_OPTS_STAGE2],[CONF_GCC_LINKER_OPTS_STAGE2],[CONF_LD_LINKER_OPTS_STAGE2],[CONF_CPP_OPTS_STAGE2])
 # Stage 3 won't be supported by cross-compilation
-
-FP_GCC_EXTRA_FLAGS
 
 # See rules/distdir-way-opts.mk for details.
 # Flags passed to the C compiler

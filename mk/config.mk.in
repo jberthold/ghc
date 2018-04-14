@@ -554,6 +554,7 @@ GccVersion            = @GccVersion@
 # TargetPlatformFull retains the string passed to configure so we have it in
 # the necessary format to pass to libffi's configure.
 TargetPlatformFull    = @TargetPlatformFull@
+GccLT46         = @GccLT46@
 GccIsClang      = @GccIsClang@
 
 CC              = @CC@
@@ -758,6 +759,7 @@ HaveDtrace		= @HaveDtrace@
 USE_DTRACE = $(HaveDtrace)
 DTRACE			= @DtraceCmd@
 
+LD_NO_GOLD = @LdNoGoldCmd@
 LD = @LdCmd@
 NM = @NmCmd@
 AR = @ArCmd@

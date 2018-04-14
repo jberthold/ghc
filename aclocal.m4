@@ -1237,15 +1237,18 @@ if test -z "$CC"
 then
   AC_MSG_ERROR([gcc is required])
 fi
+GccLT46=NO
 AC_CACHE_CHECK([version of gcc], [fp_cv_gcc_version],
 [
     # Be sure only to look at the first occurrence of the "version " string;
     # Some Apple compilers emit multiple messages containing this string.
     fp_cv_gcc_version="`$CC -v 2>&1 | sed -n -e '1,/version /s/.*version [[^0-9]]*\([[0-9.]]*\).*/\1/p'`"
-    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [4.7],
-                        [AC_MSG_ERROR([Need at least gcc version 4.7])])
+    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [4.4],
+                        [AC_MSG_ERROR([Need at least gcc version 4.4 (4.7+ recommended)])])
+    FP_COMPARE_VERSIONS([$fp_cv_gcc_version], [-lt], [4.6], GccLT46=YES)
 ])
 AC_SUBST([GccVersion], [$fp_cv_gcc_version])
+AC_SUBST(GccLT46)
 ])# FP_GCC_VERSION
 
 dnl Check to see if the C compiler is clang or llvm-gcc
@@ -1276,6 +1279,24 @@ fi
 AC_SUBST(GccIsClang)
 
 rm -f conftest.txt
+])
+
+# FP_GCC_SUPPORTS__ATOMICS
+# ------------------------
+# Does gcc support the __atomic_* family of builtins?
+AC_DEFUN([FP_GCC_SUPPORTS__ATOMICS],
+[
+   AC_REQUIRE([AC_PROG_CC])
+   AC_MSG_CHECKING([whether GCC supports __atomic_ builtins])
+   echo 'int test(int *x) { int y; __atomic_load(&x, &y, __ATOMIC_SEQ_CST); return x; }' > conftest.c
+   if $CC -c conftest.c > /dev/null 2>&1; then
+       CONF_GCC_SUPPORTS__ATOMICS=YES
+       AC_MSG_RESULT([yes])
+   else
+       CONF_GCC_SUPPORTS__ATOMICS=NO
+       AC_MSG_RESULT([no])
+   fi
+   rm -f conftest.c conftest.o
 ])
 
 # FP_GCC_SUPPORTS_NO_PIE
@@ -2334,6 +2355,7 @@ AC_DEFUN([FIND_LD],[
         # Make sure the user didn't specify LD manually.
         if test "z$LD" != "z"; then
             AC_CHECK_TARGET_TOOL([LD], [ld])
+            LD_NO_GOLD=$LD
             return
         fi
 
@@ -2346,10 +2368,16 @@ AC_DEFUN([FIND_LD],[
             if test "x$TmpLd" = "x"; then continue; fi
 
             out=`$TmpLd --version`
+            LD_NO_GOLD=$TmpLd
             case $out in
-              "GNU ld"*)   FP_CC_LINKER_FLAG_TRY(bfd, $2) ;;
-              "GNU gold"*) FP_CC_LINKER_FLAG_TRY(gold, $2) ;;
-              "LLD"*)      FP_CC_LINKER_FLAG_TRY(lld, $2) ;;
+              "GNU ld"*)
+                   FP_CC_LINKER_FLAG_TRY(bfd, $2) ;;
+              "GNU gold"*)
+                   FP_CC_LINKER_FLAG_TRY(gold, $2)
+                   LD_NO_GOLD=ld
+                   ;;
+              "LLD"*)
+                   FP_CC_LINKER_FLAG_TRY(lld, $2) ;;
               *) AC_MSG_NOTICE([unknown linker version $out]) ;;
             esac
             if test "z$$2" = "z"; then
@@ -2366,12 +2394,16 @@ AC_DEFUN([FIND_LD],[
 
         # Fallback
         AC_CHECK_TARGET_TOOL([LD], [ld])
+        # This isn't entirely safe since $LD may have been discovered to be
+        $ ld.gold, but what else can we do?
+        if test "x$LD_NO_GOLD" = "x"; then LD_NO_GOLD=$LD; fi
     }
 
     if test "x$enable_ld_override" = "xyes"; then
         find_ld
     else
         AC_CHECK_TARGET_TOOL([LD], [ld])
+        if test "x$LD_NO_GOLD" = "x"; then LD_NO_GOLD=$LD; fi
     fi
 
     CHECK_LD_COPY_BUG([$1])

@@ -367,12 +367,12 @@ cvtDec (TH.PatSynD nm args dir pat)
        ; returnJustL $ Hs.ValD $ PatSynBind $
            PSB nm' placeHolderType args' pat' dir' }
   where
-    cvtArgs (TH.PrefixPatSyn args) = Hs.PrefixPatSyn <$> mapM vNameL args
-    cvtArgs (TH.InfixPatSyn a1 a2) = Hs.InfixPatSyn <$> vNameL a1 <*> vNameL a2
+    cvtArgs (TH.PrefixPatSyn args) = Hs.PrefixCon <$> mapM vNameL args
+    cvtArgs (TH.InfixPatSyn a1 a2) = Hs.InfixCon <$> vNameL a1 <*> vNameL a2
     cvtArgs (TH.RecordPatSyn sels)
       = do { sels' <- mapM vNameL sels
            ; vars' <- mapM (vNameL . mkNameS . nameBase) sels
-           ; return $ Hs.RecordPatSyn $ zipWith RecordPatSynField sels' vars' }
+           ; return $ Hs.RecCon $ zipWith RecordPatSynField sels' vars' }
 
     cvtDir _ Unidir          = return Unidirectional
     cvtDir _ ImplBidir       = return ImplicitBidirectional
@@ -775,8 +775,17 @@ cvtl e = wrapL (cvt e)
     cvt (VarE s)        = do { s' <- vName s; return $ HsVar (noLoc s') }
     cvt (ConE s)        = do { s' <- cName s; return $ HsVar (noLoc s') }
     cvt (LitE l)
-      | overloadedLit l = do { l' <- cvtOverLit l; return $ HsOverLit l' }
-      | otherwise       = do { l' <- cvtLit l;     return $ HsLit l' }
+      | overloadedLit l = go cvtOverLit HsOverLit isCompoundHsOverLit
+      | otherwise       = go cvtLit     HsLit     isCompoundHsLit
+      where
+        go :: (Lit -> CvtM (l GhcPs))
+           -> (l GhcPs -> HsExpr GhcPs)
+           -> (l GhcPs -> Bool)
+           -> CvtM (HsExpr GhcPs)
+        go cvt_lit mk_expr is_compound_lit = do
+          l' <- cvt_lit l
+          let e' = mk_expr l'
+          return $ if is_compound_lit l' then HsPar (noLoc e') else e'
     cvt (AppE x@(LamE _ _) y) = do { x' <- cvtl x; y' <- cvtl y
                                    ; return $ HsApp (mkLHsPar x') (mkLHsPar y')}
     cvt (AppE x y)            = do { x' <- cvtl x; y' <- cvtl y
@@ -790,8 +799,10 @@ cvtl e = wrapL (cvt e)
                                -- oddities that can result from zero-argument
                                -- lambda expressions. See #13856.
     cvt (LamE ps e)    = do { ps' <- cvtPats ps; e' <- cvtl e
+                            ; let pats = map parenthesizeCompoundPat ps'
                             ; return $ HsLam (mkMatchGroup FromSource
-                                             [mkSimpleMatch LambdaExpr ps' e'])}
+                                             [mkSimpleMatch LambdaExpr
+                                             pats e'])}
     cvt (LamCaseE ms)  = do { ms' <- mapM (cvtMatch LambdaExpr) ms
                             ; return $ HsLamCase (mkMatchGroup FromSource ms')
                             }
@@ -1221,10 +1232,11 @@ cvtTypeKind ty_str ty
                         tys'
            ArrowT
              | [x',y'] <- tys' -> do
-                 case x' of
-                   (L _ HsFunTy{}) -> do { x'' <- returnL (HsParTy x')
-                                         ; returnL (HsFunTy x'' y') }
-                   _  -> returnL (HsFunTy x' y')
+                 x'' <- case x' of
+                          L _ HsFunTy{}    -> returnL (HsParTy x')
+                          L _ HsForAllTy{} -> returnL (HsParTy x') -- #14646
+                          _                -> return x'
+                 returnL (HsFunTy x'' y')
              | otherwise ->
                   mk_apps (HsTyVar NotPromoted (noLoc (getRdrName funTyCon)))
                           tys'

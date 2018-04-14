@@ -310,7 +310,7 @@ usage_text[] = {
 "  -kc<size> Sets the stack chunk size (default 32k)",
 "  -kb<size> Sets the stack chunk buffer size (default 1k)",
 "",
-"  -A<size>  Sets the minimum allocation area size (default 512k) Egs: -A1m -A10k",
+"  -A<size>  Sets the minimum allocation area size (default 1m) Egs: -A20m -A10k",
 "  -AL<size> Sets the amount of large-object memory that can be allocated",
 "            before a GC is triggered (default: the value of -A)",
 "  -n<size>  Allocation area chunk size (0 = disabled, default: 0)",
@@ -1363,11 +1363,7 @@ error = true;
                 // could be THREADED_OR_PARALLEL_BUILD_ONLY()
                 // PARALLEL_RTS uses this flag in a different way (for now)
                 if (rts_argv[arg][2] == '\0') {
-#if defined(PROFILING)
-                    RtsFlags.ParFlags.nCapabilities = 1;
-#else
                     RtsFlags.ParFlags.nCapabilities = getNumberOfProcessors();
-#endif
                 } else {
                     int nCapabilities;
                     OPTION_SAFE; /* but see extra checks below... */
