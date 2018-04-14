@@ -83,7 +83,7 @@ import TysWiredIn       ( unitTyCon, unitDataCon, tupleTyCon, tupleDataCon, nilD
 
 -- compiler/utils
 import Util             ( looksLikePackageName )
-import Prelude
+import GhcPrelude
 
 import qualified GHC.LanguageExtensions as LangExt
 }
@@ -1154,21 +1154,23 @@ ty_fam_inst_eqn_list :: { Located ([AddAnn],Maybe [LTyFamInstEqn GhcPs]) }
 
 ty_fam_inst_eqns :: { Located [LTyFamInstEqn GhcPs] }
         : ty_fam_inst_eqns ';' ty_fam_inst_eqn
-                                      {% asl (unLoc $1) $2 (snd $ unLoc $3)
-                                         >> ams $3 (fst $ unLoc $3)
-                                         >> return (sLL $1 $> ((snd $ unLoc $3) : unLoc $1)) }
+                                      {% let L loc (anns, eqn) = $3 in
+                                         asl (unLoc $1) $2 (L loc eqn)
+                                         >> ams $3 anns
+                                         >> return (sLL $1 $> (L loc eqn : unLoc $1)) }
         | ty_fam_inst_eqns ';'        {% addAnnotation (gl $1) AnnSemi (gl $2)
                                          >> return (sLL $1 $>  (unLoc $1)) }
-        | ty_fam_inst_eqn             {% ams $1 (fst $ unLoc $1)
-                                         >> return (sLL $1 $> [snd $ unLoc $1]) }
+        | ty_fam_inst_eqn             {% let L loc (anns, eqn) = $1 in
+                                         ams $1 anns
+                                         >> return (sLL $1 $> [L loc eqn]) }
         | {- empty -}                 { noLoc [] }
 
-ty_fam_inst_eqn :: { Located ([AddAnn],LTyFamInstEqn GhcPs) }
+ty_fam_inst_eqn :: { Located ([AddAnn],TyFamInstEqn GhcPs) }
         : type '=' ctype
                 -- Note the use of type for the head; this allows
                 -- infix type constructors and type patterns
               {% do { (eqn,ann) <- mkTyFamInstEqn $1 $3
-                    ; return (sLL $1 $> (mj AnnEqual $2:ann, sLL $1 $> eqn))  } }
+                    ; return (sLL $1 $> (mj AnnEqual $2:ann, eqn))  } }
 
 -- Associated type family declarations
 --
@@ -1690,10 +1692,6 @@ opt_sig :: { ([AddAnn], Maybe (LHsType GhcPs)) }
         : {- empty -}                   { ([],Nothing) }
         | '::' sigtype                  { ([mu AnnDcolon $1],Just $2) }
 
-opt_asig :: { ([AddAnn],Maybe (LHsType GhcPs)) }
-        : {- empty -}                   { ([],Nothing) }
-        | '::' atype                    { ([mu AnnDcolon $1],Just $2) }
-
 opt_tyconsig :: { ([AddAnn], Maybe (Located RdrName)) }
              : {- empty -}              { ([], Nothing) }
              | '::' gtycon              { ([mu AnnDcolon $1], Just $2) }
@@ -2208,7 +2206,7 @@ decl_no_th :: { LHsDecl GhcPs }
                                         (ann, r) <- checkValDef empty SrcStrict e Nothing $3 ;
                                         -- Depending upon what the pattern looks like we might get either
                                         -- a FunBind or PatBind back from checkValDef. See Note
-                                        -- [Varieties of binding pattern matches]
+                                        -- [FunBind vs PatBind]
                                         case r of {
                                           (FunBind n _ _ _ _) ->
                                                 ams (L l ()) [mj AnnFunId n] >> return () ;
@@ -2222,7 +2220,7 @@ decl_no_th :: { LHsDecl GhcPs }
                                         let { l = comb2 $1 $> };
                                         -- Depending upon what the pattern looks like we might get either
                                         -- a FunBind or PatBind back from checkValDef. See Note
-                                        -- [Varieties of binding pattern matches]
+                                        -- [FunBind vs PatBind]
                                         case r of {
                                           (FunBind n _ _ _ _) ->
                                                 ams (L l ()) (mj AnnFunId n:(fst $2)) >> return () ;
@@ -2309,7 +2307,7 @@ sigdecl :: { LHsDecl GhcPs }
         | '{-# SPECIALISE' activation qvar '::' sigtypes1 '#-}'
              {% ams (
                  let inl_prag = mkInlinePragma (getSPEC_PRAGs $1)
-                                             (EmptyInlineSpec, FunLike) (snd $2)
+                                             (NoUserInline, FunLike) (snd $2)
                   in sLL $1 $> $ SigD (SpecSig $3 (fromOL $5) inl_prag))
                     (mo $1:mu AnnDcolon $4:mc $6:(fst $2)) }
 
@@ -2383,13 +2381,12 @@ infixexp_top :: { LHsExpr GhcPs }
                                          [mj AnnVal $2] }
 
 exp10_top :: { LHsExpr GhcPs }
-        : '\\' apat apats opt_asig '->' exp
+        : '\\' apat apats '->' exp
                    {% ams (sLL $1 $> $ HsLam (mkMatchGroup FromSource
                             [sLL $1 $> $ Match { m_ctxt = LambdaExpr
                                                , m_pats = $2:$3
-                                               , m_type = snd $4
-                                               , m_grhss = unguardedGRHSs $6 }]))
-                          (mj AnnLam $1:mu AnnRarrow $5:(fst $4)) }
+                                               , m_grhss = unguardedGRHSs $5 }]))
+                          [mj AnnLam $1, mu AnnRarrow $4] }
 
         | 'let' binds 'in' exp          {% ams (sLL $1 $> $ HsLet (snd $ unLoc $2) $4)
                                                (mj AnnLet $1:mj AnnIn $3
@@ -2812,11 +2809,10 @@ alts1   :: { Located ([AddAnn],[LMatch GhcPs (LHsExpr GhcPs)]) }
         | alt                   { sL1 $1 ([],[$1]) }
 
 alt     :: { LMatch GhcPs (LHsExpr GhcPs) }
-        : pat opt_asig alt_rhs  {%ams (sLL $1 $> (Match { m_ctxt = CaseAlt
-                                                        , m_pats = [$1]
-                                                        , m_type = snd $2
-                                                        , m_grhss = snd $ unLoc $3 }))
-                                      (fst $2 ++ (fst $ unLoc $3))}
+        : pat alt_rhs  {%ams (sLL $1 $> (Match { m_ctxt = CaseAlt
+                                               , m_pats = [$1]
+                                               , m_grhss = snd $ unLoc $2 }))
+                                      (fst $ unLoc $2)}
 
 alt_rhs :: { Located ([AddAnn],GRHSs GhcPs (LHsExpr GhcPs)) }
         : ralt wherebinds           { sLL $1 $> (fst $ unLoc $2,

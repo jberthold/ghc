@@ -25,6 +25,8 @@ module Bag (
         anyBagM, filterBagM
     ) where
 
+import GhcPrelude
+
 import Outputable
 import Util
 
@@ -327,6 +329,9 @@ instance Data a => Data (Bag a) where
   gunfold _ _  = error "gunfold"
   dataTypeOf _ = mkNoRepType "Bag"
   dataCast1 x  = gcast1 x
+
+instance Functor Bag where
+    fmap = mapBag
 
 instance Foldable.Foldable Bag where
     foldr = foldrBag

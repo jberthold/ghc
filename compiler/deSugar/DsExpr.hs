@@ -14,6 +14,8 @@ module DsExpr ( dsExpr, dsLExpr, dsLExprNoLP, dsLocalBinds
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Match
 import MatchLit
 import DsBinds
@@ -368,21 +370,20 @@ ds_expr _ (ExplicitTuple tup_args boxity)
              go (lam_vars, args) (L _ (Present expr))
                     -- Expressions that are present don't generate
                     -- lambdas, just arguments.
-               = do { core_expr <- dsLExpr expr
+               = do { core_expr <- dsLExprNoLP expr
                     ; return (lam_vars, core_expr : args) }
 
-       ; (lam_vars, args) <- foldM go ([], []) (reverse tup_args)
+       ; dsWhenNoErrs (foldM go ([], []) (reverse tup_args))
                 -- The reverse is because foldM goes left-to-right
-
-       ; return $ mkCoreLams lam_vars $
-                  mkCoreTupBoxity boxity args }
+                      (\(lam_vars, args) -> mkCoreLams lam_vars $
+                                            mkCoreTupBoxity boxity args) }
 
 ds_expr _ (ExplicitSum alt arity expr types)
-  = do { core_expr <- dsLExpr expr
-       ; return $ mkCoreConApps (sumDataCon alt arity)
-                                (map (Type . getRuntimeRep "dsExpr ExplicitSum") types ++
-                                 map Type types ++
-                                 [core_expr]) }
+  = do { dsWhenNoErrs (dsLExprNoLP expr)
+                      (\core_expr -> mkCoreConApps (sumDataCon alt arity)
+                                     (map (Type . getRuntimeRep) types ++
+                                      map Type types ++
+                                      [core_expr]) ) }
 
 ds_expr _ (HsSCC _ cc expr@(L loc _)) = do
     dflags <- getDynFlags
@@ -923,7 +924,7 @@ dsDo stmts
              let
                (pats, rhss) = unzip (map (do_arg . snd) args)
 
-               do_arg (ApplicativeArgOne pat expr) =
+               do_arg (ApplicativeArgOne pat expr _) =
                  (pat, dsLExpr expr)
                do_arg (ApplicativeArgMany stmts ret pat) =
                  (pat, dsDo (stmts ++ [noLoc $ mkLastStmt (noLoc ret)]))

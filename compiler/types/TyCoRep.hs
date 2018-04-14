@@ -40,7 +40,6 @@ module TyCoRep (
         mkPiTy, mkPiTys,
         isLiftedTypeKind, isUnliftedTypeKind,
         isCoercionType, isRuntimeRepTy, isRuntimeRepVar,
-        isRuntimeRepKindedTy, dropRuntimeRepArgs,
         sameVis,
 
         -- * Functions over binders
@@ -62,10 +61,11 @@ module TyCoRep (
         pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind, pprTyLit,
         TyPrec(..), maybeParen,
-        pprPrefixApp, pprArrowChain,
         pprDataCons, ppSuggestExplicitKinds,
 
         pprCo, pprParendCo,
+
+        debugPprType,
 
         -- * Free variables
         tyCoVarsOfType, tyCoVarsOfTypeDSet, tyCoVarsOfTypes, tyCoVarsOfTypesDSet,
@@ -79,6 +79,7 @@ module TyCoRep (
         tyCoFVsOfCo, tyCoFVsOfCos,
         tyCoVarsOfCoList, tyCoVarsOfProv,
         closeOverKinds,
+        injectiveVarsOfBinder, injectiveVarsOfType,
 
         noFreeVarsOfType, noFreeVarsOfCo,
 
@@ -134,14 +135,16 @@ module TyCoRep (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-} DataCon( dataConFullSig
-                             , dataConUnivTyVarBinders, dataConExTyVarBinders
-                             , DataCon, filterEqSpec )
+                             , dataConUserTyVarBinders
+                             , DataCon )
 import {-# SOURCE #-} Type( isPredTy, isCoercionTy, mkAppTy, mkCastTy
                           , tyCoVarsOfTypeWellScoped
                           , tyCoVarsOfTypesWellScoped
                           , toposortTyVars
-                          , coreView, typeKind )
+                          , coreView )
    -- Transitively pulls in a LOT of stuff, better to break the loop
 
 import {-# SOURCE #-} Coercion
@@ -459,8 +462,8 @@ words, if `x` is either a function or a polytype, `x arg` makes sense
 (for an appropriate `arg`).
 
 
-Note [TyVarBndrs, TyVarBinders, TyConBinders, and visiblity]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Note [TyVarBndrs, TyVarBinders, TyConBinders, and visibility]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 * A ForAllTy (used for both types and kinds) contains a TyVarBinder.
   Each TyVarBinder
       TvBndr a tvis
@@ -473,7 +476,7 @@ Note [TyVarBndrs, TyVarBinders, TyConBinders, and visiblity]
   and kind arguments for this TyCon should be visible (explicit) in
   source Haskell.
 
-This table summarises the visiblity rules:
+This table summarises the visibility rules:
 ---------------------------------------------------------------------------------------
 |                                                      Occurrences look like this
 |                             GHC displays type as     in Haskell source code
@@ -736,22 +739,9 @@ isRuntimeRepTy ty | Just ty' <- coreView ty = isRuntimeRepTy ty'
 isRuntimeRepTy (TyConApp tc []) = tc `hasKey` runtimeRepTyConKey
 isRuntimeRepTy _ = False
 
--- | Is this a type of kind RuntimeRep? (e.g. LiftedRep)
-isRuntimeRepKindedTy :: Type -> Bool
-isRuntimeRepKindedTy = isRuntimeRepTy . typeKind
-
 -- | Is a tyvar of type 'RuntimeRep'?
 isRuntimeRepVar :: TyVar -> Bool
 isRuntimeRepVar = isRuntimeRepTy . tyVarKind
-
--- | Drops prefix of RuntimeRep constructors in 'TyConApp's. Useful for e.g.
--- dropping 'LiftedRep arguments of unboxed tuple TyCon applications:
---
---   dropRuntimeRepArgs [ 'LiftedRep, 'IntRep
---                      , String, Int# ] == [String, Int#]
---
-dropRuntimeRepArgs :: [Type] -> [Type]
-dropRuntimeRepArgs = dropWhile isRuntimeRepKindedTy
 
 {-
 %************************************************************************
@@ -1280,7 +1270,7 @@ the evidence for unboxed equalities:
     they might appear in a top-level type, there is no place to bind these
    (unlifted) coercions in the usual way.
 
-  - A coercion for (forall a. t1) ~ forall a. t2) will look like
+  - A coercion for (forall a. t1) ~ (forall a. t2) will look like
        forall a. (coercion for t1~t2)
     But the coercion for (t1~t2) may mention 'a', and we don't have let-bindings
     within coercions.  We could add them, but coercion holes are easier.
@@ -1569,6 +1559,41 @@ closeOverKindsList tvs = fvVarList $ closeOverKindsFV tvs
 -- Returns a deterministic set.
 closeOverKindsDSet :: DTyVarSet -> DTyVarSet
 closeOverKindsDSet = fvDVarSet . closeOverKindsFV . dVarSetElems
+
+-- | Returns the free variables of a 'TyConBinder' that are in injective
+-- positions. (See @Note [Kind annotations on TyConApps]@ in "TcSplice" for an
+-- explanation of what an injective position is.)
+injectiveVarsOfBinder :: TyConBinder -> FV
+injectiveVarsOfBinder (TvBndr tv vis) =
+  case vis of
+    AnonTCB           -> injectiveVarsOfType (tyVarKind tv)
+    NamedTCB Required -> unitFV tv `unionFV`
+                         injectiveVarsOfType (tyVarKind tv)
+    NamedTCB _        -> emptyFV
+
+-- | Returns the free variables of a 'Type' that are in injective positions.
+-- (See @Note [Kind annotations on TyConApps]@ in "TcSplice" for an explanation
+-- of what an injective position is.)
+injectiveVarsOfType :: Type -> FV
+injectiveVarsOfType = go
+  where
+    go ty                | Just ty' <- coreView ty
+                         = go ty'
+    go (TyVarTy v)       = unitFV v `unionFV` go (tyVarKind v)
+    go (AppTy f a)       = go f `unionFV` go a
+    go (FunTy ty1 ty2)   = go ty1 `unionFV` go ty2
+    go (TyConApp tc tys) =
+      case tyConInjectivityInfo tc of
+        NotInjective  -> emptyFV
+        Injective inj -> mapUnionFV go $
+                         filterByList (inj ++ repeat True) tys
+                         -- Oversaturated arguments to a tycon are
+                         -- always injective, hence the repeat True
+    go (ForAllTy tvb ty) = tyCoFVsBndr tvb $ go (tyVarKind (binderVar tvb))
+                                             `unionFV` go ty
+    go LitTy{}           = emptyFV
+    go (CastTy ty _)     = go ty
+    go CoercionTy{}      = emptyFV
 
 -- | Returns True if this type has no free variables. Should be the same as
 -- isEmptyVarSet . tyCoVarsOfType, but faster in the non-forall case.
@@ -2447,7 +2472,11 @@ pprType       = pprPrecType TopPrec
 pprParendType = pprPrecType TyConPrec
 
 pprPrecType :: TyPrec -> Type -> SDoc
-pprPrecType prec ty = getPprStyle $ \sty -> pprPrecIfaceType prec (tidyToIfaceTypeSty ty sty)
+pprPrecType prec ty
+  = getPprStyle $ \sty ->
+    if debugStyle sty           -- Use pprDebugType when in
+    then debug_ppr_ty prec ty   -- when in debug-style
+    else pprPrecIfaceType prec (tidyToIfaceTypeSty ty sty)
 
 pprTyLit :: TyLit -> SDoc
 pprTyLit = pprIfaceTyLit . toIfaceTyLit
@@ -2519,7 +2548,6 @@ instance Outputable TyLit where
    ppr = pprTyLit
 
 ------------------
-
 pprSigmaType :: Type -> SDoc
 pprSigmaType = pprIfaceSigmaType ShowForAllWhen . tidyToIfaceType
 
@@ -2559,6 +2587,57 @@ instance Outputable TyBinder where
 -----------------
 instance Outputable Coercion where -- defined here to avoid orphans
   ppr = pprCo
+
+debugPprType :: Type -> SDoc
+-- ^ debugPprType is a simple pretty printer that prints a type
+-- without going through IfaceType.  It does not format as prettily
+-- as the normal route, but it's much more direct, and that can
+-- be useful for debugging.  E.g. with -dppr-debug it prints the
+-- kind on type-variable /occurrences/ which the normal route
+-- fundamentally cannot do.
+debugPprType ty = debug_ppr_ty TopPrec ty
+
+debug_ppr_ty :: TyPrec -> Type -> SDoc
+debug_ppr_ty _ (LitTy l)
+  = ppr l
+
+debug_ppr_ty _ (TyVarTy tv)
+  = ppr tv  -- With -dppr-debug we get (tv :: kind)
+
+debug_ppr_ty prec (FunTy arg res)
+  = maybeParen prec FunPrec $
+    sep [debug_ppr_ty FunPrec arg, arrow <+> debug_ppr_ty prec res]
+
+debug_ppr_ty prec (TyConApp tc tys)
+  | null tys  = ppr tc
+  | otherwise = maybeParen prec TyConPrec $
+                hang (ppr tc) 2 (sep (map (debug_ppr_ty TyConPrec) tys))
+
+debug_ppr_ty prec (AppTy t1 t2)
+  = hang (debug_ppr_ty prec t1)
+       2 (debug_ppr_ty TyConPrec t2)
+
+debug_ppr_ty prec (CastTy ty co)
+  = maybeParen prec TopPrec $
+    hang (debug_ppr_ty TopPrec ty)
+       2 (text "|>" <+> ppr co)
+
+debug_ppr_ty _ (CoercionTy co)
+  = parens (text "CO" <+> ppr co)
+
+debug_ppr_ty prec ty@(ForAllTy {})
+  | (tvs, body) <- split ty
+  = maybeParen prec FunPrec $
+    hang (text "forall" <+> fsep (map ppr tvs) <> dot)
+         -- The (map ppr tvs) will print kind-annotated
+         -- tvs, because we are (usually) in debug-style
+       2 (ppr body)
+  where
+    split ty | ForAllTy tv ty' <- ty
+             , (tvs, body) <- split ty'
+             = (tv:tvs, body)
+             | otherwise
+             = ([], ty)
 
 {-
 Note [When to print foralls]
@@ -2607,12 +2686,11 @@ pprDataCons = sepWithVBars . fmap pprDataConWithArgs . tyConDataCons
 pprDataConWithArgs :: DataCon -> SDoc
 pprDataConWithArgs dc = sep [forAllDoc, thetaDoc, ppr dc <+> argsDoc]
   where
-    (_univ_tvs, _ex_tvs, eq_spec, theta, arg_tys, _res_ty) = dataConFullSig dc
-    univ_bndrs = dataConUnivTyVarBinders dc
-    ex_bndrs   = dataConExTyVarBinders dc
-    forAllDoc = pprUserForAll $ (filterEqSpec eq_spec univ_bndrs ++ ex_bndrs)
-    thetaDoc  = pprThetaArrowTy theta
-    argsDoc   = hsep (fmap pprParendType arg_tys)
+    (_univ_tvs, _ex_tvs, _eq_spec, theta, arg_tys, _res_ty) = dataConFullSig dc
+    user_bndrs = dataConUserTyVarBinders dc
+    forAllDoc  = pprUserForAll user_bndrs
+    thetaDoc   = pprThetaArrowTy theta
+    argsDoc    = hsep (fmap pprParendType arg_tys)
 
 
 pprTypeApp :: TyCon -> [Type] -> SDoc
@@ -2622,17 +2700,6 @@ pprTypeApp tc tys
     -- TODO: toIfaceTcArgs seems rather wasteful here
 
 ------------------
-
-pprPrefixApp :: TyPrec -> SDoc -> [SDoc] -> SDoc
-pprPrefixApp = pprIfacePrefixApp
-
-----------------
-pprArrowChain :: TyPrec -> [SDoc] -> SDoc
--- pprArrowChain p [a,b,c]  generates   a -> b -> c
-pprArrowChain _ []         = empty
-pprArrowChain p (arg:args) = maybeParen p FunPrec $
-                             sep [arg, sep (map (arrow <+>) args)]
-
 ppSuggestExplicitKinds :: SDoc
 -- Print a helpful suggstion about -fprint-explicit-kinds,
 -- if it is not already on

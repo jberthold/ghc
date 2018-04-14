@@ -86,8 +86,13 @@ underflowError = raise# underflowException
 
 -- | Type representing arbitrary-precision non-negative integers.
 --
--- Operations whose result would be negative
--- @'throw' ('Underflow' :: 'ArithException')@.
+-- >>> 2^20 :: Natural
+-- 1267650600228229401496703205376
+--
+-- Operations whose result would be negative @'throw' ('Underflow' :: 'ArithException')@,
+--
+-- >>> -1 :: Natural
+-- *** Exception: arithmetic underflow
 --
 -- @since 4.8.0.0
 data Natural = NatS#                 GmpLimb# -- ^ in @[0, maxBound::Word]@
@@ -338,7 +343,20 @@ instance Bits Natural where
     testBit (NatS# w) i = testBit (W# w) i
     testBit (NatJ# bn) (I# i#) = testBitBigNat bn i#
 
-    -- TODO: setBit, clearBit, complementBit (needs more primitives)
+    clearBit n@(NatS# w#) i
+        | i < finiteBitSize (0::Word) = let !(W# w2#) = clearBit (W# w#) i in NatS# w2#
+        | otherwise                   = n
+    clearBit (NatJ# bn) (I# i#) = bigNatToNatural (clearBitBigNat bn i#)
+
+    setBit (NatS# w#) i@(I# i#)
+        | i < finiteBitSize (0::Word) = let !(W# w2#) = setBit (W# w#) i in NatS# w2#
+        | otherwise                   = bigNatToNatural (setBitBigNat (wordToBigNat w#) i#)
+    setBit (NatJ# bn) (I# i#) = bigNatToNatural (setBitBigNat bn i#)
+
+    complementBit (NatS# w#) i@(I# i#)
+        | i < finiteBitSize (0::Word) = let !(W# w2#) = complementBit (W# w#) i in NatS# w2#
+        | otherwise                   = bigNatToNatural (setBitBigNat (wordToBigNat w#) i#)
+    complementBit (NatJ# bn) (I# i#) = bigNatToNatural (complementBitBigNat bn i#)
 
     shiftL n           0 = n
     shiftL (NatS# 0##) _ = NatS# 0##

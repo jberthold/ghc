@@ -7,7 +7,10 @@ Foreign function interface (FFI)
    single: Foreign function interface
    single: interfacing with native code
 
-.. ghc-flag:: -XForeignFunctionInterface
+.. extension:: ForeignFunctionInterface
+    :shortdesc: Enable foreign function interface.
+
+    :since: 6.8.1
 
     Allow use of the Haskell foreign function interface.
 
@@ -16,7 +19,7 @@ definition is part of the Haskell Report on
 `http://www.haskell.org/ <http://www.haskell.org/>`__.
 
 FFI support is enabled by default, but can be enabled or disabled
-explicitly with the :ghc-flag:`-XForeignFunctionInterface` flag.
+explicitly with the :extension:`ForeignFunctionInterface` flag.
 
 GHC implements a number of GHC-specific extensions to the FFI Chapter of the
 Haskell 2010 Report. These extensions are described in :ref:`ffi-ghcexts`, but
@@ -118,6 +121,11 @@ come with GHC. For more details see the
 Interruptible foreign calls
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
+.. extension:: InterruptibleFFI
+    :shortdesc: Enable interruptible FFI.
+
+    :since: 7.2.1
+
 This concerns the interaction of foreign calls with
 ``Control.Concurrent.throwTo``. Normally when the target of a
 ``throwTo`` is involved in a foreign call, the exception is not raised
@@ -152,7 +160,7 @@ Unix systems
 
 Windows systems
     [Vista and later only] The RTS calls the Win32 function
-    ``CancelSynchronousIO``, which will cause a blocking I/O operation
+    ``CancelSynchronousIo``, which will cause a blocking I/O operation
     to return with the error ``ERROR_OPERATION_ABORTED``.
 
 If the system call is successfully interrupted, it will return to
@@ -166,6 +174,11 @@ it is not typically necessary to handle ``ERROR_OPERATION_ABORTED``.
 
 The CAPI calling convention
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. extension:: CApiFFI
+    :shortdesc: Enable the CAPI calling convention.
+
+    :since: 7.10.1
 
 The ``CApiFFI`` extension allows a calling convention of ``capi`` to be
 used in foreign declarations, e.g. ::

@@ -35,6 +35,8 @@ module RegAlloc.Liveness (
         regLiveness,
         natCmmTopToLive
   ) where
+import GhcPrelude
+
 import Reg
 import Instruction
 
@@ -812,7 +814,7 @@ computeLiveness
 computeLiveness platform sccs
  = case checkIsReverseDependent sccs of
         Nothing         -> livenessSCCs platform mapEmpty [] sccs
-        Just bad        -> pprPanic "RegAlloc.Liveness.computeLivenss"
+        Just bad        -> pprPanic "RegAlloc.Liveness.computeLiveness"
                                 (vcat   [ text "SCCs aren't in reverse dependent order"
                                         , text "bad blockId" <+> ppr bad
                                         , ppr sccs])

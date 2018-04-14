@@ -24,7 +24,7 @@ Nota Bene: all Names defined in here should come from the base package
    One of these Names contains
         (a) the module and occurrence name of the thing
         (b) its Unique
-   The may way the compiler "knows about" one of these things is
+   The way the compiler "knows about" one of these things is
    where the type checker or desugarer needs to look it up. For
    example, when desugaring list comprehensions the desugarer
    needs to conjure up 'foldr'.  It does this by looking up
@@ -127,6 +127,8 @@ module PrelNames (
     ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import Module
 import OccName
@@ -238,6 +240,7 @@ basicKnownKeyNames
         typeLitSymbolDataConName,
         typeLitNatDataConName,
         typeRepIdName,
+        mkTrTypeName,
         mkTrConName,
         mkTrAppName,
         mkTrFunName,
@@ -330,7 +333,7 @@ basicKnownKeyNames
         otherwiseIdName, inlineIdName,
         eqStringName, assertName, breakpointName, breakpointCondName,
         breakpointAutoName,  opaqueTyConName,
-        assertErrorName,
+        assertErrorName, traceName,
         printName, fstName, sndName,
 
         -- Integer
@@ -471,7 +474,7 @@ gHC_PRIM, gHC_TYPES, gHC_GENERICS, gHC_MAGIC,
     gHC_CLASSES, gHC_BASE, gHC_ENUM, gHC_GHCI, gHC_CSTRING,
     gHC_SHOW, gHC_READ, gHC_NUM, gHC_INTEGER_TYPE, gHC_NATURAL, gHC_LIST,
     gHC_TUPLE, dATA_TUPLE, dATA_EITHER, dATA_STRING,
-    dATA_FOLDABLE, dATA_TRAVERSABLE, dATA_MONOID, dATA_SEMIGROUP,
+    dATA_FOLDABLE, dATA_TRAVERSABLE,
     gHC_CONC, gHC_IO, gHC_IO_Exception,
     gHC_ST, gHC_ARR, gHC_STABLE, gHC_PTR, gHC_ERR, gHC_REAL,
     gHC_FLOAT, gHC_TOP_HANDLER, sYSTEM_IO, dYNAMIC,
@@ -479,7 +482,7 @@ gHC_PRIM, gHC_TYPES, gHC_GENERICS, gHC_MAGIC,
     rEAD_PREC, lEX, gHC_INT, gHC_WORD, mONAD, mONAD_FIX, mONAD_ZIP, mONAD_FAIL,
     aRROW, cONTROL_APPLICATIVE, gHC_DESUGAR, rANDOM, gHC_EXTS,
     cONTROL_EXCEPTION_BASE, gHC_TYPELITS, gHC_TYPENATS, dATA_TYPE_EQUALITY,
-    dATA_COERCE :: Module
+    dATA_COERCE, dEBUG_TRACE :: Module
 
 gHC_PRIM        = mkPrimModule (fsLit "GHC.Prim")   -- Primitive types and values
 gHC_TYPES       = mkPrimModule (fsLit "GHC.Types")
@@ -502,8 +505,6 @@ dATA_EITHER     = mkBaseModule (fsLit "Data.Either")
 dATA_STRING     = mkBaseModule (fsLit "Data.String")
 dATA_FOLDABLE   = mkBaseModule (fsLit "Data.Foldable")
 dATA_TRAVERSABLE= mkBaseModule (fsLit "Data.Traversable")
-dATA_SEMIGROUP  = mkBaseModule (fsLit "Data.Semigroup")
-dATA_MONOID     = mkBaseModule (fsLit "Data.Monoid")
 gHC_CONC        = mkBaseModule (fsLit "GHC.Conc")
 gHC_IO          = mkBaseModule (fsLit "GHC.IO")
 gHC_IO_Exception = mkBaseModule (fsLit "GHC.IO.Exception")
@@ -539,6 +540,7 @@ gHC_TYPELITS    = mkBaseModule (fsLit "GHC.TypeLits")
 gHC_TYPENATS    = mkBaseModule (fsLit "GHC.TypeNats")
 dATA_TYPE_EQUALITY = mkBaseModule (fsLit "Data.Type.Equality")
 dATA_COERCE     = mkBaseModule (fsLit "Data.Coerce")
+dEBUG_TRACE     = mkBaseModule (fsLit "Debug.Trace")
 
 gHC_PARR' :: Module
 gHC_PARR' = mkBaseModule (fsLit "GHC.PArr")
@@ -741,6 +743,10 @@ parens_RDR              = varQual_RDR gHC_READ (fsLit "parens")
 choose_RDR              = varQual_RDR gHC_READ (fsLit "choose")
 lexP_RDR                = varQual_RDR gHC_READ (fsLit "lexP")
 expectP_RDR             = varQual_RDR gHC_READ (fsLit "expectP")
+
+readField_RDR, readSymField_RDR :: RdrName
+readField_RDR           = varQual_RDR gHC_READ (fsLit "readField")
+readSymField_RDR        = varQual_RDR gHC_READ (fsLit "readSymField")
 
 punc_RDR, ident_RDR, symbol_RDR :: RdrName
 punc_RDR                = dataQual_RDR lEX (fsLit "Punc")
@@ -1020,8 +1026,8 @@ traversableClassName  = clsQual  dATA_TRAVERSABLE    (fsLit "Traversable") trave
 
 -- Classes (Semigroup, Monoid)
 semigroupClassName, sappendName :: Name
-semigroupClassName = clsQual dATA_SEMIGROUP (fsLit "Semigroup") semigroupClassKey
-sappendName        = varQual dATA_SEMIGROUP (fsLit "<>")        sappendClassOpKey
+semigroupClassName = clsQual gHC_BASE       (fsLit "Semigroup") semigroupClassKey
+sappendName        = varQual gHC_BASE       (fsLit "<>")        sappendClassOpKey
 monoidClassName, memptyName, mappendName, mconcatName :: Name
 monoidClassName    = clsQual gHC_BASE       (fsLit "Monoid")    monoidClassKey
 memptyName         = varQual gHC_BASE       (fsLit "mempty")    memptyClassOpKey
@@ -1251,6 +1257,7 @@ typeableClassName
   , typeRepTyConName
   , someTypeRepTyConName
   , someTypeRepDataConName
+  , mkTrTypeName
   , mkTrConName
   , mkTrAppName
   , mkTrFunName
@@ -1264,6 +1271,7 @@ typeRepTyConName      = tcQual  tYPEABLE_INTERNAL (fsLit "TypeRep")        typeR
 someTypeRepTyConName   = tcQual tYPEABLE_INTERNAL (fsLit "SomeTypeRep")    someTypeRepTyConKey
 someTypeRepDataConName = dcQual tYPEABLE_INTERNAL (fsLit "SomeTypeRep")    someTypeRepDataConKey
 typeRepIdName         = varQual tYPEABLE_INTERNAL (fsLit "typeRep#")       typeRepIdKey
+mkTrTypeName          = varQual tYPEABLE_INTERNAL (fsLit "mkTrType")       mkTrTypeKey
 mkTrConName           = varQual tYPEABLE_INTERNAL (fsLit "mkTrCon")        mkTrConKey
 mkTrAppName           = varQual tYPEABLE_INTERNAL (fsLit "mkTrApp")        mkTrAppKey
 mkTrFunName           = varQual tYPEABLE_INTERNAL (fsLit "mkTrFun")        mkTrFunKey
@@ -1315,6 +1323,10 @@ dataClassName = clsQual gENERICS (fsLit "Data") dataClassKey
 -- Error module
 assertErrorName    :: Name
 assertErrorName   = varQual gHC_IO_Exception (fsLit "assertError") assertErrorIdKey
+
+-- Debug.Trace
+traceName          :: Name
+traceName         = varQual dEBUG_TRACE (fsLit "trace") traceKey
 
 -- Enum module (Enum, Bounded)
 enumClassName, enumFromName, enumFromToName, enumFromThenName,
@@ -1816,6 +1828,9 @@ typeNatKindConNameKey, typeSymbolKindConNameKey,
   typeNatAddTyFamNameKey, typeNatMulTyFamNameKey, typeNatExpTyFamNameKey,
   typeNatLeqTyFamNameKey, typeNatSubTyFamNameKey
   , typeSymbolCmpTyFamNameKey, typeNatCmpTyFamNameKey
+  , typeNatDivTyFamNameKey
+  , typeNatModTyFamNameKey
+  , typeNatLogTyFamNameKey
   :: Unique
 typeNatKindConNameKey     = mkPreludeTyConUnique 164
 typeSymbolKindConNameKey  = mkPreludeTyConUnique 165
@@ -1826,48 +1841,51 @@ typeNatLeqTyFamNameKey    = mkPreludeTyConUnique 169
 typeNatSubTyFamNameKey    = mkPreludeTyConUnique 170
 typeSymbolCmpTyFamNameKey = mkPreludeTyConUnique 171
 typeNatCmpTyFamNameKey    = mkPreludeTyConUnique 172
+typeNatDivTyFamNameKey  = mkPreludeTyConUnique 173
+typeNatModTyFamNameKey  = mkPreludeTyConUnique 174
+typeNatLogTyFamNameKey  = mkPreludeTyConUnique 175
 
 -- Custom user type-errors
 errorMessageTypeErrorFamKey :: Unique
-errorMessageTypeErrorFamKey =  mkPreludeTyConUnique 173
+errorMessageTypeErrorFamKey =  mkPreludeTyConUnique 176
 
 
 
 ntTyConKey:: Unique
-ntTyConKey = mkPreludeTyConUnique 174
+ntTyConKey = mkPreludeTyConUnique 177
 coercibleTyConKey :: Unique
-coercibleTyConKey = mkPreludeTyConUnique 175
+coercibleTyConKey = mkPreludeTyConUnique 178
 
 proxyPrimTyConKey :: Unique
-proxyPrimTyConKey = mkPreludeTyConUnique 176
+proxyPrimTyConKey = mkPreludeTyConUnique 179
 
 specTyConKey :: Unique
-specTyConKey = mkPreludeTyConUnique 177
+specTyConKey = mkPreludeTyConUnique 180
 
 anyTyConKey :: Unique
-anyTyConKey = mkPreludeTyConUnique 178
+anyTyConKey = mkPreludeTyConUnique 181
 
-smallArrayPrimTyConKey        = mkPreludeTyConUnique  179
-smallMutableArrayPrimTyConKey = mkPreludeTyConUnique  180
+smallArrayPrimTyConKey        = mkPreludeTyConUnique  182
+smallMutableArrayPrimTyConKey = mkPreludeTyConUnique  183
 
 staticPtrTyConKey  :: Unique
-staticPtrTyConKey  = mkPreludeTyConUnique 181
+staticPtrTyConKey  = mkPreludeTyConUnique 184
 
 staticPtrInfoTyConKey :: Unique
-staticPtrInfoTyConKey = mkPreludeTyConUnique 182
+staticPtrInfoTyConKey = mkPreludeTyConUnique 185
 
 callStackTyConKey :: Unique
-callStackTyConKey = mkPreludeTyConUnique 183
+callStackTyConKey = mkPreludeTyConUnique 186
 
 -- Typeables
 typeRepTyConKey, someTypeRepTyConKey, someTypeRepDataConKey :: Unique
-typeRepTyConKey       = mkPreludeTyConUnique 184
-someTypeRepTyConKey   = mkPreludeTyConUnique 185
-someTypeRepDataConKey = mkPreludeTyConUnique 186
+typeRepTyConKey       = mkPreludeTyConUnique 187
+someTypeRepTyConKey   = mkPreludeTyConUnique 188
+someTypeRepDataConKey = mkPreludeTyConUnique 189
 
 
 typeSymbolAppendFamNameKey :: Unique
-typeSymbolAppendFamNameKey = mkPreludeTyConUnique 187
+typeSymbolAppendFamNameKey = mkPreludeTyConUnique 190
 
 ---------------- Template Haskell -------------------
 --      THNames.hs: USES TyConUniques 200-299
@@ -2175,6 +2193,9 @@ assertErrorIdKey              = mkPreludeMiscIdUnique 105
 oneShotKey                    = mkPreludeMiscIdUnique 106
 runRWKey                      = mkPreludeMiscIdUnique 107
 
+traceKey :: Unique
+traceKey                      = mkPreludeMiscIdUnique 108
+
 breakpointIdKey, breakpointCondIdKey, breakpointAutoIdKey,
     breakpointJumpIdKey, breakpointCondJumpIdKey,
     breakpointAutoJumpIdKey :: Unique
@@ -2311,6 +2332,7 @@ proxyHashKey = mkPreludeMiscIdUnique 502
 
 -- Used to make `Typeable` dictionaries
 mkTyConKey
+  , mkTrTypeKey
   , mkTrConKey
   , mkTrAppKey
   , mkTrFunKey
@@ -2319,12 +2341,13 @@ mkTyConKey
   , typeRepIdKey
   :: Unique
 mkTyConKey            = mkPreludeMiscIdUnique 503
-mkTrConKey            = mkPreludeMiscIdUnique 504
-mkTrAppKey            = mkPreludeMiscIdUnique 505
-typeNatTypeRepKey     = mkPreludeMiscIdUnique 506
-typeSymbolTypeRepKey  = mkPreludeMiscIdUnique 507
-typeRepIdKey          = mkPreludeMiscIdUnique 508
-mkTrFunKey            = mkPreludeMiscIdUnique 509
+mkTrTypeKey           = mkPreludeMiscIdUnique 504
+mkTrConKey            = mkPreludeMiscIdUnique 505
+mkTrAppKey            = mkPreludeMiscIdUnique 506
+typeNatTypeRepKey     = mkPreludeMiscIdUnique 507
+typeSymbolTypeRepKey  = mkPreludeMiscIdUnique 508
+typeRepIdKey          = mkPreludeMiscIdUnique 509
+mkTrFunKey            = mkPreludeMiscIdUnique 510
 
 -- Representations for primitive types
 trTYPEKey
@@ -2332,10 +2355,10 @@ trTYPEKey
   , trRuntimeRepKey
   , tr'PtrRepLiftedKey
   :: Unique
-trTYPEKey              = mkPreludeMiscIdUnique 510
-trTYPE'PtrRepLiftedKey = mkPreludeMiscIdUnique 511
-trRuntimeRepKey        = mkPreludeMiscIdUnique 512
-tr'PtrRepLiftedKey     = mkPreludeMiscIdUnique 513
+trTYPEKey              = mkPreludeMiscIdUnique 511
+trTYPE'PtrRepLiftedKey = mkPreludeMiscIdUnique 512
+trRuntimeRepKey        = mkPreludeMiscIdUnique 513
+tr'PtrRepLiftedKey     = mkPreludeMiscIdUnique 514
 
 -- KindReps for common cases
 starKindRepKey, starArrStarKindRepKey, starArrStarArrStarKindRepKey :: Unique

@@ -58,6 +58,7 @@
      tools. See note below.
 
    Note [BFD import library]
+   ~~~~~~~~~~~~~~~~~~~~~~~~~
 
    On Windows, compilers don't link directly to dynamic libraries.
    The reason for this is that the exports are not always by symbol, the
@@ -152,6 +153,10 @@
 static uint8_t* cstring_from_COFF_symbol_name(
     uint8_t* name,
     uint8_t* strtab);
+#include <inttypes.h>
+#include <dbghelp.h>
+#include <stdlib.h>
+#include <Psapi.h>
 
 #if defined(x86_64_HOST_ARCH)
 static size_t makeSymbolExtra_PEi386(
@@ -239,6 +244,13 @@ static void addDLLHandle(pathchar* dll_name, HINSTANCE instance) {
     PIMAGE_IMPORT_DESCRIPTOR imports =
         (PIMAGE_IMPORT_DESCRIPTOR)((BYTE *)instance + header->
         OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress);
+
+    bool importTableMissing =
+        header->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].Size == 0;
+
+    if (importTableMissing) {
+        return;
+    }
 
     /* Ignore these compatibility shims.  */
     const pathchar* ms_dll = WSTR("api-ms-win-");
@@ -395,7 +407,7 @@ COFF_HEADER_INFO* getHeaderInfo ( ObjectCode* oc )
 __attribute__ ((always_inline)) inline
 size_t getSymbolSize ( COFF_HEADER_INFO *info )
 {
-    ASSERT (info);
+    ASSERT(info);
     switch (info->type)
     {
         case COFF_ANON_BIG_OBJ:
@@ -408,8 +420,8 @@ size_t getSymbolSize ( COFF_HEADER_INFO *info )
 __attribute__ ((always_inline)) inline
 int32_t getSymSectionNumber ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 {
-    ASSERT (info);
-    ASSERT (sym);
+    ASSERT(info);
+    ASSERT(sym);
     switch (info->type)
     {
         case COFF_ANON_BIG_OBJ:
@@ -422,8 +434,8 @@ int32_t getSymSectionNumber ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 __attribute__ ((always_inline)) inline
 uint32_t getSymValue ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 {
-    ASSERT (info);
-    ASSERT (sym);
+    ASSERT(info);
+    ASSERT(sym);
     switch (info->type)
     {
         case COFF_ANON_BIG_OBJ:
@@ -436,8 +448,8 @@ uint32_t getSymValue ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 __attribute__ ((always_inline)) inline
 uint8_t getSymStorageClass ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 {
-    ASSERT (info);
-    ASSERT (sym);
+    ASSERT(info);
+    ASSERT(sym);
     switch (info->type)
     {
         case COFF_ANON_BIG_OBJ:
@@ -450,8 +462,8 @@ uint8_t getSymStorageClass ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 __attribute__ ((always_inline)) inline
 uint8_t getSymNumberOfAuxSymbols ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 {
-    ASSERT (info);
-    ASSERT (sym);
+    ASSERT(info);
+    ASSERT(sym);
     switch (info->type)
     {
         case COFF_ANON_BIG_OBJ:
@@ -464,8 +476,8 @@ uint8_t getSymNumberOfAuxSymbols ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 __attribute__ ((always_inline)) inline
 uint16_t getSymType ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 {
-    ASSERT (info);
-    ASSERT (sym);
+    ASSERT(info);
+    ASSERT(sym);
     switch (info->type)
     {
         case COFF_ANON_BIG_OBJ:
@@ -478,8 +490,8 @@ uint16_t getSymType ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 __attribute__ ((always_inline)) inline
 uint8_t* getSymShortName ( COFF_HEADER_INFO *info, COFF_symbol* sym )
 {
-    ASSERT (info);
-    ASSERT (sym);
+    ASSERT(info);
+    ASSERT(sym);
     switch (info->type)
     {
         case COFF_ANON_BIG_OBJ:
@@ -1421,6 +1433,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
           addr = (char*)cstring_from_COFF_symbol_name(
                                getSymShortName (info, symtab_i),
                                strtab);
+          stgFree (info);
 
           IF_DEBUG(linker,
                    debugBelch("addImportSymbol `%s' => `%s'\n",
@@ -1470,8 +1483,6 @@ ocGetNames_PEi386 ( ObjectCode* oc )
        }
        i += getSymNumberOfAuxSymbols (info, symtab_i);
    }
-
-   stgFree (info);
 
    /* Allocate BSS space */
    SymbolAddr* bss = NULL;
@@ -1570,6 +1581,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
           if (result != NULL || dllInstance == 0) {
               errorBelch("Could not load `%s'. Reason: %s\n",
                          (char*)dllName, result);
+              stgFree (info);
               return false;
           }
 
@@ -1599,8 +1611,10 @@ ocGetNames_PEi386 ( ObjectCode* oc )
           sname[size-start]='\0';
           stgFree(tmp);
           if (!ghciInsertSymbolTable(oc->fileName, symhash, (SymbolName*)sname,
-                                     addr, false, oc))
+                                     addr, false, oc)) {
+               stgFree (info);
                return false;
+          }
           break;
       }
 
@@ -1617,6 +1631,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
 
          if (! ghciInsertSymbolTable(oc->fileName, symhash, (SymbolName*)sname, addr,
                                      isWeak, oc)) {
+             stgFree (info);
              return false;
          }
       } else {
@@ -1650,6 +1665,7 @@ ocGetNames_PEi386 ( ObjectCode* oc )
       i += getSymNumberOfAuxSymbols (info, symtab_i);
    }
 
+   stgFree (info);
    return true;
 }
 
@@ -2047,4 +2063,196 @@ SymbolAddr *lookupSymbol_PEi386(SymbolName *lbl)
     }
 }
 
+/* -----------------------------------------------------------------------------
+ * Debugging operations.
+ */
+
+pathchar*
+resolveSymbolAddr_PEi386 (pathchar* buffer, int size,
+                          SymbolAddr* symbol, uintptr_t* top ){
+    SYMBOL_INFO sym;
+    ZeroMemory (&sym, sizeof(SYMBOL_INFO));
+    sym.MaxNameLen = sizeof(char) * 1024;
+
+    DWORD64 uDisplacement = 0;
+    HANDLE hProcess = GetCurrentProcess();
+    ObjectCode* obj = NULL;
+    uintptr_t start, end;
+    *top = 0;
+
+    pathprintf (buffer, size, WSTR("0x%" PRIxPTR), symbol);
+
+    if (SymFromAddr (hProcess, (uintptr_t)symbol, &uDisplacement, &sym))
+    {
+      /* Try using Windows symbols.  */
+      wcscat (buffer, WSTR(" "));
+      pathchar* name = mkPath (sym.Name);
+      wcscat (buffer, name);
+      stgFree (name);
+      if (uDisplacement != 0)
+      {
+        int64_t displacement = (int64_t)uDisplacement;
+        pathchar s_disp[50];
+        if (displacement < 0)
+          pathprintf ((pathchar*)s_disp, 50, WSTR("-%ld"), -displacement);
+        else
+          pathprintf ((pathchar*)s_disp, 50, WSTR("+%ld"), displacement);
+
+        wcscat (buffer, s_disp);
+      }
+    }
+    else
+    {
+      /* Try to calculate from information inside the rts.  */
+      uintptr_t loc = (uintptr_t)symbol;
+      for (ObjectCode* oc = objects; oc; oc = oc->next) {
+          for (int i = 0; i < oc->n_sections; i++) {
+              Section section = oc->sections[i];
+              start = (uintptr_t)section.start;
+              end   = start + section.size;
+              if (loc > start && loc <= end)
+              {
+                  wcscat (buffer, WSTR(" "));
+                  if (oc->archiveMemberName)
+                  {
+                      pathchar* name = mkPath (oc->archiveMemberName);
+                      wcscat (buffer, name);
+                      stgFree (name);
+                  }
+                  else
+                  {
+                      wcscat (buffer, oc->fileName);
+                  }
+                  pathchar s_disp[50];
+                  pathprintf (s_disp, 50, WSTR("+0x%" PRIxPTR), loc - start);
+                  wcscat (buffer, s_disp);
+                  obj = oc;
+                  goto exit_loop;
+              }
+          }
+      }
+
+      /* If we managed to make it here, we must not have any symbols nor be
+         dealing with code we've linked. The only thing left is an internal
+         segfault or one in a dynamic library. So let's enumerate the module
+         address space.  */
+      HMODULE *hMods = NULL;
+      DWORD cbNeeded;
+      EnumProcessModules (hProcess, hMods, 0, &cbNeeded);
+      hMods = stgMallocBytes (cbNeeded, "resolveSymbolAddr_PEi386");
+      if (EnumProcessModules (hProcess, hMods, cbNeeded, &cbNeeded))
+      {
+        uintptr_t loc = (uintptr_t)symbol;
+        MODULEINFO info;
+        for (uint32_t i = 0; i < cbNeeded / sizeof(HMODULE); i++) {
+           ZeroMemory (&info, sizeof (MODULEINFO));
+           if (GetModuleInformation (hProcess, hMods[i], &info,
+                                     sizeof(MODULEINFO)))
+           {
+             uintptr_t start = (uintptr_t)info.lpBaseOfDll;
+             uintptr_t end   = start + info.SizeOfImage;
+             if (loc >= start && loc < end)
+             {
+                /* Hoera, finally found some information.  */
+                pathchar tmp[MAX_PATH];
+                if (GetModuleFileNameExW (hProcess, hMods[i], tmp, MAX_PATH))
+                {
+                  wcscat (buffer, WSTR(" "));
+                  wcscat (buffer, tmp);
+                  pathprintf (tmp, MAX_PATH, WSTR("+0x%" PRIxPTR), loc - start);
+                  wcscat (buffer, tmp);
+                }
+                break;
+             }
+           }
+        }
+      }
+
+      stgFree(hMods);
+    }
+
+    /* Finally any file/line number.  */
+    IMAGEHLP_LINE64 lineInfo = {0};
+    DWORD dwDisplacement = 0;
+  exit_loop:
+    if (SymGetLineFromAddr64(hProcess, (uintptr_t)symbol, &dwDisplacement,
+                             &lineInfo))
+    {
+      /* Try using Windows symbols.  */
+      pathchar s_line[512];
+      pathprintf ((pathchar*) s_line, 512, WSTR("   %ls (%lu)"),
+                  lineInfo.FileName, lineInfo.LineNumber);
+      wcscat (buffer, s_line);
+      if (dwDisplacement != 0)
+      {
+        pathprintf ((pathchar*) s_line, 512, WSTR(" +%lu byte%s"),
+                    dwDisplacement,
+                    (dwDisplacement == 1 ? WSTR("") : WSTR("s")));
+      }
+      wcscat (buffer, s_line);
+    }
+    else if (obj)
+    {
+      /* Try to calculate from information inside the rts.  */
+      typedef struct _SymX { SymbolName* name; uintptr_t loc; } SymX;
+      SymX* locs = stgCallocBytes (sizeof(SymX), obj->n_symbols,
+                                   "resolveSymbolAddr");
+      int blanks = 0;
+      for (int i = 0; i < obj->n_symbols; i++) {
+          SymbolName* sym = obj->symbols[i];
+          if (sym == NULL)
+            {
+               blanks++;
+               continue;
+            }
+          RtsSymbolInfo* a = NULL;
+          ghciLookupSymbolInfo(symhash, sym, &a);
+          if (a) {
+              SymX sx = {0};
+              sx.name = sym;
+              sx.loc  = (uintptr_t)a->value;
+              locs[i] = sx;
+          }
+      }
+      int comp (const void * elem1, const void * elem2)
+      {
+          SymX f = *((SymX*)elem1);
+          SymX s = *((SymX*)elem2);
+          if (f.loc > s.loc) return  1;
+          if (f.loc < s.loc) return -1;
+          return 0;
+      }
+      qsort (locs, obj->n_symbols, sizeof (SymX), comp);
+      uintptr_t key  = (uintptr_t)symbol;
+      SymX* res = NULL;
+
+      for (int x = blanks; x < obj->n_symbols; x++) {
+          if (x < (obj->n_symbols -1)) {
+              if (locs[x].loc >= key && key < locs[x+1].loc) {
+                res = &locs[x];
+                break;
+              }
+          }
+          else
+          {
+              if (locs[x].loc >= key) {
+                  res = &locs[x];
+                  break;
+                }
+          }
+      }
+
+      if (res) {
+          pathchar s_disp[512];
+          *top = (uintptr_t)res->loc;
+          pathprintf ((pathchar*)s_disp, 512,
+                      WSTR("\n\t\t (%s+0x%" PRIxPTR ")"),
+                      res->name, res->loc - key);
+          wcscat (buffer, s_disp);
+      }
+      stgFree (locs);
+    }
+
+    return buffer;
+}
 #endif /* mingw32_HOST_OS */

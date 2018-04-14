@@ -36,6 +36,7 @@ module Unique (
         deriveUnique,                   -- Ditto
         newTagUnique,                   -- Used in CgCase
         initTyVarUnique,
+        initExitJoinUnique,
         nonDetCmpUnique,
         isValidKnownKeyUnique,          -- Used in PrelInfo.knownKeyNamesOkay
 
@@ -67,6 +68,8 @@ module Unique (
 
 #include "HsVersions.h"
 #include "Unique.h"
+
+import GhcPrelude
 
 import BasicTypes
 import FastString
@@ -434,3 +437,6 @@ mkVarOccUnique  fs = mkUnique 'i' (uniqueOfFS fs)
 mkDataOccUnique fs = mkUnique 'd' (uniqueOfFS fs)
 mkTvOccUnique   fs = mkUnique 'v' (uniqueOfFS fs)
 mkTcOccUnique   fs = mkUnique 'c' (uniqueOfFS fs)
+
+initExitJoinUnique :: Unique
+initExitJoinUnique = mkUnique 's' 0

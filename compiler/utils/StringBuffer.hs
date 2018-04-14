@@ -7,7 +7,7 @@ Buffers for scanning string input stored in external arrays.
 -}
 
 {-# LANGUAGE BangPatterns, CPP, MagicHash, UnboxedTuples #-}
-{-# OPTIONS_GHC -O #-}
+{-# OPTIONS_GHC -O2 #-}
 -- We always optimise this, otherwise performance of a non-optimised
 -- compiler is severely affected
 
@@ -44,6 +44,8 @@ module StringBuffer
        ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import Encoding
 import FastString

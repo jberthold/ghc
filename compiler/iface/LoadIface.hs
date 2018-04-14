@@ -32,6 +32,8 @@ module LoadIface (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-}   TcIface( tcIfaceDecl, tcIfaceRules, tcIfaceInst,
                                  tcIfaceFamInst, tcIfaceVectInfo,
                                  tcIfaceAnnotations, tcIfaceCompleteSigs )
@@ -144,7 +146,7 @@ importDecl name
         { eps <- getEps
         ; case lookupTypeEnv (eps_PTE eps) name of
             Just thing -> return $ Succeeded thing
-            Nothing    -> let doc = ifPprDebug (found_things_msg eps $$ empty)
+            Nothing    -> let doc = whenPprDebug (found_things_msg eps $$ empty)
                                     $$ not_found_msg
                           in return $ Failed doc
     }}}
@@ -1071,7 +1073,8 @@ pprUsage usage@UsageHomeModule{}
         )
 pprUsage usage@UsageFile{}
   = hsep [text "addDependentFile",
-          doubleQuotes (text (usg_file_path usage))]
+          doubleQuotes (text (usg_file_path usage)),
+          ppr (usg_file_hash usage)]
 pprUsage usage@UsageMergedRequirement{}
   = hsep [text "merged", ppr (usg_mod usage), ppr (usg_mod_hash usage)]
 

@@ -72,7 +72,7 @@ test('T1969',
              # 2017-03-24 9261052 (x86/Linux, 64-bit machine)
              # 2017-04-06 9418680 (x86/Linux, 64-bit machine)
 
-           (wordsize(64), 16679176, 15)]),
+           (wordsize(64), 19199872, 15)]),
              # 2014-09-10 10463640, 10  # post-AMP-update (somewhat stabelish)
                # looks like the peak is around ~10M, but we're
                # unlikely to GC exactly on the peak.
@@ -87,6 +87,7 @@ test('T1969',
              # 2017-02-01 19924328 (amd64/Linux) Join points (#12988)
              # 2017-02-14 16393848 Early inline patch
              # 2017-03-31 16679176 Fix memory leak in simplifier
+             # 2017-08-25 19199872 Refactor the Mighty Simplifier
 
       compiler_stats_num_field('bytes allocated',
           [(platform('i386-unknown-mingw32'), 301784492, 5),
@@ -196,7 +197,7 @@ test('T3294',
            # 2013-11-13: 1478325844  (x86/Windows, 64bit machine)
            # 2014-01-12: 1565185140  (x86/Linux)
            # 2013-04-04: 1377050640  (x86/Windows, 64bit machine)
-           (wordsize(64), 2253557280, 5)]),
+           (wordsize(64), 1858491504, 5)]),
             # old:        1357587088 (amd64/Linux)
             # 29/08/2012: 2961778696 (amd64/Linux)
             # (^ increase due to new codegen, see #7198)
@@ -211,6 +212,7 @@ test('T3294',
             # 2016-07-11: 2739731144 (Windows) after fix for #12227 (ignoring)
             # 2017-02-17: 2758641264 (amd64/Linux) (Type indexed Typeable)
             # 2017-05-14: 2253557280 (amd64/Linux) Two-pass CmmLayoutStack
+            # 2017-10-24: 1858491504 (amd64/Linux) Improved linear regAlloc
       conf_3294,
 
       # Use `+RTS -G1` for more stable residency measurements. Note [residency].
@@ -495,7 +497,7 @@ test('T783',
             # 2016-04-06: 249332816 (x86/Linux, 64-bit machine)
             # 2017-03-24: 225911912 (x86/Linux, 64-bit machine)
 
-           (wordsize(64), 436978192, 10)]),
+           (wordsize(64), 481875416, 10)]),
             # prev:       349263216 (amd64/Linux)
             # 07/08/2012: 384479856 (amd64/Linux)
             # 29/08/2012: 436927840 (amd64/Linux)
@@ -525,6 +527,7 @@ test('T783',
             # 2016-02-03: 488592288 (amd64/Linux)
             #    (D1795: Another overhaul of pattern match checker, #11374)
             # 2017-02-14    436978192    Early inlining: 5% improvement
+            # 2017-09-08    481875416    Unknown
 
       extra_hc_opts('-static')
       ],
@@ -656,7 +659,7 @@ test('T5837',
              # 2017-02-19                       59161648 (x64/Windows) - Unknown
              # 2017-04-21                       54985248 (x64/Windows) - Unknown
 
-           (wordsize(64), 52625920, 7)])
+           (wordsize(64), 52089424, 7)])
              # sample: 3926235424 (amd64/Linux, 15/2/2012)
              # 2012-10-02 81879216
              # 2012-09-20 87254264 amd64/Linux
@@ -692,6 +695,8 @@ test('T5837',
              # 2017-02-20 58648600  amd64/Linux Type-indexed Typeable
              # 2017-02-28 54151864  amd64/Linux Likely drift due to recent simplifier improvements
              # 2017-02-25 52625920  amd64/Linux Early inlining patch
+             # 2017-09-06 56782344  amd64/Linux Drift manifest in unrelated LLVM patch
+             # 2017-10-24 52089424  amd64/linux Fix space leak in BinIface.getSymbolTable
       ],
       compile, ['-freduction-depth=50'])
 
@@ -1018,13 +1023,14 @@ test('T12227',
 test('T12425',
      [ only_ways(['optasm']),
        compiler_stats_num_field('bytes allocated',
-          [(wordsize(64), 127500136, 5),
+          [(wordsize(64), 134780272, 5),
           # initial:      125831400
           # 2017-01-18:   133380960  Allow top-level string literals in Core
           # 2017-02-17:   153611448  Type-indexed Typeable
           # 2017-03-03:   142256192  Share Typeable KindReps
           # 2017-03-21:   134334800  Unclear
           # 2017-04-28:   127500136  Remove exponential behaviour in simplifier
+          # 2017-05-23:   134780272  Addition of llvm-targets in dynflags (D3352)
           ]),
      ],
      compile,
@@ -1037,13 +1043,14 @@ test('T12234',
           # initial:      83032768
           # 2017-02-19    89180624 (x64/Windows) - Unknown
           # 2017-02-25    79889200 (x64/Windows) - Early inline patch
-           (wordsize(64), 80245640, 5),
+           (wordsize(64), 81696664, 5),
           # initial:      72958288
           # 2016-01-17:   76848856  (x86-64, Linux. drift?)
           # 2017-02-01:   80882208  (Use superclass instances when solving)
           # 2017-02-05:   74374440  (Probably OccAnal fixes)
           # 2017-02-17:   86525344  (Type-indexed Typeable)
           # 2017-02-25:   83032768  (Early inline patch)
+          # 2017-09-07:   81696664  (Semigroup=>Monoid patch, D3927)
           ]),
      ],
      compile,
@@ -1104,6 +1111,19 @@ test('T12707',
           ]),
      ],
      compile,
+     [''])
+
+test('T12150',
+     [ only_ways(['optasm']),
+       compiler_stats_num_field('bytes allocated',
+          [(wordsize(64), 73769936, 5)
+          # initial:    70773000
+          # 2017-08-25: 74358208  Refactor the Mighty Simplifier
+          # 2017-08-25: 78300680  Drift
+          # 2017-10-25: 73769936  amd64/linux Fix space leak in BinIface.getSymbolTable
+          ]),
+     ],
+    compile,
      [''])
 
 test('T13379',

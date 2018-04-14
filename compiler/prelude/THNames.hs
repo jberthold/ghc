@@ -6,6 +6,8 @@
 
 module THNames where
 
+import GhcPrelude ()
+
 import PrelNames( mk_known_key_name )
 import Module( Module, mkModuleNameFS, mkModule, thUnitId )
 import Name( Name )
@@ -135,8 +137,6 @@ templateHaskellNames = [
     ruleVarName, typedRuleVarName,
     -- FunDep
     funDepName,
-    -- FamFlavour
-    typeFamName, dataFamName,
     -- TySynEqn
     tySynEqnName,
     -- AnnTarget
@@ -514,11 +514,6 @@ typedRuleVarName = libFun (fsLit ("typedRuleVar")) typedRuleVarIdKey
 -- data FunDep = ...
 funDepName :: Name
 funDepName     = libFun (fsLit "funDep") funDepIdKey
-
--- data FamFlavour = ...
-typeFamName, dataFamName :: Name
-typeFamName = libFun (fsLit "typeFam") typeFamIdKey
-dataFamName = libFun (fsLit "dataFam") dataFamIdKey
 
 -- data TySynEqn = ...
 tySynEqnName :: Name
@@ -1028,11 +1023,6 @@ interruptibleIdKey = mkPreludeMiscIdUnique 432
 -- data FunDep = ...
 funDepIdKey :: Unique
 funDepIdKey = mkPreludeMiscIdUnique 440
-
--- data FamFlavour = ...
-typeFamIdKey, dataFamIdKey :: Unique
-typeFamIdKey = mkPreludeMiscIdUnique 450
-dataFamIdKey = mkPreludeMiscIdUnique 451
 
 -- data TySynEqn = ...
 tySynEqnIdKey :: Unique

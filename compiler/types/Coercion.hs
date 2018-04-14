@@ -107,6 +107,8 @@ module Coercion (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import TyCoRep
 import Type
 import TyCon
@@ -1513,6 +1515,8 @@ ty_co_subst lc role ty
   = go role ty
   where
     go :: Role -> Type -> Coercion
+    go r ty                | Just ty' <- coreView ty
+                           = go r ty'
     go Phantom ty          = lift_phantom ty
     go r (TyVarTy tv)      = expectJust "ty_co_subst bad roles" $
                              liftCoSubstTyVar lc r tv

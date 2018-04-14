@@ -19,6 +19,8 @@ module DsBinds ( dsTopLHsBinds, dsLHsBinds, decomposeRuleLhs, dsSpec,
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import {-# SOURCE #-}   DsExpr( dsLExpr )
 import {-# SOURCE #-}   Match( matchWrapper )
 
@@ -356,15 +358,16 @@ dsAbsBinds dflags tyvars dicts exports
 makeCorePair :: DynFlags -> Id -> Bool -> Arity -> CoreExpr
              -> (Id, CoreExpr)
 makeCorePair dflags gbl_id is_default_method dict_arity rhs
-  | is_default_method                 -- Default methods are *always* inlined
+  | is_default_method    -- Default methods are *always* inlined
+                         -- See Note [INLINE and default methods] in TcInstDcls
   = (gbl_id `setIdUnfolding` mkCompulsoryUnfolding rhs, rhs)
 
   | otherwise
   = case inlinePragmaSpec inline_prag of
-          EmptyInlineSpec -> (gbl_id, rhs)
-          NoInline        -> (gbl_id, rhs)
-          Inlinable       -> (gbl_id `setIdUnfolding` inlinable_unf, rhs)
-          Inline          -> inline_pair
+          NoUserInline -> (gbl_id, rhs)
+          NoInline     -> (gbl_id, rhs)
+          Inlinable    -> (gbl_id `setIdUnfolding` inlinable_unf, rhs)
+          Inline       -> inline_pair
 
   where
     inline_prag   = idInlinePragma gbl_id
@@ -652,7 +655,7 @@ dsSpec mb_poly_rhs (L loc (SpecPrag poly_id spec_co spec_inl))
   = putSrcSpanDs loc $
     do { warnDs NoReason (text "Ignoring useless SPECIALISE pragma for NOINLINE function:"
                           <+> quotes (ppr poly_id))
-       ; return Nothing  }  -- Function is NOINLINE, and the specialiation inherits that
+       ; return Nothing  }  -- Function is NOINLINE, and the specialisation inherits that
                             -- See Note [Activation pragmas for SPECIALISE]
 
   | otherwise
@@ -1012,7 +1015,7 @@ drop_dicts drops dictionary bindings on the LHS where possible.
              RULE forall s (d :: MonadAbstractIOST (ReaderT s)).
                 useAbstractMonad (ReaderT s) d = $suseAbstractMonad s
 
-   Trac #8848 is a good example of where there are some intersting
+   Trac #8848 is a good example of where there are some interesting
    dictionary bindings to discard.
 
 The drop_dicts algorithm is based on these observations:
@@ -1184,7 +1187,7 @@ dsEvTerm (EvDelayedError ty msg) = return $ dsEvDelayedError ty msg
 
 dsEvDelayedError :: Type -> FastString -> CoreExpr
 dsEvDelayedError ty msg
-  = Var errorId `mkTyApps` [getRuntimeRep "dsEvTerm" ty, ty] `mkApps` [litMsg]
+  = Var errorId `mkTyApps` [getRuntimeRep ty, ty] `mkApps` [litMsg]
   where
     errorId = tYPE_ERROR_ID
     litMsg  = Lit (MachStr (fastStringToByteString msg))
@@ -1236,10 +1239,12 @@ ds_ev_typeable ty (EvTypeableTyCon tc kind_ev)
          -- Note that we use the kind of the type, not the TyCon from which it
          -- is constructed since the latter may be kind polymorphic whereas the
          -- former we know is not (we checked in the solver).
-       ; return $ mkApps (Var mkTrCon) [ Type (typeKind ty)
-                                       , Type ty
-                                       , tc_rep
-                                       , kind_args ]
+       ; let expr = mkApps (Var mkTrCon) [ Type (typeKind ty)
+                                         , Type ty
+                                         , tc_rep
+                                         , kind_args ]
+       -- ; pprRuntimeTrace "Trace mkTrTyCon" (ppr expr) expr
+       ; return expr
        }
 
 ds_ev_typeable ty (EvTypeableTyApp ev1 ev2)
@@ -1250,8 +1255,11 @@ ds_ev_typeable ty (EvTypeableTyApp ev1 ev2)
                     -- mkTrApp :: forall k1 k2 (a :: k1 -> k2) (b :: k1).
                     --            TypeRep a -> TypeRep b -> TypeRep (a b)
        ; let (k1, k2) = splitFunTy (typeKind t1)
-       ; return $ mkApps (mkTyApps (Var mkTrApp) [ k1, k2, t1, t2 ])
-                         [ e1, e2 ] }
+       ; let expr =  mkApps (mkTyApps (Var mkTrApp) [ k1, k2, t1, t2 ])
+                            [ e1, e2 ]
+       -- ; pprRuntimeTrace "Trace mkTrApp" (ppr expr) expr
+       ; return expr
+       }
 
 ds_ev_typeable ty (EvTypeableTrFun ev1 ev2)
   | Just (t1,t2) <- splitFunTy_maybe ty
@@ -1260,8 +1268,8 @@ ds_ev_typeable ty (EvTypeableTrFun ev1 ev2)
        ; mkTrFun <- dsLookupGlobalId mkTrFunName
                     -- mkTrFun :: forall r1 r2 (a :: TYPE r1) (b :: TYPE r2).
                     --            TypeRep a -> TypeRep b -> TypeRep (a -> b)
-       ; let r1 = getRuntimeRep "ds_ev_typeable" t1
-             r2 = getRuntimeRep "ds_ev_typeable" t2
+       ; let r1 = getRuntimeRep t1
+             r2 = getRuntimeRep t2
        ; return $ mkApps (mkTyApps (Var mkTrFun) [r1, r2, t1, t2])
                          [ e1, e2 ]
        }

@@ -495,6 +495,8 @@
       SymI_HasProto(enterFunCCS)                \
       SymI_HasProto(pushCostCentre)             \
       SymI_HasProto(mkCostCentre)               \
+      SymI_HasProto(registerCcList)             \
+      SymI_HasProto(registerCcsList)            \
       SymI_HasProto(era)
 #else
 #define RTS_PROF_SYMBOLS /* empty */
@@ -606,6 +608,7 @@
       SymI_HasProto(getFullProgArgv)                                    \
       SymI_HasProto(setFullProgArgv)                                    \
       SymI_HasProto(freeFullProgArgv)                                   \
+      SymI_HasProto(getProcessElapsedTime)                              \
       SymI_HasProto(getStablePtr)                                       \
       SymI_HasProto(foreignExportStablePtr)                             \
       SymI_HasProto(hs_init)                                            \
@@ -869,6 +872,7 @@
       SymI_HasProto(stg_waitWritezh)                                    \
       SymI_HasProto(stg_writeTVarzh)                                    \
       SymI_HasProto(stg_yieldzh)                                        \
+      SymI_NeedsProto(stg_badAlignment_entry)                           \
       SymI_NeedsProto(stg_interp_constr1_entry)                         \
       SymI_NeedsProto(stg_interp_constr2_entry)                         \
       SymI_NeedsProto(stg_interp_constr3_entry)                         \
@@ -922,6 +926,7 @@
       SymI_HasProto(store_load_barrier)                                 \
       SymI_HasProto(load_load_barrier)                                  \
       SymI_HasProto(cas)                                                \
+      SymI_HasProto(_assertFail)                                        \
       RTS_USER_SIGNALS_SYMBOLS                                          \
       RTS_INTCHAR_SYMBOLS
 

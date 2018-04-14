@@ -8,6 +8,8 @@ module BlockId
   , blockLbl, infoTblLbl
   ) where
 
+import GhcPrelude
+
 import CLabel
 import IdInfo
 import Name
@@ -38,7 +40,8 @@ newBlockId :: MonadUnique m => m BlockId
 newBlockId = mkBlockId <$> getUniqueM
 
 blockLbl :: BlockId -> CLabel
-blockLbl label = mkEntryLabel (mkFCallName (getUnique label) "block") NoCafRefs
+blockLbl label = mkLocalBlockLabel (getUnique label)
 
 infoTblLbl :: BlockId -> CLabel
-infoTblLbl label = mkInfoTableLabel (mkFCallName (getUnique label) "block") NoCafRefs
+infoTblLbl label
+  = mkBlockInfoTableLabel (mkFCallName (getUnique label) "block") NoCafRefs

@@ -10,20 +10,24 @@ module CSE (cseProgram, cseOneExpr) where
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import CoreSubst
 import Var              ( Var )
-import VarEnv           ( elemInScopeSet )
+import VarEnv           ( elemInScopeSet, mkInScopeSet )
 import Id               ( Id, idType, idInlineActivation, isDeadBinder
                         , zapIdOccInfo, zapIdUsageInfo, idInlinePragma
                         , isJoinId )
 import CoreUtils        ( mkAltExpr, eqExpr
                         , exprIsLiteralString
                         , stripTicksE, stripTicksT, mkTicks )
+import CoreFVs          ( exprFreeVars )
 import Type             ( tyConAppArgs )
 import CoreSyn
 import Outputable
 import BasicTypes       ( TopLevelFlag(..), isTopLevel
-                        , isAlwaysActive, isAnyInlinePragma )
+                        , isAlwaysActive, isAnyInlinePragma,
+                          inlinePragmaSpec, noUserInlineSpec )
 import TrieMap
 import Util             ( filterOut )
 import Data.List        ( mapAccumL )
@@ -204,8 +208,12 @@ is small).  The conclusion here is this:
   might replace <rhs> by 'bar', and then later be unable to see that it
   really was <rhs>.
 
+An except to the rule is when the INLINE pragma is not from the user, e.g. from
+WorkWrap (see Note [Wrapper activation]). We can tell because noUserInlineSpec
+is then true.
+
 Note that we do not (currently) do CSE on the unfolding stored inside
-an Id, even if is a 'stable' unfolding.  That means that when an
+an Id, even if it is a 'stable' unfolding.  That means that when an
 unfolding happens, it is always faithful to what the stable unfolding
 originally was.
 
@@ -385,7 +393,8 @@ addBinding env in_id out_id rhs'
                    _      -> False
 
 noCSE :: InId -> Bool
-noCSE id =  not (isAlwaysActive (idInlineActivation id))
+noCSE id =  not (isAlwaysActive (idInlineActivation id)) &&
+            not (noUserInlineSpec (inlinePragmaSpec (idInlinePragma id)))
              -- See Note [CSE for INLINE and NOINLINE]
          || isAnyInlinePragma (idInlinePragma id)
              -- See Note [CSE for stable unfoldings]
@@ -444,8 +453,13 @@ tryForCSE env expr
     -- top of the replaced sub-expression. This is probably not too
     -- useful in practice, but upholds our semantics.
 
+-- | Runs CSE on a single expression.
+--
+-- This entry point is not used in the compiler itself, but is provided
+-- as a convenient entry point for users of the GHC API.
 cseOneExpr :: InExpr -> OutExpr
-cseOneExpr = cseExpr emptyCSEnv
+cseOneExpr e = cseExpr env e
+  where env = emptyCSEnv {cs_subst = mkEmptySubst (mkInScopeSet (exprFreeVars e)) }
 
 cseExpr :: CSEnv -> InExpr -> OutExpr
 cseExpr env (Type t)              = Type (substTy (csEnvSubst env) t)

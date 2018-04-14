@@ -18,6 +18,8 @@ module HsExpr where
 #include "HsVersions.h"
 
 -- friends:
+import GhcPrelude
+
 import HsDecls
 import HsPat
 import HsLit
@@ -196,7 +198,8 @@ data UnboundVar
   deriving Data
 
 instance Outputable UnboundVar where
-    ppr = ppr . unboundVarOcc
+    ppr (OutOfScope occ _) = text "OutOfScope" <> parens (ppr occ)
+    ppr (TrueExprHole occ) = text "ExprHole"   <> parens (ppr occ)
 
 unboundVarOcc :: UnboundVar -> OccName
 unboundVarOcc (OutOfScope occ _) = occ
@@ -740,7 +743,7 @@ HsPar (and ParPat in patterns, HsParTy in types) is used as follows
     https://phabricator.haskell.org/rGHC499e43824bda967546ebf95ee33ec1f84a114a7c
 
   * ParPat and HsParTy are pretty printed as '( .. )' regardless of whether or
-    not they are strictly necssary. This should be addressed when #13238 is
+    not they are strictly necessary. This should be addressed when #13238 is
     completed, to be treated the same as HsPar.
 
 
@@ -1410,10 +1413,6 @@ data Match p body
         m_ctxt :: HsMatchContext (NameOrRdrName (IdP p)),
           -- See note [m_ctxt in Match]
         m_pats :: [LPat p], -- The patterns
-        m_type :: (Maybe (LHsType p)),
-                                 -- A type signature for the result of the match
-                                 -- Nothing after typechecking
-                                 -- NB: No longer supported
         m_grhss :: (GRHSs p body)
   }
 deriving instance (Data body,DataId p) => Data (Match p body)
@@ -1537,7 +1536,6 @@ pprMatch :: (SourceTextX idR, OutputableBndrId idR, Outputable body)
          => Match idR body -> SDoc
 pprMatch match
   = sep [ sep (herald : map (nest 2 . pprParendLPat) other_pats)
-        , nest 2 ppr_maybe_ty
         , nest 2 (pprGRHSs ctxt (m_grhss match)) ]
   where
     ctxt = m_ctxt match
@@ -1567,10 +1565,6 @@ pprMatch match
 
     (pat1:pats1) = m_pats match
     (pat2:pats2) = pats1
-    ppr_maybe_ty = case m_type match of
-                        Just ty -> dcolon <+> ppr ty
-                        Nothing -> empty
-
 
 pprGRHSs :: (SourceTextX idR, OutputableBndrId idR, Outputable body)
          => HsMatchContext idL -> GRHSs idR body -> SDoc
@@ -1783,13 +1777,18 @@ deriving instance (DataId idL, DataId idR) => Data (ParStmtBlock idL idR)
 
 -- | Applicative Argument
 data ApplicativeArg idL idR
-  = ApplicativeArgOne            -- pat <- expr (pat must be irrefutable)
-      (LPat idL)
+  = ApplicativeArgOne      -- A single statement (BindStmt or BodyStmt)
+      (LPat idL)           -- WildPat if it was a BodyStmt (see below)
       (LHsExpr idL)
-  | ApplicativeArgMany           -- do { stmts; return vars }
-      [ExprLStmt idL]            -- stmts
-      (HsExpr idL)               -- return (v1,..,vn), or just (v1,..,vn)
-      (LPat idL)                 -- (v1,...,vn)
+      Bool                 -- True <=> was a BodyStmt
+                           -- False <=> was a BindStmt
+                           -- See Note [Applicative BodyStmt]
+
+  | ApplicativeArgMany     -- do { stmts; return vars }
+      [ExprLStmt idL]      -- stmts
+      (HsExpr idL)         -- return (v1,..,vn), or just (v1,..,vn)
+      (LPat idL)           -- (v1,...,vn)
+
 deriving instance (DataId idL, DataId idR) => Data (ApplicativeArg idL idR)
 
 {-
@@ -1927,6 +1926,34 @@ Parallel statements require the 'Control.Monad.Zip.mzip' function:
 
 In any other context than 'MonadComp', the fields for most of these
 'SyntaxExpr's stay bottom.
+
+
+Note [Applicative BodyStmt]
+
+(#12143) For the purposes of ApplicativeDo, we treat any BodyStmt
+as if it was a BindStmt with a wildcard pattern.  For example,
+
+  do
+    x <- A
+    B
+    return x
+
+is transformed as if it were
+
+  do
+    x <- A
+    _ <- B
+    return x
+
+so it transforms to
+
+  (\(x,_) -> x) <$> A <*> B
+
+But we have to remember when we treat a BodyStmt like a BindStmt,
+because in error messages we want to emit the original syntax the user
+wrote, not our internal representation.  So ApplicativeArgOne has a
+Bool flag that is True when the original statement was a BodyStmt, so
+that we can pretty-print it correctly.
 -}
 
 instance (SourceTextX idL, OutputableBndrId idL)
@@ -1943,7 +1970,7 @@ pprStmt :: forall idL idR body . (SourceTextX idL, SourceTextX idR,
                                   Outputable body)
         => (StmtLR idL idR body) -> SDoc
 pprStmt (LastStmt expr ret_stripped _)
-  = ifPprDebug (text "[last]") <+>
+  = whenPprDebug (text "[last]") <+>
        (if ret_stripped then text "return" else empty) <+>
        ppr expr
 pprStmt (BindStmt pat expr _ _ _) = hsep [ppr pat, larrow, ppr expr]
@@ -1958,7 +1985,7 @@ pprStmt (RecStmt { recS_stmts = segment, recS_rec_ids = rec_ids
                  , recS_later_ids = later_ids })
   = text "rec" <+>
     vcat [ ppr_do_stmts segment
-         , ifPprDebug (vcat [ text "rec_ids=" <> ppr rec_ids
+         , whenPprDebug (vcat [ text "rec_ids=" <> ppr rec_ids
                             , text "later_ids=" <> ppr later_ids])]
 
 pprStmt (ApplicativeStmt args mb_join _)
@@ -1979,7 +2006,11 @@ pprStmt (ApplicativeStmt args mb_join _)
    flattenStmt (L _ (ApplicativeStmt args _ _)) = concatMap flattenArg args
    flattenStmt stmt = [ppr stmt]
 
-   flattenArg (_, ApplicativeArgOne pat expr) =
+   flattenArg (_, ApplicativeArgOne pat expr isBody)
+     | isBody =  -- See Note [Applicative BodyStmt]
+     [ppr (BodyStmt expr noSyntaxExpr noSyntaxExpr (panic "pprStmt")
+             :: ExprStmt idL)]
+     | otherwise =
      [ppr (BindStmt pat expr noSyntaxExpr noSyntaxExpr (panic "pprStmt")
              :: ExprStmt idL)]
    flattenArg (_, ApplicativeArgMany stmts _ _) =
@@ -1993,7 +2024,11 @@ pprStmt (ApplicativeStmt args mb_join _)
           then ap_expr
           else text "join" <+> parens ap_expr
 
-   pp_arg (_, ApplicativeArgOne pat expr) =
+   pp_arg (_, ApplicativeArgOne pat expr isBody)
+     | isBody =  -- See Note [Applicative BodyStmt]
+     ppr (BodyStmt expr noSyntaxExpr noSyntaxExpr (panic "pprStmt")
+            :: ExprStmt idL)
+     | otherwise =
      ppr (BindStmt pat expr noSyntaxExpr noSyntaxExpr (panic "pprStmt")
             :: ExprStmt idL)
    pp_arg (_, ApplicativeArgMany stmts return pat) =
@@ -2006,7 +2041,7 @@ pprStmt (ApplicativeStmt args mb_join _)
 pprTransformStmt :: (SourceTextX p, OutputableBndrId p)
                  => [IdP p] -> LHsExpr p -> Maybe (LHsExpr p) -> SDoc
 pprTransformStmt bndrs using by
-  = sep [ text "then" <+> ifPprDebug (braces (ppr bndrs))
+  = sep [ text "then" <+> whenPprDebug (braces (ppr bndrs))
         , nest 2 (ppr using)
         , nest 2 (pprBy by)]
 
@@ -2262,14 +2297,14 @@ pprSplice (HsQuasiQuote n q _ s)      = ppr_quasi n q s
 pprSplice (HsSpliced _ thing)         = ppr thing
 
 ppr_quasi :: OutputableBndr p => p -> p -> FastString -> SDoc
-ppr_quasi n quoter quote = ifPprDebug (brackets (ppr n)) <>
+ppr_quasi n quoter quote = whenPprDebug (brackets (ppr n)) <>
                            char '[' <> ppr quoter <> vbar <>
                            ppr quote <> text "|]"
 
 ppr_splice :: (SourceTextX p, OutputableBndrId p)
            => SDoc -> (IdP p) -> LHsExpr p -> SDoc -> SDoc
 ppr_splice herald n e trail
-    = herald <> ifPprDebug (brackets (ppr n)) <> ppr e <> trail
+    = herald <> whenPprDebug (brackets (ppr n)) <> ppr e <> trail
 
 -- | Haskell Bracket
 data HsBracket p = ExpBr (LHsExpr p)    -- [|  expr  |]
@@ -2518,13 +2553,11 @@ pprStmtContext (PatGuard ctxt) = text "pattern guard for" $$ pprMatchContext ctx
 --          transformed branch of
 --          transformed branch of monad comprehension
 pprStmtContext (ParStmtCtxt c) =
-  sdocWithPprDebug $ \dbg -> if dbg
-    then sep [text "parallel branch of", pprAStmtContext c]
-    else pprStmtContext c
+  ifPprDebug (sep [text "parallel branch of", pprAStmtContext c])
+             (pprStmtContext c)
 pprStmtContext (TransStmtCtxt c) =
-  sdocWithPprDebug $ \dbg -> if dbg
-    then sep [text "transformed branch of", pprAStmtContext c]
-    else pprStmtContext c
+  ifPprDebug (sep [text "transformed branch of", pprAStmtContext c])
+             (pprStmtContext c)
 
 instance (Outputable p, Outputable (NameOrRdrName p))
       => Outputable (HsStmtContext p) where

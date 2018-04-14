@@ -11,6 +11,8 @@ module CmmSwitch (
      createSwitchPlan,
   ) where
 
+import GhcPrelude
+
 import Outputable
 import DynFlags
 import Hoopl.Label (Label)
@@ -107,7 +109,7 @@ data SwitchTargets =
         (M.Map Integer Label)      -- The branches
     deriving (Show, Eq)
 
--- | The smart constructr mkSwitchTargets normalises the map a bit:
+-- | The smart constructor mkSwitchTargets normalises the map a bit:
 --  * No entries outside the range
 --  * No entries equal to the default
 --  * No default if all elements have explicit values

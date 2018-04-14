@@ -31,14 +31,14 @@ module TcUnify (
   matchActualFunTys, matchActualFunTysPart,
   matchExpectedFunKind,
 
-  wrapFunResCoercion,
-
   occCheckExpand, metaTyVarUpdateOK,
   occCheckForErrors, OccCheckResult(..)
 
   ) where
 
 #include "HsVersions.h"
+
+import GhcPrelude
 
 import HsSyn
 import TyCoRep
@@ -64,7 +64,6 @@ import Util
 import Pair( pFst )
 import qualified GHC.LanguageExtensions as LangExt
 import Outputable
-import FastString
 
 import Control.Monad
 import Control.Arrow ( second )
@@ -97,6 +96,23 @@ This is used to construct a message of form
 
    The function 'f' is applied to two arguments
    but its type `Int -> Int' has only one
+
+When visible type applications (e.g., `f @Int 1 2`, as in #13902) enter the
+picture, we have a choice in deciding whether to count the type applications as
+proper arguments:
+
+   The function 'f' is applied to one visible type argument
+     and two value arguments
+   but its type `forall a. a -> a` has only one visible type argument
+     and one value argument
+
+Or whether to include the type applications as part of the herald itself:
+
+   The expression 'f @Int' is applied to two arguments
+   but its type `Int -> Int` has only one
+
+The latter is easier to implement and is arguably easier to understand, so we
+choose to implement that option.
 
 Note [matchExpectedFunTys]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -813,20 +829,6 @@ tcWrapResultO orig rn_expr expr actual_ty res_ty
                                  (Just rn_expr) actual_ty res_ty
        ; return (mkHsWrap cow expr) }
 
------------------------------------
-wrapFunResCoercion
-        :: [TcType]        -- Type of args
-        -> HsWrapper       -- HsExpr a -> HsExpr b
-        -> TcM HsWrapper   -- HsExpr (arg_tys -> a) -> HsExpr (arg_tys -> b)
-wrapFunResCoercion arg_tys co_fn_res
-  | isIdHsWrapper co_fn_res
-  = return idHsWrapper
-  | null arg_tys
-  = return co_fn_res
-  | otherwise
-  = do  { arg_ids <- newSysLocalIds (fsLit "sub") arg_tys
-        ; return (mkWpLams arg_ids <.> co_fn_res <.> mkWpEvVarApps arg_ids) }
-
 
 {- **********************************************************************
 %*                                                                      *
@@ -1127,24 +1129,41 @@ buildImplication :: SkolemInfo
                  -> TcM result
                  -> TcM (Bag Implication, TcEvBinds, result)
 buildImplication skol_info skol_tvs given thing_inside
-  = do { tc_lvl <- getTcLevel
-       ; deferred_type_errors <- goptM Opt_DeferTypeErrors <||>
-                                 goptM Opt_DeferTypedHoles
-       ; if null skol_tvs && null given && (not deferred_type_errors ||
-                                            not (isTopTcLevel tc_lvl))
-         then do { res <- thing_inside
-                 ; return (emptyBag, emptyTcEvBinds, res) }
-      -- Fast path.  We check every function argument with
-      -- tcPolyExpr, which uses tcSkolemise and hence checkConstraints.
-      -- But with the solver producing unlifted equalities, we need
-      -- to have an EvBindsVar for them when they might be deferred to
-      -- runtime. Otherwise, they end up as top-level unlifted bindings,
-      -- which are verboten. See also Note [Deferred errors for coercion holes]
-      -- in TcErrors.
+  = do { implication_needed <- implicationNeeded skol_tvs given
+
+       ; if implication_needed
+         then do { (tclvl, wanted, result) <- pushLevelAndCaptureConstraints thing_inside
+                 ; (implics, ev_binds) <- buildImplicationFor tclvl skol_info skol_tvs given wanted
+                 ; return (implics, ev_binds, result) }
+
+         else -- Fast path.  We check every function argument with
+              -- tcPolyExpr, which uses tcSkolemise and hence checkConstraints.
+              -- So this fast path is well-exercised
+              do { res <- thing_inside
+                 ; return (emptyBag, emptyTcEvBinds, res) } }
+
+implicationNeeded :: [TcTyVar] -> [EvVar] -> TcM Bool
+-- With the solver producing unlifted equalities, we need
+-- to have an EvBindsVar for them when they might be deferred to
+-- runtime. Otherwise, they end up as top-level unlifted bindings,
+-- which are verboten. See also Note [Deferred errors for coercion holes]
+-- in TcErrors.  cf Trac #14149 for an example of what goes wrong.
+implicationNeeded skol_tvs given
+  | null skol_tvs
+  , null given
+  = -- Empty skolems and givens
+    do { tc_lvl <- getTcLevel
+       ; if not (isTopTcLevel tc_lvl)  -- No implication needed if we are
+         then return False             -- already inside an implication
          else
-    do { (tclvl, wanted, result) <- pushLevelAndCaptureConstraints thing_inside
-       ; (implics, ev_binds) <- buildImplicationFor tclvl skol_info skol_tvs given wanted
-       ; return (implics, ev_binds, result) }}
+    do { dflags <- getDynFlags       -- If any deferral can happen,
+                                     -- we must build an implication
+       ; return (gopt Opt_DeferTypeErrors dflags ||
+                 gopt Opt_DeferTypedHoles dflags ||
+                 gopt Opt_DeferOutOfScopeVariables dflags) } }
+
+  | otherwise     -- Non-empty skolems or givens
+  = return True   -- Definitely need an implication
 
 buildImplicationFor :: TcLevel -> SkolemInfo -> [TcTyVar]
                    -> [EvVar] -> WantedConstraints
@@ -1246,8 +1265,11 @@ uType_defer t_or_k origin ty1 ty2
        ; whenDOptM Opt_D_dump_tc_trace $ do
             { ctxt <- getErrCtxt
             ; doc <- mkErrInfo emptyTidyEnv ctxt
-            ; traceTc "utype_defer" (vcat [ppr co, ppr ty1,
-                                           ppr ty2, pprCtOrigin origin, doc])
+            ; traceTc "utype_defer" (vcat [ debugPprType ty1
+                                          , debugPprType ty2
+                                          , pprCtOrigin origin
+                                          , doc])
+            ; traceTc "utype_defer2" (ppr co)
             }
        ; return co }
 
@@ -1792,7 +1814,7 @@ matchExpectedFunKind hs_ty = go
     go k | Just k' <- tcView k = go k'
 
     go k@(TyVarTy kvar)
-      | isTcTyVar kvar, isMetaTyVar kvar
+      | isMetaTyVar kvar
       = do { maybe_kind <- readMetaTyVar kvar
            ; case maybe_kind of
                 Indirect fun_kind -> go fun_kind

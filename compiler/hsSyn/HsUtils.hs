@@ -20,7 +20,7 @@ which deal with the instantiated versions are located elsewhere:
 
 module HsUtils(
   -- Terms
-  mkHsPar, mkHsApp, mkHsAppType, mkHsAppTypeOut, mkHsCaseAlt,
+  mkHsPar, mkHsApp, mkHsAppType, mkHsAppTypes, mkHsAppTypeOut, mkHsCaseAlt,
   mkSimpleMatch, unguardedGRHSs, unguardedRHS,
   mkMatchGroup, mkMatch, mkPrefixFunRhs, mkHsLam, mkHsIf,
   mkHsWrap, mkLHsWrap, mkHsWrapCo, mkHsWrapCoR, mkLHsWrapCo,
@@ -92,6 +92,8 @@ module HsUtils(
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import HsDecls
 import HsBinds
 import HsExpr
@@ -146,7 +148,7 @@ mkSimpleMatch :: HsMatchContext (NameOrRdrName (IdP id))
               -> LMatch id (Located (body id))
 mkSimpleMatch ctxt pats rhs
   = L loc $
-    Match { m_ctxt = ctxt, m_pats = pats, m_type = Nothing
+    Match { m_ctxt = ctxt, m_pats = pats
           , m_grhss = unguardedGRHSs rhs }
   where
     loc = case pats of
@@ -177,6 +179,9 @@ mkHsApp e1 e2 = addCLoc e1 e2 (HsApp e1 e2)
 
 mkHsAppType :: LHsExpr name -> LHsWcType name -> LHsExpr name
 mkHsAppType e t = addCLoc e (hswc_body t) (HsAppType e t)
+
+mkHsAppTypes :: LHsExpr name -> [LHsWcType name] -> LHsExpr name
+mkHsAppTypes = foldl mkHsAppType
 
 mkHsAppTypeOut :: LHsExpr GhcTc -> LHsWcType GhcRn -> LHsExpr GhcTc
 mkHsAppTypeOut e t = addCLoc e (hswc_body t) (HsAppTypeOut e t)
@@ -769,7 +774,6 @@ mkMatch :: HsMatchContext (NameOrRdrName (IdP p)) -> [LPat p] -> LHsExpr p
 mkMatch ctxt pats expr lbinds
   = noLoc (Match { m_ctxt  = ctxt
                  , m_pats  = map paren pats
-                 , m_type  = Nothing
                  , m_grhss = GRHSs (unguardedRHS noSrcSpan expr) lbinds })
   where
     paren lp@(L l p) | hsPatNeedsParens p = L l (ParPat lp)
@@ -1089,7 +1093,8 @@ hsLInstDeclBinders (L _ (TyFamInstD {})) = mempty
 -- the SrcLoc returned are for the whole declarations, not just the names
 hsDataFamInstBinders :: DataFamInstDecl pass
                      -> ([Located (IdP pass)], [LFieldOcc pass])
-hsDataFamInstBinders (DataFamInstDecl { dfid_defn = defn })
+hsDataFamInstBinders (DataFamInstDecl { dfid_eqn = HsIB { hsib_body =
+                       FamEqn { feqn_rhs = defn }}})
   = hsDataDefnBinders defn
   -- There can't be repeated symbols because only data instances have binders
 
@@ -1192,7 +1197,7 @@ lStmtsImplicits = hs_lstmts
     hs_stmt :: StmtLR GhcRn idR (Located (body idR)) -> NameSet
     hs_stmt (BindStmt pat _ _ _ _) = lPatImplicits pat
     hs_stmt (ApplicativeStmt args _ _) = unionNameSets (map do_arg args)
-      where do_arg (_, ApplicativeArgOne pat _) = lPatImplicits pat
+      where do_arg (_, ApplicativeArgOne pat _ _) = lPatImplicits pat
             do_arg (_, ApplicativeArgMany stmts _ _) = hs_lstmts stmts
     hs_stmt (LetStmt binds)      = hs_local_binds (unLoc binds)
     hs_stmt (BodyStmt {})        = emptyNameSet

@@ -67,6 +67,8 @@ module   RdrHsSyn (
 
     ) where
 
+import GhcPrelude
+
 import HsSyn            -- Lots of it
 import Class            ( FunDep )
 import TyCon            ( TyCon, isTupleTyCon, tyConSingleDataCon_maybe )
@@ -159,14 +161,14 @@ mkATDefault :: LTyFamInstDecl GhcPs
 --
 -- We use the Either monad because this also called
 -- from Convert.hs
-mkATDefault (L loc (TyFamInstDecl { tfid_eqn = L _ e }))
-      | TyFamEqn { tfe_tycon = tc, tfe_pats = pats, tfe_fixity = fixity
-                 , tfe_rhs = rhs } <- e
-      = do { tvs <- checkTyVars (text "default") equalsDots tc (hsib_body pats)
-           ; return (L loc (TyFamEqn { tfe_tycon = tc
-                                     , tfe_pats = tvs
-                                     , tfe_fixity = fixity
-                                     , tfe_rhs = rhs })) }
+mkATDefault (L loc (TyFamInstDecl { tfid_eqn = HsIB { hsib_body = e }}))
+      | FamEqn { feqn_tycon = tc, feqn_pats = pats, feqn_fixity = fixity
+               , feqn_rhs = rhs } <- e
+      = do { tvs <- checkTyVars (text "default") equalsDots tc pats
+           ; return (L loc (FamEqn { feqn_tycon  = tc
+                                   , feqn_pats   = tvs
+                                   , feqn_fixity = fixity
+                                   , feqn_rhs    = rhs })) }
 
 mkTyData :: SrcSpan
          -> NewOrData
@@ -221,10 +223,11 @@ mkTyFamInstEqn :: LHsType GhcPs
                -> P (TyFamInstEqn GhcPs,[AddAnn])
 mkTyFamInstEqn lhs rhs
   = do { (tc, tparams, fixity, ann) <- checkTyClHdr False lhs
-       ; return (TyFamEqn { tfe_tycon = tc
-                          , tfe_pats  = mkHsImplicitBndrs tparams
-                          , tfe_fixity = fixity
-                          , tfe_rhs   = rhs },
+       ; return (mkHsImplicitBndrs
+                  (FamEqn { feqn_tycon  = tc
+                          , feqn_pats   = tparams
+                          , feqn_fixity = fixity
+                          , feqn_rhs    = rhs }),
                  ann) }
 
 mkDataFamInst :: SrcSpan
@@ -239,18 +242,17 @@ mkDataFamInst loc new_or_data cType (L _ (mcxt, tycl_hdr)) ksig data_cons maybe_
   = do { (tc, tparams, fixity, ann) <- checkTyClHdr False tycl_hdr
        ; mapM_ (\a -> a loc) ann -- Add any API Annotations to the top SrcSpan
        ; defn <- mkDataDefn new_or_data cType mcxt ksig data_cons maybe_deriv
-       ; return (L loc (DataFamInstD (
-                  DataFamInstDecl { dfid_tycon = tc
-                                  , dfid_pats = mkHsImplicitBndrs tparams
-                                  , dfid_fixity = fixity
-                                  , dfid_defn = defn, dfid_fvs = placeHolderNames }))) }
+       ; return (L loc (DataFamInstD (DataFamInstDecl (mkHsImplicitBndrs
+                  (FamEqn { feqn_tycon = tc
+                          , feqn_pats = tparams
+                          , feqn_fixity = fixity
+                          , feqn_rhs = defn }))))) }
 
 mkTyFamInst :: SrcSpan
-            -> LTyFamInstEqn GhcPs
+            -> TyFamInstEqn GhcPs
             -> P (LInstDecl GhcPs)
 mkTyFamInst loc eqn
-  = return (L loc (TyFamInstD (TyFamInstDecl { tfid_eqn  = eqn
-                                             , tfid_fvs  = placeHolderNames })))
+  = return (L loc (TyFamInstD (TyFamInstDecl eqn)))
 
 mkFamDecl :: SrcSpan
           -> FamilyInfo GhcPs
@@ -515,12 +517,12 @@ mkPatSynMatchGroup (L loc patsyn_name) (L _ decls) =
                wrongNameBindingErr loc decl
            ; match <- case details of
                PrefixCon pats -> return $ Match { m_ctxt = ctxt, m_pats = pats
-                                                , m_type = Nothing, m_grhss = rhs }
+                                                , m_grhss = rhs }
                    where
                      ctxt = FunRhs { mc_fun = ln, mc_fixity = Prefix, mc_strictness = NoSrcStrict }
 
                InfixCon p1 p2 -> return $ Match { m_ctxt = ctxt, m_pats = [p1, p2]
-                                                , m_type = Nothing, m_grhss = rhs }
+                                                , m_grhss = rhs }
                    where
                      ctxt = FunRhs { mc_fun = ln, mc_fixity = Infix, mc_strictness = NoSrcStrict }
 
@@ -942,12 +944,12 @@ checkValDef msg _strictness lhs (Just sig) grhss
   = checkPatBind msg (L (combineLocs lhs sig)
                         (ExprWithTySig lhs (mkLHsSigWcType sig))) grhss
 
-checkValDef msg strictness lhs opt_sig g@(L l (_,grhss))
+checkValDef msg strictness lhs Nothing g@(L l (_,grhss))
   = do  { mb_fun <- isFunLhs lhs
         ; case mb_fun of
             Just (fun, is_infix, pats, ann) ->
               checkFunBind msg strictness ann (getLoc lhs)
-                           fun is_infix pats opt_sig (L l grhss)
+                           fun is_infix pats (L l grhss)
             Nothing -> checkPatBind msg lhs g }
 
 checkFunBind :: SDoc
@@ -957,10 +959,9 @@ checkFunBind :: SDoc
              -> Located RdrName
              -> LexicalFixity
              -> [LHsExpr GhcPs]
-             -> Maybe (LHsType GhcPs)
              -> Located (GRHSs GhcPs (LHsExpr GhcPs))
              -> P ([AddAnn],HsBind GhcPs)
-checkFunBind msg strictness ann lhs_loc fun is_infix pats opt_sig (L rhs_span grhss)
+checkFunBind msg strictness ann lhs_loc fun is_infix pats (L rhs_span grhss)
   = do  ps <- checkPatterns msg pats
         let match_span = combineSrcSpans lhs_loc rhs_span
         -- Add back the annotations stripped from any HsPar values in the lhs
@@ -970,7 +971,6 @@ checkFunBind msg strictness ann lhs_loc fun is_infix pats opt_sig (L rhs_span gr
                                                          , mc_fixity = is_infix
                                                          , mc_strictness = strictness }
                                        , m_pats = ps
-                                       , m_type = opt_sig
                                        , m_grhss = grhss })])
         -- The span of the match covers the entire equation.
         -- That isn't quite right, but it'll do for now.

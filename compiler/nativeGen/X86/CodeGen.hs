@@ -30,6 +30,8 @@ where
 #include "../includes/MachDeps.h"
 
 -- NCG stuff:
+import GhcPrelude
+
 import X86.Instr
 import X86.Cond
 import X86.Regs
@@ -63,7 +65,6 @@ import SrcLoc           ( srcSpanFile, srcSpanStartLine, srcSpanStartCol )
 import ForeignCall      ( CCallConv(..) )
 import OrdList
 import Outputable
-import Unique
 import FastString
 import DynFlags
 import Util
@@ -293,7 +294,7 @@ data Amode
         = Amode AddrMode InstrBlock
 
 {-
-Now, given a tree (the argument to an CmmLoad) that references memory,
+Now, given a tree (the argument to a CmmLoad) that references memory,
 produce a suitable addressing mode.
 
 A Rule of the Game (tm) for Amodes: use of the addr bit must
@@ -326,7 +327,7 @@ is32BitInteger i = i64 <= 0x7fffffff && i64 >= -0x80000000
 jumpTableEntry :: DynFlags -> Maybe BlockId -> CmmStatic
 jumpTableEntry dflags Nothing = CmmStaticLit (CmmInt 0 (wordWidth dflags))
 jumpTableEntry _ (Just blockid) = CmmStaticLit (CmmLabel blockLabel)
-    where blockLabel = mkAsmTempLabel (getUnique blockid)
+    where blockLabel = blockLbl blockid
 
 
 -- -----------------------------------------------------------------------------
@@ -500,6 +501,9 @@ getRegister' dflags is32Bit (CmmReg reg)
 
 getRegister' dflags is32Bit (CmmRegOff r n)
   = getRegister' dflags is32Bit $ mangleIndexTree dflags r n
+
+getRegister' dflags is32Bit (CmmMachOp (MO_AlignmentCheck align _) [e])
+  = addAlignmentCheck align <$> getRegister' dflags is32Bit e
 
 -- for 32-bit architectuers, support some 64 -> 32 bit conversions:
 -- TO_W_(x), TO_W_(x >> 32)
@@ -1252,6 +1256,21 @@ isOperand _ (CmmLoad _ _) = True
 isOperand is32Bit (CmmLit lit)  = is32BitLit is32Bit lit
                           || isSuitableFloatingPointLit lit
 isOperand _ _            = False
+
+-- | Given a 'Register', produce a new 'Register' with an instruction block
+-- which will check the value for alignment. Used for @-falignment-sanitisation@.
+addAlignmentCheck :: Int -> Register -> Register
+addAlignmentCheck align reg =
+    case reg of
+      Fixed fmt reg code -> Fixed fmt reg (code `appOL` check fmt reg)
+      Any fmt f          -> Any fmt (\reg -> f reg `appOL` check fmt reg)
+  where
+    check :: Format -> Reg -> InstrBlock
+    check fmt reg =
+        ASSERT(not $ isFloatFormat fmt)
+        toOL [ TEST fmt (OpImm $ ImmInt $ align-1) (OpReg reg)
+             , JXX_GBL NE $ ImmCLbl mkBadAlignmentLabel
+             ]
 
 memConstant :: Int -> CmmLit -> NatM Amode
 memConstant align lit = do
@@ -2663,6 +2682,7 @@ outOfLineCmmOp mop res args
               MO_Memcpy _  -> fsLit "memcpy"
               MO_Memset _  -> fsLit "memset"
               MO_Memmove _ -> fsLit "memmove"
+              MO_Memcmp _  -> fsLit "memcmp"
 
               MO_PopCnt _  -> fsLit "popcnt"
               MO_BSwap _   -> fsLit "bswap"
@@ -2696,7 +2716,7 @@ outOfLineCmmOp mop res args
 genSwitch :: DynFlags -> CmmExpr -> SwitchTargets -> NatM InstrBlock
 
 genSwitch dflags expr targets
-  | gopt Opt_PIC dflags
+  | positionIndependent dflags
   = do
         (reg,e_code) <- getNonClobberedReg (cmmOffset dflags expr offset)
            -- getNonClobberedReg because it needs to survive across t_code
@@ -2759,12 +2779,12 @@ createJumpTable :: DynFlags -> [Maybe BlockId] -> Section -> CLabel
                 -> GenCmmDecl (Alignment, CmmStatics) h g
 createJumpTable dflags ids section lbl
     = let jumpTable
-            | gopt Opt_PIC dflags =
+            | positionIndependent dflags =
                   let jumpTableEntryRel Nothing
                           = CmmStaticLit (CmmInt 0 (wordWidth dflags))
                       jumpTableEntryRel (Just blockid)
                           = CmmStaticLit (CmmLabelDiffOff blockLabel lbl 0)
-                          where blockLabel = mkAsmTempLabel (getUnique blockid)
+                          where blockLabel = blockLbl blockid
                   in map jumpTableEntryRel ids
             | otherwise = map (jumpTableEntry dflags) ids
       in CmmData section (1, Statics lbl jumpTable)

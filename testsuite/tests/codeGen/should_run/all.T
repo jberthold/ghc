@@ -93,6 +93,7 @@ test('T5626', exit_code(1), compile_and_run, [''])
 test('T5747', when(arch('i386'), extra_hc_opts('-msse2')), compile_and_run, ['-O2'])
 test('T5785', normal, compile_and_run, [''])
 test('setByteArray', normal, compile_and_run, [''])
+test('compareByteArrays', normal, compile_and_run, [''])
 
 test('T6146', normal, compile_and_run, [''])
 test('T5900', normal, compile_and_run, [''])
@@ -148,7 +149,7 @@ test('PopCnt', omit_ways(['ghci']), multi_compile_and_run,
                  ['PopCnt', [('PopCnt_cmm.cmm', '')], ''])
 test('T12059', normal, compile_and_run, [''])
 test('T12433', normal, compile_and_run, [''])
-test('T12622', expect_broken_for(13481, ['ghci']), multimod_compile_and_run, ['T12622', '-O'])
+test('T12622', normal, multimod_compile_and_run, ['T12622', '-O'])
 test('T12757', normal, compile_and_run, [''])
 test('T12855', normal, compile_and_run, [''])
 test('T9577', [ unless(arch('x86_64') or arch('i386'),skip),
@@ -158,3 +159,7 @@ test('T9577', [ unless(arch('x86_64') or arch('i386'),skip),
 
 test('T13425', normal, compile_and_run, ['-O'])
 test('castFloatWord', normal, compile_and_run, ['-dcmm-lint'])
+test('T13825-unit',
+     extra_run_opts('"' + config.libdir + '"'),
+     compile_and_run,
+     ['-package ghc'])

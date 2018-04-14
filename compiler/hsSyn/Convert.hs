@@ -13,6 +13,8 @@ module Convert( convertToHsExpr, convertToPat, convertToHsDecls,
                 convertToHsType,
                 thRdrNameGuesses ) where
 
+import GhcPrelude
+
 import HsSyn as Hs
 import qualified Class
 import RdrName
@@ -300,10 +302,10 @@ cvtDec (DataInstD ctxt tc tys ksig constrs derivs)
                                , dd_cons = cons', dd_derivs = derivs' }
 
        ; returnJustL $ InstD $ DataFamInstD
-           { dfid_inst = DataFamInstDecl { dfid_tycon = tc', dfid_pats = typats'
-                                         , dfid_defn = defn
-                                         , dfid_fixity = Prefix
-                                         , dfid_fvs = placeHolderNames } }}
+           { dfid_inst = DataFamInstDecl { dfid_eqn = mkHsImplicitBndrs $
+                           FamEqn { feqn_tycon = tc', feqn_pats = typats'
+                                  , feqn_rhs = defn
+                                  , feqn_fixity = Prefix } }}}
 
 cvtDec (NewtypeInstD ctxt tc tys ksig constr derivs)
   = do { (ctxt', tc', typats') <- cvt_tyinst_hdr ctxt tc tys
@@ -315,17 +317,16 @@ cvtDec (NewtypeInstD ctxt tc tys ksig constr derivs)
                                , dd_kindSig = ksig'
                                , dd_cons = [con'], dd_derivs = derivs' }
        ; returnJustL $ InstD $ DataFamInstD
-           { dfid_inst = DataFamInstDecl { dfid_tycon = tc', dfid_pats = typats'
-                                         , dfid_defn = defn
-                                         , dfid_fixity = Prefix
-                                         , dfid_fvs = placeHolderNames } }}
+           { dfid_inst = DataFamInstDecl { dfid_eqn = mkHsImplicitBndrs $
+                           FamEqn { feqn_tycon = tc', feqn_pats = typats'
+                                  , feqn_rhs = defn
+                                  , feqn_fixity = Prefix } }}}
 
 cvtDec (TySynInstD tc eqn)
   = do  { tc' <- tconNameL tc
-        ; eqn' <- cvtTySynEqn tc' eqn
+        ; L _ eqn' <- cvtTySynEqn tc' eqn
         ; returnJustL $ InstD $ TyFamInstD
-            { tfid_inst = TyFamInstDecl { tfid_eqn = eqn'
-                                        , tfid_fvs = placeHolderNames } } }
+            { tfid_inst = TyFamInstDecl { tfid_eqn = eqn' } } }
 
 cvtDec (OpenTypeFamilyD head)
   = do { (tc', tyvars', result', injectivity') <- cvt_tyfam_head head
@@ -389,10 +390,11 @@ cvtTySynEqn :: Located RdrName -> TySynEqn -> CvtM (LTyFamInstEqn GhcPs)
 cvtTySynEqn tc (TySynEqn lhs rhs)
   = do  { lhs' <- mapM (wrap_apps <=< cvtType) lhs
         ; rhs' <- cvtType rhs
-        ; returnL $ TyFamEqn { tfe_tycon = tc
-                             , tfe_pats = mkHsImplicitBndrs lhs'
-                             , tfe_fixity = Prefix
-                             , tfe_rhs = rhs' } }
+        ; returnL $ mkHsImplicitBndrs
+                  $ FamEqn { feqn_tycon  = tc
+                           , feqn_pats   = lhs'
+                           , feqn_fixity = Prefix
+                           , feqn_rhs    = rhs' } }
 
 ----------------
 cvt_ci_decs :: MsgDoc -> [TH.Dec]
@@ -430,12 +432,12 @@ cvt_tycl_hdr cxt tc tvs
 cvt_tyinst_hdr :: TH.Cxt -> TH.Name -> [TH.Type]
                -> CvtM ( LHsContext GhcPs
                        , Located RdrName
-                       , HsImplicitBndrs GhcPs [LHsType GhcPs])
+                       , HsTyPats GhcPs)
 cvt_tyinst_hdr cxt tc tys
   = do { cxt' <- cvtContext cxt
        ; tc'  <- tconNameL tc
        ; tys' <- mapM (wrap_apps <=< cvtType) tys
-       ; return (cxt', tc', mkHsImplicitBndrs tys') }
+       ; return (cxt', tc', tys') }
 
 ----------------
 cvt_tyfam_head :: TypeFamilyHead
@@ -660,7 +662,7 @@ cvtPragmaD (SpecialiseP nm ty inline phases)
        ; let (inline', dflt,srcText) = case inline of
                Just inline1 -> (cvtInline inline1, dfltActivation inline1,
                                 src inline1)
-               Nothing      -> (EmptyInlineSpec,   AlwaysActive,
+               Nothing      -> (NoUserInline,   AlwaysActive,
                                 "{-# SPECIALISE")
        ; let ip = InlinePragma { inl_src    = SourceText srcText
                                , inl_inline = inline'
@@ -760,8 +762,7 @@ cvtClause ctxt (Clause ps body wheres)
         ; pps <- mapM wrap_conpat ps'
         ; g'  <- cvtGuard body
         ; ds' <- cvtLocalDecs (text "a where clause") wheres
-        ; returnL $ Hs.Match ctxt pps Nothing
-                             (GRHSs g' (noLoc ds')) }
+        ; returnL $ Hs.Match ctxt pps (GRHSs g' (noLoc ds')) }
 
 
 -------------------------------------------------------------------
@@ -999,8 +1000,7 @@ cvtMatch ctxt (TH.Match p body decs)
             _       -> wrap_conpat p'
         ; g' <- cvtGuard body
         ; decs' <- cvtLocalDecs (text "a where clause") decs
-        ; returnL $ Hs.Match ctxt [lp] Nothing
-                             (GRHSs g' (noLoc decs')) }
+        ; returnL $ Hs.Match ctxt [lp] (GRHSs g' (noLoc decs')) }
 
 cvtGuard :: TH.Body -> CvtM [LGRHS GhcPs (LHsExpr GhcPs)]
 cvtGuard (GuardedB pairs) = mapM cvtpair pairs
@@ -1330,13 +1330,37 @@ mk_apps head_ty (ty:tys) =
      ; p_ty      <- add_parens ty
      ; mk_apps (HsAppTy head_ty' p_ty) tys }
   where
-    add_parens t@(L _ HsAppTy{}) = returnL (HsParTy t)
-    add_parens t@(L _ HsFunTy{}) = returnL (HsParTy t)
-    add_parens t                 = return t
+    -- See Note [Adding parens for splices]
+    add_parens t
+      | isCompoundHsType t = returnL (HsParTy t)
+      | otherwise          = return t
 
 wrap_apps  :: LHsType GhcPs -> CvtM (LHsType GhcPs)
 wrap_apps t@(L _ HsAppTy {}) = returnL (HsParTy t)
 wrap_apps t                  = return t
+
+-- ---------------------------------------------------------------------
+-- Note [Adding parens for splices]
+{-
+The hsSyn representation of parsed source explicitly contains all the original
+parens, as written in the source.
+
+When a Template Haskell (TH) splice is evaluated, the original splice is first
+renamed and type checked and then finally converted to core in DsMeta. This core
+is then run in the TH engine, and the result comes back as a TH AST.
+
+In the process, all parens are stripped out, as they are not needed.
+
+This Convert module then converts the TH AST back to hsSyn AST.
+
+In order to pretty-print this hsSyn AST, parens need to be adde back at certain
+points so that the code is readable with its original meaning.
+
+So scattered through Convert.hs are various points where parens are added.
+
+See (among other closed issued) https://ghc.haskell.org/trac/ghc/ticket/14289
+-}
+-- ---------------------------------------------------------------------
 
 -- | Constructs an arrow type with a specified return type
 mk_arr_apps :: [LHsType GhcPs] -> HsType GhcPs -> CvtM (LHsType GhcPs)

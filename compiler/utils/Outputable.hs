@@ -15,7 +15,7 @@ module Outputable (
 
         -- * Pretty printing combinators
         SDoc, runSDoc, initSDocContext,
-        docToSDoc, sdocWithPprDebug,
+        docToSDoc,
         interppSP, interpp'SP,
         pprQuotedList, pprWithCommas, quotedListWithOr, quotedListWithNor,
         pprWithBars,
@@ -72,16 +72,21 @@ module Outputable (
         getPprStyle, withPprStyle, withPprStyleDoc, setStyleColoured,
         pprDeeper, pprDeeperList, pprSetDepth,
         codeStyle, userStyle, debugStyle, dumpStyle, asmStyle,
-        ifPprDebug, qualName, qualModule, qualPackage,
+        qualName, qualModule, qualPackage,
         mkErrStyle, defaultErrStyle, defaultDumpStyle, mkDumpStyle, defaultUserStyle,
         mkUserStyle, cmdlineParserStyle, Depth(..),
+
+        ifPprDebug, whenPprDebug, getPprDebug,
 
         -- * Error handling and debugging utilities
         pprPanic, pprSorry, assertPprPanic, pprPgmError,
         pprTrace, pprTraceDebug, pprTraceIt, warnPprTrace, pprSTrace,
+        pprTraceException,
         trace, pgmError, panic, sorry, assertPanic,
-        pprDebugAndThen, callStackDoc
+        pprDebugAndThen, callStackDoc,
     ) where
+
+import GhcPrelude
 
 import {-# SOURCE #-}   DynFlags( DynFlags, hasPprDebug, hasNoDebugOutput,
                                   targetPlatform, pprUserLength, pprCols,
@@ -122,6 +127,8 @@ import Data.List (intersperse)
 import GHC.Fingerprint
 import GHC.Show         ( showMultiLineString )
 import GHC.Stack        ( callStack, prettyCallStack )
+import Control.Monad.IO.Class
+import Exception
 
 {-
 ************************************************************************
@@ -247,8 +254,8 @@ defaultUserStyle dflags = mkUserStyle dflags neverQualify AllTheWay
 defaultDumpStyle :: DynFlags -> PprStyle
  -- Print without qualifiers to reduce verbosity, unless -dppr-debug
 defaultDumpStyle dflags
-   |  hasPprDebug dflags = PprDebug
-   |  otherwise          = PprDump neverQualify
+   | hasPprDebug dflags = PprDebug
+   | otherwise          = PprDump neverQualify
 
 mkDumpStyle :: DynFlags -> PrintUnqualified -> PprStyle
 mkDumpStyle dflags print_unqual
@@ -339,9 +346,6 @@ withPprStyle sty d = SDoc $ \ctxt -> runSDoc d ctxt{sdocStyle=sty}
 withPprStyleDoc :: DynFlags -> PprStyle -> SDoc -> Doc
 withPprStyleDoc dflags sty d = runSDoc d (initSDocContext dflags sty)
 
-sdocWithPprDebug :: (Bool -> SDoc) -> SDoc
-sdocWithPprDebug f = sdocWithDynFlags $ \dflags -> f (hasPprDebug dflags)
-
 pprDeeper :: SDoc -> SDoc
 pprDeeper d = SDoc $ \ctx -> case ctx of
   SDC{sdocStyle=PprUser _ (PartWay 0) _} -> Pretty.text "..."
@@ -422,11 +426,16 @@ userStyle ::  PprStyle -> Bool
 userStyle (PprUser {}) = True
 userStyle _other       = False
 
-ifPprDebug :: SDoc -> SDoc        -- Empty for non-debug style
-ifPprDebug d = SDoc $ \ctx ->
-    case ctx of
-        SDC{sdocStyle=PprDebug} -> runSDoc d ctx
-        _                       -> Pretty.empty
+getPprDebug :: (Bool -> SDoc) -> SDoc
+getPprDebug d = getPprStyle $ \ sty -> d (debugStyle sty)
+
+ifPprDebug :: SDoc -> SDoc -> SDoc
+-- ^ Says what to do with and without -dppr-debug
+ifPprDebug yes no = getPprDebug $ \ dbg -> if dbg then yes else no
+
+whenPprDebug :: SDoc -> SDoc        -- Empty for non-debug style
+-- ^ Says what to do with -dppr-debug; without, return empty
+whenPprDebug d = ifPprDebug d empty
 
 -- | The analog of 'Pretty.printDoc_' for 'SDoc', which tries to make sure the
 --   terminal doesn't get screwed up by the ANSI color codes if an exception
@@ -779,6 +788,9 @@ instance Outputable Int64 where
 instance Outputable Int where
     ppr n = int n
 
+instance Outputable Integer where
+    ppr n = integer n
+
 instance Outputable Word16 where
     ppr n = integer $ fromIntegral n
 
@@ -1013,7 +1025,7 @@ pprQuotedList :: Outputable a => [a] -> SDoc
 pprQuotedList = quotedList . map ppr
 
 quotedList :: [SDoc] -> SDoc
-quotedList xs = hsep (punctuate comma (map quotes xs))
+quotedList xs = fsep (punctuate comma (map quotes xs))
 
 quotedListWithOr :: [SDoc] -> SDoc
 -- [x,y,z]  ==>  `x', `y' or `z'
@@ -1162,6 +1174,13 @@ pprTrace str doc x
 pprTraceIt :: Outputable a => String -> a -> a
 pprTraceIt desc x = pprTrace desc (ppr x) x
 
+-- | @pprTraceException desc x action@ runs action, printing a message
+-- if it throws an exception.
+pprTraceException :: ExceptionMonad m => String -> SDoc -> m a -> m a
+pprTraceException heading doc =
+    handleGhcException $ \exc -> liftIO $ do
+        putStrLn $ showSDocDump unsafeGlobalDynFlags (sep [text heading, nest 2 doc])
+        throwGhcExceptionIO exc
 
 -- | If debug output is on, show some 'SDoc' on the screen along
 -- with a call stack when available.

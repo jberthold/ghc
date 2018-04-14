@@ -20,6 +20,8 @@ module TcValidity (
 
 #include "HsVersions.h"
 
+import GhcPrelude
+
 import Maybes
 
 -- friends:
@@ -39,7 +41,7 @@ import TyCon
 -- others:
 import HsSyn            -- HsType
 import TcRnMonad        -- TcType, amongst others
-import TcEnv       ( tcGetInstEnvs )
+import TcEnv       ( tcGetInstEnvs, tcInitTidyEnv, tcInitOpenTidyEnv )
 import FunDeps
 import InstEnv     ( InstMatch, lookupInstEnv )
 import FamInstEnv  ( isDominatedBy, injectiveBranches,
@@ -62,6 +64,7 @@ import qualified GHC.LanguageExtensions as LangExt
 
 import Control.Monad
 import Data.List        ( (\\) )
+import qualified Data.List.NonEmpty as NE
 
 {-
 ************************************************************************
@@ -148,7 +151,7 @@ The nested forall is ambiguous.  Originally we called checkAmbiguity
 in the forall case of check_type, but that had two bad consequences:
   * We got two error messages about (Eq b) in a nested forall like this:
        g :: forall a. Eq a => forall b. Eq b => a -> a
-  * If we try to check for ambiguity of an nested forall like
+  * If we try to check for ambiguity of a nested forall like
     (forall a. Eq a => b), the implication constraint doesn't bind
     all the skolems, which results in "No skolem info" in error
     messages (see Trac #10432).
@@ -224,6 +227,7 @@ wantAmbiguityCheck ctxt
   = case ctxt of  -- See Note [When we don't check for ambiguity]
       GhciCtxt     -> False
       TySynCtxt {} -> False
+      TypeAppCtxt  -> False
       _            -> True
 
 checkUserTypeError :: Type -> TcM ()
@@ -267,6 +271,10 @@ In a few places we do not want to check a user-specified type for ambiguity
   TcTyVars before calling checkValidType, so we get asertion failures
   from doing an ambiguity check on a type with TyVars in it.  Fixing this
   would not be hard, but let's wait till there's a reason.
+
+* TypeAppCtxt: visible type application
+     f @ty
+  No need to check ty for ambiguity
 
 
 ************************************************************************
@@ -972,13 +980,13 @@ constraintSynErr env kind
     , hang (text "Illegal constraint synonym of kind:" <+> quotes (ppr_tidy env kind))
          2 (parens constraintKindsMsg) )
 
-dupPredWarn :: TidyEnv -> [[PredType]] -> (TidyEnv, SDoc)
+dupPredWarn :: TidyEnv -> [NE.NonEmpty PredType] -> (TidyEnv, SDoc)
 dupPredWarn env dups
   = ( env
     , text "Duplicate constraint" <> plural primaryDups <> text ":"
       <+> pprWithCommas (ppr_tidy env) primaryDups )
   where
-    primaryDups = map head dups
+    primaryDups = map NE.head dups
 
 tyConArityErr :: TyCon -> [TcType] -> SDoc
 -- For type-constructor arity errors, be careful to report
@@ -1554,8 +1562,8 @@ checkConsistentFamInst (Just (clas, inst_tvs, mini_env)) fam_tc at_tys pp_hs_pat
        ; checkTc (all check_arg type_shapes)   pp_wrong_at_arg
 
        -- And now kind args
-       ; checkTc (all check_arg kind_shapes)
-                 (pp_wrong_at_arg $$ ppSuggestExplicitKinds)
+       ; checkTcM (all check_arg kind_shapes)
+                  (tidy_env2, pp_wrong_at_arg $$ ppSuggestExplicitKinds)
 
        ; traceTc "cfi" (vcat [ ppr inst_tvs
                              , ppr arg_shapes
@@ -1584,7 +1592,16 @@ checkConsistentFamInst (Just (clas, inst_tvs, mini_env)) fam_tc at_tys pp_hs_pat
                vcat [ text "where the `<tv>' arguments are type variables,"
                     , text "distinct from each other and from the instance variables" ] ]
 
-    expected_args = [ exp_ty `orElse` mk_tv at_ty | (exp_ty, at_ty) <- arg_shapes ]
+    -- We need to tidy, since it's possible that expected_args will contain
+    -- inferred kind variables with names identical to those in at_tys. If we
+    -- don't, we'll end up with horrible messages like this one (#13972):
+    --
+    --   Expected: T (a -> Either a b)
+    --     Actual: T (a -> Either a b)
+    (tidy_env1, _) = tidyOpenTypes emptyTidyEnv at_tys
+    (tidy_env2, expected_args)
+      = tidyOpenTypes tidy_env1 [ exp_ty `orElse` mk_tv at_ty
+                                | (exp_ty, at_ty) <- arg_shapes ]
     mk_tv at_ty   = mkTyVarTy (mkTyVar tv_name (typeKind at_ty))
     tv_name = mkInternalName (mkAlphaTyVarUnique 1) (mkTyVarOcc "<tv>") noSrcSpan
 
@@ -1613,7 +1630,7 @@ checkValidCoAxiom ax@(CoAxiom { co_ax_tc = fam_tc, co_ax_branches = branches })
        ; foldlM_ check_branch_compat [] branch_list }
   where
     branch_list = fromBranches branches
-    injectivity = familyTyConInjectivityInfo fam_tc
+    injectivity = tyConInjectivityInfo fam_tc
 
     check_branch_compat :: [CoAxBranch]    -- previous branches in reverse order
                         -> CoAxBranch      -- current branch
@@ -1760,10 +1777,6 @@ checkValidTypePat pat_ty
           -- Ensure that no type family instances occur a type pattern
        ; checkTc (isTyFamFree pat_ty) $
          tyFamInstIllegalErr pat_ty }
-
-isTyFamFree :: Type -> Bool
--- ^ Check that a type does not contain any type family applications.
-isTyFamFree = null . tcTyFamInsts
 
 -- Error messages
 

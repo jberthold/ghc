@@ -15,6 +15,8 @@ module TcBinds ( tcLocalBinds, tcTopBinds, tcRecSelBinds,
                  chooseInferredQuantifiers,
                  badBootDeclErr ) where
 
+import GhcPrelude
+
 import {-# SOURCE #-} TcMatches ( tcGRHSsPat, tcMatchesFun )
 import {-# SOURCE #-} TcExpr  ( tcMonoExpr )
 import {-# SOURCE #-} TcPatSyn ( tcInferPatSynDecl, tcCheckPatSynDecl
@@ -40,7 +42,7 @@ import TyCon
 import TcType
 import Type( mkStrLitTy, tidyOpenType, splitTyConApp_maybe)
 import TysPrim
-import TysWiredIn( cTupleTyConName )
+import TysWiredIn( mkBoxedTupleTy )
 import Id
 import Var
 import VarSet
@@ -67,6 +69,7 @@ import qualified GHC.LanguageExtensions as LangExt
 import ConLike
 
 import Control.Monad
+import Data.List.NonEmpty ( NonEmpty(..) )
 
 #include "HsVersions.h"
 
@@ -407,7 +410,7 @@ tcValBinds top_lvl binds sigs thing_inside
 
                 -- Extend the envt right away with all the Ids
                 -- declared with complete type signatures
-                -- Do not extend the TcIdBinderStack; instead
+                -- Do not extend the TcBinderStack; instead
                 -- we extend it on a per-rhs basis in tcExtendForRhs
         ; tcExtendSigIds top_lvl poly_ids $ do
             { (binds', (extra_binds', thing)) <- tcBindGroups top_lvl sig_fn prag_fn binds $ do
@@ -701,7 +704,7 @@ tcPolyCheck prag_fn
 
        ; (ev_binds, (co_fn, matches'))
             <- checkConstraints skol_info skol_tvs ev_vars $
-               tcExtendIdBndrs [TcIdBndr mono_id NotTopLevel]  $
+               tcExtendBinderStack [TcIdBndr mono_id NotTopLevel]  $
                tcExtendTyVarEnv2 tv_prs $
                setSrcSpan loc           $
                tcMatchesFun (L nm_loc mono_name) matches (mkCheckExpType tau)
@@ -935,46 +938,11 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
                                       , sig_inst_wcx   = wcx
                                       , sig_inst_theta = annotated_theta
                                       , sig_inst_skols = annotated_tvs }))
-  | Nothing <- wcx
-  = do { annotated_theta <- zonkTcTypes annotated_theta
-       ; let free_tvs = closeOverKinds (tyCoVarsOfTypes annotated_theta
-                                        `unionVarSet` tau_tvs)
-       ; traceTc "ciq" (vcat [ ppr sig, ppr annotated_theta, ppr free_tvs])
-       ; psig_qtvs <- mk_psig_qtvs annotated_tvs
-       ; return (mk_final_qtvs psig_qtvs free_tvs, annotated_theta) }
-
-  | Just wc_var <- wcx
-  = do { annotated_theta <- zonkTcTypes annotated_theta
-       ; let free_tvs = closeOverKinds (growThetaTyVars inferred_theta seed_tvs)
-                          -- growThetaVars just like the no-type-sig case
-                          -- Omitting this caused #12844
-             seed_tvs = tyCoVarsOfTypes annotated_theta  -- These are put there
-                        `unionVarSet` tau_tvs            --       by the user
-
-       ; psig_qtvs <- mk_psig_qtvs annotated_tvs
-       ; let my_qtvs  = mk_final_qtvs psig_qtvs free_tvs
-             keep_me  = psig_qtvs `unionVarSet` free_tvs
-             my_theta = pickCapturedPreds keep_me inferred_theta
-
-       -- Report the inferred constraints for an extra-constraints wildcard/hole as
-       -- an error message, unless the PartialTypeSignatures flag is enabled. In this
-       -- case, the extra inferred constraints are accepted without complaining.
-       -- NB: inferred_theta already includes all the annotated constraints
-             inferred_diff = [ pred
-                             | pred <- my_theta
-                             , all (not . (`eqType` pred)) annotated_theta ]
-       ; ctuple <- mk_ctuple inferred_diff
-       ; writeMetaTyVar wc_var ctuple
-       ; traceTc "completeTheta" $
-            vcat [ ppr sig
-                 , ppr annotated_theta, ppr inferred_theta
-                 , ppr inferred_diff ]
-
-       ; return (my_qtvs, my_theta) }
-
-  | otherwise  -- A complete type signature is dealt with in mkInferredPolyId
-  = pprPanic "chooseInferredQuantifiers" (ppr sig)
-
+  = -- Choose quantifiers for a partial type signature
+    do { psig_qtvs            <- mk_psig_qtvs annotated_tvs
+       ; annotated_theta      <- zonkTcTypes annotated_theta
+       ; (free_tvs, my_theta) <- choose_psig_context psig_qtvs annotated_theta wcx
+       ; return (mk_final_qtvs psig_qtvs free_tvs, my_theta) }
   where
     mk_final_qtvs psig_qtvs free_tvs
       = [ mkTyVarBinder vis tv
@@ -985,14 +953,66 @@ chooseInferredQuantifiers inferred_theta tau_tvs qtvs
       where
         keep_me = free_tvs `unionVarSet` psig_qtvs
 
-    mk_ctuple [pred] = return pred
-    mk_ctuple preds  = do { tc <- tcLookupTyCon (cTupleTyConName (length preds))
-                          ; return (mkTyConApp tc preds) }
-
     mk_psig_qtvs :: [(Name,TcTyVar)] -> TcM TcTyVarSet
     mk_psig_qtvs annotated_tvs
-       = do { psig_qtvs <- mapM (zonkTcTyVarToTyVar . snd) annotated_tvs
+       = do { let (sig_tv_names, sig_tvs) = unzip annotated_tvs
+            ; psig_qtvs <- mapM zonkTcTyVarToTyVar sig_tvs
+
+            -- Report an error if the quantified variables of the
+            -- partial signature have been unified together
+            -- See Note [Quantified variables in partial type signatures]
+            ; let bad_sig_tvs = findDupsEq eq (sig_tv_names `zip` psig_qtvs)
+                  eq (_,tv1) (_,tv2) = tv1 == tv2
+            ; mapM_ (report_sig_tv_err sig) bad_sig_tvs
+
             ; return (mkVarSet psig_qtvs) }
+
+    report_sig_tv_err (PartialSig { psig_name = fn_name, psig_hs_ty = hs_ty })
+                      ((n1,_) :| (n2,_) : _)
+      = addErrTc (hang (text "Couldn't match" <+> quotes (ppr n1)
+                        <+> text "with" <+> quotes (ppr n2))
+                     2 (hang (text "both bound by the partial type signature:")
+                           2 (ppr fn_name <+> dcolon <+> ppr hs_ty)))
+    report_sig_tv_err sig _ = pprPanic "report_sig_tv_err" (ppr sig)
+                              -- Can't happen; by now we know it's a partial sig
+
+    choose_psig_context :: VarSet -> TcThetaType -> Maybe TcTyVar
+                        -> TcM (VarSet, TcThetaType)
+    choose_psig_context _ annotated_theta Nothing
+      = do { let free_tvs = closeOverKinds (tyCoVarsOfTypes annotated_theta
+                                            `unionVarSet` tau_tvs)
+           ; return (free_tvs, annotated_theta) }
+
+    choose_psig_context psig_qtvs annotated_theta (Just wc_var)
+      = do { let free_tvs = closeOverKinds (growThetaTyVars inferred_theta seed_tvs)
+                            -- growThetaVars just like the no-type-sig case
+                            -- Omitting this caused #12844
+                 seed_tvs = tyCoVarsOfTypes annotated_theta  -- These are put there
+                            `unionVarSet` tau_tvs            --       by the user
+
+           ; let keep_me  = psig_qtvs `unionVarSet` free_tvs
+                 my_theta = pickCapturedPreds keep_me inferred_theta
+
+           -- Fill in the extra-constraints wildcard hole with inferred_theta,
+           -- so that the Hole constraint we have already emitted
+           -- (in tcHsPartialSigType) can report what filled it in.
+           -- NB: my_theta already includes all the annotated constraints
+           ; let inferred_diff = [ pred
+                                 | pred <- my_theta
+                                 , all (not . (`eqType` pred)) annotated_theta ]
+           ; ctuple <- mk_ctuple inferred_diff
+           ; writeMetaTyVar wc_var ctuple
+
+           ; traceTc "completeTheta" $
+                vcat [ ppr sig
+                     , ppr annotated_theta, ppr inferred_theta
+                     , ppr inferred_diff ]
+           ; return (free_tvs, my_theta) }
+
+    mk_ctuple preds = return (mkBoxedTupleTy preds)
+       -- Hack alert!  See TcHsType:
+       -- Note [Extra-constraint holes in partial type signatures]
+
 
 mk_impedance_match_msg :: MonoBindInfo
                        -> TcType -> TcType
@@ -1090,6 +1110,27 @@ It's stupid to apply the MR here.  This test includes an extra-constraints
 wildcard; that is, we don't apply the MR if you write
    f3 :: _ => blah
 
+Note [Quantified variables in partial type signatures]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Consider
+  f :: forall a. a -> a -> _
+  f x y = g x y
+  g :: forall b. b -> b -> _
+  g x y = [x, y]
+
+Here, 'f' and 'g' are mutually recursive, and we end up unifyin 'a' and 'b'
+together, which is fine.  So we bind 'a' and 'b' to SigTvs, which can then
+unify with each other.
+
+But now consider:
+  f :: forall a b. a -> b -> _
+  f x y = [x, y]
+
+We want to get an error from this, because 'a' and 'b' get unified.
+So we make a test, one per parital signature, to check that the
+explicitly-quantified type variables have not been unified together.
+Trac #14449 showed this up.
+
 Note [Validity of inferred types]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We need to check inferred type for validity, in case it uses language
@@ -1160,7 +1201,7 @@ tcVectDecls decls
        ; return decls'
        }
   where
-    reportVectDups (first:_second:_more)
+    reportVectDups (first :| (_second:_more))
       = addErrAt (getSrcSpan first) $
           text "Duplicate vectorisation declarations for" <+> ppr first
     reportVectDups _ = return ()
@@ -1281,7 +1322,7 @@ tcMonoBinds is_rec sig_fn no_gen
             <- tcInferInst $ \ exp_ty ->
                   -- tcInferInst: see TcUnify,
                   -- Note [Deep instantiation of InferResult]
-               tcExtendIdBndrs [TcIdBndr_ExpType name exp_ty NotTopLevel] $
+               tcExtendBinderStack [TcIdBndr_ExpType name exp_ty NotTopLevel] $
                   -- We extend the error context even for a non-recursive
                   -- function so that in type error messages we show the
                   -- type of the thing whose rhs we are type checking
@@ -1469,7 +1510,7 @@ tcExtendTyVarEnvFromSig sig_inst thing_inside
     thing_inside
 
 tcExtendIdBinderStackForRhs :: [MonoBindInfo] -> TcM a -> TcM a
--- Extend the TcIdBinderStack for the RHS of the binding, with
+-- Extend the TcBinderStack for the RHS of the binding, with
 -- the monomorphic Id.  That way, if we have, say
 --     f = \x -> blah
 -- and something goes wrong in 'blah', we get a "relevant binding"
@@ -1478,12 +1519,12 @@ tcExtendIdBinderStackForRhs :: [MonoBindInfo] -> TcM a -> TcM a
 --    f :: forall a. [a] -> [a]
 --    f x = True
 -- We can't unify True with [a], and a relevant binding is f :: [a] -> [a]
--- If we had the *polymorphic* version of f in the TcIdBinderStack, it
+-- If we had the *polymorphic* version of f in the TcBinderStack, it
 -- would not be reported as relevant, because its type is closed
 tcExtendIdBinderStackForRhs infos thing_inside
-  = tcExtendIdBndrs [ TcIdBndr mono_id NotTopLevel
-                    | MBI { mbi_mono_id = mono_id } <- infos ]
-                    thing_inside
+  = tcExtendBinderStack [ TcIdBndr mono_id NotTopLevel
+                        | MBI { mbi_mono_id = mono_id } <- infos ]
+                        thing_inside
     -- NotTopLevel: it's a monomorphic binding
 
 ---------------------

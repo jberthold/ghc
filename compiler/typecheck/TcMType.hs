@@ -24,7 +24,7 @@ module TcMType (
   cloneMetaTyVar,
   newFmvTyVar, newFskTyVar,
 
-  readMetaTyVar, writeMetaTyVar, writeMetaTyVarRef,
+  readMetaTyVar, writeMetaTyVar,
   newMetaDetails, isFilledMetaTyVar, isUnfilledMetaTyVar,
 
   --------------------------------
@@ -90,6 +90,8 @@ module TcMType (
 #include "HsVersions.h"
 
 -- friends:
+import GhcPrelude
+
 import TyCoRep
 import TcType
 import Type
@@ -240,7 +242,7 @@ newDict cls tys
 predTypeOccName :: PredType -> OccName
 predTypeOccName ty = case classifyPredType ty of
     ClassPred cls _ -> mkDictOcc (getOccName cls)
-    EqPred _ _ _    -> mkVarOccFS (fsLit "cobox")
+    EqPred _ _ _    -> mkVarOccFS (fsLit "co")
     IrredPred _     -> mkVarOccFS (fsLit "irred")
 
 {-
@@ -580,12 +582,6 @@ instead of the buggous
 ************************************************************************
 -}
 
-mkMetaTyVarName :: Unique -> FastString -> Name
--- Makes a /System/ Name, which is eagerly eliminated by
--- the unifier; see TcUnify.nicer_to_update_tv1, and
--- TcCanonical.canEqTyVarTyVar (nicer_to_update_tv2)
-mkMetaTyVarName uniq str = mkSysTvName uniq str
-
 newSigTyVar :: Name -> Kind -> TcM TcTyVar
 newSigTyVar name kind
   = do { details <- newMetaDetails SigTv
@@ -681,8 +677,11 @@ writeMetaTyVarRef tyvar ref ty
        ; zonked_tv_kind <- zonkTcType tv_kind
        ; zonked_ty_kind <- zonkTcType ty_kind
        ; let kind_check_ok = isPredTy tv_kind  -- Don't check kinds for updates
-                                               -- to coercion variables
+                                               -- to coercion variables.  Why not??
+                          || isConstraintKind zonked_tv_kind
                           || tcEqKind zonked_ty_kind zonked_tv_kind
+             -- Hack alert! isConstraintKind: see TcHsType
+             -- Note [Extra-constraint holes in partial type signatures]
 
              kind_msg = hang (text "Ill-kinded update to meta tyvar")
                            2 (    ppr tyvar <+> text "::" <+> (ppr tv_kind $$ ppr zonked_tv_kind)
@@ -763,6 +762,12 @@ coercion variables, except for the special case of the promoted Eq#. But,
 that can't ever appear in user code, so we're safe!
 -}
 
+mkMetaTyVarName :: Unique -> FastString -> Name
+-- Makes a /System/ Name, which is eagerly eliminated by
+-- the unifier; see TcUnify.nicer_to_update_tv1, and
+-- TcCanonical.canEqTyVarTyVar (nicer_to_update_tv2)
+mkMetaTyVarName uniq str = mkSystemName uniq (mkTyVarOccFS str)
+
 newAnonMetaTyVar :: MetaInfo -> Kind -> TcM TcTyVar
 -- Make a new meta tyvar out of thin air
 newAnonMetaTyVar meta_info kind
@@ -775,6 +780,21 @@ newAnonMetaTyVar meta_info kind
                         SigTv       -> fsLit "a"
         ; details <- newMetaDetails meta_info
         ; return (mkTcTyVar name kind details) }
+
+cloneAnonMetaTyVar :: MetaInfo -> TyVar -> TcKind -> TcM TcTyVar
+-- Same as newAnonMetaTyVar, but use a supplied TyVar as the source of the print-name
+cloneAnonMetaTyVar info tv kind
+  = do  { uniq    <- newUnique
+        ; details <- newMetaDetails info
+        ; let name = mkSystemName uniq (getOccName tv)
+                       -- See Note [Name of an instantiated type variable]
+        ; return (mkTcTyVar name kind details) }
+
+{- Note [Name of an instantiated type variable]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+At the moment we give a unification variable a System Name, which
+influences the way it is tidied; see TypeRep.tidyTyVarBndr.
+-}
 
 newFlexiTyVar :: Kind -> TcM TcTyVar
 newFlexiTyVar kind = newAnonMetaTyVar TauTv kind
@@ -832,23 +852,20 @@ newWildCardX subst tv
 
 new_meta_tv_x :: MetaInfo -> TCvSubst -> TyVar -> TcM (TCvSubst, TcTyVar)
 new_meta_tv_x info subst tv
-  = do  { uniq <- newUnique
-        ; details <- newMetaDetails info
-        ; let name   = mkSystemName uniq (getOccName tv)
-                       -- See Note [Name of an instantiated type variable]
-              kind   = substTyUnchecked subst (tyVarKind tv)
-                       -- NOTE: Trac #12549 is fixed so we could use
-                       -- substTy here, but the tc_infer_args problem
-                       -- is not yet fixed so leaving as unchecked for now.
-                       -- OLD NOTE:
-                       -- Unchecked because we call newMetaTyVarX from
-                       -- tcInstBinder, which is called from tc_infer_args
-                       -- which does not yet take enough trouble to ensure
-                       -- the in-scope set is right; e.g. Trac #12785 trips
-                       -- if we use substTy here
-              new_tv = mkTcTyVar name kind details
-              subst1 = extendTvSubstWithClone subst tv new_tv
+  = do  { new_tv <- cloneAnonMetaTyVar info tv substd_kind
+        ; let subst1 = extendTvSubstWithClone subst tv new_tv
         ; return (subst1, new_tv) }
+  where
+    substd_kind = substTyUnchecked subst (tyVarKind tv)
+      -- NOTE: Trac #12549 is fixed so we could use
+      -- substTy here, but the tc_infer_args problem
+      -- is not yet fixed so leaving as unchecked for now.
+      -- OLD NOTE:
+      -- Unchecked because we call newMetaTyVarX from
+      -- tcInstBinder, which is called from tc_infer_args
+      -- which does not yet take enough trouble to ensure
+      -- the in-scope set is right; e.g. Trac #12785 trips
+      -- if we use substTy here
 
 newMetaTyVarTyAtLevel :: TcLevel -> TcKind -> TcM TcType
 newMetaTyVarTyAtLevel tc_lvl kind
@@ -860,12 +877,7 @@ newMetaTyVarTyAtLevel tc_lvl kind
                                , mtv_tclvl = tc_lvl }
         ; return (mkTyVarTy (mkTcTyVar name kind details)) }
 
-{- Note [Name of an instantiated type variable]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-At the moment we give a unification variable a System Name, which
-influences the way it is tidied; see TypeRep.tidyTyVarBndr.
-
-************************************************************************
+{- *********************************************************************
 *                                                                      *
              Quantification
 *                                                                      *
@@ -1258,7 +1270,7 @@ zonkTcTypeAndFV :: TcType -> TcM DTyCoVarSet
 -- where k2:=k1 is in the substitution.  We don't want
 -- k2 to look free in this type!
 -- NB: This might be called from within the knot, so don't use
--- smart constructors. See Note [Zonking within the knot] in TcHsType
+-- smart constructors. See Note [Type-checking inside the knot] in TcHsType
 zonkTcTypeAndFV ty
   = tyCoVarsOfTypeDSet <$> zonkTcTypeInKnot ty
 
@@ -1339,11 +1351,10 @@ zonkWC :: WantedConstraints -> TcM WantedConstraints
 zonkWC wc = zonkWCRec wc
 
 zonkWCRec :: WantedConstraints -> TcM WantedConstraints
-zonkWCRec (WC { wc_simple = simple, wc_impl = implic, wc_insol = insol })
+zonkWCRec (WC { wc_simple = simple, wc_impl = implic })
   = do { simple' <- zonkSimples simple
        ; implic' <- mapBagM zonkImplication implic
-       ; insol'  <- zonkSimples insol
-       ; return (WC { wc_simple = simple', wc_impl = implic', wc_insol = insol' }) }
+       ; return (WC { wc_simple = simple', wc_impl = implic' }) }
 
 zonkSimples :: Cts -> TcM Cts
 zonkSimples cts = do { cts' <- mapBagM zonkCt' cts
@@ -1354,10 +1365,12 @@ zonkCt' :: Ct -> TcM Ct
 zonkCt' ct = zonkCt ct
 
 {- Note [zonkCt behaviour]
+~~~~~~~~~~~~~~~~~~~~~~~~~~
 zonkCt tries to maintain the canonical form of a Ct.  For example,
   - a CDictCan should stay a CDictCan;
   - a CTyEqCan should stay a CTyEqCan (if the LHS stays as a variable.).
   - a CHoleCan should stay a CHoleCan
+  - a CIrredCan should stay a CIrredCan with its cc_insol flag intact
 
 Why?, for example:
 - For CDictCan, the @TcSimplify.expandSuperClasses@ step, which runs after the
@@ -1368,21 +1381,27 @@ Why?, for example:
 
 - For CHoleCan, once we forget that it's a hole, we can never recover that info.
 
+- For CIrredCan we want to see if a constraint is insoluble with insolubleWC
+
 NB: we do not expect to see any CFunEqCans, because zonkCt is only
 called on unflattened constraints.
+
 NB: Constraints are always re-flattened etc by the canonicaliser in
 @TcCanonical@ even if they come in as CDictCan. Only canonical constraints that
 are actually in the inert set carry all the guarantees. So it is okay if zonkCt
 creates e.g. a CDictCan where the cc_tyars are /not/ function free.
 -}
+
 zonkCt :: Ct -> TcM Ct
 zonkCt ct@(CHoleCan { cc_ev = ev })
   = do { ev' <- zonkCtEvidence ev
        ; return $ ct { cc_ev = ev' } }
+
 zonkCt ct@(CDictCan { cc_ev = ev, cc_tyargs = args })
   = do { ev'   <- zonkCtEvidence ev
        ; args' <- mapM zonkTcType args
        ; return $ ct { cc_ev = ev', cc_tyargs = args' } }
+
 zonkCt ct@(CTyEqCan { cc_ev = ev, cc_tyvar = tv, cc_rhs = rhs })
   = do { ev'    <- zonkCtEvidence ev
        ; tv_ty' <- zonkTcTyVar tv
@@ -1392,6 +1411,11 @@ zonkCt ct@(CTyEqCan { cc_ev = ev, cc_tyvar = tv, cc_rhs = rhs })
                                       , cc_tyvar = tv'
                                       , cc_rhs   = rhs' } }
            Nothing  -> return (mkNonCanonical ev') }
+
+zonkCt ct@(CIrredCan { cc_ev = ev }) -- Preserve the cc_insol flag
+  = do { ev' <- zonkCtEvidence ev
+       ; return (ct { cc_ev = ev' }) }
+
 zonkCt ct
   = ASSERT( not (isCFunEqCan ct) )
   -- We do not expect to see any CFunEqCans, because zonkCt is only called on
