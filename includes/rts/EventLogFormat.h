@@ -211,6 +211,7 @@
 /* ghc changed how it handles sparks so these are no longer applicable */
 #define EVENT_CREATE_SPARK        13 /* (cap, thread) */
 #define EVENT_SPARK_TO_THREAD     14 /* (cap, thread, spark_thread) */
+#define EVENT_STARTUP             17 /* (num_capabilities) */
 #endif
 
 /*
