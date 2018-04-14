@@ -354,6 +354,8 @@ void GNU_ATTRIBUTE(__noreturn__)
 edenFatalInternalErrorFn(const char *s, va_list ap)
 {
 #if defined (mingw32_HOST_OS)
+  /* Ensure we're in text mode so newlines get encoded properly.  */
+  int mode = _setmode (_fileno(stderr), _O_TEXT);
   if (isGUIApp())
   {
      char title[BUFSIZE], message[BUFSIZE];
@@ -380,7 +382,7 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
   vfprintf(stderr, s, ap);
 #if USE_LIBDW
      fprintf(stderr, "\n");
-     fprintf(stderr, "Stack trace:");
+     fprintf(stderr, "Stack trace:\n");
      LibdwSession *session = libdwInit();
      Backtrace *bt = libdwGetBacktrace(session);
      libdwPrintBacktrace(session, stderr, bt);
@@ -393,6 +395,10 @@ edenFatalInternalErrorFn(const char *s, va_list ap)
           "http://www.mathematik.uni-marburg.de/~eden\n");
   fflush(stderr);
 
+#if defined(mingw32_HOST_OS)
+  _setmode (_fileno(stderr), mode);
+#endif
+
   // The sequential system uses abort(); but we would like to shut down the
   // entire system cleanly, using stg_exit. (which calls exit, hence noreturn)
   stg_exit(EXIT_INTERNAL_ERROR);
@@ -403,6 +409,8 @@ void
 parErrorMsgFn(const char *s, va_list ap)
 {
 #if defined (mingw32_HOST_OS)
+  /* Ensure we're in text mode so newlines get encoded properly.  */
+  int mode = _setmode (_fileno(stderr), _O_TEXT);
   if (isGUIApp())
   {
      char buf[BUFSIZE];
@@ -431,6 +439,9 @@ parErrorMsgFn(const char *s, va_list ap)
     vfprintf(stderr, s, ap);
     fprintf(stderr, "\n");
   }
+#if defined(mingw32_HOST_OS)
+  _setmode (_fileno(stderr), mode);
+#endif
 }
 
 void
@@ -439,6 +450,8 @@ parSysErrorMsgFn(const char *s, va_list ap)
   char *syserr;
 
 #if defined (mingw32_HOST_OS)
+  /* Ensure we're in text mode so newlines get encoded properly.  */
+  int mode = _setmode (_fileno(stderr), _O_TEXT);
   FormatMessage(
         FORMAT_MESSAGE_ALLOCATE_BUFFER |
         FORMAT_MESSAGE_FROM_SYSTEM |
@@ -480,7 +493,7 @@ parSysErrorMsgFn(const char *s, va_list ap)
         }
         vfprintf(stderr, s, ap);
         if (syserr) {
-#if defined (mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS)
             // Win32 error messages have a terminating \n
             fprintf(stderr, ": %s", syserr);
 #else
@@ -491,8 +504,9 @@ parSysErrorMsgFn(const char *s, va_list ap)
         }
     }
 
-#if defined (mingw32_HOST_OS)
+#if defined(mingw32_HOST_OS)
     if (syserr) LocalFree(syserr);
+    _setmode (_fileno(stderr), mode);
 #endif
 }
 
@@ -500,6 +514,8 @@ void
 parDebugMsgFn(const char *s, va_list ap)
 {
 #if defined (mingw32_HOST_OS)
+  /* Ensure we're in text mode so newlines get encoded properly.  */
+  int mode = _setmode (_fileno(stderr), _O_TEXT);
   if (isGUIApp())
   {
      char buf[BUFSIZE];
@@ -517,5 +533,8 @@ parDebugMsgFn(const char *s, va_list ap)
     vfprintf(stderr, s, ap);
     fflush(stderr);
   }
+#if defined(mingw32_HOST_OS)
+  _setmode (_fileno(stderr), mode);
+#endif
 }
 #endif
