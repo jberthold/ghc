@@ -294,3 +294,6 @@ test('T14152', [ only_ways(['optasm']), check_errmsg(r'dead code') ], compile, [
 test('T14152a', [ only_ways(['optasm']), check_errmsg(r'dead code') ], compile, ['-fno-exitification -ddump-simpl'])
 test('T13990', normal, compile, ['-dcore-lint -O'])
 test('T14650', normal, compile, ['-O2'])
+test('T14959', normal, compile, ['-O'])
+test('T15002', [ req_profiling ], compile, ['-O -fprof-auto -prof'])
+test('T15005', normal, compile, ['-O'])

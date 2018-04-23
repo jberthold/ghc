@@ -13,7 +13,7 @@ dnl
 # see what flags are available. (Better yet, read the documentation!)
 #
 
-AC_INIT([The Parallel Haskell Compilation System], [8.4.1], [eden@mathematik.uni-marburg.de], [ghc-AC_PACKAGE_VERSION])
+AC_INIT([The Parallel Haskell Compilation System], [8.4.2], [eden@mathematik.uni-marburg.de], [ghc-AC_PACKAGE_VERSION])
 
 # Set this to YES for a released version, otherwise NO
 : ${RELEASE=YES}
@@ -797,13 +797,23 @@ dnl if GNU patch is named gpatch, look for it first
 AC_PATH_PROGS(PatchCmd,gpatch patch, patch)
 
 dnl ** check for dtrace (currently only implemented for Mac OS X)
+AC_ARG_ENABLE(dtrace,
+    [AC_HELP_STRING([--enable-dtrace],
+        [Enable DTrace])],
+    EnableDtrace=$enableval,
+    EnableDtrace=yes
+)
+
 HaveDtrace=NO
+
 AC_PATH_PROG(DtraceCmd,dtrace)
-if test -n "$DtraceCmd"; then
-  if test "x$TargetOS_CPP-$TargetVendor_CPP" = "xdarwin-apple" \
-		-o "x$TargetOS_CPP-$TargetVendor_CPP" = "xfreebsd-portbld" \
-		-o "x$TargetOS_CPP-$TargetVendor_CPP" = "xsolaris2-unknown"; then
-    HaveDtrace=YES
+if test "x$EnableDtrace" = "xyes"; then
+  if test -n "$DtraceCmd"; then
+    if test "x$TargetOS_CPP-$TargetVendor_CPP" = "xdarwin-apple" \
+      -o "x$TargetOS_CPP-$TargetVendor_CPP" = "xfreebsd-portbld" \
+      -o "x$TargetOS_CPP-$TargetVendor_CPP" = "xsolaris2-unknown"; then
+      HaveDtrace=YES
+    fi
   fi
 fi
 AC_SUBST(HaveDtrace)

@@ -779,11 +779,22 @@ checkTyClHdr is_cls ty
       = parseErrorSDoc l (text "Malformed head of type or class declaration:"
                           <+> ppr ty)
 
+-- | Validate the context constraints and break up a context into a list
+-- of predicates.
+--
+-- @
+--     (Eq a, Ord b)        -->  [Eq a, Ord b]
+--     Eq a                 -->  [Eq a]
+--     (Eq a)               -->  [Eq a]
+--     (((Eq a)))           -->  [Eq a]
+-- @
 checkContext :: LHsType GhcPs -> P ([AddAnn],LHsContext GhcPs)
 checkContext (L l orig_t)
   = check [] (L l orig_t)
  where
-  check anns (L lp (HsTupleTy _ ts))   -- (Eq a, Ord b) shows up as a tuple type
+  check anns (L lp (HsTupleTy HsBoxedOrConstraintTuple ts))
+    -- (Eq a, Ord b) shows up as a tuple type. Only boxed tuples can
+    -- be used as context constraints.
     = return (anns ++ mkParensApiAnn lp,L l ts)                -- Ditto ()
 
     -- don't let HsAppsTy get in the way
@@ -875,12 +886,13 @@ checkAPat msg loc e0 = do
                       | extopt LangExt.NPlusKPatterns opts && (plus == plus_RDR)
                       -> return (mkNPlusKPat (L nloc n) (L lloc lit))
 
-   OpApp l op _fix r  -> do l <- checkLPat msg l
-                            r <- checkLPat msg r
-                            case op of
-                               L cl (HsVar (L _ c)) | isDataOcc (rdrNameOcc c)
-                                      -> return (ConPatIn (L cl c) (InfixCon l r))
-                               _ -> patFail msg loc e0
+   OpApp l (L cl (HsVar (L _ c))) _fix r
+     | isDataOcc (rdrNameOcc c) -> do
+         l <- checkLPat msg l
+         r <- checkLPat msg r
+         return (ConPatIn (L cl c) (InfixCon l r))
+
+   OpApp _l _op _fix _r -> patFail msg loc e0
 
    HsPar e            -> checkLPat msg e >>= (return . ParPat)
    ExplicitList _ _ es  -> do ps <- mapM (checkLPat msg) es
