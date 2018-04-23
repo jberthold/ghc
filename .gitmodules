@@ -131,3 +131,6 @@
 [submodule "libraries/edenmodules"]
 	path = libraries/edenmodules
 	url = git://hex.mathematik.uni-marburg.de/edenmodules.git
+[submodule "hadrian"]
+	path = hadrian
+	url = http://git.haskell.org/hadrian.git

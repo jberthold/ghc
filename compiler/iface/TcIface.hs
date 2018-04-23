@@ -897,6 +897,9 @@ tcIfaceDataCons tycon_name tycon tc_tybinders if_cons
     univ_tvs :: [TyVar]
     univ_tvs = binderVars (tyConTyVarBinders tc_tybinders)
 
+    tag_map :: NameEnv ConTag
+    tag_map = mkTyConTagMap tycon
+
     tc_con_decl (IfCon { ifConInfix = is_infix,
                          ifConExTvs = ex_bndrs,
                          ifConUserTvBinders = user_bndrs,
@@ -960,7 +963,7 @@ tcIfaceDataCons tycon_name tycon tc_tybinders if_cons
                        lbl_names
                        univ_tvs ex_tvs user_tv_bndrs
                        eq_spec theta
-                       arg_tys orig_res_ty tycon
+                       arg_tys orig_res_ty tycon tag_map
         ; traceIf (text "Done interface-file tc_con_decl" <+> ppr dc_name)
         ; return con }
     mk_doc con_name = text "Constructor" <+> ppr con_name
@@ -1341,7 +1344,6 @@ tcIfaceCo = go
     go (IfaceForAllCo tv k c)  = do { k' <- go k
                                       ; bindIfaceTyVar tv $ \ tv' ->
                                         ForAllCo tv' k' <$> go c }
-    go (IfaceFreeCoVar c)        = pprPanic "tcIfaceCo:IfaceFreeCoVar" (ppr c)
     go (IfaceCoVarCo n)          = CoVarCo <$> go_var n
     go (IfaceAxiomInstCo n i cs) = AxiomInstCo <$> tcIfaceCoAxiom n <*> pure i <*> mapM go cs
     go (IfaceUnivCo p r t1 t2)   = UnivCo <$> tcIfaceUnivCoProv p <*> pure r
@@ -1351,31 +1353,26 @@ tcIfaceCo = go
                                             <*> go c2
     go (IfaceInstCo c1 t2)       = InstCo   <$> go c1
                                             <*> go t2
-    go (IfaceNthCo d c)          = NthCo d  <$> go c
+    go (IfaceNthCo d c)          = do { c' <- go c
+                                      ; return $ mkNthCo (nthCoRole d c') d c' }
     go (IfaceLRCo lr c)          = LRCo lr  <$> go c
     go (IfaceCoherenceCo c1 c2)  = CoherenceCo <$> go c1
                                                <*> go c2
     go (IfaceKindCo c)           = KindCo   <$> go c
     go (IfaceSubCo c)            = SubCo    <$> go c
-    go (IfaceAxiomRuleCo ax cos) = AxiomRuleCo <$> go_axiom_rule ax
+    go (IfaceAxiomRuleCo ax cos) = AxiomRuleCo <$> tcIfaceCoAxiomRule ax
                                                <*> mapM go cos
+    go (IfaceFreeCoVar c)        = pprPanic "tcIfaceCo:IfaceFreeCoVar" (ppr c)
+    go (IfaceHoleCo c)           = pprPanic "tcIfaceCo:IfaceHoleCo"    (ppr c)
 
     go_var :: FastString -> IfL CoVar
     go_var = tcIfaceLclId
-
-    go_axiom_rule :: FastString -> IfL CoAxiomRule
-    go_axiom_rule n =
-      case Map.lookup n typeNatCoAxiomRules of
-        Just ax -> return ax
-        _  -> pprPanic "go_axiom_rule" (ppr n)
 
 tcIfaceUnivCoProv :: IfaceUnivCoProv -> IfL UnivCoProvenance
 tcIfaceUnivCoProv IfaceUnsafeCoerceProv     = return UnsafeCoerceProv
 tcIfaceUnivCoProv (IfacePhantomProv kco)    = PhantomProv <$> tcIfaceCo kco
 tcIfaceUnivCoProv (IfaceProofIrrelProv kco) = ProofIrrelProv <$> tcIfaceCo kco
 tcIfaceUnivCoProv (IfacePluginProv str)     = return $ PluginProv str
-tcIfaceUnivCoProv (IfaceHoleProv _)         =
-    pprPanic "tcIfaceUnivCoProv" (text "holes can't occur in interface files")
 
 {-
 ************************************************************************
@@ -1805,6 +1802,16 @@ tcIfaceTyCon (IfaceTyCon name info)
 tcIfaceCoAxiom :: Name -> IfL (CoAxiom Branched)
 tcIfaceCoAxiom name = do { thing <- tcIfaceImplicit name
                          ; return (tyThingCoAxiom thing) }
+
+
+tcIfaceCoAxiomRule :: IfLclName -> IfL CoAxiomRule
+-- Unlike CoAxioms, which arise form user 'type instance' declarations,
+-- there are a fixed set of CoAxiomRules,
+-- currently enumerated in typeNatCoAxiomRules
+tcIfaceCoAxiomRule n
+  = case Map.lookup n typeNatCoAxiomRules of
+        Just ax -> return ax
+        _  -> pprPanic "tcIfaceCoAxiomRule" (ppr n)
 
 tcIfaceDataCon :: Name -> IfL DataCon
 tcIfaceDataCon name = do { thing <- tcIfaceGlobal name
