@@ -73,7 +73,6 @@ import Control.Monad
 import Data.List        ( isInfixOf, isSuffixOf, intercalate )
 import Data.Maybe
 import System.Environment
-import Data.Char
 import Data.Version
 import Data.Either      ( partitionEithers )
 

@@ -1568,7 +1568,7 @@ static StgWord PackArray(PackState *p, StgClosure *closure) {
     tag = GET_CLOSURE_TAG(closure);
     closure = UNTAG_CLOSURE(closure);
 
-#if DEBUG
+#if defined(DEBUG)
     /* get info about basic layout of the closure */
     const StgInfoTable *info = get_itbl(closure);
 
@@ -2826,7 +2826,7 @@ static void checkPacket(StgWord* buffer, uint32_t size) {
             // This is rather a test for getClosureInfo...but used here
             if (clsize != HEADERSIZE + vhs + ptrs + nonptrs) {
                 barf("size mismatch in packed closure at %p :"
-                     "(%d + %d + %d +%d != %d)", bufptr,
+                     "(%" FMT_Word " + %d + %d +%d != %d)", bufptr,
                      HEADERSIZE, vhs, ptrs, nonptrs, clsize);
             }
 
@@ -2873,7 +2873,7 @@ static void checkPacket(StgWord* buffer, uint32_t size) {
 
             openptrs += (StgInt) ptrs; // closure needs some pointers to be filled in
         } else {
-            barf("found invalid tag %x in packet", *bufptr);
+            barf("found invalid tag %" FMT_Word " in packet", *bufptr);
         }
 
         openptrs--; // one thing was unpacked
@@ -2883,7 +2883,7 @@ static void checkPacket(StgWord* buffer, uint32_t size) {
     PACKDEBUG(debugBelch(" traversed %" FMT_Word " words.", packsize));
 
     if (openptrs != 0) {
-        barf("%d open pointers at end of packet ",
+        barf("%" FMT_Word " open pointers at end of packet ",
                 openptrs);
     }
 
