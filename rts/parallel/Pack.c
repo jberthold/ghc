@@ -56,6 +56,13 @@
 #define true  rtsTrue
 #define false rtsFalse
 #endif
+// and sometimes things just need to have the right name (on it?..)
+#if __GLASGOW_HASKELL__ < 805
+#define SMALL_MUT_ARR_PTRS_FROZEN_DIRTY SMALL_MUT_ARR_PTRS_FROZEN0
+#define SMALL_MUT_ARR_PTRS_FROZEN_CLEAN SMALL_MUT_ARR_PTRS_FROZEN
+#define MUT_ARR_PTRS_FROZEN_DIRTY MUT_ARR_PTRS_FROZEN0
+#define MUT_ARR_PTRS_FROZEN_CLEAN MUT_ARR_PTRS_FROZEN
+#endif
 
 
 #if defined(DEBUG)
@@ -586,8 +593,8 @@ getClosureInfo(StgClosure* node, StgInfoTable* info,
         */
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
-    case MUT_ARR_PTRS_FROZEN0:
-    case MUT_ARR_PTRS_FROZEN:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
         *vhs = 2;
         *ptrs = ((StgMutArrPtrs*) node)->ptrs;
         *nonptrs = ((StgMutArrPtrs*) node)->size - *ptrs; // count card table
@@ -598,8 +605,8 @@ getClosureInfo(StgClosure* node, StgInfoTable* info,
         // Small arrays do not have card tables, straightforward
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
-    case SMALL_MUT_ARR_PTRS_FROZEN0:
-    case SMALL_MUT_ARR_PTRS_FROZEN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
         *vhs = 1; // ptrs field
         *ptrs = ((StgSmallMutArrPtrs*) node)->ptrs;
         *nonptrs = 0;
@@ -1115,8 +1122,8 @@ loop:
 
     case MUT_ARR_PTRS_CLEAN:
     case MUT_ARR_PTRS_DIRTY:
-    case MUT_ARR_PTRS_FROZEN0:
-    case MUT_ARR_PTRS_FROZEN:
+    case MUT_ARR_PTRS_FROZEN_CLEAN:
+    case MUT_ARR_PTRS_FROZEN_DIRTY:
         // Arrays of pointers have a card table to indicate dirty cells,
         // therefore not the simple pointers/nonpointers layout.
         // NB At this level, we cannot distinguish immutable arrays
@@ -1163,8 +1170,8 @@ loop:
 #if __GLASGOW_HASKELL__ >= 709
     case SMALL_MUT_ARR_PTRS_CLEAN:
     case SMALL_MUT_ARR_PTRS_DIRTY:
-    case SMALL_MUT_ARR_PTRS_FROZEN:
-    case SMALL_MUT_ARR_PTRS_FROZEN0:
+    case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+    case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
         // unlike the standard arrays, small arrays do not have a card table
         // Layout is thus: +------------------------------+
         //                 | hdr | #ptrs | payload (ptrs) |
@@ -1567,8 +1574,8 @@ static StgWord PackArray(PackState *p, StgClosure *closure) {
 
     ASSERT( info->type == MUT_ARR_PTRS_CLEAN
             || info->type == MUT_ARR_PTRS_DIRTY
-            || info->type == MUT_ARR_PTRS_FROZEN0
-            || info->type == MUT_ARR_PTRS_FROZEN);
+            || info->type == MUT_ARR_PTRS_FROZEN_CLEAN
+            || info->type == MUT_ARR_PTRS_FROZEN_DIRTY);
 #endif
 
     // MUT_ARR_PTRS_* {HDR,(no. of)ptrs,size(total incl.card table)}
@@ -1937,8 +1944,8 @@ UnpackClosure (ClosureQ* q, HashTable* offsets,
                 // space after data space, and enqueue the closure
             case MUT_ARR_PTRS_CLEAN:
             case MUT_ARR_PTRS_DIRTY:
-            case MUT_ARR_PTRS_FROZEN0:
-            case MUT_ARR_PTRS_FROZEN:
+            case MUT_ARR_PTRS_FROZEN_CLEAN:
+            case MUT_ARR_PTRS_FROZEN_DIRTY:
                 closure = UnpackArray(q, ip, bufptrP, cap);
                 break;
 
@@ -1972,8 +1979,8 @@ UnpackClosure (ClosureQ* q, HashTable* offsets,
 #if __GLASGOW_HASKELL__ >= 709
             case SMALL_MUT_ARR_PTRS_CLEAN:
             case SMALL_MUT_ARR_PTRS_DIRTY:
-            case SMALL_MUT_ARR_PTRS_FROZEN0:
-            case SMALL_MUT_ARR_PTRS_FROZEN:
+            case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+            case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
 #endif
 
                 PACKETDEBUG(
@@ -2228,8 +2235,10 @@ static StgClosure* UnpackArray(ClosureQ *queue, StgInfoTable* info,
     uint32_t type = INFO_PTR_TO_STRUCT(info)->type;
 
     // refuse to work if not an array
-    if (type != MUT_ARR_PTRS_CLEAN && type != MUT_ARR_PTRS_DIRTY &&
-        type != MUT_ARR_PTRS_FROZEN0 && type != MUT_ARR_PTRS_FROZEN) {
+    if (type != MUT_ARR_PTRS_CLEAN &&
+        type != MUT_ARR_PTRS_DIRTY &&
+        type != MUT_ARR_PTRS_FROZEN_CLEAN &&
+        type != MUT_ARR_PTRS_FROZEN_DIRTY) {
 
         PACKDEBUG(errorBelch("UnpackArray: unexpected closure type %d",
                              INFO_PTR_TO_STRUCT(info)->type));
@@ -2685,8 +2694,8 @@ print:
 
         case MUT_ARR_PTRS_CLEAN:
         case MUT_ARR_PTRS_DIRTY:
-        case MUT_ARR_PTRS_FROZEN0:
-        case MUT_ARR_PTRS_FROZEN:
+        case MUT_ARR_PTRS_FROZEN_CLEAN:
+        case MUT_ARR_PTRS_FROZEN_DIRTY:
             {
                 char str[6];
                 sprintf(str, "%ld", (long)((StgMutArrPtrs*)p)->ptrs);
@@ -2724,8 +2733,8 @@ print:
 #if __GLASGOW_HASKELL__ >= 709
         case SMALL_MUT_ARR_PTRS_CLEAN:
         case SMALL_MUT_ARR_PTRS_DIRTY:
-        case SMALL_MUT_ARR_PTRS_FROZEN0:
-        case SMALL_MUT_ARR_PTRS_FROZEN:
+        case SMALL_MUT_ARR_PTRS_FROZEN_CLEAN:
+        case SMALL_MUT_ARR_PTRS_FROZEN_DIRTY:
             {
                 char str[6];
                 sprintf(str,"%ld",(long)((StgSmallMutArrPtrs*)p)->ptrs);
@@ -2851,8 +2860,8 @@ static void checkPacket(StgWord* buffer, uint32_t size) {
                     break;
                 case MUT_ARR_PTRS_CLEAN:
                 case MUT_ARR_PTRS_DIRTY:
-                case MUT_ARR_PTRS_FROZEN0:
-                case MUT_ARR_PTRS_FROZEN:
+                case MUT_ARR_PTRS_FROZEN_CLEAN:
+                case MUT_ARR_PTRS_FROZEN_DIRTY:
                     // card table is counted as non-pointer, but not in packet
                     bufptr += sizeofW(StgHeader) + vhs;
                     packsize += 1 + sizeofW(StgHeader) + vhs;
