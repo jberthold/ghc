@@ -14,7 +14,7 @@ module CoreMonad (
     pprPassDetails,
 
     -- * Plugins
-    PluginPass, bindsOnlyPass,
+    CorePluginPass, bindsOnlyPass,
 
     -- * Counting
     SimplCount, doSimplTick, doFreeSimplTick, simplCountN,
@@ -55,8 +55,9 @@ module CoreMonad (
 
 import GhcPrelude hiding ( read )
 
-import Name( Name )
-import TcRnMonad        ( initTcForLookup )
+import Convert
+import RdrName
+import Name
 import CoreSyn
 import HscTypes
 import Module
@@ -81,6 +82,7 @@ import Data.List
 import Data.Ord
 import Data.Dynamic
 import Data.IORef
+import Data.Maybe
 import Data.Map (Map)
 import qualified Data.Map as Map
 import qualified Data.Map.Strict as MapStrict
@@ -88,7 +90,6 @@ import Data.Word
 import Control.Monad
 import Control.Applicative ( Alternative(..) )
 
-import {-# SOURCE #-} TcSplice ( lookupThName_maybe )
 import qualified Language.Haskell.TH as TH
 
 {-
@@ -107,7 +108,7 @@ data CoreToDo           -- These are diff core-to-core passes,
   = CoreDoSimplify      -- The core-to-core simplifier.
         Int                    -- Max iterations
         SimplMode
-  | CoreDoPluginPass String PluginPass
+  | CoreDoPluginPass String CorePluginPass
   | CoreDoFloatInwards
   | CoreDoFloatOutwards FloatOutSwitches
   | CoreLiberateCase
@@ -122,7 +123,6 @@ data CoreToDo           -- These are diff core-to-core passes,
   | CoreCSE
   | CoreDoRuleCheck CompilerPhase String   -- Check for non-application of rules
                                            -- matching this string
-  | CoreDoVectorisation
   | CoreDoNothing                -- Useful when building up
   | CoreDoPasses [CoreToDo]      -- lists of these things
 
@@ -148,7 +148,6 @@ instance Outputable CoreToDo where
   ppr CoreDoSpecialising       = text "Specialise"
   ppr CoreDoSpecConstr         = text "SpecConstr"
   ppr CoreCSE                  = text "Common sub-expression"
-  ppr CoreDoVectorisation      = text "Vectorisation"
   ppr CoreDesugar              = text "Desugar (before optimization)"
   ppr CoreDesugarOpt           = text "Desugar (after optimization)"
   ppr CoreTidy                 = text "Tidy Core"
@@ -238,7 +237,7 @@ runMaybe Nothing  _ = CoreDoNothing
 -}
 
 -- | A description of the plugin pass itself
-type PluginPass = ModGuts -> CoreM ModGuts
+type CorePluginPass = ModGuts -> CoreM ModGuts
 
 bindsOnlyPass :: (CoreProgram -> CoreM CoreProgram) -> ModGuts -> CoreM ModGuts
 bindsOnlyPass pass guts
@@ -811,6 +810,17 @@ instance MonadThings CoreM where
 -- to names in the module being compiled, if possible. Exact TH names
 -- will be bound to the name they represent, exactly.
 thNameToGhcName :: TH.Name -> CoreM (Maybe Name)
-thNameToGhcName th_name = do
-    hsc_env <- getHscEnv
-    liftIO $ initTcForLookup hsc_env (lookupThName_maybe th_name)
+thNameToGhcName th_name
+  =  do { names <- mapMaybeM lookup (thRdrNameGuesses th_name)
+          -- Pick the first that works
+          -- E.g. reify (mkName "A") will pick the class A in preference
+          -- to the data constructor A
+        ; return (listToMaybe names) }
+  where
+    lookup rdr_name
+      | Just n <- isExact_maybe rdr_name   -- This happens in derived code
+      = return $ if isExternalName n then Just n else Nothing
+      | Just (rdr_mod, rdr_occ) <- isOrig_maybe rdr_name
+      = do { cache <- getOrigNameCache
+           ; return $ lookupOrigNameCache cache rdr_mod rdr_occ }
+      | otherwise = return Nothing

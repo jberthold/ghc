@@ -494,7 +494,7 @@ addForeignSource lang src = do
   runIO $ writeFile path src
   addForeignFilePath lang path
 
--- | Same as 'addForeignSource', but expects to recieve a path pointing to the
+-- | Same as 'addForeignSource', but expects to receive a path pointing to the
 -- foreign file instead of a 'String' of its contents. Consider using this in
 -- conjunction with 'addTempFile'.
 --
@@ -731,8 +731,8 @@ trueName  = mkNameG DataName "ghc-prim" "GHC.Types" "True"
 falseName = mkNameG DataName "ghc-prim" "GHC.Types" "False"
 
 nothingName, justName :: Name
-nothingName = mkNameG DataName "base" "GHC.Base" "Nothing"
-justName    = mkNameG DataName "base" "GHC.Base" "Just"
+nothingName = mkNameG DataName "base" "GHC.Maybe" "Nothing"
+justName    = mkNameG DataName "base" "GHC.Maybe" "Just"
 
 leftName, rightName :: Name
 leftName  = mkNameG DataName "base" "Data.Either" "Left"
@@ -1743,6 +1743,7 @@ data DerivClause = DerivClause (Maybe DerivStrategy) Cxt
 data DerivStrategy = StockStrategy    -- ^ A \"standard\" derived instance
                    | AnyclassStrategy -- ^ @-XDeriveAnyClass@
                    | NewtypeStrategy  -- ^ @-XGeneralizedNewtypeDeriving@
+                   | ViaStrategy Type -- ^ @-XDerivingVia@
   deriving( Show, Eq, Ord, Data, Generic )
 
 -- | A Pattern synonym's type. Note that a pattern synonym's *fully*

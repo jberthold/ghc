@@ -70,7 +70,7 @@ import System.Directory
 import System.FilePath
 import System.IO
 import Control.Monad
-import Data.List        ( isSuffixOf, intercalate )
+import Data.List        ( isInfixOf, isSuffixOf, intercalate )
 import Data.Maybe
 import System.Environment
 import Data.Char
@@ -268,8 +268,7 @@ compileOne' m_tc_result mHscMessage
        prevailing_dflags = hsc_dflags hsc_env0
        dflags =
           dflags1 { includePaths = addQuoteInclude old_paths [current_dir]
-                  , log_action = log_action prevailing_dflags
-                  , log_finaliser = log_finaliser prevailing_dflags }
+                  , log_action = log_action prevailing_dflags }
                   -- use the prevailing log_action / log_finaliser,
                   -- not the one cached in the summary.  This is so
                   -- that we can change the log_action without having
@@ -825,7 +824,8 @@ llvmOptions dflags =
     ++ [("", "-filetype=obj") | fastLlvmPipeline dflags ]
 
     -- Additional llc flags
-    ++ [("", "-mcpu=" ++ mcpu)   | not (null mcpu) ]
+    ++ [("", "-mcpu=" ++ mcpu)   | not (null mcpu)
+                                 , not (any (isInfixOf "-mcpu") (getOpts dflags opt_lc)) ]
     ++ [("", "-mattr=" ++ attrs) | not (null attrs) ]
 
   where target = LLVM_TARGET
@@ -1476,10 +1476,12 @@ runPhase (RealPhase LlvmOpt) input_fn dflags
   where
         -- we always (unless -optlo specified) run Opt since we rely on it to
         -- fix up some pretty big deficiencies in the code we generate
-        llvmOpts = case optLevel dflags of
-          0 -> "-mem2reg -globalopt"
-          1 -> "-O1 -globalopt"
-          _ -> "-O2"
+        optIdx = max 0 $ min 2 $ optLevel dflags  -- ensure we're in [0,2]
+        llvmOpts = case lookup optIdx $ llvmPasses dflags of
+                    Just passes -> passes
+                    Nothing -> panic ("runPhase LlvmOpt: llvm-passes file "
+                                      ++ "is missing passes for level "
+                                      ++ show optIdx)
 
         -- don't specify anything if user has specified commands. We do this
         -- for opt but not llc since opt is very specifically for optimisation
@@ -1960,6 +1962,16 @@ linkBinary' staticLink dflags o_files dep_packages = do
               in ["-L" ++ l] ++ ["-Xlinker", "-rpath", "-Xlinker", libpath]
          | otherwise = ["-L" ++ l]
 
+    pkg_lib_path_opts <-
+      if gopt Opt_SingleLibFolder dflags
+      then do
+        libs <- getLibs dflags dep_packages
+        tmpDir <- newTempDir dflags
+        sequence_ [ copyFile lib (tmpDir </> basename)
+                  | (lib, basename) <- libs]
+        return [ "-L" ++ tmpDir ]
+      else pure pkg_lib_path_opts
+
     let
       dead_strip
         | gopt Opt_WholeArchiveHsLibs dflags = []
@@ -2118,6 +2130,9 @@ linkBinary' staticLink dflags o_files dep_packages = do
                       ++ mp_opts -- these linker flags must be explicitly added at the /end/ (changed since GHC 6.x), but before debug flags(?)
                       ++ debug_opts
                       ++ thread_opts
+                      ++ (if platformOS platform == OSDarwin
+                          then [ "-Wl,-dead_strip_dylibs" ]
+                          else [])
                     ))
 
     -- parallel only: move binary to another dir -- HWL

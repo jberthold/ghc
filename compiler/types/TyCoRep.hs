@@ -34,6 +34,7 @@ module TyCoRep (
         UnivCoProvenance(..),
         CoercionHole(..), coHoleCoVar, setCoHoleCoVar,
         CoercionN, CoercionR, CoercionP, KindCoercion,
+        MCoercion(..), MCoercionR,
 
         -- * Functions over types
         mkTyConTy, mkTyVarTy, mkTyVarTys,
@@ -62,7 +63,7 @@ module TyCoRep (
         pprTyVar, pprTyVars,
         pprThetaArrowTy, pprClassPred,
         pprKind, pprParendKind, pprTyLit,
-        TyPrec(..), maybeParen,
+        PprPrec(..), topPrec, sigPrec, opPrec, funPrec, appPrec, maybeParen,
         pprDataCons, ppSuggestExplicitKinds,
 
         pprCo, pprParendCo,
@@ -111,12 +112,12 @@ module TyCoRep (
         substCoUnchecked, substCoWithUnchecked,
         substTyWithInScope,
         substTys, substTheta,
-        lookupTyVar, substTyVarBndr,
+        lookupTyVar, substTyVarBndr, substTyVarBndrs,
         substCo, substCos, substCoVar, substCoVars, lookupCoVar,
         substCoVarBndr, cloneTyVarBndr, cloneTyVarBndrs,
         substTyVar, substTyVars,
         substForAllCoBndr,
-        substTyVarBndrCallback, substForAllCoBndrCallback,
+        substTyVarBndrUsing, substForAllCoBndrUsing,
         checkValidSubst, isValidTCvSubst,
 
         -- * Tidying type related things up for printing
@@ -166,7 +167,8 @@ import CoAxiom
 import FV
 
 -- others
-import BasicTypes ( LeftOrRight(..), TyPrec(..), maybeParen, pickLR )
+import BasicTypes ( LeftOrRight(..), PprPrec(..), topPrec, sigPrec, opPrec
+                  , funPrec, appPrec, maybeParen, pickLR )
 import PrelNames
 import Outputable
 import DynFlags
@@ -799,6 +801,7 @@ tcIsTYPE _ _ = False
 
 -- | This version considers Constraint to be the same as *. Returns True
 -- if the argument is equivalent to Type/Constraint and False otherwise.
+-- See Note [Kind Constraint and kind Type]
 isLiftedTypeKind :: Kind -> Bool
 isLiftedTypeKind = isTYPE is_lifted
   where
@@ -940,6 +943,15 @@ type CoercionN = Coercion       -- always nominal
 type CoercionR = Coercion       -- always representational
 type CoercionP = Coercion       -- always phantom
 type KindCoercion = CoercionN   -- always nominal
+
+-- | A semantically more meaningful type to represent what may or may not be a
+-- useful 'Coercion'.
+data MCoercion
+  = MRefl
+    -- A trivial Reflexivity coercion
+  | MCo Coercion
+    -- Other coercions
+type MCoercionR = MCoercion
 
 {-
 Note [Refl invariant]
@@ -1807,7 +1819,7 @@ data TCvSubst
   = TCvSubst InScopeSet -- The in-scope type and kind variables
              TvSubstEnv -- Substitutes both type and kind variables
              CvSubstEnv -- Substitutes coercion variables
-        -- See Note [Apply Once]
+        -- See Note [Substitutions apply only once]
         -- and Note [Extending the TvSubstEnv]
         -- and Note [Substituting types and coercions]
         -- and Note [The substitution invariant]
@@ -1815,21 +1827,51 @@ data TCvSubst
 -- | A substitution of 'Type's for 'TyVar's
 --                 and 'Kind's for 'KindVar's
 type TvSubstEnv = TyVarEnv Type
-        -- A TvSubstEnv is used both inside a TCvSubst (with the apply-once
-        -- invariant discussed in Note [Apply Once]), and also independently
-        -- in the middle of matching, and unification (see Types.Unify)
-        -- So you have to look at the context to know if it's idempotent or
-        -- apply-once or whatever
+  -- NB: A TvSubstEnv is used
+  --   both inside a TCvSubst (with the apply-once invariant
+  --        discussed in Note [Substitutions apply only once],
+  --   and  also independently in the middle of matching,
+  --        and unification (see Types.Unify).
+  -- So you have to look at the context to know if it's idempotent or
+  -- apply-once or whatever
 
 -- | A substitution of 'Coercion's for 'CoVar's
 type CvSubstEnv = CoVarEnv Coercion
 
-{-
-Note [Apply Once]
-~~~~~~~~~~~~~~~~~
+{- Note [The substitution invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+When calling (substTy subst ty) it should be the case that
+the in-scope set in the substitution is a superset of both:
+
+  (SIa) The free vars of the range of the substitution
+  (SIb) The free vars of ty minus the domain of the substitution
+
+The same rules apply to other substitutions (notably CoreSubst.Subst)
+
+* Reason for (SIa). Consider
+      substTy [a :-> Maybe b] (forall b. b->a)
+  we must rename the forall b, to get
+      forall b2. b2 -> Maybe b
+  Making 'b' part of the in-scope set forces this renaming to
+  take place.
+
+* Reason for (SIb). Consider
+     substTy [a :-> Maybe b] (forall b. (a,b,x))
+  Then if we use the in-scope set {b}, satisfying (SIa), there is
+  a danger we will rename the forall'd variable to 'x' by mistake,
+  getting this:
+      forall x. (List b, x, x)
+  Breaking (SIb) caused the bug from #11371.
+
+Note: if the free vars of the range of the substitution are freshly created,
+then the problems of (SIa) can't happen, and so it would be sound to
+ignore (SIa).
+
+Note [Substitutions apply only once]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 We use TCvSubsts to instantiate things, and we might instantiate
         forall a b. ty
-\with the types
+with the types
         [a, b], or [b, a].
 So the substitution might go [a->b, b->a].  A similar situation arises in Core
 when we find a beta redex like
@@ -1837,9 +1879,9 @@ when we find a beta redex like
 Then we also end up with a substitution that permutes type variables. Other
 variations happen to; for example [a -> (a, b)].
 
-        ****************************************************
-        *** So a TCvSubst must be applied precisely once ***
-        ****************************************************
+        ********************************************************
+        *** So a substitution must be applied precisely once ***
+        ********************************************************
 
 A TCvSubst is not idempotent, but, unlike the non-idempotent substitution
 we use during unifications, it must not be repeatedly applied.
@@ -1882,25 +1924,6 @@ Note that the TvSubstEnv should *never* map a CoVar (built with the Id
 constructor) and the CvSubstEnv should *never* map a TyVar. Furthermore,
 the range of the TvSubstEnv should *never* include a type headed with
 CoercionTy.
-
-Note [The substitution invariant]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-When calling (substTy subst ty) it should be the case that
-the in-scope set in the substitution is a superset of both:
-
-  * The free vars of the range of the substitution
-  * The free vars of ty minus the domain of the substitution
-
-If we want to substitute [a -> ty1, b -> ty2] I used to
-think it was enough to generate an in-scope set that includes
-fv(ty1,ty2).  But that's not enough; we really should also take the
-free vars of the type we are substituting into!  Example:
-     (forall b. (a,b,x)) [a -> List b]
-Then if we use the in-scope set {b}, there is a danger we will rename
-the forall'd variable to 'x' by mistake, getting this:
-     (forall x. (List b, x, x))
-
-Breaking this invariant caused the bug from #11371.
 -}
 
 emptyTvSubstEnv :: TvSubstEnv
@@ -2267,17 +2290,15 @@ isValidTCvSubst (TCvSubst in_scope tenv cenv) =
 checkValidSubst :: HasCallStack => TCvSubst -> [Type] -> [Coercion] -> a -> a
 checkValidSubst subst@(TCvSubst in_scope tenv cenv) tys cos a
 -- TODO (RAE): Change back to ASSERT
-  = WARN( not ({-#SCC "isValidTCvSubst" #-} isValidTCvSubst subst),
+  = WARN( not (isValidTCvSubst subst),
              text "in_scope" <+> ppr in_scope $$
              text "tenv" <+> ppr tenv $$
-             text "tenvFVs"
-               <+> ppr (tyCoVarsOfTypesSet tenv) $$
+             text "tenvFVs" <+> ppr (tyCoVarsOfTypesSet tenv) $$
              text "cenv" <+> ppr cenv $$
-             text "cenvFVs"
-               <+> ppr (tyCoVarsOfCosSet cenv) $$
+             text "cenvFVs" <+> ppr (tyCoVarsOfCosSet cenv) $$
              text "tys" <+> ppr tys $$
              text "cos" <+> ppr cos )
-    WARN( not ({-#SCC "tysCosFVsInScope" #-} tysCosFVsInScope),
+    WARN( not tysCosFVsInScope,
              text "in_scope" <+> ppr in_scope $$
              text "tenv" <+> ppr tenv $$
              text "cenv" <+> ppr cenv $$
@@ -2458,7 +2479,7 @@ subst_co subst co
 
 substForAllCoBndr :: TCvSubst -> TyVar -> Coercion -> (TCvSubst, TyVar, Coercion)
 substForAllCoBndr subst
-  = substForAllCoBndrCallback False (substCo subst) subst
+  = substForAllCoBndrUsing False (substCo subst) subst
 
 -- | Like 'substForAllCoBndr', but disables sanity checks.
 -- The problems that the sanity checks in substCo catch are described in
@@ -2467,14 +2488,14 @@ substForAllCoBndr subst
 -- substCo and remove this function. Please don't use in new code.
 substForAllCoBndrUnchecked :: TCvSubst -> TyVar -> Coercion -> (TCvSubst, TyVar, Coercion)
 substForAllCoBndrUnchecked subst
-  = substForAllCoBndrCallback False (substCoUnchecked subst) subst
+  = substForAllCoBndrUsing False (substCoUnchecked subst) subst
 
 -- See Note [Sym and ForAllCo]
-substForAllCoBndrCallback :: Bool  -- apply sym to binder?
+substForAllCoBndrUsing :: Bool  -- apply sym to binder?
                           -> (Coercion -> Coercion)  -- transformation to kind co
                           -> TCvSubst -> TyVar -> Coercion
                           -> (TCvSubst, TyVar, Coercion)
-substForAllCoBndrCallback sym sco (TCvSubst in_scope tenv cenv)
+substForAllCoBndrUsing sym sco (TCvSubst in_scope tenv cenv)
                           old_var old_kind_co
   = ( TCvSubst (in_scope `extendInScopeSet` new_var) new_env cenv
     , new_var, new_kind_co )
@@ -2507,7 +2528,10 @@ lookupCoVar :: TCvSubst -> Var  -> Maybe Coercion
 lookupCoVar (TCvSubst _ _ cenv) v = lookupVarEnv cenv v
 
 substTyVarBndr :: HasCallStack => TCvSubst -> TyVar -> (TCvSubst, TyVar)
-substTyVarBndr = substTyVarBndrCallback substTy
+substTyVarBndr = substTyVarBndrUsing substTy
+
+substTyVarBndrs :: HasCallStack => TCvSubst -> [TyVar] -> (TCvSubst, [TyVar])
+substTyVarBndrs = mapAccumL substTyVarBndr
 
 -- | Like 'substTyVarBndr' but disables sanity checks.
 -- The problems that the sanity checks in substTy catch are described in
@@ -2515,13 +2539,15 @@ substTyVarBndr = substTyVarBndrCallback substTy
 -- The goal of #11371 is to migrate all the calls of substTyUnchecked to
 -- substTy and remove this function. Please don't use in new code.
 substTyVarBndrUnchecked :: TCvSubst -> TyVar -> (TCvSubst, TyVar)
-substTyVarBndrUnchecked = substTyVarBndrCallback substTyUnchecked
+substTyVarBndrUnchecked = substTyVarBndrUsing substTyUnchecked
 
 -- | Substitute a tyvar in a binding position, returning an
 -- extended subst and a new tyvar.
-substTyVarBndrCallback :: (TCvSubst -> Type -> Type)  -- ^ the subst function
-                       -> TCvSubst -> TyVar -> (TCvSubst, TyVar)
-substTyVarBndrCallback subst_fn subst@(TCvSubst in_scope tenv cenv) old_var
+-- Use the supplied function to substitute in the kind
+substTyVarBndrUsing
+  :: (TCvSubst -> Type -> Type)  -- ^ Use this to substitute in the kind
+  -> TCvSubst -> TyVar -> (TCvSubst, TyVar)
+substTyVarBndrUsing subst_fn subst@(TCvSubst in_scope tenv cenv) old_var
   = ASSERT2( _no_capture, pprTyVar old_var $$ pprTyVar new_var $$ ppr subst )
     ASSERT( isTyVar old_var )
     (TCvSubst (in_scope `extendInScopeSet` new_var) new_env cenv, new_var)
@@ -2614,10 +2640,10 @@ See Note [Precedence in types] in BasicTypes.
 ------------------
 
 pprType, pprParendType :: Type -> SDoc
-pprType       = pprPrecType TopPrec
-pprParendType = pprPrecType TyConPrec
+pprType       = pprPrecType topPrec
+pprParendType = pprPrecType appPrec
 
-pprPrecType :: TyPrec -> Type -> SDoc
+pprPrecType :: PprPrec -> Type -> SDoc
 pprPrecType prec ty
   = getPprStyle $ \sty ->
     if debugStyle sty           -- Use pprDebugType when in
@@ -2678,10 +2704,10 @@ pprClassPred clas tys = pprTypeApp (classTyCon clas) tys
 
 ------------
 pprTheta :: ThetaType -> SDoc
-pprTheta = pprIfaceContext TopPrec . map tidyToIfaceType
+pprTheta = pprIfaceContext topPrec . map tidyToIfaceType
 
 pprParendTheta :: ThetaType -> SDoc
-pprParendTheta = pprIfaceContext TyConPrec . map tidyToIfaceType
+pprParendTheta = pprIfaceContext appPrec . map tidyToIfaceType
 
 pprThetaArrowTy :: ThetaType -> SDoc
 pprThetaArrowTy = pprIfaceContextArr . map tidyToIfaceType
@@ -2741,9 +2767,9 @@ debugPprType :: Type -> SDoc
 -- be useful for debugging.  E.g. with -dppr-debug it prints the
 -- kind on type-variable /occurrences/ which the normal route
 -- fundamentally cannot do.
-debugPprType ty = debug_ppr_ty TopPrec ty
+debugPprType ty = debug_ppr_ty topPrec ty
 
-debug_ppr_ty :: TyPrec -> Type -> SDoc
+debug_ppr_ty :: PprPrec -> Type -> SDoc
 debug_ppr_ty _ (LitTy l)
   = ppr l
 
@@ -2751,21 +2777,21 @@ debug_ppr_ty _ (TyVarTy tv)
   = ppr tv  -- With -dppr-debug we get (tv :: kind)
 
 debug_ppr_ty prec (FunTy arg res)
-  = maybeParen prec FunPrec $
-    sep [debug_ppr_ty FunPrec arg, arrow <+> debug_ppr_ty prec res]
+  = maybeParen prec funPrec $
+    sep [debug_ppr_ty funPrec arg, arrow <+> debug_ppr_ty prec res]
 
 debug_ppr_ty prec (TyConApp tc tys)
   | null tys  = ppr tc
-  | otherwise = maybeParen prec TyConPrec $
-                hang (ppr tc) 2 (sep (map (debug_ppr_ty TyConPrec) tys))
+  | otherwise = maybeParen prec appPrec $
+                hang (ppr tc) 2 (sep (map (debug_ppr_ty appPrec) tys))
 
 debug_ppr_ty prec (AppTy t1 t2)
   = hang (debug_ppr_ty prec t1)
-       2 (debug_ppr_ty TyConPrec t2)
+       2 (debug_ppr_ty appPrec t2)
 
 debug_ppr_ty prec (CastTy ty co)
-  = maybeParen prec TopPrec $
-    hang (debug_ppr_ty TopPrec ty)
+  = maybeParen prec topPrec $
+    hang (debug_ppr_ty topPrec ty)
        2 (text "|>" <+> ppr co)
 
 debug_ppr_ty _ (CoercionTy co)
@@ -2773,7 +2799,7 @@ debug_ppr_ty _ (CoercionTy co)
 
 debug_ppr_ty prec ty@(ForAllTy {})
   | (tvs, body) <- split ty
-  = maybeParen prec FunPrec $
+  = maybeParen prec funPrec $
     hang (text "forall" <+> fsep (map ppr tvs) <> dot)
          -- The (map ppr tvs) will print kind-annotated
          -- tvs, because we are (usually) in debug-style
@@ -2841,7 +2867,7 @@ pprDataConWithArgs dc = sep [forAllDoc, thetaDoc, ppr dc <+> argsDoc]
 
 pprTypeApp :: TyCon -> [Type] -> SDoc
 pprTypeApp tc tys
-  = pprIfaceTypeApp TopPrec (toIfaceTyCon tc)
+  = pprIfaceTypeApp topPrec (toIfaceTyCon tc)
                             (toIfaceTcArgs tc tys)
     -- TODO: toIfaceTcArgs seems rather wasteful here
 

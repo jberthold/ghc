@@ -68,6 +68,8 @@ module Lexer (
    explicitNamespacesEnabled,
    patternSynonymsEnabled,
    sccProfilingOn, hpcEnabled,
+   typeOperatorsEnabled,
+   starIsTypeEnabled,
    addWarning,
    lexTokenStream,
    addAnnotation,AddAnn,addAnnsAt,mkParensApiAnn,
@@ -371,11 +373,6 @@ $tab          { warnTab }
 -- "special" symbols
 
 <0> {
-  "[:" / { ifExtension parrEnabled }    { token ITopabrack }
-  ":]" / { ifExtension parrEnabled }    { token ITcpabrack }
-}
-
-<0> {
   "[|"        / { ifExtension thQuotesEnabled } { token (ITopenExpQuote NoE
                                                                 NormalSyntax) }
   "[||"       / { ifExtension thQuotesEnabled } { token (ITopenTExpQuote NoE) }
@@ -637,6 +634,7 @@ data Token
   | ITstatic
   | ITstock
   | ITanyclass
+  | ITvia
 
   -- Backpack tokens
   | ITunit
@@ -665,9 +663,6 @@ data Token
   | IToptions_prag String
   | ITinclude_prag String
   | ITlanguage_prag
-  | ITvect_prag         SourceText
-  | ITvect_scalar_prag  SourceText
-  | ITnovect_prag       SourceText
   | ITminimal_prag      SourceText
   | IToverlappable_prag SourceText  -- instance overlap mode
   | IToverlapping_prag  SourceText  -- instance overlap mode
@@ -686,10 +681,10 @@ data Token
   | ITrarrow            IsUnicodeSyntax
   | ITat
   | ITtilde
-  | ITtildehsh
   | ITdarrow            IsUnicodeSyntax
   | ITminus
   | ITbang
+  | ITstar              IsUnicodeSyntax
   | ITdot
 
   | ITbiglam                    -- GHC-extension symbols
@@ -838,6 +833,7 @@ reservedWordsFM = listToUFM $
          ( "static",         ITstatic,        0 ),
          ( "stock",          ITstock,         0 ),
          ( "anyclass",       ITanyclass,      0 ),
+         ( "via",            ITvia,           0 ),
          ( "group",          ITgroup,         xbit TransformComprehensionsBit),
          ( "by",             ITby,            xbit TransformComprehensionsBit),
          ( "using",          ITusing,         xbit TransformComprehensionsBit),
@@ -896,10 +892,11 @@ reservedSymsFM = listToUFM $
        ,("->",  ITrarrow NormalSyntax, always)
        ,("@",   ITat,                  always)
        ,("~",   ITtilde,               always)
-       ,("~#",  ITtildehsh,            magicHashEnabled)
        ,("=>",  ITdarrow NormalSyntax, always)
        ,("-",   ITminus,               always)
        ,("!",   ITbang,                always)
+
+       ,("*", ITstar NormalSyntax, starIsTypeEnabled)
 
         -- For 'forall a . t'
        ,(".", ITdot,  always) -- \i -> explicitForallEnabled i || inRulePrag i)
@@ -923,6 +920,8 @@ reservedSymsFM = listToUFM $
                                 \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
        ,("⤜",   ITRarrowtail UnicodeSyntax,
                                 \i -> unicodeSyntaxEnabled i && arrowsEnabled i)
+       ,("★",   ITstar UnicodeSyntax,
+                  \i -> unicodeSyntaxEnabled i && starIsTypeEnabled i)
 
         -- ToDo: ideally, → and ∷ should be "specials", so that they cannot
         -- form part of a large operator.  This would let us have a better
@@ -2230,7 +2229,6 @@ data ExtBits
   = FfiBit
   | InterruptibleFfiBit
   | CApiFfiBit
-  | ParrBit
   | ArrowsBit
   | ThBit
   | ThQuotesBit
@@ -2266,13 +2264,13 @@ data ExtBits
   | TypeApplicationsBit
   | StaticPointersBit
   | NumericUnderscoresBit
+  | TypeOperatorsBit
+  | StarIsTypeBit
   deriving Enum
 
 
 always :: ExtsBitmap -> Bool
 always           _     = True
-parrEnabled :: ExtsBitmap -> Bool
-parrEnabled = xtest ParrBit
 arrowsEnabled :: ExtsBitmap -> Bool
 arrowsEnabled = xtest ArrowsBit
 thEnabled :: ExtsBitmap -> Bool
@@ -2336,6 +2334,10 @@ staticPointersEnabled :: ExtsBitmap -> Bool
 staticPointersEnabled = xtest StaticPointersBit
 numericUnderscoresEnabled :: ExtsBitmap -> Bool
 numericUnderscoresEnabled = xtest NumericUnderscoresBit
+typeOperatorsEnabled :: ExtsBitmap -> Bool
+typeOperatorsEnabled = xtest TypeOperatorsBit
+starIsTypeEnabled :: ExtsBitmap -> Bool
+starIsTypeEnabled = xtest StarIsTypeBit
 
 -- PState for parsing options pragmas
 --
@@ -2354,48 +2356,56 @@ mkParserFlags flags =
     , pExtsBitmap = bitmap
     }
   where
-      bitmap =     FfiBit                      `setBitIf` xopt LangExt.ForeignFunctionInterface flags
-               .|. InterruptibleFfiBit         `setBitIf` xopt LangExt.InterruptibleFFI         flags
-               .|. CApiFfiBit                  `setBitIf` xopt LangExt.CApiFFI                  flags
-               .|. ParrBit                     `setBitIf` xopt LangExt.ParallelArrays           flags
-               .|. ArrowsBit                   `setBitIf` xopt LangExt.Arrows                   flags
-               .|. ThBit                       `setBitIf` xopt LangExt.TemplateHaskell          flags
-               .|. ThQuotesBit                 `setBitIf` xopt LangExt.TemplateHaskellQuotes    flags
-               .|. QqBit                       `setBitIf` xopt LangExt.QuasiQuotes              flags
-               .|. IpBit                       `setBitIf` xopt LangExt.ImplicitParams           flags
-               .|. OverloadedLabelsBit         `setBitIf` xopt LangExt.OverloadedLabels         flags
-               .|. ExplicitForallBit           `setBitIf` xopt LangExt.ExplicitForAll           flags
-               .|. BangPatBit                  `setBitIf` xopt LangExt.BangPatterns             flags
-               .|. HaddockBit                  `setBitIf` gopt Opt_Haddock                      flags
-               .|. MagicHashBit                `setBitIf` xopt LangExt.MagicHash                flags
-               .|. RecursiveDoBit              `setBitIf` xopt LangExt.RecursiveDo              flags
-               .|. UnicodeSyntaxBit            `setBitIf` xopt LangExt.UnicodeSyntax            flags
-               .|. UnboxedTuplesBit            `setBitIf` xopt LangExt.UnboxedTuples            flags
-               .|. UnboxedSumsBit              `setBitIf` xopt LangExt.UnboxedSums              flags
-               .|. DatatypeContextsBit         `setBitIf` xopt LangExt.DatatypeContexts         flags
-               .|. TransformComprehensionsBit  `setBitIf` xopt LangExt.TransformListComp        flags
-               .|. TransformComprehensionsBit  `setBitIf` xopt LangExt.MonadComprehensions      flags
-               .|. RawTokenStreamBit           `setBitIf` gopt Opt_KeepRawTokenStream           flags
-               .|. HpcBit                      `setBitIf` gopt Opt_Hpc                          flags
-               .|. AlternativeLayoutRuleBit    `setBitIf` xopt LangExt.AlternativeLayoutRule    flags
-               .|. RelaxedLayoutBit            `setBitIf` xopt LangExt.RelaxedLayout            flags
-               .|. SccProfilingOnBit           `setBitIf` gopt Opt_SccProfilingOn               flags
-               .|. NondecreasingIndentationBit `setBitIf` xopt LangExt.NondecreasingIndentation flags
-               .|. SafeHaskellBit              `setBitIf` safeImportsOn                         flags
-               .|. TraditionalRecordSyntaxBit  `setBitIf` xopt LangExt.TraditionalRecordSyntax  flags
-               .|. ExplicitNamespacesBit       `setBitIf` xopt LangExt.ExplicitNamespaces flags
-               .|. LambdaCaseBit               `setBitIf` xopt LangExt.LambdaCase               flags
-               .|. BinaryLiteralsBit           `setBitIf` xopt LangExt.BinaryLiterals           flags
-               .|. NegativeLiteralsBit         `setBitIf` xopt LangExt.NegativeLiterals         flags
-               .|. HexFloatLiteralsBit         `setBitIf` xopt LangExt.HexFloatLiterals         flags
-               .|. PatternSynonymsBit          `setBitIf` xopt LangExt.PatternSynonyms          flags
-               .|. TypeApplicationsBit         `setBitIf` xopt LangExt.TypeApplications         flags
-               .|. StaticPointersBit           `setBitIf` xopt LangExt.StaticPointers           flags
-               .|. NumericUnderscoresBit       `setBitIf` xopt LangExt.NumericUnderscores       flags
+    bitmap = safeHaskellBit .|. langExtBits .|. optBits
+    safeHaskellBit =
+          SafeHaskellBit `setBitIf` safeImportsOn flags
+    langExtBits =
+          FfiBit                      `xoptBit` LangExt.ForeignFunctionInterface
+      .|. InterruptibleFfiBit         `xoptBit` LangExt.InterruptibleFFI
+      .|. CApiFfiBit                  `xoptBit` LangExt.CApiFFI
+      .|. ArrowsBit                   `xoptBit` LangExt.Arrows
+      .|. ThBit                       `xoptBit` LangExt.TemplateHaskell
+      .|. ThQuotesBit                 `xoptBit` LangExt.TemplateHaskellQuotes
+      .|. QqBit                       `xoptBit` LangExt.QuasiQuotes
+      .|. IpBit                       `xoptBit` LangExt.ImplicitParams
+      .|. OverloadedLabelsBit         `xoptBit` LangExt.OverloadedLabels
+      .|. ExplicitForallBit           `xoptBit` LangExt.ExplicitForAll
+      .|. BangPatBit                  `xoptBit` LangExt.BangPatterns
+      .|. MagicHashBit                `xoptBit` LangExt.MagicHash
+      .|. RecursiveDoBit              `xoptBit` LangExt.RecursiveDo
+      .|. UnicodeSyntaxBit            `xoptBit` LangExt.UnicodeSyntax
+      .|. UnboxedTuplesBit            `xoptBit` LangExt.UnboxedTuples
+      .|. UnboxedSumsBit              `xoptBit` LangExt.UnboxedSums
+      .|. DatatypeContextsBit         `xoptBit` LangExt.DatatypeContexts
+      .|. TransformComprehensionsBit  `xoptBit` LangExt.TransformListComp
+      .|. TransformComprehensionsBit  `xoptBit` LangExt.MonadComprehensions
+      .|. AlternativeLayoutRuleBit    `xoptBit` LangExt.AlternativeLayoutRule
+      .|. RelaxedLayoutBit            `xoptBit` LangExt.RelaxedLayout
+      .|. NondecreasingIndentationBit `xoptBit` LangExt.NondecreasingIndentation
+      .|. TraditionalRecordSyntaxBit  `xoptBit` LangExt.TraditionalRecordSyntax
+      .|. ExplicitNamespacesBit       `xoptBit` LangExt.ExplicitNamespaces
+      .|. LambdaCaseBit               `xoptBit` LangExt.LambdaCase
+      .|. BinaryLiteralsBit           `xoptBit` LangExt.BinaryLiterals
+      .|. NegativeLiteralsBit         `xoptBit` LangExt.NegativeLiterals
+      .|. HexFloatLiteralsBit         `xoptBit` LangExt.HexFloatLiterals
+      .|. PatternSynonymsBit          `xoptBit` LangExt.PatternSynonyms
+      .|. TypeApplicationsBit         `xoptBit` LangExt.TypeApplications
+      .|. StaticPointersBit           `xoptBit` LangExt.StaticPointers
+      .|. NumericUnderscoresBit       `xoptBit` LangExt.NumericUnderscores
+      .|. TypeOperatorsBit            `xoptBit` LangExt.TypeOperators
+      .|. StarIsTypeBit               `xoptBit` LangExt.StarIsType
+    optBits =
+          HaddockBit        `goptBit` Opt_Haddock
+      .|. RawTokenStreamBit `goptBit` Opt_KeepRawTokenStream
+      .|. HpcBit            `goptBit` Opt_Hpc
+      .|. SccProfilingOnBit `goptBit` Opt_SccProfilingOn
 
-      setBitIf :: ExtBits -> Bool -> ExtsBitmap
-      b `setBitIf` cond | cond      = xbit b
-                        | otherwise = 0
+    xoptBit bit ext = bit `setBitIf` xopt ext flags
+    goptBit bit opt = bit `setBitIf` gopt opt flags
+
+    setBitIf :: ExtBits -> Bool -> ExtsBitmap
+    b `setBitIf` cond | cond      = xbit b
+                      | otherwise = 0
 
 -- | Creates a parse state from a 'DynFlags' value
 mkPState :: DynFlags -> StringBuffer -> RealSrcLoc -> PState
@@ -2878,8 +2888,6 @@ oneWordPrags = Map.fromList [
      ("unpack", strtoken (\s -> ITunpack_prag (SourceText s))),
      ("nounpack", strtoken (\s -> ITnounpack_prag (SourceText s))),
      ("ann", strtoken (\s -> ITann_prag (SourceText s))),
-     ("vectorize", strtoken (\s -> ITvect_prag (SourceText s))),
-     ("novectorize", strtoken (\s -> ITnovect_prag (SourceText s))),
      ("minimal", strtoken (\s -> ITminimal_prag (SourceText s))),
      ("overlaps", strtoken (\s -> IToverlaps_prag (SourceText s))),
      ("overlappable", strtoken (\s -> IToverlappable_prag (SourceText s))),
@@ -2890,7 +2898,7 @@ oneWordPrags = Map.fromList [
      ("column", columnPrag)
      ]
 
-twoWordPrags = Map.fromList([
+twoWordPrags = Map.fromList [
      ("inline conlike",
          strtoken (\s -> (ITinline_prag (SourceText s) Inline ConLike))),
      ("notinline conlike",
@@ -2898,9 +2906,8 @@ twoWordPrags = Map.fromList([
      ("specialize inline",
          strtoken (\s -> (ITspec_inline_prag (SourceText s) True))),
      ("specialize notinline",
-         strtoken (\s -> (ITspec_inline_prag (SourceText s) False))),
-     ("vectorize scalar",
-         strtoken (\s -> ITvect_scalar_prag (SourceText s)))])
+         strtoken (\s -> (ITspec_inline_prag (SourceText s) False)))
+     ]
 
 dispatch_pragmas :: Map String Action -> Action
 dispatch_pragmas prags span buf len = case Map.lookup (clean_pragma (lexemeToString buf len)) prags of
@@ -2922,8 +2929,6 @@ clean_pragma prag = canon_ws (map toLower (unprefix prag))
                           canonical prag' = case prag' of
                                               "noinline" -> "notinline"
                                               "specialise" -> "specialize"
-                                              "vectorise" -> "vectorize"
-                                              "novectorise" -> "novectorize"
                                               "constructorlike" -> "conlike"
                                               _ -> prag'
                           canon_ws s = unwords (map canonical (words s))

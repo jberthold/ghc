@@ -19,6 +19,7 @@ import GhcPrelude
 import HsSyn
 import TcBinds
 import TcTyClsDecls
+import TcTyDecls ( addTyConsToGblEnv )
 import TcClassDcl( tcClassDecl2, tcATDefault,
                    HsSigFun, mkHsSigFun,
                    findMethodBind, instantiateMethod )
@@ -60,6 +61,7 @@ import DynFlags
 import ErrUtils
 import FastString
 import Id
+import ListSetOps
 import MkId
 import Name
 import NameSet
@@ -415,13 +417,12 @@ addFamInsts :: [FamInst] -> TcM a -> TcM a
 --        (b) the type envt with stuff from data type decls
 addFamInsts fam_insts thing_inside
   = tcExtendLocalFamInstEnv fam_insts $
-    tcExtendGlobalEnv axioms $
-    tcExtendTyConEnv data_rep_tycons  $
+    tcExtendGlobalEnv axioms          $
     do { traceTc "addFamInsts" (pprFamInsts fam_insts)
-       ; tcg_env <- tcAddImplicits data_rep_tycons
-                    -- Does not add its axiom; that comes from
-                    -- adding the 'axioms' above
-       ; setGblEnv tcg_env thing_inside }
+       ; gbl_env <- addTyConsToGblEnv data_rep_tycons
+                    -- Does not add its axiom; that comes
+                    -- from adding the 'axioms' above
+       ; setGblEnv gbl_env thing_inside }
   where
     axioms = map (ACoAxiom . toBranchedAxiom . famInstAxiom) fam_insts
     data_rep_tycons = famInstsRepTyCons fam_insts
@@ -462,6 +463,8 @@ tcLocalInstDecl (L loc (DataFamInstD { dfid_inst = decl }))
 tcLocalInstDecl (L loc (ClsInstD { cid_inst = decl }))
   = do { (insts, fam_insts, deriv_infos) <- tcClsInstDecl (L loc decl)
        ; return (insts, fam_insts, deriv_infos) }
+
+tcLocalInstDecl (L _ (XInstDecl _)) = panic "tcLocalInstDecl"
 
 tcClsInstDecl :: LClsInstDecl GhcRn
               -> TcM ([InstInfo GhcRn], [FamInst], [DerivInfo])
@@ -517,7 +520,7 @@ tcClsInstDecl (L loc (ClsInstDecl { cid_poly_ty = poly_ty, cid_binds = binds
 
         ; return ( [inst_info], tyfam_insts0 ++ concat tyfam_insts1 ++ datafam_insts
                  , deriv_infos ) }
-
+tcClsInstDecl (L _ (XClsInstDecl _)) = panic "tcClsInstDecl"
 
 doClsInstErrorChecks :: InstInfo GhcRn -> TcM ()
 doClsInstErrorChecks inst_info
@@ -630,8 +633,9 @@ tcDataFamInstDecl :: Maybe ClsInstInfo
                   -> LDataFamInstDecl GhcRn -> TcM (FamInst, Maybe DerivInfo)
   -- "newtype instance" and "data instance"
 tcDataFamInstDecl mb_clsinfo
-    (L loc decl@(DataFamInstDecl { dfid_eqn = HsIB { hsib_vars = tv_names
-                                                   , hsib_body =
+    (L loc decl@(DataFamInstDecl { dfid_eqn = HsIB { hsib_ext
+                                               = HsIBRn { hsib_vars = tv_names }
+                                 , hsib_body =
       FamEqn { feqn_pats   = pats
              , feqn_tycon  = fam_tc_name
              , feqn_fixity = fixity
@@ -681,7 +685,7 @@ tcDataFamInstDecl mb_clsinfo
          -- Deal with any kind signature.
          -- See also Note [Arity of data families] in FamInstEnv
        ; (extra_tcbs, final_res_kind) <- tcDataKindSig full_tcbs res_kind'
-       ; checkTc (tcIsStarKind final_res_kind) (badKindSig True res_kind')
+       ; checkTc (tcIsLiftedTypeKind final_res_kind) (badKindSig True res_kind')
 
        ; let extra_pats  = map (mkTyVarTy . binderVar) extra_tcbs
              all_pats    = pats' `chkAppend` extra_pats
@@ -723,7 +727,7 @@ tcDataFamInstDecl mb_clsinfo
        ; checkValidFamPats mb_clsinfo fam_tc tvs' [] pats' extra_pats pp_hs_pats
 
          -- Result kind must be '*' (otherwise, we have too few patterns)
-       ; checkTc (tcIsStarKind final_res_kind) $
+       ; checkTc (tcIsLiftedTypeKind final_res_kind) $
          tooFewParmsErr (tyConArity fam_tc)
 
        ; checkValidTyCon rep_tc
@@ -754,6 +758,16 @@ tcDataFamInstDecl mb_clsinfo
     go pats etad_tvs = (reverse pats, etad_tvs)
 
     pp_hs_pats = pprFamInstLHS fam_tc_name pats fixity (unLoc ctxt) m_ksig
+
+tcDataFamInstDecl _
+    (L _ (DataFamInstDecl
+         { dfid_eqn = HsIB { hsib_body = FamEqn { feqn_rhs = XHsDataDefn _ }}}))
+  = panic "tcDataFamInstDecl"
+tcDataFamInstDecl _ (L _ (DataFamInstDecl (XHsImplicitBndrs _)))
+  = panic "tcDataFamInstDecl"
+tcDataFamInstDecl _ (L _ (DataFamInstDecl (HsIB _ (XFamEqn _))))
+  = panic "tcDataFamInstDecl"
+
 
 {- *********************************************************************
 *                                                                      *
@@ -1038,7 +1052,7 @@ tcSuperClasses dfun_id cls tyvars dfun_evs inst_tys dfun_ev_binds sc_theta
 
            ; sc_top_name  <- newName (mkSuperDictAuxOcc n (getOccName cls))
            ; sc_ev_id     <- newEvVar sc_pred
-           ; addTcEvBind ev_binds_var $ mkWantedEvBind sc_ev_id (EvExpr sc_ev_tm)
+           ; addTcEvBind ev_binds_var $ mkWantedEvBind sc_ev_id sc_ev_tm
            ; let sc_top_ty = mkInvForAllTys tyvars (mkLamTypes dfun_evs sc_pred)
                  sc_top_id = mkLocalId sc_top_name sc_top_ty
                  export = ABE { abe_ext  = noExt
@@ -1289,10 +1303,11 @@ tcMethods dfun_id clas tyvars dfun_ev_vars inst_tys
                                 , ib_derived    = is_derived })
       -- tcExtendTyVarEnv (not scopeTyVars) is OK because the TcLevel is pushed
       -- in checkInstConstraints
-  = tcExtendTyVarEnv2 (lexical_tvs `zip` tyvars) $
+  = tcExtendNameTyVarEnv (lexical_tvs `zip` tyvars) $
        -- The lexical_tvs scope over the 'where' part
     do { traceTc "tcInstMeth" (ppr sigs $$ ppr binds)
        ; checkMinimalDefinition
+       ; checkMethBindMembership
        ; (ids, binds, mb_implics) <- set_exts exts $
                                      mapAndUnzip3M tc_item op_items
        ; return (ids, listToBag binds, listToBag (catMaybes mb_implics)) }
@@ -1354,6 +1369,41 @@ tcMethods dfun_id clas tyvars dfun_ev_vars inst_tys
         warnUnsatisfiedMinimalDefinition
 
     methodExists meth = isJust (findMethodBind meth binds prag_fn)
+
+    ----------------------
+    -- Check if any method bindings do not correspond to the class.
+    -- See Note [Mismatched class methods and associated type families].
+    checkMethBindMembership
+      = let bind_nms         = map unLoc $ collectMethodBinders binds
+            cls_meth_nms     = map (idName . fst) op_items
+            mismatched_meths = bind_nms `minusList` cls_meth_nms
+        in forM_ mismatched_meths $ \mismatched_meth ->
+             addErrTc $ hsep
+             [ text "Class", quotes (ppr (className clas))
+             , text "does not have a method", quotes (ppr mismatched_meth)]
+
+{-
+Note [Mismatched class methods and associated type families]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+It's entirely possible for someone to put methods or associated type family
+instances inside of a class in which it doesn't belong. For instance, we'd
+want to fail if someone wrote this:
+
+  instance Eq () where
+    type Rep () = Maybe
+    compare = undefined
+
+Since neither the type family `Rep` nor the method `compare` belong to the
+class `Eq`. Normally, this is caught in the renamer when resolving RdrNames,
+since that would discover that the parent class `Eq` is incorrect.
+
+However, there is a scenario in which the renamer could fail to catch this:
+if the instance was generated through Template Haskell, as in #12387. In that
+case, Template Haskell will provide fully resolved names (e.g.,
+`GHC.Classes.compare`), so the renamer won't notice the sleight-of-hand going
+on. For this reason, we also put an extra validity check for this in the
+typechecker as a last resort.
+-}
 
 ------------------------
 tcMethodBody :: Class -> [TcTyVar] -> [EvVar] -> [TcType]

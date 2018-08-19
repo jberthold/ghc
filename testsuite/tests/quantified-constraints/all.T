@@ -1,0 +1,12 @@
+
+test('T14833', normal, compile, [''])
+test('T14835', normal, compile, [''])
+test('T2893', normal, compile, [''])
+test('T2893a', normal, compile, [''])
+test('T2893c', normal, compile, [''])
+test('T9123', normal, compile, [''])
+test('T14863', normal, compile, [''])
+test('T14961', normal, compile, [''])
+test('T9123a', normal, compile, [''])
+test('T15244', normal, compile, [''])
+test('T15231', normal, compile_fail, [''])

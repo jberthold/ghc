@@ -10,8 +10,8 @@ module TcSimplify(
        solveEqualities, solveLocalEqualities,
        simplifyWantedsTcM,
        tcCheckSatisfiability,
-       tcSubsumes,
-       tcCheckHoleFit,
+
+       simpl_top,
 
        promoteTyVar,
        promoteTyVarSet,
@@ -49,7 +49,6 @@ import TrieMap       () -- DV: for now
 import Type
 import TysWiredIn    ( liftedRepTy )
 import Unify         ( tcMatchTyKi )
-import TcUnify       ( tcSubType_NC )
 import Util
 import Var
 import VarSet
@@ -154,6 +153,8 @@ solveLocalEqualities thing_inside
        ; traceTc "solveLocalEqualities: running solver }" (ppr reduced_wanted)
 
        ; emitConstraints reduced_wanted
+
+       ; traceTc "solveLocalEqualities end }" empty
        ; return result }
 
 -- | Type-check a thing that emits only equality constraints, then
@@ -175,6 +176,8 @@ solveEqualities thing_inside
        ; traceTc "reportAllUnsolved }" empty
        ; return result }
 
+-- | Simplify top-level constraints, but without reporting any unsolved
+-- constraints nor unsafe overlapping.
 simpl_top :: WantedConstraints -> TcS WantedConstraints
     -- See Note [Top-level Defaulting Plan]
 simpl_top wanteds
@@ -251,7 +254,7 @@ defaultCallStacks wanteds
   defaultCallStack ct
     | ClassPred cls tys <- classifyPredType (ctPred ct)
     , Just {} <- isCallStackPred cls tys
-    = do { solveCallStack (cc_ev ct) EvCsEmpty
+    = do { solveCallStack (ctEvidence ct) EvCsEmpty
          ; return Nothing }
 
   defaultCallStack ct
@@ -508,31 +511,6 @@ simplifyDefault theta
        ; reportAllUnsolved unsolved
        ; traceTc "reportUnsolved }" empty
        ; return () }
-
--- | Reports whether first type (ty_a) subsumes the second type (ty_b),
--- discarding any errors. Subsumption here means that the ty_b can fit into the
--- ty_a, i.e. `tcSubsumes a b == True` if b is a subtype of a.
--- N.B.: Make sure that the types contain all the constraints
--- contained in any associated implications.
-tcSubsumes :: TcSigmaType -> TcSigmaType -> TcM Bool
-tcSubsumes = tcCheckHoleFit emptyBag
-
-
--- | A tcSubsumes which takes into account relevant constraints, to fix trac
--- #14273. Make sure that the constraints are cloned, since the simplifier may
--- perform unification.
-tcCheckHoleFit :: Cts -> TcSigmaType -> TcSigmaType -> TcM Bool
-tcCheckHoleFit _ hole_ty ty | hole_ty `eqType` ty = return True
-tcCheckHoleFit relevantCts hole_ty ty = discardErrs $
- do { (tclevel, wanted, _) <- pushLevelAndCaptureConstraints $
-                              tcSubType_NC ExprSigCtxt ty hole_ty
-    ; rem <- setTcLevel tclevel $ runTcSDeriveds $
-                                  simpl_top $ addSimples wanted relevantCts
-    -- We don't want any insoluble or simple constraints left,
-    -- but solved implications are ok (and neccessary for e.g. undefined)
-    ; return (isEmptyBag (wc_simple rem)
-              && allBag (isSolvedStatus . ic_status) (wc_impl rem))
-    }
 
 ------------------
 tcCheckSatisfiability :: Bag EvVar -> TcM Bool
@@ -915,7 +893,7 @@ decideQuantification infer_mode rhs_tclvl name_taus psigs candidates
        ; psig_theta <- TcM.zonkTcTypes (concatMap sig_inst_theta psigs)
        ; let quantifiable_candidates
                = pickQuantifiablePreds (mkVarSet qtvs) candidates
-             -- NB: do /not/ run pickQuantifieablePreds over psig_theta,
+             -- NB: do /not/ run pickQuantifiablePreds over psig_theta,
              -- because we always want to quantify over psig_theta, and not
              -- drop any of them; e.g. CallStack constraints.  c.f Trac #14658
 
@@ -1600,15 +1578,13 @@ setImplicationStatus :: Implication -> TcS (Maybe Implication)
 --    * Trim the ic_wanted field to remove Derived constraints
 -- Precondition: the ic_status field is not already IC_Solved
 -- Return Nothing if we can discard the implication altogether
-setImplicationStatus implic@(Implic { ic_status    = status
-                                    , ic_info      = info
-                                    , ic_skols     = skols
-                                    , ic_telescope = m_telescope
-                                    , ic_wanted    = wc
-                                    , ic_given     = givens })
+setImplicationStatus implic@(Implic { ic_status     = status
+                                    , ic_info       = info
+                                    , ic_wanted     = wc
+                                    , ic_given      = givens })
  | ASSERT2( not (isSolvedStatus status ), ppr info )
    -- Precondition: we only set the status if it is not already solved
-   not all_solved
+   not (isSolvedWC pruned_wc)
  = do { traceTcS "setImplicationStatus(not-all-solved) {" (ppr implic)
 
       ; implic <- neededEvVars implic
@@ -1628,20 +1604,20 @@ setImplicationStatus implic@(Implic { ic_status    = status
               -- See Note [Tracking redundant constraints]
  = do { traceTcS "setImplicationStatus(all-solved) {" (ppr implic)
 
-      ; implic <- neededEvVars implic
-      ; skols <- mapM TcS.zonkTcTyCoVarBndr skols
+      ; implic@(Implic { ic_need_inner = need_inner
+                       , ic_need_outer = need_outer }) <- neededEvVars implic
+
+      ; bad_telescope <- checkBadTelescope implic
 
       ; let dead_givens | warnRedundantGivens info
-                        = filterOut (`elemVarSet` ic_need_inner implic) givens
+                        = filterOut (`elemVarSet` need_inner) givens
                         | otherwise = []   -- None to report
-
-            bad_telescope = check_telescope skols
 
             discard_entire_implication  -- Can we discard the entire implication?
               =  null dead_givens           -- No warning from this implication
               && not bad_telescope
               && isEmptyBag pruned_implics  -- No live children
-              && isEmptyVarSet (ic_need_outer implic) -- No needed vars to pass up to parent
+              && isEmptyVarSet need_outer   -- No needed vars to pass up to parent
 
             final_status
               | bad_telescope = IC_BadTelescope
@@ -1664,9 +1640,6 @@ setImplicationStatus implic@(Implic { ic_status    = status
    pruned_wc = WC { wc_simple = pruned_simples
                   , wc_impl   = pruned_implics }
 
-   all_solved = isEmptyBag pruned_simples
-             && allBag (isSolvedStatus . ic_status) pruned_implics
-
    keep_me :: Implication -> Bool
    keep_me ic
      | IC_Solved { ics_dead = dead_givens } <- ic_status ic
@@ -1678,18 +1651,28 @@ setImplicationStatus implic@(Implic { ic_status    = status
      | otherwise
      = True        -- Otherwise, keep it
 
-   -- See Note [Keeping scoped variables in order: Explicit] in TcHsType
-   check_telescope sks = isJust m_telescope && go emptyVarSet (reverse sks)
-     where
-       go :: TyVarSet   -- skolems that appear *later* than the current ones
-          -> [TcTyVar]  -- ordered skolems, in reverse order
-          -> Bool       -- True <=> there is an out-of-order skolem
-       go _ [] = False
-       go later_skols (one_skol : earlier_skols)
-         | tyCoVarsOfType (tyVarKind one_skol) `intersectsVarSet` later_skols
-         = True
-         | otherwise
-         = go (later_skols `extendVarSet` one_skol) earlier_skols
+checkBadTelescope :: Implication -> TcS Bool
+-- True <=> the skolems form a bad telescope
+-- See Note [Keeping scoped variables in order: Explicit] in TcHsType
+checkBadTelescope (Implic { ic_telescope  = m_telescope
+                          , ic_skols      = skols })
+  | isJust m_telescope
+  = do{ skols <- mapM TcS.zonkTcTyCoVarBndr skols
+      ; return (go emptyVarSet (reverse skols))}
+
+  | otherwise
+  = return False
+
+  where
+    go :: TyVarSet   -- skolems that appear *later* than the current ones
+       -> [TcTyVar]  -- ordered skolems, in reverse order
+       -> Bool       -- True <=> there is an out-of-order skolem
+    go _ [] = False
+    go later_skols (one_skol : earlier_skols)
+      | tyCoVarsOfType (tyVarKind one_skol) `intersectsVarSet` later_skols
+      = True
+      | otherwise
+      = go (later_skols `extendVarSet` one_skol) earlier_skols
 
 warnRedundantGivens :: SkolemInfo -> Bool
 warnRedundantGivens (SigSkol ctxt _ _)
@@ -1725,18 +1708,12 @@ neededEvVars :: Implication -> TcS Implication
 --   - From the 'needed' set, delete ev_bndrs, the binders of the
 --     evidence bindings, to give the final needed variables
 --
-neededEvVars implic@(Implic { ic_info = info
-                            , ic_given = givens
+neededEvVars implic@(Implic { ic_given = givens
                             , ic_binds = ev_binds_var
                             , ic_wanted = WC { wc_impl = implics }
                             , ic_need_inner = old_needs })
  = do { ev_binds <- TcS.getTcEvBindsMap ev_binds_var
       ; tcvs     <- TcS.getTcEvTyCoVars ev_binds_var
-
-        -- Check that there are no term-level evidence bindings
-        -- in the cases where we have no place to put them
-      ; MASSERT2( termEvidenceAllowed info || isEmptyEvBindMap ev_binds
-                , ppr info $$ ppr ev_binds )
 
       ; let seeds1        = foldrBag add_implic_seeds old_needs implics
             seeds2        = foldEvBindMap add_wanted seeds1 ev_binds

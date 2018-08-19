@@ -377,6 +377,8 @@ usage_text[] = {
 "",
 "  -xc      Show current cost centre stack on raising an exception",
 #endif /* PROFILING */
+"",
+"  -hT            Produce a heap profile grouped by closure type"
 
 #if defined(TRACING)
 "",
@@ -976,6 +978,12 @@ error = true;
                   }
 #if defined(THREADED_RTS)
                   else if (!strncmp("numa", &rts_argv[arg][2], 4)) {
+                      if (!osBuiltWithNumaSupport()) {
+                          errorBelch("%s: This GHC build was compiled without NUMA support.",
+                                     rts_argv[arg]);
+                          error = true;
+                          break;
+                      }
                       OPTION_SAFE;
                       StgWord mask;
                       if (rts_argv[arg][6] == '=') {
@@ -2269,6 +2277,9 @@ static bool read_heap_profiling_flag(const char *arg)
         case 'B':
         case 'b':
             RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_LDV;
+            break;
+        case 'T':
+            RtsFlags.ProfFlags.doHeapProfile = HEAP_BY_CLOSURE_TYPE;
             break;
         }
         break;
