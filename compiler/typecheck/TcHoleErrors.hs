@@ -29,7 +29,7 @@ import FV ( fvVarList, fvVarSet, unionFV, mkFVs, FV )
 import Control.Arrow ( (&&&) )
 
 import Control.Monad    ( filterM, replicateM )
-import Data.List        ( partition, sort, sortOn, nubBy, foldl' )
+import Data.List        ( partition, sort, sortOn, nubBy )
 import Data.Graph       ( graphFromEdges, topSort )
 import Data.Function    ( on )
 
@@ -355,6 +355,15 @@ the only non-hole constraint that mentions any free type variables mentioned in
 the hole constraint for `_a`, namely `a_a1pd[tau:2]` , and similarly for the
 hole `_b` we only require that the `$dShow_a1pe` constraint is solved.
 
+Note [Leaking errors]
+~~~~~~~~~~~~~~~~~~~
+
+When considering candidates, GHC believes that we're checking for validity in
+actual source. However, As evidenced by #15321, #15007 and #15202, this can
+cause bewildering error messages. The solution here is simple: if a candidate
+would cause the type checker to error, it is not a valid hole fit, and thus it
+is discarded.
+
 -}
 
 
@@ -509,11 +518,11 @@ getLocalBindings tidy_orig ct
 
 -- See Note [Valid hole fits include ...]
 findValidHoleFits :: TidyEnv        --The tidy_env for zonking
-                           -> [Implication]  --Enclosing implications for givens
-                           -> [Ct] -- The  unsolved simple constraints in the
-                                   -- implication for the hole.
-                           -> Ct   -- The hole constraint itself
-                           -> TcM (TidyEnv, SDoc)
+                  -> [Implication]  --Enclosing implications for givens
+                  -> [Ct] -- The  unsolved simple constraints in the
+                          -- implication for the hole.
+                  -> Ct   -- The hole constraint itself
+                  -> TcM (TidyEnv, SDoc)
 findValidHoleFits tidy_env implics simples ct | isExprHoleCt ct =
   do { rdr_env <- getGlobalRdrEnv
      ; lclBinds <- getLocalBindings tidy_env ct
@@ -652,19 +661,17 @@ findValidHoleFits tidy_env implics simples ct | isExprHoleCt ct =
     isFlexiTyVar tv | isMetaTyVar tv = isFlexi <$> readMetaTyVar tv
     isFlexiTyVar _ = return False
 
-    -- Takes a list of free variables and makes sure that the given action
-    -- is run with the right TcLevel and restores any Flexi type
-    -- variables after the action is run.
+    -- Takes a list of free variables and restores any Flexi type variables
+    -- in free_vars after the action is run.
     withoutUnification :: FV -> TcM a -> TcM a
     withoutUnification free_vars action
       = do { flexis <- filterM isFlexiTyVar fuvs
-            ; result <- setTcLevel deepestFreeTyVarLvl action
+            ; result <- action
               -- Reset any mutated free variables
             ; mapM_ restore flexis
             ; return result }
       where restore = flip writeTcRef Flexi . metaTyVarRef
             fuvs = fvVarList free_vars
-            deepestFreeTyVarLvl = foldl' max topTcLevel $ map tcTyVarLevel fuvs
 
     -- The real work happens here, where we invoke the type checker using
     -- tcCheckHoleFit to see whether the given type fits the hole.
@@ -818,6 +825,8 @@ findValidHoleFits tidy_env implics simples ct | isExprHoleCt ct =
         go subs _ _ _ [] = return (False, reverse subs)
         go subs _ (Just 0) _ _ = return (True, reverse subs)
         go subs seen maxleft ty (el:elts) =
+          -- See Note [Leaking errors]
+          tryTcDiscardingErrs discard_it $
           do { traceTc "lookingUp" $ ppr el
              ; maybeThing <- lookup el
              ; case maybeThing of
@@ -880,25 +889,42 @@ tcSubsumes ty_a ty_b = fst <$> tcCheckHoleFit emptyBag [] ty_a ty_b
 -- free type variables to avoid side-effects.
 tcCheckHoleFit :: Cts                   -- Any relevant Cts to the hole.
                -> [Implication]         -- The nested implications of the hole
+                                        -- with the innermost implication first
                -> TcSigmaType           -- The type of the hole.
                -> TcSigmaType           -- The type to check whether fits.
                -> TcM (Bool, HsWrapper)
 tcCheckHoleFit _ _ hole_ty ty | hole_ty `eqType` ty
     = return (True, idHsWrapper)
 tcCheckHoleFit relevantCts implics hole_ty ty = discardErrs $
-  do { (wrp, wanted) <- captureConstraints $ tcSubType_NC ExprSigCtxt ty hole_ty
+  do { -- We wrap the subtype constraint in the implications to pass along the
+       -- givens, and so we must ensure that any nested implications and skolems
+       -- end up with the correct level. The implications are ordered so that
+       -- the innermost (the one with the highest level) is first, so it
+       -- suffices to get the level of the first one (or the current level, if
+       -- there are no implications involved).
+       innermost_lvl <- case implics of
+                          [] -> getTcLevel
+                          -- imp is the innermost implication
+                          (imp:_) -> return (ic_tclvl imp)
+     ; (wrp, wanted) <- setTcLevel innermost_lvl $ captureConstraints $
+                          tcSubType_NC ExprSigCtxt ty hole_ty
      ; traceTc "Checking hole fit {" empty
      ; traceTc "wanteds are: " $ ppr wanted
-     -- We add the relevantCts to the wanteds generated by the call to
-     -- tcSubType_NC, see Note [Relevant Constraints]
-     ; let w_rel_cts = addSimples wanted relevantCts
-     ; if isEmptyWC w_rel_cts
+     ; if isEmptyWC wanted && isEmptyBag relevantCts
        then traceTc "}" empty >> return (True, wrp)
        else do { fresh_binds <- newTcEvBinds
+                -- The relevant constraints may contain HoleDests, so we must
+                -- take care to clone them as well (to avoid #15370).
+               ; cloned_relevants <- mapBagM cloneSimple relevantCts
                  -- We wrap the WC in the nested implications, see
                  -- Note [Nested Implications]
                ; let outermost_first = reverse implics
                      setWC = setWCAndBinds fresh_binds
+                    -- We add the cloned relevants to the wanteds generated by
+                    -- the call to tcSubType_NC, see Note [Relevant Constraints]
+                    -- There's no need to clone the wanteds, because they are
+                    -- freshly generated by `tcSubtype_NC`.
+                     w_rel_cts = addSimples wanted cloned_relevants
                      w_givens = foldr setWC w_rel_cts outermost_first
                ; traceTc "w_givens are: " $ ppr w_givens
                ; rem <- runTcSDeriveds $ simpl_top w_givens

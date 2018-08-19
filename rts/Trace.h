@@ -403,6 +403,8 @@ void traceHeapProfSampleCostCentre(StgWord8 profile_id,
                                    CostCentreStack *stack, StgWord residency);
 #endif /* PROFILING */
 
+void flushTrace(void);
+
 #else /* !TRACING */
 
 #define traceSchedEvent(cap, tag, tso, other) /* nothing */
@@ -441,6 +443,7 @@ void traceHeapProfSampleCostCentre(StgWord8 profile_id,
 
 #define traceVersion(version) /* nothing */
 #define traceProgramInvocation(commandline) /* nothing */
+
 #if defined(PARALLEL_RTS)
 #define traceEdenEventStartReceive(cap) /* nothing */
 #define traceEdenEventEndReceive(cap) /* nothing */
@@ -453,8 +456,10 @@ void traceHeapProfSampleCostCentre(StgWord8 profile_id,
 #define traceReceiveMessageEvent(cap, mstag, buf) /* nothing */
 #define traceSendReceiveLocalMessageEvent(mstag, spid, stid, rpid, rpoid) /* nothing */
 #endif // PARALLEL_RTS
-#endif /* TRACING */
 
+#define flushTrace() /* nothing */
+
+#endif /* TRACING */
 
 // If DTRACE is enabled, but neither DEBUG nor TRACING, we need a C land
 // wrapper for the user-msg probe (as we can't expand that in PrimOps.cmm)

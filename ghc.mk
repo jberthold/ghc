@@ -1214,7 +1214,9 @@ GIT_COMMIT_ID:
 
 sdist-ghc-prep-tree : VERSION GIT_COMMIT_ID
 
-EXTRA_PACKAGES=parallel random
+# Extra packages which shouldn't be in the source distribution: see #8801
+# for the PARALLEL_RTS fork, everything should be in the distro.
+EXTRA_PACKAGES=
 
 .PHONY: sdist-ghc-prep-tree
 sdist-ghc-prep-tree :

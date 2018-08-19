@@ -96,7 +96,7 @@ dsIPBinds (IPBinds ev_binds ip_binds) body
     ds_ip_bind (L _ (IPBind _ ~(Right n) e)) body
       = do e' <- dsLExpr e
            return (Let (NonRec n e') body)
-    ds_ip_bind (L _ (XCIPBind _)) _ = panic "dsIPBinds"
+    ds_ip_bind (L _ (XIPBind _)) _ = panic "dsIPBinds"
 dsIPBinds (XHsIPBinds _) _ = panic "dsIPBinds"
 
 -------------------------
@@ -901,7 +901,7 @@ dsDo stmts
       = do  { body     <- goL stmts
             ; rhs'     <- dsLExpr rhs
             ; var   <- selectSimpleMatchVarL pat
-            ; match <- matchSinglePat (Var var) (StmtCtxt DoExpr) pat
+            ; match <- matchSinglePatVar var (StmtCtxt DoExpr) pat
                                       res1_ty (cantFailMatchResult body)
             ; match_code <- handle_failure pat match fail_op
             ; dsSyntaxExpr bind_op [rhs', Lam var match_code] }

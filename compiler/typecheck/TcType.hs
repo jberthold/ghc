@@ -23,6 +23,7 @@ module TcType (
   TcType, TcSigmaType, TcRhoType, TcTauType, TcPredType, TcThetaType,
   TcTyVar, TcTyVarSet, TcDTyVarSet, TcTyCoVarSet, TcDTyCoVarSet,
   TcKind, TcCoVar, TcTyCoVar, TcTyVarBinder, TcTyCon,
+  KnotTied,
 
   ExpType(..), InferResult(..), ExpSigmaType, ExpRhoType, mkCheckExpType,
 
@@ -51,8 +52,7 @@ module TcType (
   --------------------------------
   -- Builders
   mkPhiTy, mkInfSigmaTy, mkSpecSigmaTy, mkSigmaTy,
-  mkNakedTyConApp, mkNakedAppTys, mkNakedAppTy,
-  mkNakedCastTy,
+  mkNakedAppTy, mkNakedAppTys, mkNakedCastTy, nakedSubstTy,
 
   --------------------------------
   -- Splitters
@@ -226,6 +226,7 @@ import ErrUtils( Validity(..), MsgDoc, isValid )
 import qualified GHC.LanguageExtensions as LangExt
 
 import Data.List  ( mapAccumL )
+import Data.Functor.Identity( Identity(..) )
 import Data.IORef
 import Data.List.NonEmpty( NonEmpty(..) )
 import qualified Data.Semigroup as Semi
@@ -351,7 +352,6 @@ type TcTyVarSet     = TyVarSet
 type TcTyCoVarSet   = TyCoVarSet
 type TcDTyVarSet    = DTyVarSet
 type TcDTyCoVarSet  = DTyCoVarSet
-
 
 {- *********************************************************************
 *                                                                      *
@@ -1385,23 +1385,76 @@ getDFunTyLitKey :: TyLit -> OccName
 getDFunTyLitKey (NumTyLit n) = mkOccName Name.varName (show n)
 getDFunTyLitKey (StrTyLit n) = mkOccName Name.varName (show n)  -- hm
 
----------------
-mkNakedTyConApp :: TyCon -> [Type] -> Type
--- Builds a TyConApp
---   * without being strict in TyCon,
---   * without satisfying the invariants of TyConApp
--- A subsequent zonking will establish the invariants
--- See Note [Type-checking inside the knot] in TcHsType
-mkNakedTyConApp tc tys = TyConApp tc tys
+{- *********************************************************************
+*                                                                      *
+           Maintaining the well-kinded type invariant
+*                                                                      *
+********************************************************************* -}
 
+{- Note [The well-kinded type invariant]
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+See also Note [The tcType invariant] in TcHsType.
+
+During type inference, we maintain the invariant that
+
+   INVARIANT: every type is well-kinded /without/ zonking
+
+   EXCEPT: you are allowed (ty |> co) even if the kind of ty
+           does not match the from-kind of co.
+
+Main goal: if this invariant is respected, then typeKind cannot fail
+(as it can for ill-kinded types).
+
+In particular, we can get types like
+     (k |> co) Int
+where
+    k :: kappa
+    co :: Refl (Type -> Type)
+    kappa is a unification variable and kappa := Type already
+
+So in the un-zonked form (k Int) would be ill-kinded,
+but (k |> co) Int is well-kinded.  So we want to keep that 'co'
+/even though it is Refl/.
+
+Immediate consequence: during type inference we cannot use the "smart
+contructors" for types, particularly
+   mkAppTy, mkCastTy
+because they all eliminate Refl casts.  Solution: during type
+inference use the mkNakedX type formers, which do no Refl-elimination.
+E.g. mkNakedCastTy uses an actual CastTy, without optimising for
+Refl.  (NB: mkNakedCastTy is only called in two places: in tcInferApps
+and in checkExpectedResultKind.)
+
+Where does this show up in practice: apparently mainly in
+TcHsType.tcInferApps.  Suppose we are kind-checking the type (a Int),
+where (a :: kappa).  Then in tcInferApps we'll run out of binders on
+a's kind, so we'll call matchExpectedFunKind, and unify
+   kappa := kappa1 -> kappa2,  with evidence co :: kappa ~ (kappa1 ~ kappa2)
+That evidence is actually Refl, but we must not discard the cast to
+form the result type
+   ((a::kappa) (Int::*))
+bacause that does not satisfy the invariant, and crashes TypeKind.  This
+caused Trac #14174 and #14520.
+
+Notes:
+
+* The Refls will be removed later, when we zonk the type.
+
+* This /also/ applies to substitution.  We must use nakedSubstTy,
+  not substTy, bucause the latter uses smart constructors that do
+  Refl-elimination.
+
+-}
+
+---------------
 mkNakedAppTys :: Type -> [Type] -> Type
--- See Note [Type-checking inside the knot] in TcHsType
+-- See Note [The well-kinded type invariant]
 mkNakedAppTys ty1                []   = ty1
-mkNakedAppTys (TyConApp tc tys1) tys2 = mkNakedTyConApp tc (tys1 ++ tys2)
+mkNakedAppTys (TyConApp tc tys1) tys2 = mkTyConApp tc (tys1 ++ tys2)
 mkNakedAppTys ty1                tys2 = foldl AppTy ty1 tys2
 
 mkNakedAppTy :: Type -> Type -> Type
--- See Note [Type-checking inside the knot] in TcHsType
+-- See Note [The well-kinded type invariant]
 mkNakedAppTy ty1 ty2 = mkNakedAppTys ty1 [ty2]
 
 mkNakedCastTy :: Type -> Coercion -> Type
@@ -1415,33 +1468,22 @@ mkNakedCastTy :: Type -> Coercion -> Type
 -- In fact the calls to mkNakedCastTy ar pretty few and far between.
 mkNakedCastTy ty co = CastTy ty co
 
-{- Note [The well-kinded type invariant]
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-During type inference, we maintain the invariant that
+nakedSubstTy :: HasCallStack => TCvSubst -> TcType  -> TcType
+nakedSubstTy subst ty
+  | isEmptyTCvSubst subst = ty
+  | otherwise             = runIdentity                   $
+                            checkValidSubst subst [ty] [] $
+                            mapType nakedSubstMapper subst ty
+  -- Interesting idea: use StrictIdentity to avoid space leaks
 
-   INVARIANT: every type is well-kinded /without/ zonking
-
-and in particular that typeKind does not fail (as it can for
-ill-kinded types).
-
-Now suppose we are kind-checking the type (a Int), where (a :: kappa).
-Then in tcInferApps we'll run out of binders on a's kind, so
-we'll call matchExpectedFunKind, and unify
-   kappa := kappa1 -> kappa2,  with evidence co :: kappa ~ (kappa1 ~ kappa2)
-That evidence is actually Refl, but we must not discard the cast to
-form the result type
-   ((a::kappa) (Int::*))
-bacause that does not satisfy the invariant, and crashes TypeKind.  This
-caused Trac #14174 and #14520.
-
-Solution: make mkNakedCastTy use an actual CastTy, without optimising
-for Refl. Now everything is well-kinded.  The CastTy will be removed
-later, when we zonk.  Still, it's distressingly delicate.
-
-NB: mkNakedCastTy is only called in two places:
-    in tcInferApps and in checkExpectedResultKind.
-    See Note [The tcType invariant] in TcHsType.
--}
+nakedSubstMapper :: TyCoMapper TCvSubst Identity
+nakedSubstMapper
+  = TyCoMapper { tcm_smart    = False
+               , tcm_tyvar    = \subst tv -> return (substTyVar subst tv)
+               , tcm_covar    = \subst cv -> return (substCoVar subst cv)
+               , tcm_hole     = \_ hole   -> return (HoleCo hole)
+               , tcm_tybinder = \subst tv _ -> return (substTyVarBndr subst tv)
+               , tcm_tycon    = return }
 
 {-
 ************************************************************************
@@ -2099,6 +2141,40 @@ isImprovementPred ty
       IrredPred {}       -> True -- Might have equalities after reduction?
       ForAllPred {}      -> False
 
+-- | Is the equality
+--        a ~r ...a....
+-- definitely insoluble or not?
+--      a ~r Maybe a      -- Definitely insoluble
+--      a ~N ...(F a)...  -- Not definitely insoluble
+--                        -- Perhaps (F a) reduces to Int
+--      a ~R ...(N a)...  -- Not definitely insoluble
+--                        -- Perhaps newtype N a = MkN Int
+-- See Note [Occurs check error] in
+-- TcCanonical for the motivation for this function.
+isInsolubleOccursCheck :: EqRel -> TcTyVar -> TcType -> Bool
+isInsolubleOccursCheck eq_rel tv ty
+  = go ty
+  where
+    go ty | Just ty' <- tcView ty = go ty'
+    go (TyVarTy tv') = tv == tv' || go (tyVarKind tv')
+    go (LitTy {})    = False
+    go (AppTy t1 t2) = case eq_rel of  -- See Note [AppTy and ReprEq]
+                         NomEq  -> go t1 || go t2
+                         ReprEq -> go t1
+    go (FunTy t1 t2) = go t1 || go t2
+    go (ForAllTy (TvBndr tv' _) inner_ty)
+      | tv' == tv = False
+      | otherwise = go (tyVarKind tv') || go inner_ty
+    go (CastTy ty _)  = go ty   -- ToDo: what about the coercion
+    go (CoercionTy _) = False   -- ToDo: what about the coercion
+    go (TyConApp tc tys)
+      | isGenerativeTyCon tc role = any go tys
+      | otherwise                 = any go (drop (tyConArity tc) tys)
+         -- (a ~ F b a), where F has arity 1,
+         -- has an insoluble occurs check
+
+    role = eqRelRole eq_rel
+
 {- Note [Expanding superclasses]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 When we expand superclasses, we use the following algorithm:
@@ -2170,7 +2246,7 @@ the quantified variables.
 
 ************************************************************************
 *                                                                      *
-\subsection{Predicates}
+      Classifying types
 *                                                                      *
 ************************************************************************
 -}
@@ -2272,39 +2348,6 @@ isTyVarHead _  (ForAllTy {})   = False
 isTyVarHead _  (FunTy {})      = False
 isTyVarHead _  (CoercionTy {}) = False
 
--- | Is the equality
---        a ~r ...a....
--- definitely insoluble or not?
---      a ~r Maybe a      -- Definitely insoluble
---      a ~N ...(F a)...  -- Not definitely insoluble
---                        -- Perhaps (F a) reduces to Int
---      a ~R ...(N a)...  -- Not definitely insoluble
---                        -- Perhaps newtype N a = MkN Int
--- See Note [Occurs check error] in
--- TcCanonical for the motivation for this function.
-isInsolubleOccursCheck :: EqRel -> TcTyVar -> TcType -> Bool
-isInsolubleOccursCheck eq_rel tv ty
-  = go ty
-  where
-    go ty | Just ty' <- tcView ty = go ty'
-    go (TyVarTy tv') = tv == tv' || go (tyVarKind tv')
-    go (LitTy {})    = False
-    go (AppTy t1 t2) = case eq_rel of  -- See Note [AppTy and ReprEq]
-                         NomEq  -> go t1 || go t2
-                         ReprEq -> go t1
-    go (FunTy t1 t2) = go t1 || go t2
-    go (ForAllTy (TvBndr tv' _) inner_ty)
-      | tv' == tv = False
-      | otherwise = go (tyVarKind tv') || go inner_ty
-    go (CastTy ty _)  = go ty   -- ToDo: what about the coercion
-    go (CoercionTy _) = False   -- ToDo: what about the coercion
-    go (TyConApp tc tys)
-      | isGenerativeTyCon tc role = any go tys
-      | otherwise                 = any go (drop (tyConArity tc) tys)
-         -- (a ~ F b a), where F has arity 1,
-         -- has an insoluble occurs check
-
-    role = eqRelRole eq_rel
 
 {- Note [AppTy and ReprEq]
 ~~~~~~~~~~~~~~~~~~~~~~~~~~

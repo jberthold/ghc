@@ -1592,14 +1592,13 @@ New monadic failure desugaring mechanism
     when desugaring refutable patterns in ``do`` blocks.
 
 The ``-XMonadFailDesugaring`` extension switches the desugaring of
-``do``-blocks to use ``MonadFail.fail`` instead of ``Monad.fail``. This will
-eventually be the default behaviour in a future GHC release, under the
+``do``-blocks to use ``MonadFail.fail`` instead of ``Monad.fail``.
+
+This extension is enabled by default since GHC 8.6.1, under the
 `MonadFail Proposal (MFP)
 <https://prime.haskell.org/wiki/Libraries/Proposals/MonadFail>`__.
 
-This extension is temporary, and will be deprecated in a future release. It is
-included so that library authors have a hard check for whether their code
-will work with future GHC versions.
+This extension is temporary, and will be deprecated in a future release.
 
 .. _rebindable-syntax:
 
@@ -8678,8 +8677,7 @@ Kind polymorphism
 .. extension:: TypeInType
     :shortdesc: Deprecated. Enable kind polymorphism and datatype promotion.
 
-    :implies: :extension:`PolyKinds`, :extension:`DataKinds`, :extension:`KindSignatures`,
-              :extension:`NoStarIsType`
+    :implies: :extension:`PolyKinds`, :extension:`DataKinds`, :extension:`KindSignatures`
     :since: 8.0.1
 
     In the past this extension used to enable advanced type-level programming
@@ -9126,13 +9124,12 @@ The kind ``Type``
 -----------------
 
 .. extension:: StarIsType
-    :shortdesc: Desugar ``*`` to ``Data.Kind.Type``.
+    :shortdesc: Treat ``*`` as ``Data.Kind.Type``.
 
     :since: 8.6.1
 
     Treat the unqualified uses of the ``*`` type operator as nullary and desugar
-    to ``Data.Kind.Type``. Disabled by :extension:`TypeOperators` and
-    :extension:`TypeInType`.
+    to ``Data.Kind.Type``.
 
 The kind ``Type`` (imported from ``Data.Kind``) classifies ordinary types. With
 :extension:`StarIsType` (currently enabled by default), ``*`` is desugared to

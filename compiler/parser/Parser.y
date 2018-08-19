@@ -1882,7 +1882,8 @@ is connected to the first type too.
 
 type :: { LHsType GhcPs }
         : btype                        { $1 }
-        | btype '->' ctype             {% ams (sLL $1 $> $ HsFunTy noExt $1 $3)
+        | btype '->' ctype             {% ams $1 [mu AnnRarrow $2] -- See note [GADT decl discards annotations]
+                                       >> ams (sLL $1 $> $ HsFunTy noExt $1 $3)
                                               [mu AnnRarrow $2] }
 
 
@@ -1929,9 +1930,9 @@ tyapp :: { Located TyEl }
         | qtyconop                      { sL1 $1 $ TyElOpr (unLoc $1) }
         | tyvarop                       { sL1 $1 $ TyElOpr (unLoc $1) }
         | SIMPLEQUOTE qconop            {% ams (sLL $1 $> $ TyElOpr (unLoc $2))
-                                               [mj AnnSimpleQuote $1] }
+                                               [mj AnnSimpleQuote $1,mj AnnVal $2] }
         | SIMPLEQUOTE varop             {% ams (sLL $1 $> $ TyElOpr (unLoc $2))
-                                               [mj AnnSimpleQuote $1] }
+                                               [mj AnnSimpleQuote $1,mj AnnVal $2] }
 
 atype_docs :: { LHsType GhcPs }
         : atype docprev                 { sLL $1 $> $ HsDocTy noExt $1 $2 }

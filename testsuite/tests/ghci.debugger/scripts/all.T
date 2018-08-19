@@ -22,8 +22,7 @@ test('print019', extra_files(['../Test.hs']), ghci_script, ['print019.script'])
 test('print020', extra_files(['../HappyTest.hs']), ghci_script, ['print020.script'])
 test('print021', normal, ghci_script, ['print021.script'])
 test('print022',
-     [when(arch('powerpc64'), expect_broken(14455)),
-      when(wordsize(32), expect_broken(15061))],
+     [when(arch('powerpc64'), expect_broken(14455))],
      ghci_script, ['print022.script'])
 test('print023', extra_files(['../Test.hs']), ghci_script, ['print023.script'])
 test('print024', extra_files(['../Test.hs']), ghci_script, ['print024.script'])
@@ -100,3 +99,5 @@ test('T8557', normal, ghci_script, ['T8557.script'])
 test('T12458', normal, ghci_script, ['T12458.script'])
 test('T13825-debugger', when(arch('powerpc64'), expect_broken(14455)),
       ghci_script, ['T13825-debugger.script'])
+
+test('break029', extra_files(['break029.hs']), ghci_script, ['break029.script'])

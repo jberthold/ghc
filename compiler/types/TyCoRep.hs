@@ -26,6 +26,7 @@ module TyCoRep (
         Type(..),
         TyLit(..),
         KindOrType, Kind,
+        KnotTied,
         PredType, ThetaType,      -- Synonyms
         ArgFlag(..),
 
@@ -40,7 +41,7 @@ module TyCoRep (
         mkTyConTy, mkTyVarTy, mkTyVarTys,
         mkFunTy, mkFunTys, mkForAllTy, mkForAllTys,
         mkPiTy, mkPiTys,
-        isTYPE, tcIsTYPE,
+        isTYPE,
         isLiftedTypeKind, isUnliftedTypeKind,
         isCoercionType, isRuntimeRepTy, isRuntimeRepVar,
         sameVis,
@@ -147,7 +148,7 @@ import {-# SOURCE #-} Type( isPredTy, isCoercionTy, mkAppTy, mkCastTy
                           , tyCoVarsOfTypeWellScoped
                           , tyCoVarsOfTypesWellScoped
                           , toposortTyVars
-                          , coreView, tcView )
+                          , coreView )
    -- Transitively pulls in a LOT of stuff, better to break the loop
 
 import {-# SOURCE #-} Coercion
@@ -468,6 +469,11 @@ These invariants are all documented above, in the declaration for Type.
 
 -}
 
+-- | A type labeled 'KnotTied' might have knot-tied tycons in it. See
+-- Note [Type checking recursive type and class declarations] in
+-- TcTyClsDecls
+type KnotTied ty = ty
+
 {- **********************************************************************
 *                                                                       *
                   TyBinder and ArgFlag
@@ -559,9 +565,7 @@ This table summarises the visibility rules:
     optional kind applications, thus (T @*), but we have not
     yet implemented that
 
----- Examples of where the different visibilities come from -----
-
-In term declarations:
+---- In term declarations ----
 
 * Inferred.  Function defn, with no signature:  f1 x = x
   We infer f1 :: forall {a}. a -> a, with 'a' Inferred
@@ -592,7 +596,7 @@ In term declarations:
   Inferred - from inferred types (e.g. no pattern type signature)
            - or from inferred kind polymorphism
 
-In type declarations:
+---- In type declarations ----
 
 * Inferred (k)
      data T1 a b = MkT1 (a b)
@@ -620,6 +624,19 @@ In type declarations:
   Here T's kind is  T :: forall {k1:*} (k:*). (k1->*) -> k1 -> k -> *
   So 'k' is Specified, because it appears explicitly,
   but 'k1' is Inferred, because it does not
+
+Generally, in the list of TyConBinders for a TyCon,
+
+* Inferred arguments always come first
+* Specified, Anon and Required can be mixed
+
+e.g.
+  data Foo (a :: Type) :: forall b. (a -> b -> Type) -> Type where ...
+
+Here Foo's TyConBinders are
+   [Required 'a', Specified 'b', Anon]
+and its kind prints as
+   Foo :: forall a -> forall b. (a -> b -> Type) -> Type
 
 ---- Printing -----
 
@@ -780,24 +797,6 @@ isTYPE f (TyConApp tc [arg])
       go ty | Just ty' <- coreView ty = go ty'
       go ty = f ty
 isTYPE _ _ = False
-
--- | If a type is @'TYPE' r@ for some @r@, run the predicate argument on @r@.
--- Otherwise, return 'False'.
---
--- This function distinguishes between 'Constraint' and 'Type' (and will return
--- 'False' for 'Constraint'). For a version which does not distinguish between
--- the two, see 'isTYPE'.
-tcIsTYPE :: (   Type    -- the single argument to TYPE; not a synonym
-             -> Bool )  -- what to return
-         -> Kind -> Bool
-tcIsTYPE f ki | Just ki' <- tcView ki = tcIsTYPE f ki'
-tcIsTYPE f (TyConApp tc [arg])
-  | tc `hasKey` tYPETyConKey
-  = go arg
-    where
-      go ty | Just ty' <- tcView ty = go ty'
-      go ty = f ty
-tcIsTYPE _ _ = False
 
 -- | This version considers Constraint to be the same as *. Returns True
 -- if the argument is equivalent to Type/Constraint and False otherwise.

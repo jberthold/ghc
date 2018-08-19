@@ -104,7 +104,7 @@ if args.threads:
     config.threads = args.threads
     config.use_threads = True
 
-if args.verbose:
+if args.verbose is not None:
     config.verbose = args.verbose
 config.skip_perf_tests = args.skip_perf_tests
 
@@ -193,7 +193,7 @@ def format_path(path):
 # On Windows we need to set $PATH to include the paths to all the DLLs
 # in order for the dynamic library tests to work.
 if windows or darwin:
-    pkginfo = str(getStdout([config.ghc_pkg, 'dump']))
+    pkginfo = getStdout([config.ghc_pkg, 'dump'])
     topdir = config.libdir
     if windows:
         mingw = os.path.abspath(os.path.join(topdir, '../mingw/bin'))
