@@ -792,7 +792,7 @@ static void processMessages(Capability *cap) {
         // edentrace: emit event receiveMessage(cap, recvBuffer TERMINATE)
         traceReceiveMessageEvent(cap, opcode, recvBuffer);
         // terminate this thread (it may not catch ThreadKilled!)
-        deleteThread(cap, tso);
+        deleteThread(tso);
       } else {
         // otherwise: nothing to do, ignore message
         IF_PAR_DEBUG(ports,
